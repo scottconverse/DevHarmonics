@@ -24,20 +24,39 @@ import { WorktreeManager } from "./worktrees.js";
 
 export class Orchestrator {
   private readonly backgroundRuns = new Map<string, Promise<void>>();
+  private readonly cancellations = new Map<string, AbortController>();
 
   constructor(private readonly ledger: Ledger) {}
 
   begin(request: RunRequest): string {
     const runId = this.ledger.createRun(request.goal, request.projectPath);
-    const execution = this.execute(runId, request)
+    const controller = new AbortController();
+    this.cancellations.set(runId, controller);
+    const execution = this.execute(runId, request, controller.signal)
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
         this.ledger.addEvent(runId, "run.failed", message);
         this.ledger.setRunStatus(runId, "failed", `NOT READY\n\n${message}`);
       })
-      .finally(() => this.backgroundRuns.delete(runId));
+      .finally(() => {
+        this.backgroundRuns.delete(runId);
+        this.cancellations.delete(runId);
+      });
     this.backgroundRuns.set(runId, execution);
     return runId;
+  }
+
+  cancel(runId: string): boolean {
+    const controller = this.cancellations.get(runId);
+    if (!controller) return false;
+    controller.abort();
+    // ledger.cancelRun marks the run and its live tasks 'cancelled' and adds
+    // the 'run.cancelled' event, but only when it actually transitions the run.
+    const transitioned = this.ledger.cancelRun(runId);
+    if (!transitioned) {
+      this.ledger.addEvent(runId, "run.cancelled", "Run cancelled");
+    }
+    return true;
   }
 
   async run(request: RunRequest): Promise<string> {
@@ -46,7 +65,7 @@ export class Orchestrator {
     return runId;
   }
 
-  private async execute(runId: string, request: RunRequest): Promise<void> {
+  private async execute(runId: string, request: RunRequest, signal: AbortSignal): Promise<void> {
     const projectPath = path.resolve(request.projectPath);
     const config = await loadConfig(projectPath);
     const constitution = await loadConstitution(projectPath);
@@ -93,6 +112,11 @@ export class Orchestrator {
     let providerCursor = 0;
 
     while (pending.size || active.size) {
+      // On cancel, stop scheduling. In-flight worker processes are aborted via
+      // the shared signal and their tasks return 'cancelled'; ledger.cancelRun
+      // owns the run/task status, so return without running integration/review.
+      if (signal.aborted) return;
+
       for (const [taskId, task] of pending) {
         if (task.dependencies.some((dependency) => ["failed", "blocked"].includes(statuses.get(dependency) ?? ""))) {
           statuses.set(taskId, "blocked");
@@ -119,6 +143,7 @@ export class Orchestrator {
           providers: workerProviders,
           providerCursor: startCursor,
           worktrees,
+          signal,
         })
           .then((status) => {
             statuses.set(task.id, status);
@@ -135,6 +160,10 @@ export class Orchestrator {
         throw new Error("The task graph cannot make progress; check for cyclic dependencies");
       }
     }
+
+    // A cancel that lands as the scheduler drains must still skip the final
+    // integration + reviewer phase so it cannot overwrite the 'cancelled' run.
+    if (signal.aborted) return;
 
     let failed = [...statuses.values()].some((status) => status !== "passed");
     const integrationChecks = [...new Set(plan.tasks.flatMap((task) => task.checks))];
@@ -201,11 +230,15 @@ export class Orchestrator {
     providers: ProviderName[];
     providerCursor: number;
     worktrees: WorktreeManager;
+    signal: AbortSignal;
   }): Promise<TaskStatus> {
     const taskWorktree = await input.worktrees.createTask(input.task.id);
     let feedback = "";
 
     for (let attempt = 1; attempt <= input.config.retry.maxAttempts; attempt++) {
+      // Do not start a new attempt once cancelled; leave the 'cancelled' status
+      // for ledger.cancelRun to own rather than marking the task 'failed'.
+      if (input.signal.aborted) return "cancelled";
       const providerName = this.selectWorker(
         input.task,
         input.providers,
@@ -228,14 +261,20 @@ export class Orchestrator {
       const attemptId = this.ledger.startAttempt(input.runId, input.task.id, providerName, prompt);
 
       try {
-        const result = await provider.run({
-          role: "worker",
-          prompt,
-          cwd: taskWorktree.path,
-          writeAccess: true,
-        });
+        const result = await provider.run(
+          {
+            role: "worker",
+            prompt,
+            cwd: taskWorktree.path,
+            writeAccess: true,
+          },
+          input.signal,
+        );
         this.ledger.finishAttempt(attemptId, "completed", result.text);
       } catch (error) {
+        // A cancel aborts the child process, surfacing here as a failure. Stop
+        // without marking the task 'failed' or retrying; cancelRun owns status.
+        if (input.signal.aborted) return "cancelled";
         const message = error instanceof Error ? error.message : String(error);
         this.ledger.finishAttempt(attemptId, "failed", "", message);
         feedback = `Provider failure: ${message}`;

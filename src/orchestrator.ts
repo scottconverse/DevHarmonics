@@ -307,6 +307,7 @@ export class Orchestrator {
       if (checks.every((check) => check.passed)) {
         try {
           const committed = await input.worktrees.commitTask(taskWorktree.path, input.task.id);
+          if (input.signal.aborted) return "cancelled";
           if (committed) await input.worktrees.mergeTask(taskWorktree.branch, input.task.id);
           // A cancel that landed during the commit/merge awaits must not overwrite
           // the cancelled status to passed.
@@ -315,6 +316,8 @@ export class Orchestrator {
           this.ledger.addEvent(input.runId, "task.passed", `${input.task.title} passed verification`);
           return "passed";
         } catch (error) {
+          // A cancel surfacing from commit/merge owns status through cancelRun.
+          if (input.signal.aborted) return "cancelled";
           feedback = error instanceof Error ? error.message : String(error);
         }
       } else {

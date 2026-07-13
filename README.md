@@ -34,8 +34,9 @@ Antigravity's first login has two handoffs and an onboarding sequence that are e
 1. Run `agy` and choose Google sign-in with the account tied to your Gemini subscription.
 2. Finish the browser sign-in. The browser then displays a one-time authorization code instead of returning automatically to the CLI.
 3. Click **Copy to Clipboard**, return to the Antigravity terminal, paste the code at its authorization prompt, and press **Enter**. Treat the code as a short-lived credential: never paste it into Ringer, a chat, or a document.
-4. Antigravity opens first-run onboarding. On the color-scheme screen, use ↑/↓, then press **Enter**. Continue through each **Next** screen with Enter.
-5. When the normal Antigravity prompt appears, exit with `Ctrl+C` and verify the cached login with `agy models`.
+4. Antigravity opens a multi-screen first-run onboarding sequence. On the color-scheme screen, use ↑/↓ and press **Enter**. Antigravity 1.1.1 then presents several additional preference screens—not just one confirmation screen. Review each choice and use the navigation controls shown at the bottom of the terminal; the exact choices may change between releases.
+5. Onboarding is complete only when the normal Antigravity prompt appears. You can recognize it by the account and subscription tier, selected Gemini model, current project path, and a `>` input line.
+6. Exit the standalone session with `Ctrl+C` and verify the cached login with `agy models`.
 
 Ringer's dashboard repeats these instructions under **First-time provider sign-in guide**.
 

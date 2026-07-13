@@ -62,6 +62,7 @@ function renderSelectedRun() {
   $("#run-goal").textContent = run.goal;
   $("#run-status").textContent = run.status.replaceAll("_", " ");
   $("#run-status").className = `status-pill ${run.status}`;
+  $("#cancel-run").classList.toggle("hidden", !["planning", "running"].includes(run.status));
   $("#metric-tasks").textContent = run.tasks.length;
   $("#metric-checks").textContent = run.tasks.flatMap((task) => task.checks).filter((check) => check.passed).length;
   $("#metric-attempts").textContent = run.tasks.reduce((sum, task) => sum + task.attemptCount, 0);
@@ -76,7 +77,7 @@ function renderBoard(run) {
     ["Plan", ["queued"]],
     ["Working", ["working", "retry"]],
     ["Verifying", ["verifying"]],
-    ["Resolved", ["passed", "failed", "blocked"]],
+    ["Resolved", ["passed", "failed", "blocked", "cancelled"]],
   ];
   $("#board").innerHTML = columns.map(([title, statuses]) => {
     const tasks = run.tasks.filter((task) => statuses.includes(task.status));
@@ -169,6 +170,25 @@ function showComposer() {
 
 $("#agent-mode").addEventListener("change", (event) => { $("#agent-count").disabled = event.target.value === "auto"; });
 $("#start-run").addEventListener("click", startRun);
+$("#cancel-run").addEventListener("click", async () => {
+  const runId = state.selectedRunId;
+  if (!runId) return;
+  const button = $("#cancel-run");
+  button.disabled = true;
+  showError("");
+  try {
+    await api(`/api/runs/${runId}/cancel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    await refreshRuns();
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
 $("#new-run").addEventListener("click", showComposer);
 $("#run-list").addEventListener("click", (event) => {
   const button = event.target.closest("[data-run-id]");

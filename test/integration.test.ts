@@ -41,13 +41,14 @@ async function createFakeCli(root: string): Promise<string> {
 let input = "";
 process.stdin.setEncoding("utf8");
 for await (const chunk of process.stdin) input += chunk;
+input += " " + process.argv.slice(2).join(" ");
 if (process.argv.includes("--version")) {
   console.log("fake 1.0");
 } else if (input.includes("You are the architect")) {
   const plan = {summary:"fixture plan",recommendedConcurrency:1,tasks:[{id:"one",title:"Create result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"]}]};
   console.log(JSON.stringify({result:JSON.stringify(plan)}));
 } else if (input.includes("You are the final reviewer")) {
-  console.log(JSON.stringify({response:"READY\\n\\nFixture integration is valid."}));
+  console.log("READY\\n\\nFixture integration is valid.");
 } else {
   writeFileSync("result.txt", "created by worker\\n", "utf8");
   console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"Created result.txt"}}));
@@ -121,9 +122,13 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
     assert.equal(page.status, 200);
     assert.match(await page.text(), /Assemble a verified agent team/);
     const bootstrap = await fetch(`${dashboard.url}/api/bootstrap`);
-    const value = (await bootstrap.json()) as { defaultProject: string; providers: unknown[] };
+    const value = (await bootstrap.json()) as {
+      defaultProject: string;
+      providers: Array<{ name: string; setupSteps: string[] }>;
+    };
     assert.equal(value.defaultProject, project);
     assert.equal(value.providers.length, 3);
+    assert.ok(value.providers.find((provider) => provider.name === "gemini")?.setupSteps.some((step) => step.includes("one-time code")));
   } finally {
     await dashboard.close();
     await rm(root, { recursive: true, force: true });

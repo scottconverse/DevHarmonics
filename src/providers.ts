@@ -18,6 +18,9 @@ abstract class CliProvider implements ProviderAdapter {
 
   protected abstract argumentsFor(request: ProviderRequest): string[];
   protected abstract extractText(stdout: string): string;
+  protected stdinFor(request: ProviderRequest): string {
+    return request.prompt;
+  }
 
   async run(request: ProviderRequest): Promise<ProviderResult> {
     const result = await runProcess({
@@ -25,7 +28,7 @@ abstract class CliProvider implements ProviderAdapter {
       args: this.argumentsFor(request),
       cwd: request.cwd,
       timeoutMs: request.timeoutMs ?? this.config.timeoutMs,
-      stdin: request.prompt,
+      stdin: this.stdinFor(request),
       env: subscriptionEnvironment(this.name),
     });
 
@@ -90,11 +93,17 @@ export class GeminiProvider extends CliProvider {
 
   protected argumentsFor(request: ProviderRequest): string[] {
     return [
-      "--output-format",
-      "json",
-      "--approval-mode",
-      request.writeAccess ? "auto_edit" : "plan",
+      "--mode",
+      request.writeAccess ? "accept-edits" : "plan",
+      "--print-timeout",
+      `${Math.ceil((request.timeoutMs ?? this.config.timeoutMs) / 1_000)}s`,
+      "--print",
+      request.prompt,
     ];
+  }
+
+  protected stdinFor(): string {
+    return "";
   }
 
   protected extractText(stdout: string): string {
@@ -136,12 +145,9 @@ export function extractClaudeText(stdout: string): string {
 }
 
 export function extractGeminiText(stdout: string): string {
-  const value = parseSingleJson(stdout);
-  if (typeof value === "object" && value !== null && "response" in value) {
-    const response = (value as { response?: unknown }).response;
-    if (typeof response === "string") return response;
-  }
-  throw new Error("Gemini completed without a JSON response field");
+  const text = stdout.trim();
+  if (text) return text;
+  throw new Error("Gemini completed without a response");
 }
 
 function parseSingleJson(stdout: string): unknown {

@@ -2,7 +2,7 @@
   "name": "ringer-local",
   "version": "0.1.0",
   "private": true,
-  "description": "Local, subscription-backed multi-agent orchestrator for Codex, Claude Code, and Gemini CLI.",
+  "description": "Local, subscription-backed multi-agent orchestrator for Codex, Claude Code, and Gemini via Antigravity CLI.",
   "type": "module",
   "bin": {
     "ringer": "dist/src/cli.js"

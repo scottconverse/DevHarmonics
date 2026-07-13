@@ -1,6 +1,6 @@
 # Ringer Local
 
-Ringer is a local, subscription-backed agent orchestrator. It coordinates the official Codex, Claude Code, and Gemini command-line tools, gives parallel workers isolated Git worktrees, runs allowlisted validators, retries failures with exact feedback, and records every result in SQLite.
+Ringer is a local, subscription-backed agent orchestrator. It coordinates the official Codex, Claude Code, and Google Antigravity command-line tools, gives parallel workers isolated Git worktrees, runs allowlisted validators, retries failures with exact feedback, and records every result in SQLite. The dashboard calls the Google provider **Gemini** because Antigravity supplies the Gemini models.
 
 It does **not** use model API keys. Provider processes have API-key and cloud-credential environment variables removed so they use the login cached by each official CLI.
 
@@ -23,7 +23,21 @@ It does **not** use model API keys. Provider processes have API-key and cloud-cr
 - At least one of the official subscription-authenticated CLIs:
   - `codex` — sign in with `codex login`
   - `claude` — sign in with `claude auth login`
-  - `gemini` — run `gemini` and select **Sign in with Google**
+- `agy` — run `agy` and sign in with the Google account associated with your Gemini subscription
+
+> Google ended consumer Google AI Pro/Ultra access through Gemini CLI on June 18, 2026. Ringer therefore uses the supported Antigravity CLI (`agy`) for subscription-backed Gemini access. Gemini CLI remains relevant only for supported enterprise/API configurations, which Ringer does not use.
+
+### First-time Antigravity sign-in
+
+Antigravity's first login has two handoffs and an onboarding sequence that are easy to mistake for a failed or unfinished login:
+
+1. Run `agy` and choose Google sign-in with the account tied to your Gemini subscription.
+2. Finish the browser sign-in. The browser then displays a one-time authorization code instead of returning automatically to the CLI.
+3. Click **Copy to Clipboard**, return to the Antigravity terminal, paste the code at its authorization prompt, and press **Enter**. Treat the code as a short-lived credential: never paste it into Ringer, a chat, or a document.
+4. Antigravity opens first-run onboarding. On the color-scheme screen, use ↑/↓, then press **Enter**. Continue through each **Next** screen with Enter.
+5. When the normal Antigravity prompt appears, exit with `Ctrl+C` and verify the cached login with `agy models`.
+
+Ringer's dashboard repeats these instructions under **First-time provider sign-in guide**.
 
 Ringer never asks for your email password and never reads or copies provider OAuth tokens.
 
@@ -101,7 +115,7 @@ Example `.ringer/config.json`:
   "providers": {
     "codex": { "enabled": true, "command": "codex", "timeoutMs": 1800000 },
     "claude": { "enabled": true, "command": "claude", "timeoutMs": 1800000 },
-    "gemini": { "enabled": true, "command": "gemini", "timeoutMs": 1800000 }
+    "gemini": { "enabled": true, "command": "agy", "timeoutMs": 1800000 }
   },
   "validators": {
     "diff-check": {
@@ -141,7 +155,7 @@ Ringer does not merge its integration branch into your checked-out branch. Revie
 - Mutation endpoints accept same-origin JSON requests only.
 - Architect and reviewer runs use each provider's read-only or plan mode.
 - Workers use restricted edit modes, not unrestricted bypass/YOLO modes.
-- Provider prompts are sent over stdin, not interpolated into a shell command.
+- Codex and Claude prompts are sent over stdin. Antigravity requires its prompt as the value of `--print`; Ringer launches it directly without shell interpolation.
 - Validators come from user-controlled configuration, never model output.
 - API-key variables are removed from child process environments.
 - A clean Git working tree is required before parallel work begins.

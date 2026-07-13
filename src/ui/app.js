@@ -33,6 +33,9 @@ function renderProviders() {
   $("#provider-toggles").innerHTML = providers
     .map((provider) => `<label class="toggle"><input type="checkbox" name="provider" value="${provider.name}" ${provider.installed ? "checked" : "disabled"}><span>${escapeHtml(provider.name)}</span></label>`)
     .join("");
+  $("#provider-help-content").innerHTML = providers
+    .map((provider) => `<section class="provider-help-card"><div><strong>${escapeHtml(provider.name)}</strong><code>${escapeHtml(provider.loginCommand)}</code></div><ol>${provider.setupSteps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></section>`)
+    .join("");
 }
 
 async function refreshRuns() {

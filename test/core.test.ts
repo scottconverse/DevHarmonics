@@ -20,7 +20,7 @@ test("provider output parsers extract each CLI's final response", () => {
   ].join("\n");
   assert.equal(extractCodexText(codex), "final");
   assert.equal(extractClaudeText(JSON.stringify({ result: "claude result" })), "claude result");
-  assert.equal(extractGeminiText(JSON.stringify({ response: "gemini result" })), "gemini result");
+  assert.equal(extractGeminiText("gemini result\n"), "gemini result");
 });
 
 test("subscription environment strips API and cloud credentials", () => {
@@ -47,6 +47,7 @@ test("project initialization detects Node validators and writes constitution", a
     );
     await initializeProject(root);
     const config = await loadConfig(root);
+    assert.equal(config.providers.gemini.command, "agy");
     assert.deepEqual(config.validators.test?.args, ["run", "test"]);
     assert.deepEqual(config.validators.build?.args, ["run", "build"]);
     assert.ok(config.validators["diff-check"]);

@@ -20,7 +20,7 @@ export const defaultConfig: RingerConfig = {
   providers: {
     codex: { enabled: true, command: "codex", timeoutMs: 30 * 60_000 },
     claude: { enabled: true, command: "claude", timeoutMs: 30 * 60_000 },
-    gemini: { enabled: true, command: "gemini", timeoutMs: 30 * 60_000 },
+    gemini: { enabled: true, command: "agy", timeoutMs: 30 * 60_000 },
   },
   validators: {
     "diff-check": {

@@ -95,6 +95,14 @@ textarea { resize: vertical; min-height: 122px; line-height: 1.55; }
 .task-card strong { display: block; font-size: 13px; line-height: 1.4; margin-bottom: 10px; }
 .task-meta { display: flex; justify-content: space-between; color: var(--muted); font-size: 10px; }
 .provider-tag { color: var(--blue); text-transform: capitalize; }
+.provider-help { margin-top: 22px; border: 1px solid var(--border); border-radius: 12px; background: rgba(255,255,255,.018); }
+.provider-help summary { cursor: pointer; padding: 14px 16px; color: var(--text); font-weight: 800; }
+.provider-help-grid { display: grid; gap: 10px; padding: 0 12px 12px; }
+.provider-help-card { border-top: 1px solid var(--border); padding: 14px 4px 4px; }
+.provider-help-card > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; text-transform: capitalize; }
+.provider-help-card code { color: var(--blue); text-transform: none; }
+.provider-help-card ol { margin: 10px 0 0; padding-left: 22px; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.provider-help-card li + li { margin-top: 5px; }
 .task-card.passed { border-color: #384628; }
 .task-card.failed, .task-card.blocked { border-color: #503131; }
 .lower-grid { display: grid; grid-template-columns: 1.1fr .9fr; gap: 12px; }

@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { defaultConfig, initializeProject, loadConfig } from "../src/config.js";
+import { defaultConfig, initializeProject, loadConfig, resolveProviderCommand } from "../src/config.js";
 import { Ledger } from "../src/ledger.js";
 import { Orchestrator, parseFirstJsonObject } from "../src/orchestrator.js";
 import {
@@ -67,6 +67,26 @@ test(
       assert.match(result.stdout, /chosen -/);
     } finally {
       process.env.PATH = previousPath;
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "Windows Antigravity discovery finds the standard installer location",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "ringer-agy-command-"));
+    const previousLocalAppData = process.env.LOCALAPPDATA;
+    try {
+      const command = path.join(root, "agy", "bin", "agy.exe");
+      await mkdir(path.dirname(command), { recursive: true });
+      await writeFile(command, "fixture", "utf8");
+      process.env.LOCALAPPDATA = root;
+      assert.equal(resolveProviderCommand("gemini", "agy"), command);
+      assert.equal(resolveProviderCommand("codex", "codex"), "codex");
+    } finally {
+      process.env.LOCALAPPDATA = previousLocalAppData;
       await rm(root, { recursive: true, force: true });
     }
   },

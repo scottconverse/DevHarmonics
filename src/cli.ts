@@ -22,8 +22,9 @@ async function main(): Promise<void> {
     const config = await loadConfig(projectPath);
     const providers = await inspectProviders(config, projectPath);
     for (const provider of providers) {
+      const ready = provider.installed && provider.authenticated;
       console.log(
-        `${provider.installed ? "✓" : "✗"} ${provider.name.padEnd(7)} ${provider.version || "not installed"} — login: ${provider.loginCommand}`,
+        `${ready ? "READY" : "SETUP"} ${provider.name.padEnd(7)} ${provider.version || "not installed"} — ${provider.authStatus}; login: ${provider.loginCommand}`,
       );
     }
     console.log("Subscription-only mode is enforced; API-key environment variables are removed from provider processes.");

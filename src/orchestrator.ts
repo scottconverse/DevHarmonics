@@ -1,7 +1,8 @@
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { runPlanSchema } from "./schemas.js";
-import { loadConfig, loadConstitution, ringerDirectory } from "./config.js";
+import { loadConfig, loadConstitution, resolveProviderCommand, ringerDirectory } from "./config.js";
+import { inspectProviders } from "./doctor.js";
 import { Ledger } from "./ledger.js";
 import { createProvider, type ProviderAdapter } from "./providers.js";
 import {
@@ -74,6 +75,17 @@ export class Orchestrator {
     const workerProviders = config.workers.filter((name) => availableProviders.includes(name));
     if (!availableProviders.length) throw new Error("No subscription-backed providers are enabled");
     if (!workerProviders.length) throw new Error("No enabled provider is configured in the worker pool");
+
+    const providerStatuses = await inspectProviders(config, projectPath);
+    const unavailable = providerStatuses.filter(
+      (provider) => availableProviders.includes(provider.name) && (!provider.installed || !provider.authenticated),
+    );
+    if (unavailable.length) {
+      const instructions = unavailable
+        .map((provider) => `${provider.name}: run '${provider.loginCommand}'`)
+        .join("; ");
+      throw new Error(`Provider sign-in required before this run (${instructions}), then refresh and retry.`);
+    }
 
     const worktrees = new WorktreeManager(projectPath, runId);
     await worktrees.initialize();
@@ -366,7 +378,10 @@ export class Orchestrator {
   }
 
   private provider(name: ProviderName, config: RingerConfig): ProviderAdapter {
-    return createProvider(name, config.providers[name]);
+    return createProvider(name, {
+      ...config.providers[name],
+      command: resolveProviderCommand(name, config.providers[name].command),
+    });
   }
 
   private selectWorker(task: PlannedTask, providers: ProviderName[], cursor: number): ProviderName {

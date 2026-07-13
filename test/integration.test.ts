@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { initializeProject, loadConfig, ringerDirectory } from "../src/config.js";
+import { inspectProviders } from "../src/doctor.js";
 import { Ledger } from "../src/ledger.js";
 import { Orchestrator } from "../src/orchestrator.js";
 import { runProcess } from "../src/process.js";
@@ -35,7 +36,7 @@ async function createRepository(root: string): Promise<string> {
   return project;
 }
 
-async function createFakeCli(root: string): Promise<string> {
+async function createFakeCli(root: string, authenticated = true): Promise<string> {
   const script = path.join(root, "fake-cli.mjs");
   await writeFile(
     script,
@@ -44,8 +45,14 @@ let input = "";
 process.stdin.setEncoding("utf8");
 for await (const chunk of process.stdin) input += chunk;
 input += " " + process.argv.slice(2).join(" ");
+const args = process.argv.slice(2);
+const authCheck = args[0] === "models" ||
+  (args[0] === "login" && args[1] === "status") ||
+  (args[0] === "auth" && args[1] === "status");
 if (process.argv.includes("--version")) {
   console.log("fake 1.0");
+} else if (authCheck) {
+  ${authenticated ? 'console.log("Authenticated fixture");' : 'console.error("Sign-in required"); process.exitCode = 1;'}
 } else if (input.includes("You are the architect")) {
   const plan = {summary:"fixture plan",recommendedConcurrency:1,tasks:[{id:"one",title:"Create result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"]}]};
   console.log(JSON.stringify({result:JSON.stringify(plan)}));
@@ -81,6 +88,8 @@ for await (const chunk of process.stdin) input += chunk;
 input += " " + process.argv.slice(2).join(" ");
 if (process.argv.includes("--version")) {
   console.log("fake 1.0");
+} else if (process.argv[2] === "models" || process.argv[2] === "login" || process.argv[2] === "auth") {
+  console.log("Authenticated fixture");
 } else if (input.includes("You are the architect")) {
   await delay(1_000);
   const plan = {summary:"late plan",recommendedConcurrency:1,tasks:[{id:"one",title:"Create result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"]}]};
@@ -118,6 +127,8 @@ for await (const chunk of process.stdin) input += chunk;
 input += " " + process.argv.slice(2).join(" ");
 if (process.argv.includes("--version")) {
   console.log("fake 1.0");
+} else if (process.argv[2] === "models" || process.argv[2] === "login" || process.argv[2] === "auth") {
+  console.log("Authenticated fixture");
 } else if (input.includes("You are the architect")) {
   const plan = {summary:"cancel plan",recommendedConcurrency:1,tasks:[{id:"one",title:"Create result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"]}]};
   console.log(JSON.stringify({result:JSON.stringify(plan)}));
@@ -157,6 +168,45 @@ async function poll<T>(fetchValue: () => Promise<T>, done: (value: T) => boolean
     await delay(50);
   }
 }
+
+test("signed-out providers are detected and blocked before a run starts", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ringer-auth-gate-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root, false);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  for (const provider of ["codex", "claude", "gemini"] as const) {
+    config.providers[provider].command = command;
+  }
+  await writeFile(
+    path.join(ringerDirectory(project), "config.json"),
+    `${JSON.stringify(config, null, 2)}\n`,
+    "utf8",
+  );
+
+  const statuses = await inspectProviders(config, project);
+  assert.ok(statuses.every((provider) => provider.installed));
+  assert.ok(statuses.every((provider) => !provider.authenticated));
+  assert.ok(statuses.every((provider) => provider.authStatus.includes("Sign-in required")));
+
+  const ledger = new Ledger(path.join(ringerDirectory(project), "ringer.db"));
+  try {
+    const orchestrator = new Orchestrator(ledger);
+    const runId = await orchestrator.run({
+      goal: "This must not start",
+      projectPath: project,
+      agents: 1,
+      enabledProviders: ["codex"],
+    });
+    const run = ledger.getRun(runId);
+    assert.equal(run?.status, "failed");
+    assert.match(run?.finalReview ?? "", /codex: run 'codex login'/);
+    assert.equal(run?.events.some((event) => event.kind === "worktree.created"), false);
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("orchestrator completes a verified run through fake subscription CLIs", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ringer-e2e-"));
@@ -402,6 +452,8 @@ for await (const chunk of process.stdin) input += chunk;
 input += " " + process.argv.slice(2).join(" ");
 if (process.argv.includes("--version")) {
   console.log("fake 1.0");
+} else if (process.argv[2] === "models" || process.argv[2] === "login" || process.argv[2] === "auth") {
+  console.log("Authenticated fixture");
 } else if (input.includes("You are the architect")) {
   writeFileSync(${JSON.stringify(startedFile)}, "started\\n", "utf8");
   const until = Date.now() + 15000;
@@ -448,6 +500,8 @@ for await (const chunk of process.stdin) input += chunk;
 input += " " + process.argv.slice(2).join(" ");
 if (process.argv.includes("--version")) {
   console.log("fake 1.0");
+} else if (process.argv[2] === "models" || process.argv[2] === "login" || process.argv[2] === "auth") {
+  console.log("Authenticated fixture");
 } else if (input.includes("You are the architect")) {
   const plan = {summary:"validator plan",recommendedConcurrency:1,tasks:[{id:"one",title:"Create result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["slow-check"]}]};
   console.log(JSON.stringify({result:JSON.stringify(plan)}));

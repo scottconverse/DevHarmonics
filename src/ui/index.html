@@ -67,6 +67,14 @@
             </fieldset>
           </div>
 
+          <div id="provider-auth-gate" class="auth-gate hidden" role="status">
+            <div>
+              <strong>Provider sign-in required</strong>
+              <span id="provider-auth-message"></span>
+            </div>
+            <button id="refresh-provider-status" class="secondary" type="button">Refresh sign-in status</button>
+          </div>
+
           <details class="provider-help">
             <summary>First-time provider sign-in guide</summary>
             <div id="provider-help-content" class="provider-help-grid"></div>

@@ -1,7 +1,8 @@
+import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { ringerConfigSchema } from "./schemas.js";
-import type { RingerConfig } from "./types.js";
+import type { ProviderName, RingerConfig } from "./types.js";
 
 export const defaultConfig: RingerConfig = {
   version: 1,
@@ -98,6 +99,16 @@ export async function loadConfig(projectPath: string): Promise<RingerConfig> {
   await initializeProject(projectPath);
   const contents = await readFile(configPath(projectPath), "utf8");
   return ringerConfigSchema.parse(JSON.parse(contents));
+}
+
+export function resolveProviderCommand(name: ProviderName, configuredCommand: string): string {
+  if (process.platform !== "win32" || name !== "gemini" || configuredCommand !== "agy") {
+    return configuredCommand;
+  }
+  const localAppData = process.env.LOCALAPPDATA;
+  if (!localAppData) return configuredCommand;
+  const installedCommand = path.join(localAppData, "agy", "bin", "agy.exe");
+  return existsSync(installedCommand) ? installedCommand : configuredCommand;
 }
 
 export async function loadConstitution(projectPath: string): Promise<string> {

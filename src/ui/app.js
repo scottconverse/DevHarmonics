@@ -27,15 +27,35 @@ async function initialize() {
 
 function renderProviders() {
   const providers = state.bootstrap.providers;
+  const ready = (provider) => provider.installed && provider.authenticated;
   $("#provider-status").innerHTML = providers
-    .map((provider) => `<span class="provider-chip ${provider.installed ? "online" : ""}" title="${escapeHtml(provider.version || provider.loginCommand)}"><i></i>${escapeHtml(provider.name)}</span>`)
+    .map((provider) => `<span class="provider-chip ${ready(provider) ? "online" : ""}" title="${escapeHtml(provider.authStatus || provider.version || provider.loginCommand)}"><i></i>${escapeHtml(provider.name)}</span>`)
     .join("");
   $("#provider-toggles").innerHTML = providers
-    .map((provider) => `<label class="toggle"><input type="checkbox" name="provider" value="${provider.name}" ${provider.installed ? "checked" : "disabled"}><span>${escapeHtml(provider.name)}</span></label>`)
+    .map((provider) => `<label class="toggle" title="${escapeHtml(ready(provider) ? provider.authStatus : `Run ${provider.loginCommand} before enabling this provider`)}"><input type="checkbox" name="provider" value="${provider.name}" ${ready(provider) ? "checked" : "disabled"}><span>${escapeHtml(provider.name)}</span></label>`)
     .join("");
   $("#provider-help-content").innerHTML = providers
-    .map((provider) => `<section class="provider-help-card"><div><strong>${escapeHtml(provider.name)}</strong><code>${escapeHtml(provider.loginCommand)}</code></div><ol>${provider.setupSteps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></section>`)
+    .map((provider) => `<section class="provider-help-card"><div><strong>${escapeHtml(provider.name)} <span class="auth-label ${ready(provider) ? "ready" : "required"}">${ready(provider) ? "Ready" : "Sign-in required"}</span></strong><code>${escapeHtml(provider.loginCommand)}</code></div><ol>${provider.setupSteps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></section>`)
     .join("");
+  const unavailable = providers.filter((provider) => !ready(provider));
+  $("#provider-auth-gate").classList.toggle("hidden", unavailable.length === 0);
+  $("#provider-auth-message").textContent = unavailable.length
+    ? `${unavailable.map((provider) => provider.name).join(", ")} cannot be selected until sign-in is complete. Open the guide below and run the shown command.`
+    : "";
+}
+
+async function refreshProviderStatus() {
+  const button = $("#refresh-provider-status");
+  button.disabled = true;
+  try {
+    state.bootstrap = await api("/api/bootstrap");
+    renderProviders();
+    showError("");
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function refreshRuns() {
@@ -138,7 +158,7 @@ async function startRun() {
   const goal = $("#goal").value.trim();
   const enabledProviders = [...document.querySelectorAll('input[name="provider"]:checked')].map((input) => input.value);
   if (!goal) return showError("Describe the outcome first.");
-  if (!enabledProviders.length) return showError("Enable at least one installed provider.");
+  if (!enabledProviders.length) return showError("Sign in to and enable at least one provider.");
   const mode = $("#agent-mode").value;
   const agents = mode === "auto" ? "auto" : Number($("#agent-count").value);
   $("#start-run").disabled = true;
@@ -170,6 +190,7 @@ function showComposer() {
 
 $("#agent-mode").addEventListener("change", (event) => { $("#agent-count").disabled = event.target.value === "auto"; });
 $("#start-run").addEventListener("click", startRun);
+$("#refresh-provider-status").addEventListener("click", refreshProviderStatus);
 $("#cancel-run").addEventListener("click", async () => {
   const runId = state.selectedRunId;
   if (!runId) return;

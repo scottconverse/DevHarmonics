@@ -23,9 +23,17 @@ It does **not** use model API keys. Provider processes have API-key and cloud-cr
 - At least one of the official subscription-authenticated CLIs:
   - `codex` — sign in with `codex login`
   - `claude` — sign in with `claude auth login`
-- `agy` — run `agy` and sign in with the Google account associated with your Gemini subscription
+  - `agy` — run `agy` and sign in with the Google account associated with your Gemini subscription
 
 > Google ended consumer Google AI Pro/Ultra access through Gemini CLI on June 18, 2026. Ringer therefore uses the supported Antigravity CLI (`agy`) for subscription-backed Gemini access. Gemini CLI remains relevant only for supported enterprise/API configurations, which Ringer does not use.
+
+### First-time provider sign-in gate
+
+Ringer checks installation and subscription authentication separately at startup. An installed but signed-out provider is marked **Sign-in required**, cannot be selected in the worker pool, and is blocked before any worktree or agent process is started.
+
+For Codex, run `codex login`, complete the official OpenAI/ChatGPT browser sign-in, and return to Ringer. Click **Refresh sign-in status** in the dashboard; Ringer verifies the cached session with `codex login status`. Claude uses the equivalent `claude auth login` and `claude auth status --text` flow. Ringer never collects an OpenAI, Anthropic, or Google email password.
+
+The current project is launched from this source checkout; it is not yet packaged as a Windows installer. A future installer must run the same sign-in preflight during onboarding and cannot report setup complete while a selected provider is signed out.
 
 ### First-time Antigravity sign-in
 
@@ -38,7 +46,7 @@ Antigravity's first login has two handoffs and an onboarding sequence that are e
 5. Onboarding is complete only when the normal Antigravity prompt appears. You can recognize it by the account and subscription tier, selected Gemini model, current project path, and a `>` input line.
 6. Exit the standalone session with `Ctrl+C` and verify the cached login with `agy models`.
 
-Ringer's dashboard repeats these instructions under **First-time provider sign-in guide**.
+Ringer's dashboard repeats these instructions under **First-time provider sign-in guide** and provides a **Refresh sign-in status** button after onboarding.
 
 Ringer never asks for your email password and never reads or copies provider OAuth tokens.
 

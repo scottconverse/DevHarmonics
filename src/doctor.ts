@@ -1,10 +1,13 @@
 import type { ProviderName, RingerConfig } from "./types.js";
 import { runProcess, subscriptionEnvironment } from "./process.js";
+import { resolveProviderCommand } from "./config.js";
 
 export interface ProviderStatus {
   name: ProviderName;
   installed: boolean;
+  authenticated: boolean;
   version: string;
+  authStatus: string;
   loginCommand: string;
   setupSteps: string[];
   subscriptionOnly: true;
@@ -14,6 +17,12 @@ const loginCommands: Record<ProviderName, string> = {
   codex: "codex login",
   claude: "claude auth login",
   gemini: "agy",
+};
+
+const authChecks: Record<ProviderName, string[]> = {
+  codex: ["login", "status"],
+  claude: ["auth", "status", "--text"],
+  gemini: ["models"],
 };
 
 const setupSteps: Record<ProviderName, string[]> = {
@@ -42,17 +51,35 @@ export async function inspectProviders(
   return Promise.all(
     (["codex", "claude", "gemini"] as ProviderName[]).map(async (name) => {
       try {
+        const command = resolveProviderCommand(name, config.providers[name].command);
         const result = await runProcess({
-          command: config.providers[name].command,
+          command,
           args: ["--version"],
           cwd,
           timeoutMs: 10_000,
           env: subscriptionEnvironment(name),
         });
+        const installed = result.exitCode === 0;
+        let authenticated = false;
+        let authStatus = installed ? "Sign-in required" : "Not installed";
+        if (installed) {
+          const auth = await runProcess({
+            command,
+            args: authChecks[name],
+            cwd,
+            timeoutMs: 15_000,
+            env: subscriptionEnvironment(name),
+          });
+          authenticated = auth.exitCode === 0;
+          authStatus = firstLine(auth.stdout || auth.stderr) ||
+            (authenticated ? "Signed in" : "Sign-in required");
+        }
         return {
           name,
-          installed: result.exitCode === 0,
+          installed,
+          authenticated,
           version: (result.stdout || result.stderr).trim().split(/\r?\n/)[0] ?? "",
+          authStatus,
           loginCommand: loginCommands[name],
           setupSteps: setupSteps[name],
           subscriptionOnly: true as const,
@@ -61,7 +88,9 @@ export async function inspectProviders(
         return {
           name,
           installed: false,
+          authenticated: false,
           version: "",
+          authStatus: "Not installed",
           loginCommand: loginCommands[name],
           setupSteps: setupSteps[name],
           subscriptionOnly: true as const,
@@ -69,4 +98,8 @@ export async function inspectProviders(
       }
     }),
   );
+}
+
+function firstLine(value: string): string {
+  return value.trim().split(/\r?\n/).find((line) => line.trim())?.trim() ?? "";
 }

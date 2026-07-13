@@ -3,6 +3,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { initializeProject, loadConfig, ringerDirectory } from "../src/config.js";
 import { Ledger } from "../src/ledger.js";
 import { Orchestrator } from "../src/orchestrator.js";
@@ -66,6 +67,59 @@ if (process.argv.includes("--version")) {
   await writeFile(wrapper, `#!/bin/sh\n"${process.execPath}" "${script}" "$@"\n`, "utf8");
   await chmod(wrapper, 0o755);
   return wrapper;
+}
+
+// Like createFakeCli, but the worker prompt HANGS in a bounded sleep loop so a
+// task is genuinely in-flight while cancellation lands. Architect still returns
+// a one-task plan and the reviewer still returns READY, so nothing else stalls.
+async function createHangingCli(root: string): Promise<string> {
+  const script = path.join(root, "hanging-cli.mjs");
+  await writeFile(
+    script,
+    `let input = "";
+process.stdin.setEncoding("utf8");
+for await (const chunk of process.stdin) input += chunk;
+input += " " + process.argv.slice(2).join(" ");
+if (process.argv.includes("--version")) {
+  console.log("fake 1.0");
+} else if (input.includes("You are the architect")) {
+  const plan = {summary:"cancel plan",recommendedConcurrency:1,tasks:[{id:"one",title:"Create result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"]}]};
+  console.log(JSON.stringify({result:JSON.stringify(plan)}));
+} else if (input.includes("You are the final reviewer")) {
+  console.log("READY\\n\\nFixture integration is valid.");
+} else {
+  // Worker prompt: hang until the orchestrator kills us on cancel. Bounded to
+  // ~10s so a killed-but-orphaned grandchild (the Windows .cmd wrapper spawns
+  // node, and killing cmd.exe does not reap it) self-exits and releases the
+  // worktree directory for cleanup instead of leaking. Upgrade path: parent-
+  // death detection if the bound ever proves too short for a slow poll.
+  const until = Date.now() + 4_000;
+  while (Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 100));
+}
+`,
+    "utf8",
+  );
+
+  if (process.platform === "win32") {
+    const wrapper = path.join(root, "hanging-cli.cmd");
+    await writeFile(wrapper, `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`, "utf8");
+    return wrapper;
+  }
+  const wrapper = path.join(root, "hanging-cli.sh");
+  // exec so the shell process becomes node; killing it reaps node directly.
+  await writeFile(wrapper, `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`, "utf8");
+  await chmod(wrapper, 0o755);
+  return wrapper;
+}
+
+async function poll<T>(fetchValue: () => Promise<T>, done: (value: T) => boolean, timeoutMs: number): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await fetchValue();
+    if (done(value)) return value;
+    if (Date.now() > deadline) throw new Error("poll timed out waiting for condition");
+    await delay(50);
+  }
 }
 
 test("orchestrator completes a verified run through fake subscription CLIs", async () => {
@@ -132,5 +186,86 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
   } finally {
     await dashboard.close();
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("cancel stops the scheduler and marks the run and in-flight task cancelled", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ringer-cancel-"));
+  const project = await createRepository(root);
+  const command = await createHangingCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.architect = "claude";
+  config.reviewer = "gemini";
+  config.workers = ["codex"];
+  for (const provider of ["codex", "claude", "gemini"] as const) {
+    config.providers[provider].command = command;
+    config.providers[provider].timeoutMs = 30_000;
+  }
+  await writeFile(
+    path.join(ringerDirectory(project), "config.json"),
+    `${JSON.stringify(config, null, 2)}\n`,
+    "utf8",
+  );
+
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  let runId = "";
+  try {
+    // Start the run through the real endpoint (non-blocking, returns 202 + runId).
+    const started = await fetch(`${dashboard.url}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ goal: "Create the fixture result", projectPath: project, agents: 1 }),
+    });
+    assert.equal(started.status, 202);
+    runId = ((await started.json()) as { runId: string }).runId;
+    assert.ok(runId);
+
+    const getRun = () => fetch(`${dashboard.url}/api/runs/${runId}`).then((response) => response.json() as Promise<{
+      status: string;
+      finalReview: string | null;
+      tasks: Array<{ id: string; status: string }>;
+      events: Array<{ kind: string }>;
+    }>);
+
+    // Wait until the worker is genuinely in-flight (its CLI is hanging).
+    await poll(getRun, (run) => run.tasks.some((task) => task.id === "one" && task.status === "working"), 20_000);
+
+    // Trigger cancellation via the real endpoint; it must abort the scheduler,
+    // terminate the active provider process, and transition the ledger.
+    const cancelled = await fetch(`${dashboard.url}/api/runs/${runId}/cancel`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+    assert.equal(cancelled.status, 200);
+    assert.deepEqual(await cancelled.json(), { status: "cancelled" });
+
+    // Give the aborted background run a moment to unwind, then confirm the
+    // reviewer/integration phase never ran and never overwrote the cancelled state.
+    await delay(300);
+    const run = await getRun();
+    assert.equal(run.status, "cancelled", JSON.stringify(run, null, 2));
+    assert.equal(run.tasks.find((task) => task.id === "one")?.status, "cancelled");
+    assert.ok(run.events.some((event) => event.kind === "run.cancelled"));
+    assert.equal(run.tasks.some((task) => task.id === "__integration__"), false);
+    assert.equal(run.finalReview, null);
+    const overwrote = ["review.started", "run.ready", "run.not_ready", "integration.passed", "integration.failed"];
+    assert.ok(!run.events.some((event) => overwrote.includes(event.kind)), JSON.stringify(run.events));
+  } finally {
+    await dashboard.close();
+    if (runId) {
+      const runRoot = path.join(os.tmpdir(), "ringer", runId);
+      // The killed worker may briefly orphan a grandchild holding the worktree
+      // cwd on Windows; retry until it exits so no worktrees or temp dirs leak.
+      for (const worktree of [path.join(runRoot, "tasks", "one"), path.join(runRoot, "integration")]) {
+        for (let attempt = 0; attempt < 60; attempt++) {
+          const result = await runProcess({ command: "git", args: ["worktree", "remove", "--force", worktree], cwd: project, timeoutMs: 30_000 });
+          if (result.exitCode === 0) break;
+          await delay(250);
+        }
+      }
+      await rm(runRoot, { recursive: true, force: true, maxRetries: 60, retryDelay: 250 });
+    }
+    await rm(root, { recursive: true, force: true, maxRetries: 60, retryDelay: 250 });
   }
 });

@@ -108,6 +108,81 @@ test("plan schema rejects missing dependencies", () => {
   assert.equal(result.success, false);
 });
 
+test("ledger.cancelRun cancels in-flight work and is idempotent", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ringer-cancel-"));
+  const ledger = new Ledger(path.join(root, "ringer.db"));
+  try {
+    const runId = ledger.createRun("Cancel it", root);
+    ledger.savePlan(runId, {
+      summary: "Two tasks",
+      recommendedConcurrency: 1,
+      tasks: [
+        {
+          id: "done",
+          title: "Done",
+          description: "Already finished",
+          dependencies: [],
+          preferredProvider: "codex",
+          checks: ["diff-check"],
+        },
+        {
+          id: "busy",
+          title: "Busy",
+          description: "Still running",
+          dependencies: [],
+          preferredProvider: "claude",
+          checks: ["diff-check"],
+        },
+      ],
+    });
+    ledger.setTaskStatus(runId, "done", "passed", "codex");
+    ledger.setTaskStatus(runId, "busy", "working", "claude");
+
+    assert.equal(ledger.cancelRun(runId), true);
+    const run = ledger.getRun(runId);
+    assert.equal(run?.status, "cancelled");
+    assert.equal(run?.tasks.find((task) => task.id === "busy")?.status, "cancelled");
+    assert.equal(run?.tasks.find((task) => task.id === "done")?.status, "passed");
+    assert.ok(run?.events.some((event) => event.kind === "run.cancelled"));
+
+    // Already terminal: no-op that reports nothing was cancelled.
+    assert.equal(ledger.cancelRun(runId), false);
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("runProcess terminates a child when its abort signal fires", async () => {
+  const sleepScript = "setTimeout(() => {}, 60000);";
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 50);
+  try {
+    const result = await runProcess({
+      command: process.execPath,
+      args: ["-e", sleepScript],
+      cwd: os.tmpdir(),
+      timeoutMs: 30_000,
+      signal: controller.signal,
+    });
+    assert.equal(result.timedOut, true);
+    assert.notEqual(result.exitCode, 0);
+  } finally {
+    clearTimeout(timer);
+  }
+});
+
+test("runProcess resolves immediately for an already-aborted signal", async () => {
+  const result = await runProcess({
+    command: process.execPath,
+    args: ["-e", "setTimeout(() => {}, 60000);"],
+    cwd: os.tmpdir(),
+    timeoutMs: 30_000,
+    signal: AbortSignal.abort(),
+  });
+  assert.equal(result.timedOut, true);
+});
+
 test("ledger persists tasks, events, attempts, and check receipts", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ringer-ledger-"));
   const ledger = new Ledger(path.join(root, "ringer.db"));

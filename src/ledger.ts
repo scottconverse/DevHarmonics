@@ -73,7 +73,9 @@ export class Ledger {
 
   savePlan(runId: string, plan: RunPlan): void {
     this.database
-      .prepare("UPDATE runs SET plan_json = ?, status = 'running', updated_at = ? WHERE id = ?")
+      .prepare(
+        "UPDATE runs SET plan_json = ?, status = 'running', updated_at = ? WHERE id = ? AND status NOT IN ('cancelled', 'failed', 'ready', 'not_ready')",
+      )
       .run(JSON.stringify(plan), new Date().toISOString(), runId);
     const insert = this.database.prepare(
       `INSERT INTO tasks
@@ -111,6 +113,26 @@ export class Ledger {
         "UPDATE runs SET status = ?, final_review = COALESCE(?, final_review), updated_at = ? WHERE id = ?",
       )
       .run(status, finalReview ?? null, new Date().toISOString(), runId);
+  }
+
+  cancelRun(runId: string): boolean {
+    const run = this.database.prepare("SELECT status FROM runs WHERE id = ?").get(runId) as
+      | { status: string }
+      | undefined;
+    if (!run) return false;
+    if (["ready", "not_ready", "failed", "cancelled"].includes(run.status)) return false;
+
+    const now = new Date().toISOString();
+    this.database
+      .prepare("UPDATE runs SET status = 'cancelled', updated_at = ? WHERE id = ?")
+      .run(now, runId);
+    this.database
+      .prepare(
+        "UPDATE tasks SET status = 'cancelled', updated_at = ? WHERE run_id = ? AND status IN ('queued', 'working', 'verifying', 'retry')",
+      )
+      .run(now, runId);
+    this.addEvent(runId, "run.cancelled", "Run cancelled");
+    return true;
   }
 
   setTaskStatus(

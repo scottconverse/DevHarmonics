@@ -8,7 +8,7 @@ import { runProcess, subscriptionEnvironment } from "./process.js";
 
 export interface ProviderAdapter {
   readonly name: ProviderName;
-  run(request: ProviderRequest): Promise<ProviderResult>;
+  run(request: ProviderRequest, signal?: AbortSignal): Promise<ProviderResult>;
 }
 
 abstract class CliProvider implements ProviderAdapter {
@@ -22,7 +22,7 @@ abstract class CliProvider implements ProviderAdapter {
     return request.prompt;
   }
 
-  async run(request: ProviderRequest): Promise<ProviderResult> {
+  async run(request: ProviderRequest, signal?: AbortSignal): Promise<ProviderResult> {
     const result = await runProcess({
       command: this.config.command,
       args: this.argumentsFor(request),
@@ -30,6 +30,7 @@ abstract class CliProvider implements ProviderAdapter {
       timeoutMs: request.timeoutMs ?? this.config.timeoutMs,
       stdin: this.stdinFor(request),
       env: subscriptionEnvironment(this.name),
+      ...(signal ? { signal } : {}),
     });
 
     if (result.exitCode !== 0) {

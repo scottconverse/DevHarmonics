@@ -108,6 +108,18 @@ async function route(
     return;
   }
 
+  const cancelRunMatch = url.pathname.match(/^\/api\/runs\/([a-f0-9-]+)\/cancel$/i);
+  if (request.method === "POST" && cancelRunMatch?.[1]) {
+    requireJsonRequest(request);
+    const cancelled = context.orchestrator.cancel(cancelRunMatch[1]);
+    sendJson(
+      response,
+      cancelled ? 200 : 404,
+      cancelled ? { status: "cancelled" } : { error: "Run not found or not active" },
+    );
+    return;
+  }
+
   const assets: Record<string, { file: string; type: string }> = {
     "/": { file: "index.html", type: "text/html; charset=utf-8" },
     "/app.css": { file: "app.css", type: "text/css; charset=utf-8" },

@@ -1,0 +1,5 @@
+node_modules/
+dist/
+.ringer/ringer.db*
+.ringer/runs/
+*.log

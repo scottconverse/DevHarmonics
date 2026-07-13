@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ringer</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">R</div>
+          <div><strong>Ringer</strong><span>Agent operations</span></div>
+        </div>
+        <button id="new-run" class="primary full">＋ New run</button>
+        <div class="section-label">Recent runs</div>
+        <nav id="run-list" class="run-list" aria-label="Recent runs"></nav>
+        <div class="sidebar-foot">
+          <span class="security-dot"></span>
+          Subscription-only mode
+        </div>
+      </aside>
+
+      <main>
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">LOCAL ORCHESTRATOR</p>
+            <h1 id="page-title">Assemble a verified agent team</h1>
+          </div>
+          <div id="provider-status" class="provider-status"></div>
+        </header>
+
+        <section id="composer" class="composer panel">
+          <div class="panel-heading">
+            <div>
+              <span class="step">01</span>
+              <h2>Define the outcome</h2>
+            </div>
+            <span class="muted">Your credentials stay inside the official CLIs.</span>
+          </div>
+
+          <label for="project-path">Project folder</label>
+          <input id="project-path" class="input" spellcheck="false" />
+
+          <label for="goal">What should the team accomplish?</label>
+          <textarea
+            id="goal"
+            rows="5"
+            placeholder="Example: Add CSV export to the customer report, cover it with tests, and verify the download in the browser."
+          ></textarea>
+
+          <div class="composer-grid">
+            <div>
+              <label for="agent-mode">Concurrency</label>
+              <div class="joined">
+                <select id="agent-mode" class="input">
+                  <option value="auto">Architect decides</option>
+                  <option value="manual">I’ll choose</option>
+                </select>
+                <input id="agent-count" class="input count" type="number" min="1" value="20" disabled />
+              </div>
+            </div>
+            <fieldset>
+              <legend>Worker pool</legend>
+              <div id="provider-toggles" class="toggles"></div>
+            </fieldset>
+          </div>
+
+          <div class="composer-actions">
+            <p id="composer-error" class="error" role="alert"></p>
+            <button id="start-run" class="primary">Start verified run <span>→</span></button>
+          </div>
+        </section>
+
+        <section id="run-view" class="run-view hidden">
+          <div class="run-summary panel">
+            <div>
+              <p id="run-project" class="eyebrow"></p>
+              <h2 id="run-goal"></h2>
+            </div>
+            <div id="run-status" class="status-pill"></div>
+          </div>
+
+          <div class="metrics">
+            <div class="metric"><span>Tasks</span><strong id="metric-tasks">0</strong></div>
+            <div class="metric"><span>Passed checks</span><strong id="metric-checks">0</strong></div>
+            <div class="metric"><span>Attempts</span><strong id="metric-attempts">0</strong></div>
+            <div class="metric"><span>Active agents</span><strong id="metric-active">0</strong></div>
+          </div>
+
+          <div id="board" class="board" aria-label="Task board"></div>
+
+          <div class="lower-grid">
+            <section class="panel activity-panel">
+              <div class="panel-heading"><h3>Activity</h3><span class="live"><i></i> Live</span></div>
+              <div id="activity" class="activity"></div>
+            </section>
+            <section id="verdict-panel" class="panel verdict-panel">
+              <div class="panel-heading"><h3>Final review</h3></div>
+              <div id="verdict" class="empty-state">The reviewer’s verdict will appear after integration.</div>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="drawer-backdrop" class="drawer-backdrop hidden"></div>
+    <aside id="task-drawer" class="task-drawer" aria-label="Task details" aria-hidden="true">
+      <button id="close-drawer" class="icon-button" aria-label="Close task details">×</button>
+      <div id="drawer-content"></div>
+    </aside>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

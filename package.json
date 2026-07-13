@@ -1,0 +1,28 @@
+{
+  "name": "ringer-local",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local, subscription-backed multi-agent orchestrator for Codex, Claude Code, and Gemini CLI.",
+  "type": "module",
+  "bin": {
+    "ringer": "dist/src/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
+    "start": "node dist/src/cli.js",
+    "dev": "tsx src/cli.ts",
+    "test": "npm run build && node --test \"dist/test/*.test.js\"",
+    "check": "npm run build && npm test"
+  },
+  "dependencies": {
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

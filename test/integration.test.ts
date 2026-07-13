@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -73,8 +73,14 @@ test("orchestrator completes a verified run through fake subscription CLIs", asy
   const root = await mkdtemp(path.join(os.tmpdir(), "ringer-e2e-"));
   const project = await createRepository(root);
   const command = await createFakeCli(root);
-  await mkdir(path.join(project, "node_modules"), { recursive: true });
-  await writeFile(path.join(project, "node_modules", "shared-marker.txt"), "shared\n", "utf8");
+  const sharedDependencies = path.join(root, "shared-node-modules");
+  await mkdir(sharedDependencies, { recursive: true });
+  await writeFile(path.join(sharedDependencies, "shared-marker.txt"), "shared\n", "utf8");
+  await symlink(
+    sharedDependencies,
+    path.join(project, "node_modules"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
   await initializeProject(project);
   const config = await loadConfig(project);
   config.architect = "claude";

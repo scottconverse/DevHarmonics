@@ -106,7 +106,8 @@ export class WorktreeManager {
     const source = path.join(this.projectPath, "node_modules");
     const destination = path.join(worktreePath, "node_modules");
     try {
-      if (!(await lstat(source)).isDirectory()) return;
+      const sourceStats = await lstat(source);
+      if (!sourceStats.isDirectory() && !sourceStats.isSymbolicLink()) return;
     } catch {
       return;
     }

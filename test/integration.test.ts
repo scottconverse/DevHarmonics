@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -20,6 +20,7 @@ async function createRepository(root: string): Promise<string> {
   await import("node:fs/promises").then(({ mkdir }) => mkdir(project, { recursive: true }));
   await git(project, ["init", "-b", "main"]);
   await writeFile(path.join(project, "README.md"), "# Fixture\n", "utf8");
+  await writeFile(path.join(project, ".gitignore"), "node_modules/\n", "utf8");
   await git(project, ["add", "."]);
   await git(project, [
     "-c",
@@ -72,6 +73,8 @@ test("orchestrator completes a verified run through fake subscription CLIs", asy
   const root = await mkdtemp(path.join(os.tmpdir(), "ringer-e2e-"));
   const project = await createRepository(root);
   const command = await createFakeCli(root);
+  await mkdir(path.join(project, "node_modules"), { recursive: true });
+  await writeFile(path.join(project, "node_modules", "shared-marker.txt"), "shared\n", "utf8");
   await initializeProject(project);
   const config = await loadConfig(project);
   config.architect = "claude";
@@ -101,6 +104,13 @@ test("orchestrator completes a verified run through fake subscription CLIs", asy
     assert.ok(run?.events.some((event) => event.message === "Scheduler using concurrency 37"));
     const shown = await git(project, ["show", `ringer/${runId.slice(0, 8)}:result.txt`]);
     assert.equal(shown.stdout, "created by worker\n");
+    assert.equal(
+      await readFile(
+        path.join(os.tmpdir(), "ringer", runId, "integration", "node_modules", "shared-marker.txt"),
+        "utf8",
+      ),
+      "shared\n",
+    );
   } finally {
     ledger.close();
     if (runId) {

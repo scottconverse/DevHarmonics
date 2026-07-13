@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { lstat, mkdir, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { runProcess } from "./process.js";
@@ -38,6 +38,7 @@ export class WorktreeManager {
       "HEAD",
     ]);
     if (created.exitCode !== 0) throw new Error(`Could not create integration worktree: ${created.stderr}`);
+    await this.linkSharedDependencies(this.integrationPath);
   }
 
   async createTask(taskId: string): Promise<{ path: string; branch: string }> {
@@ -54,6 +55,7 @@ export class WorktreeManager {
       this.integrationBranch,
     ]);
     if (created.exitCode !== 0) throw new Error(`Could not create task worktree: ${created.stderr}`);
+    await this.linkSharedDependencies(worktreePath);
     return { path: worktreePath, branch };
   }
 
@@ -98,5 +100,21 @@ export class WorktreeManager {
 
   private git(cwd: string, args: string[]) {
     return runProcess({ command: "git", args, cwd, timeoutMs: 120_000 });
+  }
+
+  private async linkSharedDependencies(worktreePath: string): Promise<void> {
+    const source = path.join(this.projectPath, "node_modules");
+    const destination = path.join(worktreePath, "node_modules");
+    try {
+      if (!(await lstat(source)).isDirectory()) return;
+    } catch {
+      return;
+    }
+    try {
+      await lstat(destination);
+      return;
+    } catch {
+      await symlink(source, destination, process.platform === "win32" ? "junction" : "dir");
+    }
   }
 }

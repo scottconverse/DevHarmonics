@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { initializeProject, loadConfig } from "../src/config.js";
 import { Ledger } from "../src/ledger.js";
+import { parseFirstJsonObject } from "../src/orchestrator.js";
 import {
   extractClaudeText,
   extractCodexText,
@@ -21,6 +22,13 @@ test("provider output parsers extract each CLI's final response", () => {
   assert.equal(extractCodexText(codex), "final");
   assert.equal(extractClaudeText(JSON.stringify({ result: "claude result" })), "claude result");
   assert.equal(extractGeminiText("gemini result\n"), "gemini result");
+});
+
+test("architect JSON parser ignores fences and trailing prose", () => {
+  const value = parseFirstJsonObject(
+    '```json\n{"summary":"brace } inside string","tasks":[]}\n```\nI also considered {not JSON}.',
+  );
+  assert.deepEqual(value, { summary: "brace } inside string", tasks: [] });
 });
 
 test("subscription environment strips API and cloud credentials", () => {

@@ -318,11 +318,7 @@ export class Orchestrator {
   }
 
   private parsePlan(text: string, config: RingerConfig): RunPlan {
-    const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
-    const start = cleaned.indexOf("{");
-    const end = cleaned.lastIndexOf("}");
-    if (start < 0 || end <= start) throw new Error("Architect did not return a JSON plan");
-    const plan = runPlanSchema.parse(JSON.parse(cleaned.slice(start, end + 1)));
+    const plan = runPlanSchema.parse(parseFirstJsonObject(text));
     for (const task of plan.tasks) {
       for (const check of task.checks) {
         if (!config.validators[check]) {
@@ -346,6 +342,36 @@ export class Orchestrator {
       })
       .join("\n");
   }
+}
+
+export function parseFirstJsonObject(text: string): unknown {
+  for (let start = text.indexOf("{"); start >= 0; start = text.indexOf("{", start + 1)) {
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < text.length; index += 1) {
+      const character = text[index]!;
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === '"') inString = false;
+        continue;
+      }
+      if (character === '"') inString = true;
+      else if (character === "{") depth += 1;
+      else if (character === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          try {
+            return JSON.parse(text.slice(start, index + 1));
+          } catch {
+            break;
+          }
+        }
+      }
+    }
+  }
+  throw new Error("Architect did not return a valid JSON plan");
 }
 
 function assertAcyclic(plan: RunPlan): void {

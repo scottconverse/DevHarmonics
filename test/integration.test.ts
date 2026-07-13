@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -362,6 +362,290 @@ test("cancel stops the scheduler and marks the run and in-flight task cancelled"
       const runRoot = path.join(os.tmpdir(), "ringer", runId);
       // The killed worker may briefly orphan a grandchild holding the worktree
       // cwd on Windows; retry until it exits so no worktrees or temp dirs leak.
+      for (const worktree of [path.join(runRoot, "tasks", "one"), path.join(runRoot, "integration")]) {
+        for (let attempt = 0; attempt < 60; attempt++) {
+          const result = await runProcess({ command: "git", args: ["worktree", "remove", "--force", worktree], cwd: project, timeoutMs: 30_000 });
+          if (result.exitCode === 0) break;
+          await delay(250);
+        }
+      }
+      await rm(runRoot, { recursive: true, force: true, maxRetries: 60, retryDelay: 250 });
+    }
+    await rm(root, { recursive: true, force: true, maxRetries: 60, retryDelay: 250 });
+  }
+});
+
+async function createPlanningHangingCli(root: string, startedFile: string, completedFile: string): Promise<string> {
+  const script = path.join(root, "planning-hanging-cli.mjs");
+  await writeFile(
+    script,
+    `import { writeFileSync } from "node:fs";
+let input = "";
+process.stdin.setEncoding("utf8");
+for await (const chunk of process.stdin) input += chunk;
+input += " " + process.argv.slice(2).join(" ");
+if (process.argv.includes("--version")) {
+  console.log("fake 1.0");
+} else if (input.includes("You are the architect")) {
+  writeFileSync(${JSON.stringify(startedFile)}, "started\\n", "utf8");
+  const until = Date.now() + 15000;
+  while (Date.now() < until) {
+    try {
+      process.kill(process.ppid, 0);
+    } catch {
+      process.exit(1);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  writeFileSync(${JSON.stringify(completedFile)}, "completed\\n", "utf8");
+  const plan = {summary:"fixture plan",recommendedConcurrency:1,tasks:[{id:"one",title:"Create result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"]}]};
+  console.log(JSON.stringify({result:JSON.stringify(plan)}));
+} else if (input.includes("You are the final reviewer")) {
+  console.log("READY\\n\\nFixture integration is valid.");
+} else {
+  writeFileSync("result.txt", "created by worker\\n", "utf8");
+  console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"Created result.txt"}}));
+}
+`,
+    "utf8",
+  );
+
+  if (process.platform === "win32") {
+    const wrapper = path.join(root, "planning-hanging-cli.cmd");
+    await writeFile(wrapper, `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`, "utf8");
+    return wrapper;
+  }
+  const wrapper = path.join(root, "planning-hanging-cli.sh");
+  await writeFile(wrapper, `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`, "utf8");
+  await chmod(wrapper, 0o755);
+  return wrapper;
+}
+
+async function createValidatorTestCli(root: string): Promise<string> {
+  const script = path.join(root, "validator-test-cli.mjs");
+  await writeFile(
+    script,
+    `import { writeFileSync } from "node:fs";
+let input = "";
+process.stdin.setEncoding("utf8");
+for await (const chunk of process.stdin) input += chunk;
+input += " " + process.argv.slice(2).join(" ");
+if (process.argv.includes("--version")) {
+  console.log("fake 1.0");
+} else if (input.includes("You are the architect")) {
+  const plan = {summary:"validator plan",recommendedConcurrency:1,tasks:[{id:"one",title:"Create result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["slow-check"]}]};
+  console.log(JSON.stringify({result:JSON.stringify(plan)}));
+} else if (input.includes("You are the final reviewer")) {
+  console.log("READY\\n\\nFixture integration is valid.");
+} else {
+  writeFileSync("result.txt", "created by worker\\n", "utf8");
+  console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"Created result.txt"}}));
+}
+`,
+    "utf8",
+  );
+
+  if (process.platform === "win32") {
+    const wrapper = path.join(root, "validator-test-cli.cmd");
+    await writeFile(wrapper, `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`, "utf8");
+    return wrapper;
+  }
+  const wrapper = path.join(root, "validator-test-cli.sh");
+  await writeFile(wrapper, `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`, "utf8");
+  await chmod(wrapper, 0o755);
+  return wrapper;
+}
+
+async function createSlowCheckScript(root: string): Promise<string> {
+  const script = path.join(root, "slow-check.mjs");
+  await writeFile(
+    script,
+    `const until = Date.now() + 3500;
+while (Date.now() < until) {
+  try {
+    process.kill(process.ppid, 0);
+  } catch {
+    process.exit(1);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
+process.exit(0);
+`,
+    "utf8",
+  );
+
+  if (process.platform === "win32") {
+    const wrapper = path.join(root, "slow-check.cmd");
+    await writeFile(wrapper, `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`, "utf8");
+    return wrapper;
+  }
+  const wrapper = path.join(root, "slow-check.sh");
+  await writeFile(wrapper, `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`, "utf8");
+  await chmod(wrapper, 0o755);
+  return wrapper;
+}
+
+test("cancel during planning terminates the architect child process", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ringer-cancel-planning-a-"));
+  const project = await createRepository(root);
+  const startedFile = path.join(root, "started.marker");
+  const completedFile = path.join(root, "completed.marker");
+  const command = await createPlanningHangingCli(root, startedFile, completedFile);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.architect = "claude";
+  config.reviewer = "gemini";
+  config.workers = ["codex"];
+  for (const provider of ["codex", "claude", "gemini"] as const) {
+    config.providers[provider].command = command;
+    config.providers[provider].timeoutMs = 30_000;
+  }
+  await writeFile(
+    path.join(ringerDirectory(project), "config.json"),
+    `${JSON.stringify(config, null, 2)}\n`,
+    "utf8",
+  );
+
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  let runId = "";
+  try {
+    const started = await fetch(`${dashboard.url}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ goal: "Cancel during planning", projectPath: project, agents: 1 }),
+    });
+    assert.equal(started.status, 202);
+    runId = ((await started.json()) as { runId: string }).runId;
+    assert.ok(runId);
+
+    const getRun = () => fetch(`${dashboard.url}/api/runs/${runId}`).then((response) => response.json() as Promise<{
+      status: string;
+      finalReview: string | null;
+      tasks: Array<{ id: string; status: string }>;
+      events: Array<{ kind: string }>;
+    }>);
+
+    await poll(getRun, (run) => run.events.some((event) => event.kind === "architect.started") || run.status === "planning", 20_000);
+
+    const cancelled = await fetch(`${dashboard.url}/api/runs/${runId}/cancel`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+    assert.equal(cancelled.status, 200);
+    assert.deepEqual(await cancelled.json(), { status: "cancelled" });
+
+    await delay(1000);
+    const run = await getRun();
+    assert.equal(run.status, "cancelled");
+
+    const forbiddenEvents = ["plan.created", "scheduler.started", "task.started", "review.started"];
+    assert.ok(!run.events.some((event) => forbiddenEvents.includes(event.kind)), `Found forbidden event: ${JSON.stringify(run.events)}`);
+    assert.ok(!run.tasks.some((task) => task.id !== "__integration__"));
+    assert.equal(run.finalReview, null);
+
+    let completedExists = false;
+    try {
+      await readFile(completedFile);
+      completedExists = true;
+    } catch {
+      completedExists = false;
+    }
+    assert.equal(completedExists, false, "Architect 'completed' marker file should not exist");
+  } finally {
+    await dashboard.close();
+    if (runId) {
+      const runRoot = path.join(os.tmpdir(), "ringer", runId);
+      for (const worktree of [path.join(runRoot, "integration")]) {
+        for (let attempt = 0; attempt < 60; attempt++) {
+          const result = await runProcess({ command: "git", args: ["worktree", "remove", "--force", worktree], cwd: project, timeoutMs: 30_000 });
+          if (result.exitCode === 0) break;
+          await delay(250);
+        }
+      }
+      await rm(runRoot, { recursive: true, force: true, maxRetries: 60, retryDelay: 250 });
+    }
+    await rm(root, { recursive: true, force: true, maxRetries: 60, retryDelay: 250 });
+  }
+});
+
+test("cancel during validator verification marks task cancelled and avoids merge", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ringer-cancel-validator-b-"));
+  const project = await createRepository(root);
+  const command = await createValidatorTestCli(root);
+  const slowCheckCommand = await createSlowCheckScript(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.architect = "claude";
+  config.reviewer = "gemini";
+  config.workers = ["codex"];
+  for (const provider of ["codex", "claude", "gemini"] as const) {
+    config.providers[provider].command = command;
+    config.providers[provider].timeoutMs = 30_000;
+  }
+  config.validators["slow-check"] = {
+    command: slowCheckCommand,
+    args: [],
+    timeoutMs: 30_000,
+  };
+  await writeFile(
+    path.join(ringerDirectory(project), "config.json"),
+    `${JSON.stringify(config, null, 2)}\n`,
+    "utf8",
+  );
+
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  let runId = "";
+  try {
+    const started = await fetch(`${dashboard.url}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ goal: "Cancel during validator", projectPath: project, agents: 1 }),
+    });
+    assert.equal(started.status, 202);
+    runId = ((await started.json()) as { runId: string }).runId;
+    assert.ok(runId);
+
+    const getRun = () => fetch(`${dashboard.url}/api/runs/${runId}`).then((response) => response.json() as Promise<{
+      status: string;
+      finalReview: string | null;
+      tasks: Array<{ id: string; status: string }>;
+      events: Array<{ kind: string }>;
+    }>);
+
+    await poll(getRun, (run) => run.tasks.some((task) => task.id === "one" && task.status === "verifying"), 20_000);
+
+    const cancelled = await fetch(`${dashboard.url}/api/runs/${runId}/cancel`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+    assert.equal(cancelled.status, 200);
+    assert.deepEqual(await cancelled.json(), { status: "cancelled" });
+
+    await delay(4500);
+    const run = await getRun();
+    assert.equal(run.status, "cancelled");
+
+    const taskOne = run.tasks.find((task) => task.id === "one");
+    assert.ok(taskOne, "Task 'one' should exist");
+    assert.equal(taskOne.status, "cancelled");
+
+    assert.ok(!run.events.some((event) => event.kind === "task.passed"));
+    assert.ok(!run.tasks.some((task) => task.id === "__integration__"));
+
+    const forbiddenEvents = ["review.started", "run.ready", "run.not_ready"];
+    assert.ok(!run.events.some((event) => forbiddenEvents.includes(event.kind)));
+
+    const shown = await runProcess({
+      command: "git",
+      args: ["show", `ringer/${runId.slice(0, 8)}:result.txt`],
+      cwd: project,
+      timeoutMs: 30_000,
+    });
+    assert.notEqual(shown.exitCode, 0, `result.txt should not be present on integration branch`);
+  } finally {
+    await dashboard.close();
+    if (runId) {
+      const runRoot = path.join(os.tmpdir(), "ringer", runId);
       for (const worktree of [path.join(runRoot, "tasks", "one"), path.join(runRoot, "integration")]) {
         for (let attempt = 0; attempt < 60; attempt++) {
           const result = await runProcess({ command: "git", args: ["worktree", "remove", "--force", worktree], cwd: project, timeoutMs: 30_000 });

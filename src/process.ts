@@ -9,6 +9,7 @@ export interface ProcessRequest {
   timeoutMs: number;
   stdin?: string;
   env?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
 }
 
 export interface ProcessResult {
@@ -34,6 +35,7 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
       windowsHide: true,
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
+      signal: request.signal,
     });
 
     const timer = setTimeout(() => {
@@ -50,12 +52,24 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
       stderr += chunk;
     });
 
-    child.on("error", (error) => {
+    child.on("error", (error: NodeJS.ErrnoException) => {
       clearTimeout(timer);
-      if (!settled) {
-        settled = true;
-        reject(error);
+      if (settled) return;
+      settled = true;
+      // An aborted signal makes spawn emit an AbortError once the child is
+      // killed; treat it as a clean terminated result instead of leaking a
+      // rejection to the caller.
+      if (error.name === "AbortError" || error.code === "ABORT_ERR") {
+        resolve({
+          stdout,
+          stderr,
+          exitCode: 124,
+          durationMs: Date.now() - startedAt,
+          timedOut: true,
+        });
+        return;
       }
+      reject(error);
     });
 
     child.on("close", (code) => {

@@ -9,7 +9,8 @@ export type TaskStatus =
   | "retry"
   | "passed"
   | "failed"
-  | "blocked";
+  | "blocked"
+  | "cancelled";
 
 export interface ValidatorConfig {
   command: string;

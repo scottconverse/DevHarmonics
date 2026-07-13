@@ -14,6 +14,7 @@ import type {
   CheckResult,
   PlannedTask,
   ProviderName,
+  ProviderResult,
   RingerConfig,
   RunPlan,
   RunRequest,
@@ -83,17 +84,27 @@ export class Orchestrator {
       : availableProviders[0]!;
     const architect = this.provider(architectName, config);
     this.ledger.addEvent(runId, "architect.started", `${architectName} is planning the run`);
-    const architectResult = await architect.run({
-      role: "architect",
-      prompt: architectPrompt({
-        goal: request.goal,
-        constitution,
-        validators: Object.keys(config.validators),
-        providers: workerProviders,
-      }),
-      cwd: worktrees.integrationPath,
-      writeAccess: false,
-    });
+    let architectResult: ProviderResult;
+    try {
+      architectResult = await architect.run(
+        {
+          role: "architect",
+          prompt: architectPrompt({
+            goal: request.goal,
+            constitution,
+            validators: Object.keys(config.validators),
+            providers: workerProviders,
+          }),
+          cwd: worktrees.integrationPath,
+          writeAccess: false,
+        },
+        signal,
+      );
+    } catch (error) {
+      if (signal.aborted) return;
+      throw error;
+    }
+    if (signal.aborted) return;
     const plan = this.parsePlan(architectResult.text, config);
     this.ledger.savePlan(runId, plan);
 

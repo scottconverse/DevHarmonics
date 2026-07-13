@@ -153,6 +153,35 @@ test("ledger.cancelRun cancels in-flight work and is idempotent", async () => {
   }
 });
 
+test("ledger.savePlan does not move a cancelled run back to running", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ringer-save-plan-cancel-"));
+  const ledger = new Ledger(path.join(root, "ringer.db"));
+  try {
+    const runId = ledger.createRun("Cancel during planning", root);
+    assert.equal(ledger.cancelRun(runId), true);
+    ledger.savePlan(runId, {
+      summary: "Late plan",
+      recommendedConcurrency: 1,
+      tasks: [
+        {
+          id: "one",
+          title: "One",
+          description: "Do it",
+          dependencies: [],
+          preferredProvider: "codex",
+          checks: ["diff-check"],
+        },
+      ],
+    });
+
+    const run = ledger.getRun(runId);
+    assert.equal(run?.status, "cancelled");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("runProcess terminates a child when its abort signal fires", async () => {
   const sleepScript = "setTimeout(() => {}, 60000);";
   const controller = new AbortController();

@@ -73,7 +73,9 @@ export class Ledger {
 
   savePlan(runId: string, plan: RunPlan): void {
     this.database
-      .prepare("UPDATE runs SET plan_json = ?, status = 'running', updated_at = ? WHERE id = ?")
+      .prepare(
+        "UPDATE runs SET plan_json = ?, status = 'running', updated_at = ? WHERE id = ? AND status NOT IN ('cancelled', 'failed', 'ready', 'not_ready')",
+      )
       .run(JSON.stringify(plan), new Date().toISOString(), runId);
     const insert = this.database.prepare(
       `INSERT INTO tasks

@@ -69,6 +69,41 @@ if (process.argv.includes("--version")) {
   return wrapper;
 }
 
+async function createSlowArchitectCli(root: string): Promise<string> {
+  const script = path.join(root, "slow-architect-cli.mjs");
+  await writeFile(
+    script,
+    `import { setTimeout as delay } from "node:timers/promises";
+let input = "";
+process.stdin.setEncoding("utf8");
+for await (const chunk of process.stdin) input += chunk;
+input += " " + process.argv.slice(2).join(" ");
+if (process.argv.includes("--version")) {
+  console.log("fake 1.0");
+} else if (input.includes("You are the architect")) {
+  await delay(1_000);
+  const plan = {summary:"late plan",recommendedConcurrency:1,tasks:[{id:"one",title:"Create result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"]}]};
+  console.log(JSON.stringify({result:JSON.stringify(plan)}));
+} else if (input.includes("You are the final reviewer")) {
+  console.log("READY\\n\\nShould not review after cancellation.");
+} else {
+  console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"Should not work after cancellation"}}));
+}
+`,
+    "utf8",
+  );
+
+  if (process.platform === "win32") {
+    const wrapper = path.join(root, "slow-architect-cli.cmd");
+    await writeFile(wrapper, `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`, "utf8");
+    return wrapper;
+  }
+  const wrapper = path.join(root, "slow-architect-cli.sh");
+  await writeFile(wrapper, `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`, "utf8");
+  await chmod(wrapper, 0o755);
+  return wrapper;
+}
+
 // Like createFakeCli, but the worker prompt HANGS in a bounded sleep loop so a
 // task is genuinely in-flight while cancellation lands. Architect still returns
 // a one-task plan and the reviewer still returns READY, so nothing else stalls.
@@ -186,6 +221,76 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
   } finally {
     await dashboard.close();
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("cancel during planning does not save a late plan or restart the run", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ringer-cancel-planning-"));
+  const project = await createRepository(root);
+  const command = await createSlowArchitectCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.architect = "claude";
+  config.reviewer = "gemini";
+  config.workers = ["codex"];
+  for (const provider of ["codex", "claude", "gemini"] as const) {
+    config.providers[provider].command = command;
+    config.providers[provider].timeoutMs = 30_000;
+  }
+  await writeFile(
+    path.join(ringerDirectory(project), "config.json"),
+    `${JSON.stringify(config, null, 2)}\n`,
+    "utf8",
+  );
+
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  let runId = "";
+  try {
+    const started = await fetch(`${dashboard.url}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ goal: "Cancel while planning", projectPath: project, agents: 1 }),
+    });
+    assert.equal(started.status, 202);
+    runId = ((await started.json()) as { runId: string }).runId;
+    assert.ok(runId);
+
+    const getRun = () => fetch(`${dashboard.url}/api/runs/${runId}`).then((response) => response.json() as Promise<{
+      status: string;
+      finalReview: string | null;
+      tasks: Array<{ id: string; status: string }>;
+      events: Array<{ kind: string }>;
+    }>);
+
+    await poll(getRun, (run) => run.events.some((event) => event.kind === "architect.started"), 20_000);
+    const cancelled = await fetch(`${dashboard.url}/api/runs/${runId}/cancel`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+    assert.equal(cancelled.status, 200);
+    assert.deepEqual(await cancelled.json(), { status: "cancelled" });
+
+    await delay(1_500);
+    const run = await getRun();
+    assert.equal(run.status, "cancelled", JSON.stringify(run, null, 2));
+    assert.deepEqual(run.tasks, []);
+    assert.equal(run.finalReview, null);
+    const afterCancelEvents = ["plan.created", "scheduler.started", "review.started", "run.ready", "run.not_ready"];
+    assert.ok(!run.events.some((event) => afterCancelEvents.includes(event.kind)), JSON.stringify(run.events));
+  } finally {
+    await dashboard.close();
+    if (runId) {
+      const runRoot = path.join(os.tmpdir(), "ringer", runId);
+      for (const worktree of [path.join(runRoot, "integration")]) {
+        for (let attempt = 0; attempt < 60; attempt++) {
+          const result = await runProcess({ command: "git", args: ["worktree", "remove", "--force", worktree], cwd: project, timeoutMs: 30_000 });
+          if (result.exitCode === 0) break;
+          await delay(250);
+        }
+      }
+      await rm(runRoot, { recursive: true, force: true, maxRetries: 60, retryDelay: 250 });
+    }
+    await rm(root, { recursive: true, force: true, maxRetries: 60, retryDelay: 250 });
   }
 });
 

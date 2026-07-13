@@ -11,7 +11,7 @@ import {
   extractGeminiText,
 } from "../src/providers.js";
 import { runPlanSchema } from "../src/schemas.js";
-import { subscriptionEnvironment } from "../src/process.js";
+import { runProcess, subscriptionEnvironment } from "../src/process.js";
 
 test("provider output parsers extract each CLI's final response", () => {
   const codex = [
@@ -37,6 +37,31 @@ test("subscription environment strips API and cloud credentials", () => {
   delete process.env.GEMINI_API_KEY;
   delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
 });
+
+test(
+  "Windows bare command resolution prefers cmd wrappers over PowerShell wrappers",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "ringer-command-"));
+    const previousPath = process.env.PATH;
+    try {
+      await writeFile(path.join(root, "ringer-resolver-probe.ps1"), "throw 'wrong wrapper'\n");
+      await writeFile(path.join(root, "ringer-resolver-probe.cmd"), "@echo chosen %*\r\n");
+      process.env.PATH = `${root}${path.delimiter}${previousPath ?? ""}`;
+      const result = await runProcess({
+        command: "ringer-resolver-probe",
+        args: ["-"],
+        cwd: root,
+        timeoutMs: 10_000,
+      });
+      assert.equal(result.exitCode, 0, result.stderr);
+      assert.match(result.stdout, /chosen -/);
+    } finally {
+      process.env.PATH = previousPath;
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test("project initialization detects Node validators and writes constitution", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ringer-config-"));

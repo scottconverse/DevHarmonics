@@ -87,7 +87,7 @@ function resolveCommand(command: string, args: string[]): { command: string; arg
 
   const directories = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
   for (const directory of directories) {
-    for (const extension of [".exe", ".com", ".ps1", ".cmd", ".bat"]) {
+    for (const extension of [".exe", ".com", ".cmd", ".bat", ".ps1"]) {
       const candidate = path.join(directory.replace(/^"|"$/g, ""), `${command}${extension}`);
       if (existsSync(candidate)) return windowsCommand(candidate, args);
     }

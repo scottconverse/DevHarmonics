@@ -48,7 +48,7 @@ export const providerConfigSchema = z.object({
   timeoutMs: z.number().int().positive(),
 });
 
-export const ringerConfigSchema = z.object({
+export const devHarmonicsConfigSchema = z.object({
   version: z.literal(1),
   architect: providerSchema,
   reviewer: providerSchema,

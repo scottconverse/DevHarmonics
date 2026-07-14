@@ -1,18 +1,19 @@
 {
-  "name": "ringer-local",
+  "name": "devharmonics-local",
   "version": "0.1.0",
   "private": true,
   "description": "Local, subscription-backed multi-agent orchestrator for Codex, Claude Code, and Gemini via Antigravity CLI.",
   "type": "module",
   "bin": {
-    "ringer": "dist/src/cli.js"
+    "devharmonics": "dist/src/cli.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
     "start": "node dist/src/cli.js",
     "dev": "tsx src/cli.ts",
     "test": "npm run build && node --test \"dist/test/*.test.js\"",
-    "check": "npm run build && npm test"
+    "version:check": "node scripts/check-version.mjs",
+    "check": "npm run version:check && npm test"
   },
   "dependencies": {
     "zod": "^4.0.0"

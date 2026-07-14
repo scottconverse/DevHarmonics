@@ -14,19 +14,19 @@ export class WorktreeManager {
     private readonly runId: string,
   ) {
     const shortId = runId.slice(0, 8);
-    this.root = path.join(os.tmpdir(), "ringer", runId);
+    this.root = path.join(os.tmpdir(), "devharmonics", runId);
     this.integrationPath = path.join(this.root, "integration");
-    this.integrationBranch = `ringer/${shortId}`;
+    this.integrationBranch = `devharmonics/${shortId}`;
   }
 
   async initialize(): Promise<void> {
     const inside = await this.git(this.projectPath, ["rev-parse", "--is-inside-work-tree"]);
     if (inside.exitCode !== 0 || inside.stdout.trim() !== "true") {
-      throw new Error("Ringer requires the target project to be a Git repository");
+      throw new Error("DevHarmonics requires the target project to be a Git repository");
     }
     const status = await this.git(this.projectPath, ["status", "--porcelain"]);
     if (status.stdout.trim()) {
-      throw new Error("Ringer requires a clean working tree before starting a parallel run");
+      throw new Error("DevHarmonics requires a clean working tree before starting a parallel run");
     }
     await mkdir(this.root, { recursive: true });
     const created = await this.git(this.projectPath, [
@@ -65,12 +65,12 @@ export class WorktreeManager {
     if (staged.exitCode === 0) return false;
     const committed = await this.git(worktreePath, [
       "-c",
-      "user.name=Ringer",
+      "user.name=DevHarmonics",
       "-c",
-      "user.email=ringer@local",
+      "user.email=devharmonics@local",
       "commit",
       "-m",
-      `ringer: complete ${taskId}`,
+      `devharmonics: complete ${taskId}`,
     ]);
     if (committed.exitCode !== 0) throw new Error(`Could not commit task ${taskId}: ${committed.stderr}`);
     return true;
@@ -80,14 +80,14 @@ export class WorktreeManager {
     const operation = this.mergeQueue.then(async () => {
       const merged = await this.git(this.integrationPath, [
         "-c",
-        "user.name=Ringer",
+        "user.name=DevHarmonics",
         "-c",
-        "user.email=ringer@local",
+        "user.email=devharmonics@local",
         "merge",
         "--no-ff",
         branch,
         "-m",
-        `ringer: merge ${taskId}`,
+        `devharmonics: merge ${taskId}`,
       ]);
       if (merged.exitCode !== 0) {
         await this.git(this.integrationPath, ["merge", "--abort"]);

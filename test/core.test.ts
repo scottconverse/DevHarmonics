@@ -11,7 +11,7 @@ import {
   extractCodexText,
   extractGeminiText,
 } from "../src/providers.js";
-import type { RingerConfig } from "../src/types.js";
+import type { DevHarmonicsConfig } from "../src/types.js";
 import { runPlanSchema } from "../src/schemas.js";
 import { runProcess, subscriptionEnvironment } from "../src/process.js";
 
@@ -51,14 +51,14 @@ test(
   "Windows bare command resolution prefers cmd wrappers over PowerShell wrappers",
   { skip: process.platform !== "win32" },
   async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "ringer-command-"));
+    const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-command-"));
     const previousPath = process.env.PATH;
     try {
-      await writeFile(path.join(root, "ringer-resolver-probe.ps1"), "throw 'wrong wrapper'\n");
-      await writeFile(path.join(root, "ringer-resolver-probe.cmd"), "@echo chosen %*\r\n");
+      await writeFile(path.join(root, "devharmonics-resolver-probe.ps1"), "throw 'wrong wrapper'\n");
+      await writeFile(path.join(root, "devharmonics-resolver-probe.cmd"), "@echo chosen %*\r\n");
       process.env.PATH = `${root}${path.delimiter}${previousPath ?? ""}`;
       const result = await runProcess({
-        command: "ringer-resolver-probe",
+        command: "devharmonics-resolver-probe",
         args: ["-"],
         cwd: root,
         timeoutMs: 10_000,
@@ -76,7 +76,7 @@ test(
   "Windows Antigravity discovery finds the standard installer location",
   { skip: process.platform !== "win32" },
   async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "ringer-agy-command-"));
+    const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-agy-command-"));
     const previousLocalAppData = process.env.LOCALAPPDATA;
     try {
       const command = path.join(root, "agy", "bin", "agy.exe");
@@ -93,7 +93,7 @@ test(
 );
 
 test("project initialization detects Node validators and writes constitution", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "ringer-config-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-config-"));
   try {
     await writeFile(
       path.join(root, "package.json"),
@@ -105,7 +105,7 @@ test("project initialization detects Node validators and writes constitution", a
     assert.deepEqual(config.validators.test?.args, ["run", "test"]);
     assert.deepEqual(config.validators.build?.args, ["run", "build"]);
     assert.ok(config.validators["diff-check"]);
-    assert.match(await readFile(path.join(root, ".ringer", "constitution.md"), "utf8"), /execution receipt/);
+    assert.match(await readFile(path.join(root, ".devharmonics", "constitution.md"), "utf8"), /execution receipt/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -130,8 +130,8 @@ test("plan schema rejects missing dependencies", () => {
 });
 
 test("ledger.cancelRun cancels in-flight work and is idempotent", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "ringer-cancel-"));
-  const ledger = new Ledger(path.join(root, "ringer.db"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-cancel-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
   try {
     const runId = ledger.createRun("Cancel it", root);
     ledger.savePlan(runId, {
@@ -175,8 +175,8 @@ test("ledger.cancelRun cancels in-flight work and is idempotent", async () => {
 });
 
 test("ledger.savePlan does not move a cancelled run back to running", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "ringer-save-plan-cancel-"));
-  const ledger = new Ledger(path.join(root, "ringer.db"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-save-plan-cancel-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
   try {
     const runId = ledger.createRun("Cancel during planning", root);
     assert.equal(ledger.cancelRun(runId), true);
@@ -207,8 +207,8 @@ test("executeTask preserves cancellation at the commit/merge boundary", async ()
   async function runBoundaryVariant(
     variant: "commit-aborts-before-merge" | "commit-aborts-and-throws",
   ): Promise<{ result: string; merged: boolean; status: string; eventKinds: string[] }> {
-    const root = await mkdtemp(path.join(os.tmpdir(), `ringer-commit-cancel-${variant}-`));
-    const ledger = new Ledger(path.join(root, "ringer.db"));
+    const root = await mkdtemp(path.join(os.tmpdir(), `devharmonics-commit-cancel-${variant}-`));
+    const ledger = new Ledger(path.join(root, "devharmonics.db"));
     try {
       const worktreePath = path.join(root, "task-worktree");
       await mkdir(worktreePath, { recursive: true });
@@ -242,7 +242,7 @@ test("executeTask preserves cancellation at the commit/merge boundary", async ()
         }),
       });
 
-      const config: RingerConfig = structuredClone(defaultConfig);
+      const config: DevHarmonicsConfig = structuredClone(defaultConfig);
       config.retry.maxAttempts = 1;
       config.retry.backoffMs = 1;
       config.workers = ["codex"];
@@ -255,7 +255,7 @@ test("executeTask preserves cancellation at the commit/merge boundary", async ()
       };
 
       const worktrees = {
-        createTask: async () => ({ path: worktreePath, branch: "ringer/task-one" }),
+        createTask: async () => ({ path: worktreePath, branch: "devharmonics/task-one" }),
         commitTask: async () => {
           controller.abort();
           ledger.cancelRun(runId);
@@ -343,8 +343,8 @@ test("runProcess resolves immediately for an already-aborted signal", async () =
 });
 
 test("ledger persists tasks, events, attempts, and check receipts", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "ringer-ledger-"));
-  const ledger = new Ledger(path.join(root, "ringer.db"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-ledger-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
   try {
     const runId = ledger.createRun("Build it", root);
     ledger.savePlan(runId, {

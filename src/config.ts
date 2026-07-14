@@ -1,10 +1,10 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { ringerConfigSchema } from "./schemas.js";
-import type { ProviderName, RingerConfig } from "./types.js";
+import { devHarmonicsConfigSchema } from "./schemas.js";
+import type { ProviderName, DevHarmonicsConfig } from "./types.js";
 
-export const defaultConfig: RingerConfig = {
+export const defaultConfig: DevHarmonicsConfig = {
   version: 1,
   architect: "claude",
   reviewer: "codex",
@@ -32,16 +32,16 @@ export const defaultConfig: RingerConfig = {
   },
 };
 
-export function ringerDirectory(projectPath: string): string {
-  return path.join(projectPath, ".ringer");
+export function devHarmonicsDirectory(projectPath: string): string {
+  return path.join(projectPath, ".devharmonics");
 }
 
 export function configPath(projectPath: string): string {
-  return path.join(ringerDirectory(projectPath), "config.json");
+  return path.join(devHarmonicsDirectory(projectPath), "config.json");
 }
 
 export async function initializeProject(projectPath: string): Promise<string> {
-  const directory = ringerDirectory(projectPath);
+  const directory = devHarmonicsDirectory(projectPath);
   await mkdir(directory, { recursive: true });
   await excludeRuntimeDirectory(projectPath);
   const destination = configPath(projectPath);
@@ -75,7 +75,7 @@ export async function initializeProject(projectPath: string): Promise<string> {
   } catch {
     await writeFile(
       constitution,
-      `# Ringer constitution\n\n1. Preserve existing behavior unless the goal explicitly changes it.\n2. Never claim a check passed without an execution receipt.\n3. Add or update tests for new observable behavior.\n4. Do not weaken tests merely to make a task pass.\n5. Keep changes within the assigned task.\n6. Do not expose secrets or broaden permissions.\n7. Record assumptions and unresolved risks.\n8. A run is complete only after task checks and final integration checks pass.\n`,
+      `# DevHarmonics constitution\n\n1. Preserve existing behavior unless the goal explicitly changes it.\n2. Never claim a check passed without an execution receipt.\n3. Add or update tests for new observable behavior.\n4. Do not weaken tests merely to make a task pass.\n5. Keep changes within the assigned task.\n6. Do not expose secrets or broaden permissions.\n7. Record assumptions and unresolved risks.\n8. A run is complete only after task checks and final integration checks pass.\n`,
       "utf8",
     );
   }
@@ -87,18 +87,18 @@ async function excludeRuntimeDirectory(projectPath: string): Promise<void> {
   const exclude = path.join(projectPath, ".git", "info", "exclude");
   try {
     const current = await readFile(exclude, "utf8");
-    if (!current.split(/\r?\n/).includes(".ringer/")) {
-      await writeFile(exclude, `${current.replace(/\s*$/, "")}\n.ringer/\n`, "utf8");
+    if (!current.split(/\r?\n/).includes(".devharmonics/")) {
+      await writeFile(exclude, `${current.replace(/\s*$/, "")}\n.devharmonics/\n`, "utf8");
     }
   } catch {
     // The project may not be a Git repository yet. Worktree preflight reports that clearly.
   }
 }
 
-export async function loadConfig(projectPath: string): Promise<RingerConfig> {
+export async function loadConfig(projectPath: string): Promise<DevHarmonicsConfig> {
   await initializeProject(projectPath);
   const contents = await readFile(configPath(projectPath), "utf8");
-  return ringerConfigSchema.parse(JSON.parse(contents));
+  return devHarmonicsConfigSchema.parse(JSON.parse(contents));
 }
 
 export function resolveProviderCommand(name: ProviderName, configuredCommand: string): string {
@@ -113,5 +113,5 @@ export function resolveProviderCommand(name: ProviderName, configuredCommand: st
 
 export async function loadConstitution(projectPath: string): Promise<string> {
   await initializeProject(projectPath);
-  return readFile(path.join(ringerDirectory(projectPath), "constitution.md"), "utf8");
+  return readFile(path.join(devHarmonicsDirectory(projectPath), "constitution.md"), "utf8");
 }

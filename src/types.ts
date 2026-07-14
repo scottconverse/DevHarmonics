@@ -25,7 +25,7 @@ export interface ProviderConfig {
   timeoutMs: number;
 }
 
-export interface RingerConfig {
+export interface DevHarmonicsConfig {
   version: 1;
   architect: ProviderName;
   reviewer: ProviderName;

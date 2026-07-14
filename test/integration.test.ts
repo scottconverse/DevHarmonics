@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { initializeProject, loadConfig, ringerDirectory } from "../src/config.js";
+import { initializeProject, loadConfig, devHarmonicsDirectory } from "../src/config.js";
 import { inspectProviders } from "../src/doctor.js";
 import { Ledger } from "../src/ledger.js";
 import { Orchestrator } from "../src/orchestrator.js";
@@ -26,9 +26,9 @@ async function createRepository(root: string): Promise<string> {
   await git(project, ["add", "."]);
   await git(project, [
     "-c",
-    "user.name=Ringer Tests",
+    "user.name=DevHarmonics Tests",
     "-c",
-    "user.email=ringer-tests@local",
+    "user.email=devharmonics-tests@local",
     "commit",
     "-m",
     "fixture",
@@ -170,7 +170,7 @@ async function poll<T>(fetchValue: () => Promise<T>, done: (value: T) => boolean
 }
 
 test("signed-out providers are detected and blocked before a run starts", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "ringer-auth-gate-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-auth-gate-"));
   const project = await createRepository(root);
   const command = await createFakeCli(root, false);
   await initializeProject(project);
@@ -179,7 +179,7 @@ test("signed-out providers are detected and blocked before a run starts", async 
     config.providers[provider].command = command;
   }
   await writeFile(
-    path.join(ringerDirectory(project), "config.json"),
+    path.join(devHarmonicsDirectory(project), "config.json"),
     `${JSON.stringify(config, null, 2)}\n`,
     "utf8",
   );
@@ -189,7 +189,7 @@ test("signed-out providers are detected and blocked before a run starts", async 
   assert.ok(statuses.every((provider) => !provider.authenticated));
   assert.ok(statuses.every((provider) => provider.authStatus.includes("Sign-in required")));
 
-  const ledger = new Ledger(path.join(ringerDirectory(project), "ringer.db"));
+  const ledger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
   try {
     const orchestrator = new Orchestrator(ledger);
     const runId = await orchestrator.run({
@@ -209,7 +209,7 @@ test("signed-out providers are detected and blocked before a run starts", async 
 });
 
 test("orchestrator completes a verified run through fake subscription CLIs", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "ringer-e2e-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-e2e-"));
   const project = await createRepository(root);
   const command = await createFakeCli(root);
   const sharedDependencies = path.join(root, "shared-node-modules");
@@ -230,12 +230,12 @@ test("orchestrator completes a verified run through fake subscription CLIs", asy
     config.providers[provider].timeoutMs = 30_000;
   }
   await writeFile(
-    path.join(ringerDirectory(project), "config.json"),
+    path.join(devHarmonicsDirectory(project), "config.json"),
     `${JSON.stringify(config, null, 2)}\n`,
     "utf8",
   );
 
-  const ledger = new Ledger(path.join(ringerDirectory(project), "ringer.db"));
+  const ledger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
   let runId = "";
   try {
     const orchestrator = new Orchestrator(ledger);
@@ -247,11 +247,11 @@ test("orchestrator completes a verified run through fake subscription CLIs", asy
     assert.equal(run?.tasks.find((task) => task.id === "__integration__")?.status, "passed");
     assert.match(run?.finalReview ?? "", /^READY/);
     assert.ok(run?.events.some((event) => event.message === "Scheduler using concurrency 37"));
-    const shown = await git(project, ["show", `ringer/${runId.slice(0, 8)}:result.txt`]);
+    const shown = await git(project, ["show", `devharmonics/${runId.slice(0, 8)}:result.txt`]);
     assert.equal(shown.stdout, "created by worker\n");
     assert.equal(
       await readFile(
-        path.join(os.tmpdir(), "ringer", runId, "integration", "node_modules", "shared-marker.txt"),
+        path.join(os.tmpdir(), "devharmonics", runId, "integration", "node_modules", "shared-marker.txt"),
         "utf8",
       ),
       "shared\n",
@@ -259,7 +259,7 @@ test("orchestrator completes a verified run through fake subscription CLIs", asy
   } finally {
     ledger.close();
     if (runId) {
-      const runRoot = path.join(os.tmpdir(), "ringer", runId);
+      const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
       await runProcess({ command: "git", args: ["worktree", "remove", "--force", path.join(runRoot, "tasks", "one")], cwd: project, timeoutMs: 30_000 });
       await runProcess({ command: "git", args: ["worktree", "remove", "--force", path.join(runRoot, "integration")], cwd: project, timeoutMs: 30_000 });
       await rm(runRoot, { recursive: true, force: true });
@@ -269,7 +269,7 @@ test("orchestrator completes a verified run through fake subscription CLIs", asy
 });
 
 test("dashboard serves its UI and bootstrap data on localhost", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "ringer-server-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-server-"));
   const project = await createRepository(root);
   const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
   try {
@@ -278,9 +278,11 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
     assert.match(await page.text(), /Assemble a verified agent team/);
     const bootstrap = await fetch(`${dashboard.url}/api/bootstrap`);
     const value = (await bootstrap.json()) as {
+      product: { name: string; version: string };
       defaultProject: string;
       providers: Array<{ name: string; setupSteps: string[] }>;
     };
+    assert.deepEqual(value.product, { name: "DevHarmonics", version: "0.1.0" });
     assert.equal(value.defaultProject, project);
     assert.equal(value.providers.length, 3);
     assert.ok(value.providers.find((provider) => provider.name === "gemini")?.setupSteps.some((step) => step.includes("one-time code")));
@@ -291,7 +293,7 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
 });
 
 test("cancel during planning does not save a late plan or restart the run", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "ringer-cancel-planning-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-cancel-planning-"));
   const project = await createRepository(root);
   const command = await createSlowArchitectCli(root);
   await initializeProject(project);
@@ -304,7 +306,7 @@ test("cancel during planning does not save a late plan or restart the run", asyn
     config.providers[provider].timeoutMs = 30_000;
   }
   await writeFile(
-    path.join(ringerDirectory(project), "config.json"),
+    path.join(devHarmonicsDirectory(project), "config.json"),
     `${JSON.stringify(config, null, 2)}\n`,
     "utf8",
   );
@@ -346,7 +348,7 @@ test("cancel during planning does not save a late plan or restart the run", asyn
   } finally {
     await dashboard.close();
     if (runId) {
-      const runRoot = path.join(os.tmpdir(), "ringer", runId);
+      const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
       for (const worktree of [path.join(runRoot, "integration")]) {
         for (let attempt = 0; attempt < 60; attempt++) {
           const result = await runProcess({ command: "git", args: ["worktree", "remove", "--force", worktree], cwd: project, timeoutMs: 30_000 });
@@ -361,7 +363,7 @@ test("cancel during planning does not save a late plan or restart the run", asyn
 });
 
 test("cancel stops the scheduler and marks the run and in-flight task cancelled", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "ringer-cancel-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-cancel-"));
   const project = await createRepository(root);
   const command = await createHangingCli(root);
   await initializeProject(project);
@@ -374,7 +376,7 @@ test("cancel stops the scheduler and marks the run and in-flight task cancelled"
     config.providers[provider].timeoutMs = 30_000;
   }
   await writeFile(
-    path.join(ringerDirectory(project), "config.json"),
+    path.join(devHarmonicsDirectory(project), "config.json"),
     `${JSON.stringify(config, null, 2)}\n`,
     "utf8",
   );
@@ -425,7 +427,7 @@ test("cancel stops the scheduler and marks the run and in-flight task cancelled"
   } finally {
     await dashboard.close();
     if (runId) {
-      const runRoot = path.join(os.tmpdir(), "ringer", runId);
+      const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
       // The killed worker may briefly orphan a grandchild holding the worktree
       // cwd on Windows; retry until it exits so no worktrees or temp dirs leak.
       for (const worktree of [path.join(runRoot, "tasks", "one"), path.join(runRoot, "integration")]) {
@@ -556,7 +558,7 @@ process.exit(0);
 }
 
 test("cancel during planning terminates the architect child process", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "ringer-cancel-planning-a-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-cancel-planning-a-"));
   const project = await createRepository(root);
   const startedFile = path.join(root, "started.marker");
   const completedFile = path.join(root, "completed.marker");
@@ -571,7 +573,7 @@ test("cancel during planning terminates the architect child process", async () =
     config.providers[provider].timeoutMs = 30_000;
   }
   await writeFile(
-    path.join(ringerDirectory(project), "config.json"),
+    path.join(devHarmonicsDirectory(project), "config.json"),
     `${JSON.stringify(config, null, 2)}\n`,
     "utf8",
   );
@@ -624,7 +626,7 @@ test("cancel during planning terminates the architect child process", async () =
   } finally {
     await dashboard.close();
     if (runId) {
-      const runRoot = path.join(os.tmpdir(), "ringer", runId);
+      const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
       for (const worktree of [path.join(runRoot, "integration")]) {
         for (let attempt = 0; attempt < 60; attempt++) {
           const result = await runProcess({ command: "git", args: ["worktree", "remove", "--force", worktree], cwd: project, timeoutMs: 30_000 });
@@ -639,7 +641,7 @@ test("cancel during planning terminates the architect child process", async () =
 });
 
 test("cancel during validator verification marks task cancelled and avoids merge", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "ringer-cancel-validator-b-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-cancel-validator-b-"));
   const project = await createRepository(root);
   const command = await createValidatorTestCli(root);
   const slowCheckCommand = await createSlowCheckScript(root);
@@ -658,7 +660,7 @@ test("cancel during validator verification marks task cancelled and avoids merge
     timeoutMs: 30_000,
   };
   await writeFile(
-    path.join(ringerDirectory(project), "config.json"),
+    path.join(devHarmonicsDirectory(project), "config.json"),
     `${JSON.stringify(config, null, 2)}\n`,
     "utf8",
   );
@@ -707,7 +709,7 @@ test("cancel during validator verification marks task cancelled and avoids merge
 
     const shown = await runProcess({
       command: "git",
-      args: ["show", `ringer/${runId.slice(0, 8)}:result.txt`],
+      args: ["show", `devharmonics/${runId.slice(0, 8)}:result.txt`],
       cwd: project,
       timeoutMs: 30_000,
     });
@@ -715,7 +717,7 @@ test("cancel during validator verification marks task cancelled and avoids merge
   } finally {
     await dashboard.close();
     if (runId) {
-      const runRoot = path.join(os.tmpdir(), "ringer", runId);
+      const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
       for (const worktree of [path.join(runRoot, "tasks", "one"), path.join(runRoot, "integration")]) {
         for (let attempt = 0; attempt < 60; attempt++) {
           const result = await runProcess({ command: "git", args: ["worktree", "remove", "--force", worktree], cwd: project, timeoutMs: 30_000 });

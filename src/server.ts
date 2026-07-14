@@ -3,10 +3,11 @@ import { readFile, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { initializeProject, loadConfig, ringerDirectory } from "./config.js";
+import { initializeProject, loadConfig, devHarmonicsDirectory } from "./config.js";
 import { inspectProviders } from "./doctor.js";
 import { Ledger } from "./ledger.js";
 import { Orchestrator } from "./orchestrator.js";
+import { PRODUCT_NAME, VERSION } from "./product.js";
 import type { ProviderName, RunRequest } from "./types.js";
 
 const uiDirectory = fileURLToPath(new URL("./ui/", import.meta.url));
@@ -18,7 +19,7 @@ export async function startDashboard(options: {
 }): Promise<{ url: string; close: () => Promise<void> }> {
   const defaultProject = path.resolve(options.projectPath);
   await initializeProject(defaultProject);
-  const ledger = new Ledger(path.join(ringerDirectory(defaultProject), "ringer.db"));
+  const ledger = new Ledger(path.join(devHarmonicsDirectory(defaultProject), "devharmonics.db"));
   const orchestrator = new Orchestrator(ledger);
 
   const server = createServer(async (request, response) => {
@@ -60,6 +61,7 @@ async function route(
   if (request.method === "GET" && url.pathname === "/api/bootstrap") {
     const config = await loadConfig(context.defaultProject);
     sendJson(response, 200, {
+      product: { name: PRODUCT_NAME, version: VERSION },
       defaultProject: context.defaultProject,
       config,
       providers: await inspectProviders(config, context.defaultProject),

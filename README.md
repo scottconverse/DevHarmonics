@@ -1,110 +1,112 @@
-# Ringer Local
+# DevHarmonics
 
-Ringer is a local, subscription-backed agent orchestrator. It coordinates the official Codex, Claude Code, and Google Antigravity command-line tools, gives parallel workers isolated Git worktrees, runs allowlisted validators, retries failures with exact feedback, and records every result in SQLite. The dashboard calls the Google provider **Gemini** because Antigravity supplies the Gemini models.
+**One objective. A verified AI development crew.**
 
-It does **not** use model API keys. Provider processes have API-key and cloud-credential environment variables removed so they use the login cached by each official CLI.
+Current release: **v0.1.0**
 
-## What you get
+DevHarmonics is a local, subscription-backed multi-agent orchestrator for software work. It coordinates the official Codex, Claude Code, and Google Antigravity CLIs; turns a goal into a dependency-aware task graph; gives parallel workers isolated Git worktrees; validates their changes; and records durable execution receipts in SQLite.
 
-- A local browser dashboard at `http://127.0.0.1:4317`
-- A goal composer with manual or architect-selected concurrency
-- Codex, Claude, and Gemini worker toggles
-- Dependency-aware parallel task scheduling with no built-in agent ceiling
-- One Git worktree and branch per task
-- Allowlisted command validators with execution receipts
-- Provider rotation and specific failure feedback on retries
-- A final integration branch and read-only reviewer verdict
-- A durable SQLite task, attempt, check, and event ledger
+It does not use model API keys. Each provider uses the account session already established by its official CLI, and API-key environment variables are removed from child processes.
+
+[User manual](docs/USER_MANUAL.md) · [Architecture](docs/ARCHITECTURE.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md) · [Landing page](https://scottconverse.github.io/DevHarmonics/)
+
+## What works today
+
+- Local browser dashboard at `http://127.0.0.1:4317`
+- Separate installation and sign-in checks for Codex, Claude, and Gemini
+- Manual or architect-selected concurrency, with no built-in agent-count ceiling
+- Typed, dependency-aware task planning
+- One temporary Git worktree and branch per task
+- Allowlisted validators with stdout, stderr, exit code, and duration receipts
+- Provider rotation and exact validator feedback on retries
+- Serial integration into a dedicated run branch
+- Read-only final review with `READY` or `NOT READY` verdicts
+- Durable run, task, attempt, check, and event records in SQLite
+- Active-run cancellation from the dashboard
 
 ## Requirements
 
+- Windows, macOS, or Linux
 - Node.js 24 or newer
 - Git
-- At least one of the official subscription-authenticated CLIs:
-  - `codex` — sign in with `codex login`
-  - `claude` — sign in with `claude auth login`
-  - `agy` — run `agy` and sign in with the Google account associated with your Gemini subscription
+- At least one installed and subscription-authenticated provider CLI:
+  - Codex: `codex login`
+  - Claude Code: `claude auth login`
+  - Gemini through Google Antigravity: launch `agy` and complete first-run sign-in
 
-> Google ended consumer Google AI Pro/Ultra access through Gemini CLI on June 18, 2026. Ringer therefore uses the supported Antigravity CLI (`agy`) for subscription-backed Gemini access. Gemini CLI remains relevant only for supported enterprise/API configurations, which Ringer does not use.
+DevHarmonics never asks for an OpenAI, Anthropic, or Google email password. Authentication happens only in provider-owned terminals and browser pages.
 
-### First-time provider sign-in gate
-
-Ringer checks installation and subscription authentication separately at startup. An installed but signed-out provider is marked **Sign-in required**, cannot be selected in the worker pool, and is blocked before any worktree or agent process is started.
-
-For Codex, run `codex login`, complete the official OpenAI/ChatGPT browser sign-in, and return to Ringer. Click **Refresh sign-in status** in the dashboard; Ringer verifies the cached session with `codex login status`. Claude uses the equivalent `claude auth login` and `claude auth status --text` flow. Ringer never collects an OpenAI, Anthropic, or Google email password.
-
-The current project is launched from this source checkout; it is not yet packaged as a Windows installer. A future installer must run the same sign-in preflight during onboarding and cannot report setup complete while a selected provider is signed out.
-
-### First-time Antigravity sign-in
-
-Antigravity's first login has two handoffs and an onboarding sequence that are easy to mistake for a failed or unfinished login:
-
-1. Run `agy` and choose Google sign-in with the account tied to your Gemini subscription.
-2. Finish the browser sign-in. The browser then displays a one-time authorization code instead of returning automatically to the CLI.
-3. Click **Copy to Clipboard**, return to the Antigravity terminal, paste the code at its authorization prompt, and press **Enter**. Treat the code as a short-lived credential: never paste it into Ringer, a chat, or a document.
-4. Antigravity opens a multi-screen first-run onboarding sequence. On the color-scheme screen, use ↑/↓ and press **Enter**. Antigravity 1.1.1 then presents several additional preference screens—not just one confirmation screen. Review each choice and use the navigation controls shown at the bottom of the terminal; the exact choices may change between releases.
-5. Onboarding is complete only when the normal Antigravity prompt appears. You can recognize it by the account and subscription tier, selected Gemini model, current project path, and a `>` input line.
-6. Exit the standalone session with `Ctrl+C` and verify the cached login with `agy models`.
-
-Ringer's dashboard repeats these instructions under **First-time provider sign-in guide** and provides a **Refresh sign-in status** button after onboarding.
-
-Ringer never asks for your email password and never reads or copies provider OAuth tokens.
-
-## Install and launch
+## Install from source
 
 ```powershell
-npm.cmd install
+git clone https://github.com/scottconverse/DevHarmonics.git
+Set-Location DevHarmonics
+npm.cmd ci
 npm.cmd run build
 node dist/src/cli.js doctor
 node dist/src/cli.js serve --project C:\path\to\your\repository
 ```
 
-The last command opens the dashboard. To install the `ringer` command globally from this checkout:
+The last command opens the dashboard. To make the command available globally from this checkout:
 
 ```powershell
 npm.cmd link
-ringer serve --project C:\path\to\your\repository
+devharmonics --version
+devharmonics serve --project C:\path\to\your\repository
 ```
+
+This first release is source-distributed; it does not yet include a packaged Windows installer.
+
+## First-run sign-in
+
+Run the provider's own login command, complete its browser flow, then return to DevHarmonics and click **Refresh sign-in status**. Installed-but-signed-out providers remain disabled and cannot start work.
+
+Antigravity has a less obvious first-run flow:
+
+1. Run `agy` and choose Google sign-in with the account tied to your Gemini subscription.
+2. Complete browser sign-in. The browser displays a one-time authorization code.
+3. Copy that code, return to the Antigravity terminal, paste it at the authorization prompt, and press **Enter**. Treat it as a short-lived credential; never paste it into DevHarmonics, a chat, or a document.
+4. Complete every terminal onboarding screen, including color scheme and preferences. Use the navigation instructions shown at the bottom.
+5. Wait for the normal Antigravity prompt showing the account, subscription tier, model, project path, and a `>` input line.
+6. Exit the standalone session with `Ctrl+C`, run `agy models` to verify the cached login, and refresh DevHarmonics.
+
+The dashboard includes this provider-specific guide. See the [user manual](docs/USER_MANUAL.md) for troubleshooting.
 
 ## CLI
 
 ```text
-ringer serve [--project PATH] [--port 4317] [--open false]
-ringer init [--project PATH]
-ringer doctor [--project PATH]
-ringer run --goal "..." [--project PATH] [--agents auto|N]
-           [--providers codex,claude,gemini]
+devharmonics serve [--project PATH] [--port 4317] [--open false]
+devharmonics init [--project PATH]
+devharmonics doctor [--project PATH]
+devharmonics run --goal "..." [--project PATH] [--agents auto|N]
+                   [--providers codex,claude,gemini]
+devharmonics --version
 ```
 
-Examples:
+Example:
 
 ```powershell
-# Let the architect select concurrency from the task graph
-ringer run --project C:\repos\shop --agents auto `
-  --goal "Add CSV export, test it, and verify the browser download"
-
-# Request 40 concurrent slots with all three providers
-ringer run --project C:\repos\shop --agents 40 `
+devharmonics run --project C:\repos\shop --agents auto `
   --providers codex,claude,gemini `
-  --goal "Implement the approved backlog"
+  --goal "Add CSV export, cover it with tests, and verify the download"
 ```
 
-Ringer does not clamp the configured agent count. Actual parallelism is bounded naturally by the number of ready tasks, machine resources, and provider throttling or subscription limits.
+DevHarmonics does not clamp the requested agent count. Effective parallelism is still bounded by ready tasks, machine resources, provider throttling, and subscription limits.
 
 ## Project configuration
 
-The first `init`, `serve`, or `run` creates:
+The first `init`, `serve`, or `run` creates a local runtime directory in the target project:
 
 ```text
-.ringer/
+.devharmonics/
   config.json
   constitution.md
-  ringer.db
+  devharmonics.db
 ```
 
-`.ringer/` is added to the repository-local `.git/info/exclude`, leaving the shared `.gitignore` untouched. For Node projects, Ringer automatically registers existing `test`, `lint`, `build`, and `typecheck` package scripts. Every project also receives the built-in `diff-check` validator.
+DevHarmonics adds `.devharmonics/` to that repository's private `.git/info/exclude`; it does not edit the shared `.gitignore`. For Node projects it discovers existing `test`, `lint`, `build`, and `typecheck` scripts. Every project also receives a built-in `diff-check` validator.
 
-Example `.ringer/config.json`:
+Example `.devharmonics/config.json`:
 
 ```json
 {
@@ -112,76 +114,65 @@ Example `.ringer/config.json`:
   "architect": "claude",
   "reviewer": "codex",
   "workers": ["codex", "claude", "gemini"],
-  "concurrency": {
-    "mode": "auto",
-    "agents": 20,
-    "ceiling": null
-  },
-  "retry": {
-    "maxAttempts": 3,
-    "backoffMs": 1500
-  },
+  "concurrency": { "mode": "auto", "agents": 20, "ceiling": null },
+  "retry": { "maxAttempts": 3, "backoffMs": 1500 },
   "providers": {
     "codex": { "enabled": true, "command": "codex", "timeoutMs": 1800000 },
     "claude": { "enabled": true, "command": "claude", "timeoutMs": 1800000 },
     "gemini": { "enabled": true, "command": "agy", "timeoutMs": 1800000 }
   },
   "validators": {
-    "diff-check": {
-      "command": "git",
-      "args": ["diff", "--check"],
-      "timeoutMs": 60000
-    },
-    "test": {
-      "command": "npm",
-      "args": ["test"],
-      "timeoutMs": 600000
-    }
+    "diff-check": { "command": "git", "args": ["diff", "--check"], "timeoutMs": 60000 }
   }
 }
 ```
 
-Models can only select validator names from this file. They cannot provide a shell command for Ringer to execute.
+Models select validators by name; they cannot supply a shell command for DevHarmonics to execute.
 
 ## Run lifecycle
 
-1. Ringer requires a clean Git working tree.
-2. The architect inspects the repository in read-only mode and emits a typed task DAG.
-3. Ringer creates an integration branch named `ringer/<run-prefix>`.
-4. Each ready task receives its own `ringer/<run-prefix>-task-<task>` branch and temporary worktree.
-5. A worker edits only its task worktree.
-6. Ringer executes the task's allowlisted validators.
-7. Failures return to a worker with stdout, stderr, and the exit code.
-8. Successful work is committed and merged serially into the integration branch.
-9. Dependent tasks begin only after their dependencies merge.
-10. The final reviewer inspects the integration worktree without write access and returns `READY` or `NOT READY`.
+1. Require a clean Git working tree and authenticated providers.
+2. Ask a read-only architect to emit a typed task DAG.
+3. Create `devharmonics/<run-prefix>` as the integration branch.
+4. Assign each ready task a `devharmonics/<run-prefix>-task-<task>` branch and temporary worktree.
+5. Run a worker in that isolated worktree.
+6. Execute only allowlisted validators.
+7. Return failed check receipts to a worker for a bounded retry.
+8. Commit passing work and merge it serially into the integration branch.
+9. Start dependent tasks only after their dependencies merge.
+10. Ask a read-only reviewer for the final verdict.
 
-Ringer does not merge its integration branch into your checked-out branch. Review and merge that branch yourself.
+DevHarmonics does not merge the integration branch into your checked-out branch. You review and merge it yourself.
 
 ## Safety boundaries
 
-- Dashboard binds only to `127.0.0.1`.
-- Mutation endpoints accept same-origin JSON requests only.
-- Architect and reviewer runs use each provider's read-only or plan mode.
-- Workers use restricted edit modes, not unrestricted bypass/YOLO modes.
-- Codex and Claude prompts are sent over stdin. Antigravity requires its prompt as the value of `--print`; Ringer launches it directly without shell interpolation.
-- Validators come from user-controlled configuration, never model output.
-- API-key variables are removed from child process environments.
-- A clean Git working tree is required before parallel work begins.
+- The dashboard binds only to `127.0.0.1`.
+- Mutation endpoints require same-origin JSON requests.
+- Architect and reviewer calls use provider read-only or plan modes.
+- Workers use restricted editing modes rather than unrestricted bypass modes.
+- Prompts are launched without shell interpolation.
+- Validator commands come only from local user-controlled configuration.
+- Common API-key and cloud-credential variables are stripped from provider environments.
+- Parallel work requires a clean Git working tree.
 
-## Current MVP limitations
+## MVP limitations
 
-- Git merge conflicts stop the affected task with a precise failure; automatic conflict repair is not implemented yet.
-- There is no run cancellation button yet. Stop the Ringer process to halt scheduling; provider processes retain their own timeout.
-- Temporary worktrees are retained after real runs so you can inspect them. Git worktree cleanup will be added alongside explicit run archival.
-- Subscription quotas are provider-controlled. Ringer records throttling failures and retries, but it cannot expand an account's allowance.
-- The dashboard polls SQLite rather than using push events; this keeps the server dependency-free and durable across browser refreshes.
+- Merge conflicts fail the affected task; automatic conflict repair is not implemented.
+- Temporary worktrees are retained for inspection until explicit archival/cleanup is added.
+- The dashboard polls SQLite instead of using server-pushed events.
+- Provider quotas and throttling remain controlled by each subscription.
+- Ollama/local-model and Agent Client Protocol transports are roadmap items, not current features.
 
 ## Development
 
 ```powershell
-npm.cmd test
+npm.cmd ci
+npm.cmd run check
 npm.cmd run dev -- serve --project C:\path\to\repository
 ```
 
-The automated suite covers configuration, credential stripping, output parsing, plan validation, SQLite receipts, the dashboard server, and a complete fake-provider orchestration run through Git worktrees and final review.
+The automated suite covers configuration, credential stripping, provider parsing, plan validation, cancellation, SQLite receipts, the dashboard server, and full fake-provider orchestration through Git worktrees and final review.
+
+## Project status and licensing
+
+DevHarmonics v0.1.0 is an early MVP. The repository is public for evaluation and collaboration. No open-source license has been selected yet, so public visibility alone does not grant reuse rights. License selection is intentionally open for community discussion.

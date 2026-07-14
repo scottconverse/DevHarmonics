@@ -1,7 +1,7 @@
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { runPlanSchema } from "./schemas.js";
-import { loadConfig, loadConstitution, resolveProviderCommand, ringerDirectory } from "./config.js";
+import { loadConfig, loadConstitution, resolveProviderCommand, devHarmonicsDirectory } from "./config.js";
 import { inspectProviders } from "./doctor.js";
 import { Ledger } from "./ledger.js";
 import { createProvider, type ProviderAdapter } from "./providers.js";
@@ -16,7 +16,7 @@ import type {
   PlannedTask,
   ProviderName,
   ProviderResult,
-  RingerConfig,
+  DevHarmonicsConfig,
   RunPlan,
   RunRequest,
   TaskStatus,
@@ -249,7 +249,7 @@ export class Orchestrator {
     goal: string;
     task: PlannedTask;
     constitution: string;
-    config: RingerConfig;
+    config: DevHarmonicsConfig;
     providers: ProviderName[];
     providerCursor: number;
     worktrees: WorktreeManager;
@@ -349,7 +349,7 @@ export class Orchestrator {
   }
 
   private async verifyTask(
-    input: { runId: string; task: PlannedTask; config: RingerConfig },
+    input: { runId: string; task: PlannedTask; config: DevHarmonicsConfig },
     worktreePath: string,
   ): Promise<CheckResult[]> {
     const results: CheckResult[] = [];
@@ -369,7 +369,7 @@ export class Orchestrator {
     return results;
   }
 
-  private availableProviders(config: RingerConfig, requested?: ProviderName[]): ProviderName[] {
+  private availableProviders(config: DevHarmonicsConfig, requested?: ProviderName[]): ProviderName[] {
     const allowed = requested ? new Set(requested) : null;
     return ([config.architect, config.reviewer, ...config.workers] as ProviderName[]).filter(
       (name, index, values) =>
@@ -377,7 +377,7 @@ export class Orchestrator {
     );
   }
 
-  private provider(name: ProviderName, config: RingerConfig): ProviderAdapter {
+  private provider(name: ProviderName, config: DevHarmonicsConfig): ProviderAdapter {
     return createProvider(name, {
       ...config.providers[name],
       command: resolveProviderCommand(name, config.providers[name].command),
@@ -391,7 +391,7 @@ export class Orchestrator {
     return providers[cursor % providers.length]!;
   }
 
-  private parsePlan(text: string, config: RingerConfig): RunPlan {
+  private parsePlan(text: string, config: DevHarmonicsConfig): RunPlan {
     const plan = runPlanSchema.parse(parseFirstJsonObject(text));
     for (const task of plan.tasks) {
       for (const check of task.checks) {

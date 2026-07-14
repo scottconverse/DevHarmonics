@@ -57,7 +57,7 @@ ${input.task.description}
 Acceptance validators run by the orchestrator after you finish: ${input.task.checks.join(", ") || "none configured"}
 Attempt: ${input.attempt}
 ${input.feedback ? `\nPrevious verification feedback:\n${input.feedback}\n` : ""}
-Implement only this task. Inspect existing conventions, make the necessary edits, and run focused checks when useful. Do not commit, create branches, alter .ringer, or claim success without evidence. Finish with a concise summary of files changed and checks you ran.`;
+Implement only this task. Inspect existing conventions, make the necessary edits, and run focused checks when useful. Do not commit, create branches, alter .devharmonics, or claim success without evidence. Finish with a concise summary of files changed and checks you ran.`;
 }
 
 export function reviewerPrompt(input: {

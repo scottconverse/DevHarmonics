@@ -30,7 +30,7 @@ export function unknownValidator(name: string): CheckResult {
     passed: false,
     exitCode: 2,
     stdout: "",
-    stderr: `The architect requested unknown validator '${name}'. Add it to .ringer/config.json or revise the plan.`,
+    stderr: `The architect requested unknown validator '${name}'. Add it to .devharmonics/config.json or revise the plan.`,
     durationMs: 0,
   };
 }

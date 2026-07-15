@@ -1,16 +1,18 @@
 # DevHarmonics Detailed Implementation Plan
 
 Document status: **Build-ready execution plan**
-Plan version: **1.15**
+Plan version: **1.16**
 Written: **2026-07-14**
 Revised: **2026-07-15**
-Product specification baseline: **DevHarmonics Product Specification v1.7**
+Product specification baseline: **DevHarmonics Product Specification v1.8**
 Current implementation baseline: **DevHarmonics v0.4.0**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 
-Revision history: **v1.15 (2026-07-15)** — Corrected the Antigravity scheduler boundary: one authenticated Antigravity connection can expose Google, Anthropic, and OpenAI model vendors; Gemini and Claude/GPT quota groups retain independent cooldowns and reset windows; exhausting one group leaves the other eligible; and run receipts distinguish requested model identity from runtime-verified actual identity. The legacy `gemini` configuration key remains an internal compatibility alias only.
+Revision history: **v1.16 (2026-07-15)** — Reconciled the plan with Product Specification v1.8 and its canonical positioning of DevHarmonics as a local-first, provider-neutral software factory for product owners managing AI agents as development teams. Corrected the immediate recommendation to reflect that Increment 4 feature scope is implemented and Increment 5 multi-repository operation is now in progress; this does not change release numbering.
 
-Prior revision: **v1.14 (2026-07-15)** — Implemented the first DH-730 vertical slice: immutable source-backed product-intelligence snapshots over configured canonical local files, exact repository HEAD/content-hash/working-tree provenance, explicit version/release/status/maturity claim extraction, subject-aware contradiction detection, missing/unsafe/dirty-source findings, planning-context injection, and Products-page scan/readback controls. Git tags are never treated as maturity evidence. CivicCore and CivicCode are attached as the first current CivicSuite repository set, and their live snapshot identifies the CivicCore 1.2.0 versus 1.2.1 dependency conflict with cited sources. The live Observe proof also exposed and closed DH-720's reviewer first-use qualification ordering gap.
+Prior revision: **v1.15 (2026-07-15)** — Corrected the Antigravity scheduler boundary: one authenticated Antigravity connection can expose Google, Anthropic, and OpenAI model vendors; Gemini and Claude/GPT quota groups retain independent cooldowns and reset windows; exhausting one group leaves the other eligible; and run receipts distinguish requested model identity from runtime-verified actual identity. The legacy `gemini` configuration key remains an internal compatibility alias only.
+
+Earlier revision: **v1.14 (2026-07-15)** — Implemented the first DH-730 vertical slice: immutable source-backed product-intelligence snapshots over configured canonical local files, exact repository HEAD/content-hash/working-tree provenance, explicit version/release/status/maturity claim extraction, subject-aware contradiction detection, missing/unsafe/dirty-source findings, planning-context injection, and Products-page scan/readback controls. Git tags are never treated as maturity evidence. CivicCore and CivicCode are attached as the first current CivicSuite repository set, and their live snapshot identifies the CivicCore 1.2.0 versus 1.2.1 dependency conflict with cited sources. The live Observe proof also exposed and closed DH-720's reviewer first-use qualification ordering gap.
 
 Prior revision: **v1.13 (2026-07-15)** — Implemented the first DH-720 vertical slice: exact multi-repository integration sets with one repository per task, isolated per-repository integration/task branches and worktrees, retained base/HEAD commit evidence, repository-local validators, concurrent work across repositories, serialized same-repository merges, aggregate context-only review, evidence export, and a visible run-board integration-set card. Primary checkouts remain untouched.
 
@@ -1472,13 +1474,13 @@ The product specification remains the authority for product scope. This implemen
 
 ## 15. Immediate recommendation
 
-Increment 3 is complete. The next meaningful delivery target is Increment 4 campaign safety:
+Increment 4 feature scope is implemented on the v0.5 development line, with its aggregate integration gate intentionally deferred while feature throughput remains the priority. The next meaningful delivery target is the operational completion of Increment 5:
 
-> Safely extend the accepted adaptive workforce into long-running, multi-stage product campaigns with enforced command policy, representative-pilot promotion, adversarial review/fix/re-review, verification-integrity checks, and host resource admission.
+> Complete a real, bounded CivicSuite objective through multi-repository implementation, automatic fix/re-review, restart-safe recovery, and a reviewable delivery handoff without modifying registered primary checkouts.
 
-The v0.4.0 release closes the adaptive-workforce gate with retained CivicSuite evidence and verified full/compact cockpit behavior. Automatic first-use qualification, cross-provider scheduling, routing-score decomposition, workload-specific worker and reviewer evidence, validator/conflict attribution, observation controls, latency/cost/diversity signals, and classified fallback scope are now the accepted foundation. Structured task-linked review findings continue in DH-460; run-level NOT READY participation remains deliberately non-causal.
+The existing DH-700, DH-710, DH-720, and DH-730 slices already provide the product registry, repository-aware planning, exact multi-repository integration sets, and source-backed product intelligence. The next build slice should add automatic multi-repository fixer disposition and configured review quorum support, then reconstruct interrupted integration sets and clean completed temporary worktrees safely.
 
-Immediately after that gate, implement campaign safety before attempting very large autonomous efforts: enforced command policy, representative-pilot promotion, configurable adversarial review/fix/re-review, verification-integrity checks, and host resource admission. Campaign stage orchestration, centralized diagnostic partitioning, differential validation, and regression accounting then become the path to scaling those proven workflows across CivicSuite rather than simply increasing agent count.
+Once that vertical slice works, run the first bounded CivicSuite implementation objective through the product and retain its plan, model routing, worktree, validation, review, recovery, and delivery evidence. Draft pull-request or branch-delivery automation follows under explicit human approval. Campaign-scale orchestration remains after this proven product workflow rather than ahead of it.
 
 ## Sources
 

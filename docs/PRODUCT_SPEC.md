@@ -1,17 +1,19 @@
 # DevHarmonics Canonical Product Specification
 
 Document status: **Canonical product direction**
-Specification version: **1.7**
+Specification version: **1.8**
 Written: **2026-07-13**
 Revised: **2026-07-15**
 Current implementation baseline: **DevHarmonics v0.4.0**
 Google Doc: [DevHarmonics Canonical Product Specification](https://docs.google.com/document/d/1rd-_gqHHPZHhTkrULJR9tHcbAVUOGONsbuEFCV-8pRQ/edit?usp=drivesdk)
 
-Revision history: **v1.7 (2026-07-15)** — Clarified provider-neutral identity and quota boundaries for Google Antigravity: one authenticated subscription connection may expose Google, Anthropic, and OpenAI model vendors; its Gemini and Claude/GPT quota groups are scheduled independently; and requested model identity is never reported as actual execution identity unless the runtime verifies it.
+Revision history: **v1.8 (2026-07-15)** — Established the canonical product-category positioning: DevHarmonics is a local-first, provider-neutral software factory for product owners managing AI agents as development teams.
 
-Prior revision: **v1.6 (2026-07-15)** — Added the first named local specialist policy: Mellum2 Instruct and Thinking as separate exact-model upgrade tracks, benchmark-gated specialist scheduling, a narrow low-risk economy implementation lane, enforced task-capability matching, and no automatic download, activation, promotion, or universal-default behavior.
+Prior revision: **v1.7 (2026-07-15)** — Clarified provider-neutral identity and quota boundaries for Google Antigravity: one authenticated subscription connection may expose Google, Anthropic, and OpenAI model vendors; its Gemini and Claude/GPT quota groups are scheduled independently; and requested model identity is never reported as actual execution identity unless the runtime verifies it.
 
-Prior revision: **v1.5 (2026-07-15)** — Reconciled the current implementation baseline with the accepted v0.4.0 adaptive workforce: exact-model qualification, fair cross-provider scheduling, workload-specific worker and reviewer observations, explicit manual tier overrides, retained CivicSuite acceptance evidence, and verified full/compact cockpit behavior.
+Earlier revision: **v1.6 (2026-07-15)** — Added the first named local specialist policy: Mellum2 Instruct and Thinking as separate exact-model upgrade tracks, benchmark-gated specialist scheduling, a narrow low-risk economy implementation lane, enforced task-capability matching, and no automatic download, activation, promotion, or universal-default behavior.
+
+Earlier revision: **v1.5 (2026-07-15)** — Reconciled the current implementation baseline with the accepted v0.4.0 adaptive workforce: exact-model qualification, fair cross-provider scheduling, workload-specific worker and reviewer observations, explicit manual tier overrides, retained CivicSuite acceptance evidence, and verified full/compact cockpit behavior.
 
 Earlier revision: **v1.4 (2026-07-14)** — Added campaign-scale development orchestration: pilot-to-scale promotion, staged fan-out/fan-in execution, adversarial review quorums, enforced command policy, diagnostic partitioning, anti-shortcut and test-integrity gates, differential validation, resource-aware sharding, regression accounting, and restart-safe campaign recovery.
 
@@ -36,7 +38,9 @@ The words **MUST**, **SHOULD**, and **MAY** identify required, preferred, and op
 
 ## 2. Product definition
 
-DevHarmonics is a local-first product-development control plane for directing a heterogeneous team of AI development agents across one repository, many repositories, and an ongoing product program.
+**DevHarmonics is a local-first, provider-neutral software factory for product owners managing AI agents as development teams.**
+
+It provides the product-development control plane for directing a heterogeneous team of AI development agents across one repository, many repositories, and an ongoing product program.
 
 The user supplies product intent, constraints, priorities, and approval. DevHarmonics turns that direction into a dependency-aware execution program; selects suitable providers, models, reasoning levels, agents, and tools; runs work concurrently in isolated environments; validates and reviews the result; preserves evidence and decisions; and returns changes for human approval.
 

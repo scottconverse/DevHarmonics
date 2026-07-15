@@ -4,7 +4,9 @@
 
 Current release: **v0.4.0**
 
-DevHarmonics is a local, subscription-backed multi-agent orchestrator for software work. It coordinates the official Codex, Claude Code, and Google Antigravity CLIs; turns a goal into a dependency-aware task graph; gives parallel workers isolated Git worktrees; validates their changes; and records durable execution receipts in SQLite.
+**DevHarmonics is a local-first, provider-neutral software factory for product owners managing AI agents as development teams.**
+
+It coordinates the official Codex, Claude Code, and Google Antigravity CLIs; turns a goal into a dependency-aware task graph; gives parallel workers isolated Git worktrees; validates their changes; and records durable execution receipts in SQLite.
 
 Normal subscription and local-model use requires no model API keys. Each subscription provider uses the account session already established by its official CLI, and API-key environment variables are removed from child processes. Optional OpenRouter access is separately connected through OAuth, disabled for paid routing by default, and never requires pasting a key into DevHarmonics.
 

@@ -38,7 +38,7 @@ import { WorkspaceIsolationError, WorktreeManager } from "../src/worktrees.js";
 import { chunkDiffFiles, classifyVerdict, runContextOnlyReview } from "../src/local-review.js";
 import { classifyWorkload, inferModelProfile, profileMetadata, SUBSCRIPTION_COMPATIBILITY_MODELS } from "../src/model-intelligence.js";
 import { parseCurrentClaudeModels } from "../src/catalog.js";
-import { estimateInvocationCost, estimateQualificationCost, isExactOpenRouterModelId, OpenRouterService } from "../src/openrouter.js";
+import { estimateInvocationCost, estimateQualificationCost, isExactOpenRouterModelId, OpenRouterAdapter, OpenRouterService } from "../src/openrouter.js";
 import { architectPrompt, localReviewerContextHeader, reviewerPrompt, workerPrompt } from "../src/prompts.js";
 import { QUALIFICATION_FINGERPRINT_FIXTURE, ensureReviewerCandidateQualified, ensureSchedulerCandidateQualified, ensureSchedulerProviderCandidateQualified, hasCurrentOperationalQualification, qualifyRuntimeModel, trackedFamilyQualificationRole } from "../src/qualification.js";
 import { modelQualificationFingerprint } from "../src/model-fingerprint.js";
@@ -449,10 +449,11 @@ test("Claude official catalog watcher selects the newest exact model in each tra
   assert.deepEqual(models, ["claude-fable-5", "claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5-20251001"]);
 });
 
-test("OpenRouter cost estimates use catalog per-token pricing without activating catalog models", () => {
-  const model = { metadata: { promptPrice: 0.000001, completionPrice: 0.000002 } };
+test("OpenRouter cost ceilings use catalog pricing and context without activating catalog models", () => {
+  const model = { metadata: { promptPrice: 0.000001, completionPrice: 0.000002, contextLength: 100 } };
   assert.ok(Math.abs((estimateQualificationCost(model) ?? 0) - 0.000244) < 1e-12);
-  assert.ok(Math.abs((estimateInvocationCost(model, "12345678", 10) ?? 0) - 0.000022) < 1e-12);
+  assert.ok(Math.abs((estimateInvocationCost(model, "12345678", 10) ?? 0) - 0.00011) < 1e-12);
+  assert.equal(estimateInvocationCost({ metadata: { promptPrice: 0.000001, completionPrice: 0.000002 } }, "prompt", 10), null);
   assert.equal(defaultConfig.openRouter.enabled, false);
   assert.equal(defaultConfig.openRouter.allowPaidFallback, false);
   assert.equal(defaultConfig.runPolicy.allowPaidApi, false);
@@ -491,6 +492,53 @@ test("workload classification maps architecture, routine work, and low-risk bulk
   }).requiredTier, "premium");
 });
 
+test("OpenRouter adapter sends the hard completion ceiling", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestBody: Record<string, unknown> | null = null;
+  globalThis.fetch = async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({ model: "openai/test-20260715", provider: "fixture", choices: [{ message: { content: "bounded" } }], usage: { prompt_tokens: 2, completion_tokens: 3, cost: 0.001 } }), { status: 200 });
+  };
+  try {
+    const adapter = new OpenRouterAdapter("fixture-secret");
+    const baseRequest = { role: "reviewer" as const, prompt: "bounded prompt", cwd: process.cwd(), permission: "read_only" as const, timeoutMs: 1_000, model: { requestedModelId: domainId("Model", "api:openrouter:model:test"), alias: "openai/test-20260715", settings: {} } };
+    await assert.rejects(() => adapter.invoke(baseRequest), /hard completion-token ceiling/i);
+    await adapter.invoke({ ...baseRequest, maxOutputTokens: 7 });
+    assert.ok(requestBody);
+    const capturedBody = requestBody as unknown as Record<string, unknown>;
+    assert.equal(capturedBody.max_completion_tokens, 7);
+    assert.deepEqual(capturedBody.provider, { allow_fallbacks: false, require_parameters: true });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("ambiguous paid failures retain their durable reservation without expiry", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-openrouter-ambiguous-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    const config = structuredClone(defaultConfig);
+    config.openRouter = { enabled: true, allowPaidFallback: true, perRunLimitUsd: 0.005, monthlyLimitUsd: 0.005 };
+    config.runPolicy.allowPaidApi = true;
+    const service = new OpenRouterService(ledger, {} as any);
+    (service as any).status = async () => ({ connected: true, key: { limit_remaining: 10 } });
+    let invoked = 0;
+    await assert.rejects(() => service.withPaidRoutingAllowed(config, "same-run", 0.004, async () => {
+      invoked += 1;
+      throw new Error("response lost after provider acceptance");
+    }), /response lost/i);
+    assert.equal(invoked, 1);
+    assert.equal(Number((ledger as any).database.prepare("SELECT COUNT(*) AS count FROM paid_spend_reservations").get().count), 1);
+    (ledger as any).database.prepare("UPDATE paid_spend_reservations SET expires_at = ?").run("2000-01-01T00:00:00.000Z");
+    await assert.rejects(() => service.withPaidRoutingAllowed(config, "same-run", 0.004, async () => { invoked += 1; }), /per-run limit would be exceeded/i);
+    assert.equal(invoked, 1);
+    assert.equal(ledger.getRunSpendUsd("same-run"), 0);
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("OpenRouter Workbench consultation enforces budgets and contributes to monthly spend", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-openrouter-workbench-"));
   const ledger = new Ledger(path.join(root, "devharmonics.db"));
@@ -506,7 +554,7 @@ test("OpenRouter Workbench consultation enforces budgets and contributes to mont
 
     ledger.upsertConnection({ id: "api:openrouter", provider: "openrouter", transport: "api", authentication: "credential_reference", displayName: "OpenRouter", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "paid", capacity: "available", adapterVersion: "test", runtimeVersion: "test", metadata: {} });
     const modelId = "api:openrouter:model:anthropic-claude-test";
-    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "api:openrouter", canonicalName: "anthropic/claude-test-20260715", displayName: "Claude Test", source: "provider_catalog", lifecycle: "known", visible: true, verified: false, qualified: false, active: false, metadata: { ...profileMetadata({ tier: "premium", family: "claude-test", capabilities: ["text", "analysis"], source: "catalog" }), promptPrice: 0.000001, completionPrice: 0.000002 } });
+    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "api:openrouter", canonicalName: "anthropic/claude-test-20260715", displayName: "Claude Test", source: "provider_catalog", lifecycle: "known", visible: true, verified: false, qualified: false, active: false, metadata: { ...profileMetadata({ tier: "premium", family: "claude-test", capabilities: ["text", "analysis"], source: "catalog" }), promptPrice: 0.000001, completionPrice: 0.000002, contextLength: 2_000 } });
     ledger.recordModelQualification({ modelId, fixtureVersion: "test", role: "reviewer", passed: true, score: 1, evidence: {} });
     ledger.setModelPreference(modelId, { active: true });
     const session = ledger.createWorkbenchSession({ projectPath: root, title: "Paid consultation" });
@@ -534,7 +582,7 @@ test("OpenRouter Workbench consultation enforces budgets and contributes to mont
     await assert.rejects(() => (service as any).assertPaidWorkbenchAllowed(config, session.id, 1), /per-run limit would be exceeded/i);
 
     const secondModelId = "api:openrouter:model:openai-gpt-test";
-    ledger.upsertDiscoveredModel({ id: secondModelId, connectionId: "api:openrouter", canonicalName: "openai/gpt-test-20260715", displayName: "GPT Test", source: "provider_catalog", lifecycle: "known", visible: true, verified: false, qualified: false, active: false, metadata: { ...profileMetadata({ tier: "premium", family: "gpt-test", capabilities: ["text", "analysis"], source: "catalog" }), promptPrice: 0.000001, completionPrice: 0.000002 } });
+    ledger.upsertDiscoveredModel({ id: secondModelId, connectionId: "api:openrouter", canonicalName: "openai/gpt-test-20260715", displayName: "GPT Test", source: "provider_catalog", lifecycle: "known", visible: true, verified: false, qualified: false, active: false, metadata: { ...profileMetadata({ tier: "premium", family: "gpt-test", capabilities: ["text", "analysis"], source: "catalog" }), promptPrice: 0.000001, completionPrice: 0.000002, contextLength: 2_000 } });
     ledger.recordModelQualification({ modelId: secondModelId, fixtureVersion: "test", role: "reviewer", passed: true, score: 1, evidence: {} });
     ledger.setModelPreference(secondModelId, { active: true });
     const aggregateSession = ledger.createWorkbenchSession({ projectPath: root, title: "Aggregate paid consultation" });
@@ -575,7 +623,7 @@ test("concurrent OpenRouter Workbench consultations cannot oversubscribe the sam
 
     ledger.upsertConnection({ id: "api:openrouter", provider: "openrouter", transport: "api", authentication: "credential_reference", displayName: "OpenRouter", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "paid", capacity: "available", adapterVersion: "test", runtimeVersion: "test", metadata: {} });
     const modelId = "api:openrouter:model:concurrent-paid-test";
-    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "api:openrouter", canonicalName: "openai/concurrent-paid-test-20260715", displayName: "Concurrent Paid Test", source: "provider_catalog", lifecycle: "known", visible: true, verified: false, qualified: false, active: false, metadata: { ...profileMetadata({ tier: "premium", family: "paid-fixture", capabilities: ["text", "analysis"], source: "catalog" }), promptPrice: 0, completionPrice: 0.000002 } });
+    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "api:openrouter", canonicalName: "openai/concurrent-paid-test-20260715", displayName: "Concurrent Paid Test", source: "provider_catalog", lifecycle: "known", visible: true, verified: false, qualified: false, active: false, metadata: { ...profileMetadata({ tier: "premium", family: "paid-fixture", capabilities: ["text", "analysis"], source: "catalog" }), promptPrice: 0, completionPrice: 0.000002, contextLength: 2_000 } });
     ledger.recordModelQualification({ modelId, fixtureVersion: "test", role: "reviewer", passed: true, score: 1, evidence: {} });
     ledger.setModelPreference(modelId, { active: true });
     const session = ledger.createWorkbenchSession({ projectPath: root, title: "Concurrent paid consultation" });

@@ -285,6 +285,7 @@ export async function qualifyWithAdapter(input: {
     cwd: input.cwd,
     permission: "read_only",
     timeoutMs: 2 * 60_000,
+    ...(input.provider === "openrouter" ? { maxOutputTokens: 12 } : {}),
     model: {
       requestedModelId: domainId("Model", input.model.id),
       alias: input.model.canonicalName,

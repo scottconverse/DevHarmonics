@@ -8,6 +8,7 @@ import { CredentialStore } from "./credential-store.js";
 import type { DevHarmonicsConfig } from "./types.js";
 
 export const OPENROUTER_CONNECTION_ID = "api:openrouter";
+export const OPENROUTER_MAX_OUTPUT_TOKENS = 2_000;
 const OPENROUTER_API = "https://openrouter.ai/api/v1";
 const OPENROUTER_AUTH = "https://openrouter.ai/auth";
 const CREDENTIAL_NAME = "openrouter-oauth";
@@ -104,33 +105,37 @@ export class OpenRouterService {
   }
 
   async assertPaidRoutingAllowed(config: DevHarmonicsConfig, runId: string, estimatedCostUsd = 0): Promise<void> {
-    const release = await this.acquirePaidRouting(config, runId, estimatedCostUsd);
-    release();
+    const reservation = await this.acquirePaidRouting(config, runId, estimatedCostUsd);
+    reservation.cancelBeforeInvocation();
   }
 
   async assertPaidWorkbenchAllowed(config: DevHarmonicsConfig, sessionId: string, estimatedCostUsd = 0): Promise<void> {
-    const release = await this.acquirePaidWorkbench(config, sessionId, estimatedCostUsd);
-    release();
+    const reservation = await this.acquirePaidWorkbench(config, sessionId, estimatedCostUsd);
+    reservation.cancelBeforeInvocation();
   }
 
-  async acquirePaidRouting(config: DevHarmonicsConfig, runId: string, estimatedCostUsd = 0): Promise<() => void> {
+  async acquirePaidRouting(config: DevHarmonicsConfig, runId: string, estimatedCostUsd = 0): Promise<PaidSpendReservation> {
     return this.acquirePaidSpend(config, "run", runId, estimatedCostUsd);
   }
 
-  async acquirePaidWorkbench(config: DevHarmonicsConfig, sessionId: string, estimatedCostUsd = 0): Promise<() => void> {
+  async acquirePaidWorkbench(config: DevHarmonicsConfig, sessionId: string, estimatedCostUsd = 0): Promise<PaidSpendReservation> {
     return this.acquirePaidSpend(config, "workbench", sessionId, estimatedCostUsd);
   }
 
   async withPaidRoutingAllowed<T>(config: DevHarmonicsConfig, runId: string, estimatedCostUsd: number, action: () => Promise<T>): Promise<T> {
-    const release = await this.acquirePaidRouting(config, runId, estimatedCostUsd);
+    const reservation = await this.acquirePaidRouting(config, runId, estimatedCostUsd);
     try {
-      return await action();
-    } finally {
-      release();
+      const result = await action();
+      reservation.settleAfterDurableReceipt();
+      return result;
+    } catch (error) {
+      // The provider may have accepted and charged a request before the failure
+      // became visible. Keep the conservative reservation until reconciled.
+      throw error;
     }
   }
 
-  private async acquirePaidSpend(config: DevHarmonicsConfig, scopeType: "run" | "workbench", scopeId: string, estimatedCostUsd: number): Promise<() => void> {
+  private async acquirePaidSpend(config: DevHarmonicsConfig, scopeType: "run" | "workbench", scopeId: string, estimatedCostUsd: number): Promise<PaidSpendReservation> {
     if (!config.openRouter.enabled || !config.openRouter.allowPaidFallback || !config.runPolicy.allowPaidApi) {
       throw new Error("OpenRouter paid routing is disabled by policy");
     }
@@ -154,12 +159,13 @@ export class OpenRouterService {
       this.ledger.releasePaidSpendReservation(reservationId);
       throw error;
     }
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
+    let closed = false;
+    const close = () => {
+      if (closed) return;
+      closed = true;
       this.ledger.releasePaidSpendReservation(reservationId);
     };
+    return { settleAfterDurableReceipt: close, cancelBeforeInvocation: close };
   }
 
   async assertQualificationCredit(estimatedCostUsd: number | null): Promise<void> {
@@ -216,12 +222,15 @@ export class OpenRouterAdapter implements RuntimeAdapter {
   async invoke(request: InvocationRequest, options: InvocationOptions = {}): Promise<InvocationResult> {
     if (request.permission !== "read_only") throw new RuntimeInvocationError("OpenRouter has no DevHarmonics workspace tool harness and is read-only", "incompatible", this.connection.id, 0, false);
     if (!request.model.alias) throw new RuntimeInvocationError("OpenRouter requires an exact selected model", "incompatible", this.connection.id, 0, false);
+    if (!Number.isSafeInteger(request.maxOutputTokens) || Number(request.maxOutputTokens) <= 0) {
+      throw new RuntimeInvocationError("OpenRouter requires a positive hard completion-token ceiling", "incompatible", this.connection.id, 0, false);
+    }
     const started = Date.now();
     options.onEvent?.({ type: "started", connectionId: this.connection.id, at: new Date().toISOString() });
     const response = await fetch(`${OPENROUTER_API}/chat/completions`, {
       method: "POST",
       headers: { Authorization: `Bearer ${this.key}`, "Content-Type": "application/json", "HTTP-Referer": "https://github.com/scottconverse/DevHarmonics", "X-Title": "DevHarmonics" },
-      body: JSON.stringify({ model: request.model.alias, messages: [{ role: "user", content: request.prompt }], provider: { allow_fallbacks: false } }),
+      body: JSON.stringify({ model: request.model.alias, messages: [{ role: "user", content: request.prompt }], max_completion_tokens: request.maxOutputTokens, provider: { allow_fallbacks: false, require_parameters: true } }),
       signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(request.timeoutMs ?? 120_000)]) : AbortSignal.timeout(request.timeoutMs ?? 120_000),
     });
     const raw = await response.text();
@@ -256,11 +265,29 @@ export function estimateQualificationCost(model: { metadata: Readonly<Record<str
   return prompt === null || completion === null ? null : prompt * 220 + completion * 12;
 }
 
-export function estimateInvocationCost(model: { metadata: Readonly<Record<string, unknown>> }, prompt: string, outputTokenBudget = 2_000): number | null {
+export function estimateInvocationCost(model: { metadata: Readonly<Record<string, unknown>> }, _prompt: string, outputTokenBudget = OPENROUTER_MAX_OUTPUT_TOKENS): number | null {
   const promptPrice = numeric(model.metadata.promptPrice);
   const completionPrice = numeric(model.metadata.completionPrice);
-  if (promptPrice === null || completionPrice === null) return null;
-  return promptPrice * Math.ceil(prompt.length / 4) + completionPrice * outputTokenBudget;
+  const contextLength = numeric(model.metadata.contextLength);
+  if (promptPrice === null || completionPrice === null || contextLength === null || contextLength < 1 || !Number.isSafeInteger(outputTokenBudget) || outputTokenBudget < 1) return null;
+  const boundedOutput = Math.min(outputTokenBudget, contextLength);
+  const requestPricing = model.metadata.pricing && typeof model.metadata.pricing === "object" ? model.metadata.pricing as Record<string, unknown> : {};
+  const requestPrice = numeric(requestPricing.request) ?? 0;
+  // Total native tokens cannot exceed the model context. Reserving prompt-price
+  // across the entire context plus any higher completion-price delta is a hard
+  // upper bound once max_completion_tokens is sent with the request.
+  return requestPrice + promptPrice * contextLength + Math.max(0, completionPrice - promptPrice) * boundedOutput;
+}
+
+export function requireInvocationCostCeiling(model: { metadata: Readonly<Record<string, unknown>> }, prompt: string, outputTokenBudget = OPENROUTER_MAX_OUTPUT_TOKENS): number {
+  const ceiling = estimateInvocationCost(model, prompt, outputTokenBudget);
+  if (ceiling === null) throw new Error("OpenRouter paid routing requires current prompt price, completion price, and context length metadata");
+  return ceiling;
+}
+
+export interface PaidSpendReservation {
+  settleAfterDurableReceipt(): void;
+  cancelBeforeInvocation(): void;
 }
 
 function openRouterConnection(enabled: boolean, connected: boolean): ConnectionRegistryInput {

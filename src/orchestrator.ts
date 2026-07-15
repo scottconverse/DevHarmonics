@@ -40,7 +40,7 @@ import { ModelRouter } from "./routing.js";
 import { observeLocalResources } from "./resources.js";
 import { evaluateToolRequest, type ToolStage } from "./policy.js";
 import { adjudicateReviewQuorum, parseReviewerResponse, reviewRequirement, type ReviewFinding, type ReviewQuorumDecision, type ReviewRequirement, type StructuredReview } from "./review.js";
-import { estimateInvocationCost, OpenRouterService } from "./openrouter.js";
+import { OPENROUTER_MAX_OUTPUT_TOKENS, OpenRouterService, requireInvocationCostCeiling, type PaidSpendReservation } from "./openrouter.js";
 import { ensureSchedulerCandidateQualified, ensureSchedulerProviderCandidateQualified, type SchedulerQualificationResult } from "./qualification.js";
 import { resolveValidatorCwd, runValidator, unknownValidator } from "./validators.js";
 import { analyzeVerificationIntegrity } from "./verification-integrity.js";
@@ -191,6 +191,7 @@ export class Orchestrator {
           cwd: projectPath,
           permission: "read_only",
           timeoutMs: null,
+          maxOutputTokens: OPENROUTER_MAX_OUTPUT_TOKENS,
           model: decision.model,
         });
         const parsed = this.parsePlan(result.text, config, input.objective.autonomy);
@@ -285,14 +286,14 @@ export class Orchestrator {
       return model && connection?.provider === "openrouter" && model.active && !model.excluded && !model.retired && !model.qualificationStale ? [model] : [];
     });
     let paidBudgetError: Error | null = null;
-    let releasePaidSpend: (() => void) | null = null;
+    let paidSpendReservation: PaidSpendReservation | null = null;
     if (paidModels.length) {
-      const estimatedCost = paidModels.reduce((sum, model) => sum + (estimateInvocationCost(model, prompt) ?? 0), 0);
       try {
-        releasePaidSpend = await new OpenRouterService(this.ledger).acquirePaidWorkbench(config, input.sessionId, estimatedCost);
+        const costCeiling = paidModels.reduce((sum, model) => sum + requireInvocationCostCeiling(model, prompt), 0);
+        paidSpendReservation = await new OpenRouterService(this.ledger).acquirePaidWorkbench(config, input.sessionId, costCeiling);
         if (!input.persist) {
-          releasePaidSpend();
-          releasePaidSpend = null;
+          paidSpendReservation.cancelBeforeInvocation();
+          paidSpendReservation = null;
           paidBudgetError = new Error("Paid Workbench consultations require a durable receipt before the spending gate can be released");
         }
       } catch (error) {
@@ -353,6 +354,7 @@ export class Orchestrator {
           cwd: projectPath,
           permission: "read_only",
           timeoutMs: null,
+          maxOutputTokens: OPENROUTER_MAX_OUTPUT_TOKENS,
           model: decision.model,
         });
         this.recordConnectionOutcome(adapter.connection.id, { success: true });
@@ -377,10 +379,13 @@ export class Orchestrator {
         return failed(error);
       }
     }));
-    try {
-      await input.persist?.(consultations);
-    } finally {
-      releasePaidSpend?.();
+    await input.persist?.(consultations);
+    if (paidSpendReservation) {
+      const paidModelIds = new Set(paidModels.map((model) => model.id));
+      const paidConsultations = consultations.filter((consultation) => paidModelIds.has(consultation.requestedModelId));
+      if (paidConsultations.length === paidModels.length && paidConsultations.every((consultation) => consultation.status === "complete" && consultation.costUsd !== null)) {
+        paidSpendReservation.settleAfterDurableReceipt();
+      }
     }
     return consultations;
   }
@@ -512,15 +517,16 @@ export class Orchestrator {
             cwd: worktrees.integrationPath,
             permission: "read_only",
             timeoutMs: null,
+            maxOutputTokens: OPENROUTER_MAX_OUTPUT_TOKENS,
             model: architectDecision.model,
           }, { signal });
           this.recordInvocation(runId, null, "architect", architectDecision, result);
           return result;
         };
         const selected = architectDecision.model.requestedModelId ? this.ledger.getModel(String(architectDecision.model.requestedModelId)) : null;
-        const estimated = selected ? estimateInvocationCost(selected, prompt) ?? 0 : 0;
+        if (architectDecision.provider === "openrouter" && !selected) throw new Error("OpenRouter paid routing requires an exact selected model");
         const architectResult = architectDecision.provider === "openrouter"
-          ? await new OpenRouterService(this.ledger).withPaidRoutingAllowed(config, runId, estimated, performArchitecture)
+          ? await new OpenRouterService(this.ledger).withPaidRoutingAllowed(config, runId, requireInvocationCostCeiling(selected!, prompt), performArchitecture)
           : await performArchitecture();
         if (signal.aborted) return;
         try {
@@ -764,6 +770,7 @@ export class Orchestrator {
             cwd: worktrees.integrationPath,
             permission: "read_only",
             timeoutMs: null,
+            maxOutputTokens: OPENROUTER_MAX_OUTPUT_TOKENS,
             model: reviewerDecision.model,
           }, { signal });
           this.recordInvocation(runId, null, "reviewer", reviewerDecision, review, reviewerFallbackReason);
@@ -779,6 +786,7 @@ export class Orchestrator {
             contextHeader: localReviewerContextHeader({ goal: request.goal, constitution, plan, checkSummary, taskReports: localTaskReports, autonomy }),
             chunks,
             evidenceLabel: autonomy === "observe" ? "diagnostic report" : "diff chunk",
+            maxOutputTokens: 512,
             signal,
             onChunk: (receipt, index, total) => {
               this.ledger.addEvent(runId, "review.chunk_completed", `${reviewerDecision.provider} reviewed chunk ${index + 1}/${total}: ${receipt.label} — ${receipt.verdict}`, { label: receipt.label, verdict: receipt.verdict, durationMs: receipt.durationMs, inputTokens: receipt.inputTokens, outputTokens: receipt.outputTokens, costUsd: receipt.costUsd });
@@ -786,9 +794,10 @@ export class Orchestrator {
             },
           });
           const selected = reviewerDecision.model.requestedModelId ? this.ledger.getModel(String(reviewerDecision.model.requestedModelId)) : null;
-          const estimated = selected ? estimateInvocationCost(selected, chunks.map((chunk) => chunk.content).join("\n"), Math.max(500, chunks.length * 192)) ?? 0 : 0;
+          if (reviewerDecision.provider === "openrouter" && !selected) throw new Error("OpenRouter paid routing requires an exact selected model");
+          const costCeiling = selected ? requireInvocationCostCeiling(selected, "", 512) * chunks.length : 0;
           const review = reviewerDecision.provider === "openrouter"
-            ? await new OpenRouterService(this.ledger).withPaidRoutingAllowed(config, runId, estimated, performReview)
+            ? await new OpenRouterService(this.ledger).withPaidRoutingAllowed(config, runId, costCeiling, performReview)
             : await performReview();
           reviewText = review.text;
         }
@@ -1383,6 +1392,7 @@ export class Orchestrator {
             cwd: reviewCwd,
             permission: "read_only",
             timeoutMs: null,
+            maxOutputTokens: OPENROUTER_MAX_OUTPUT_TOKENS,
             model: decision.model,
           }, { signal: input.signal });
           this.recordInvocation(input.runId, null, "reviewer", decision, review, fallbackReason);
@@ -1399,6 +1409,7 @@ export class Orchestrator {
             contextHeader: localReviewerContextHeader({ goal: input.goal, constitution: input.constitution, plan: input.plan, checkSummary: input.checkSummary, taskReports: localTaskReports, autonomy: input.autonomy }),
             chunks,
             evidenceLabel: input.reviewEvidenceLabel ?? (input.autonomy === "observe" ? "diagnostic report" : "diff chunk"),
+            maxOutputTokens: 512,
             signal: input.signal,
             onChunk: (receipt, index, total) => {
               this.ledger.addEvent(input.runId, "review.chunk_completed", `${decision.provider} reviewed chunk ${index + 1}/${total}: ${receipt.label} - ${receipt.verdict}`, { ...input.eventContext, reviewSlot: input.reviewSlot, label: receipt.label, verdict: receipt.verdict, durationMs: receipt.durationMs, inputTokens: receipt.inputTokens, outputTokens: receipt.outputTokens, costUsd: receipt.costUsd });
@@ -1406,9 +1417,10 @@ export class Orchestrator {
             },
           });
           const selected = decision.model.requestedModelId ? this.ledger.getModel(String(decision.model.requestedModelId)) : null;
-          const estimated = selected ? estimateInvocationCost(selected, chunks.map((chunk) => chunk.content).join("\n"), Math.max(500, chunks.length * 192)) ?? 0 : 0;
+          if (decision.provider === "openrouter" && !selected) throw new Error("OpenRouter paid routing requires an exact selected model");
+          const costCeiling = selected ? requireInvocationCostCeiling(selected, "", 512) * chunks.length : 0;
           const review = decision.provider === "openrouter"
-            ? await new OpenRouterService(this.ledger).withPaidRoutingAllowed(input.config, input.runId, estimated, performReview)
+            ? await new OpenRouterService(this.ledger).withPaidRoutingAllowed(input.config, input.runId, costCeiling, performReview)
             : await performReview();
           text = review.text;
         }
@@ -1615,13 +1627,14 @@ export class Orchestrator {
           ...runtimeMetadata,
         },
       );
-      let releasePaidSpend: (() => void) | null = null;
+      let paidSpendReservation: PaidSpendReservation | null = null;
+      let paidInvocationStarted = false;
 
       try {
         if (providerName === "openrouter") {
           const selected = model.requestedModelId ? this.ledger.getModel(String(model.requestedModelId)) : null;
-          const estimated = selected ? estimateInvocationCost(selected, prompt) ?? 0 : 0;
-          releasePaidSpend = await new OpenRouterService(this.ledger).acquirePaidRouting(input.config, input.runId, estimated);
+          if (!selected) throw new Error("OpenRouter paid routing requires an exact selected model");
+          paidSpendReservation = await new OpenRouterService(this.ledger).acquirePaidRouting(input.config, input.runId, requireInvocationCostCeiling(selected, prompt));
         }
         await input.worktrees.assertPrimaryClean?.(`before ${input.task.id} attempt ${attempt}`);
         const invocationRequest = {
@@ -1636,8 +1649,10 @@ export class Orchestrator {
               ? input.config.connections[providerName as ProviderName].timeoutMs
               : 15 * 60_000,
           ),
+          maxOutputTokens: OPENROUTER_MAX_OUTPUT_TOKENS,
           model,
         };
+        if (providerName === "openrouter") paidInvocationStarted = true;
         const result = providerName === "ollama" && taskPermission === "workspace_write"
           ? await runLocalToolLoop({
               adapter: provider,
@@ -1679,8 +1694,8 @@ export class Orchestrator {
           fallbackReason,
         });
         this.recordInvocation(input.runId, input.task.id, "worker", routing, result, fallbackReason);
-        releasePaidSpend?.();
-        releasePaidSpend = null;
+        if (result.usage.costUsd !== null) paidSpendReservation?.settleAfterDurableReceipt();
+        paidSpendReservation = null;
         this.recordConnectionOutcome(provider.connection.id, { success: true });
         if (model.requestedModelId) {
           const modelId = String(model.requestedModelId);
@@ -1703,8 +1718,8 @@ export class Orchestrator {
         }
         this.ledger.addBlackboardEntry({ runId: input.runId, taskId: input.task.id, kind: taskPermission === "read_only" ? "finding" : "handoff", content: normalizedResult.summary, sourceAttemptId: attemptId });
       } catch (error) {
-        releasePaidSpend?.();
-        releasePaidSpend = null;
+        if (!paidInvocationStarted) paidSpendReservation?.cancelBeforeInvocation();
+        paidSpendReservation = null;
         // A cancel aborts the child process, surfacing here as a failure. Stop
         // without marking the task 'failed' or retrying; cancelRun owns status.
         if (input.signal.aborted) return "cancelled";

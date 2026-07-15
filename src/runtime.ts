@@ -45,6 +45,7 @@ export interface InvocationRequest {
   cwd: string;
   permission: InvocationPermission;
   timeoutMs: number | null;
+  maxOutputTokens?: number;
   model: ModelSelection;
 }
 

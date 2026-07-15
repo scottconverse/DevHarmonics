@@ -2864,7 +2864,6 @@ export class Ledger {
     const expiresAt = new Date(nowDate.getTime() + 24 * 60 * 60_000).toISOString();
     this.database.exec("BEGIN IMMEDIATE;");
     try {
-      this.database.prepare("DELETE FROM paid_spend_reservations WHERE expires_at <= ?").run(now);
       const actualScopeSpend = input.scopeType === "run"
         ? this.database.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS total FROM invocation_receipts WHERE run_id = ?").get(input.scopeId) as { total: number }
         : this.database.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS total FROM workbench_messages WHERE session_id = ? AND status = 'complete'").get(input.scopeId) as { total: number };

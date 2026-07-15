@@ -52,6 +52,7 @@ export async function runContextOnlyReview(input: {
   evidenceLabel?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
+  maxOutputTokens?: number;
   onChunk?: (receipt: ChunkReviewReceipt, index: number, total: number) => void;
 }): Promise<{ text: string; receipts: ChunkReviewReceipt[] }> {
   const receipts: ChunkReviewReceipt[] = [];
@@ -74,6 +75,7 @@ Review only the supplied evidence against the stated goal and acceptance criteri
       cwd: input.cwd,
       permission: "read_only",
       timeoutMs: input.timeoutMs ?? 120_000,
+      ...(input.maxOutputTokens === undefined ? {} : { maxOutputTokens: input.maxOutputTokens }),
       model: {
         ...input.model,
         settings: {

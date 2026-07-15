@@ -497,26 +497,32 @@ export class Orchestrator {
       const architect = await this.provider(architectDecision.provider, config, architectDecision.connectionId);
       this.ledger.addEvent(runId, "architect.started", `${architectDecision.provider} is planning the run`, { routing: architectDecision });
       try {
-        const architectResult = await architect.invoke(
-          {
+        const prompt = architectPrompt({
+          goal: request.goal,
+          constitution,
+          validators: Object.keys(config.repository.validators),
+          providers: workerProviders,
+          workspacePath: worktrees.integrationPath,
+          autonomy,
+        });
+        const performArchitecture = async () => {
+          const result = await architect.invoke({
             role: "architect",
-            prompt: architectPrompt({
-              goal: request.goal,
-              constitution,
-              validators: Object.keys(config.repository.validators),
-              providers: workerProviders,
-              workspacePath: worktrees.integrationPath,
-              autonomy,
-            }),
+            prompt,
             cwd: worktrees.integrationPath,
             permission: "read_only",
             timeoutMs: null,
             model: architectDecision.model,
-          },
-          { signal },
-        );
+          }, { signal });
+          this.recordInvocation(runId, null, "architect", architectDecision, result);
+          return result;
+        };
+        const selected = architectDecision.model.requestedModelId ? this.ledger.getModel(String(architectDecision.model.requestedModelId)) : null;
+        const estimated = selected ? estimateInvocationCost(selected, prompt) ?? 0 : 0;
+        const architectResult = architectDecision.provider === "openrouter"
+          ? await new OpenRouterService(this.ledger).withPaidRoutingAllowed(config, runId, estimated, performArchitecture)
+          : await performArchitecture();
         if (signal.aborted) return;
-        this.recordInvocation(runId, null, "architect", architectDecision, architectResult);
         try {
           plan = this.parsePlan(architectResult.text, config, autonomy);
           this.recordConnectionOutcome(architect.connection.id, { success: true });

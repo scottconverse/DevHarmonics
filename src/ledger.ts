@@ -16,6 +16,7 @@ import {
   type RunStatus,
 } from "./domain.js";
 import { redactText, redactValue } from "./redaction.js";
+import type { ReviewFinding, StructuredReview } from "./review.js";
 import { aggregateModelPerformance, type ModelPerformanceObservation, type ModelPerformanceProfile } from "./model-performance.js";
 import { classifyWorkload } from "./model-intelligence.js";
 import {
@@ -123,7 +124,7 @@ interface CheckRow {
   duration_ms: number;
 }
 
-export const LEDGER_SCHEMA_VERSION = 15;
+export const LEDGER_SCHEMA_VERSION = 17;
 
 export interface RepositoryRecord {
   id: string;
@@ -232,6 +233,38 @@ export interface InvocationReceiptInput {
   fallbackReason?: string | null;
 }
 
+export interface ToolPolicyReceiptInput {
+  runId: string;
+  taskId?: string | null;
+  attemptId?: number | null;
+  toolId: string;
+  actorRole: string;
+  stage: string;
+  sideEffect: string;
+  outcome: "allow" | "deny" | "require_approval";
+  reason: string;
+  request: Readonly<Record<string, unknown>>;
+  lockKeys: readonly string[];
+  approvalId?: string | null;
+}
+
+export interface ToolPolicyReceiptRecord {
+  id: number;
+  runId: string;
+  taskId: string | null;
+  attemptId: number | null;
+  toolId: string;
+  actorRole: string;
+  stage: string;
+  sideEffect: string;
+  outcome: ToolPolicyReceiptInput["outcome"];
+  reason: string;
+  request: Record<string, unknown>;
+  lockKeys: string[];
+  approvalId: string | null;
+  createdAt: string;
+}
+
 export interface BlackboardEntry {
   id: number;
   runId: string;
@@ -242,12 +275,31 @@ export interface BlackboardEntry {
   createdAt: string;
 }
 
+export interface ReviewReceiptRecord {
+  id: number;
+  runId: string;
+  round: number;
+  integrationSha256: string;
+  verdict: StructuredReview["verdict"];
+  provider: string;
+  modelId: string | null;
+  connectionId: string;
+  summary: string;
+  rawText: string;
+  findings: ReviewFinding[];
+  invalidatedAt: string | null;
+  invalidationReason: string | null;
+  createdAt: string;
+}
+
 export interface RunEvidencePackage {
-  version: 1;
+  version: 3;
   generatedAt: string;
   run: RunSummary;
   attempts: Array<Record<string, unknown>>;
   blackboard: BlackboardEntry[];
+  toolReceipts: ToolPolicyReceiptRecord[];
+  reviews: ReviewReceiptRecord[];
   integritySha256: string;
 }
 
@@ -646,6 +698,68 @@ const MIGRATIONS: readonly LedgerMigration[] = [
       if (!columns.has("workload_class")) database.exec("ALTER TABLE invocation_receipts ADD COLUMN workload_class TEXT;");
     },
   },
+  {
+    version: 16,
+    name: "typed-tool-policy-receipts",
+    apply(database) {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS tool_policy_receipts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+          task_id TEXT,
+          attempt_id INTEGER REFERENCES attempts(id) ON DELETE SET NULL,
+          tool_id TEXT NOT NULL,
+          actor_role TEXT NOT NULL,
+          stage TEXT NOT NULL,
+          side_effect TEXT NOT NULL,
+          outcome TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          request_json TEXT NOT NULL,
+          lock_keys_json TEXT NOT NULL,
+          approval_id TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS tool_policy_receipts_run ON tool_policy_receipts(run_id, id);
+      `);
+    },
+  },
+  {
+    version: 17,
+    name: "structured-review-quorums",
+    apply(database) {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS review_receipts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+          round INTEGER NOT NULL,
+          integration_sha256 TEXT NOT NULL,
+          verdict TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          model_id TEXT,
+          connection_id TEXT NOT NULL,
+          summary TEXT NOT NULL,
+          raw_text TEXT NOT NULL,
+          invalidated_at TEXT,
+          invalidation_reason TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS review_findings (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          review_receipt_id INTEGER NOT NULL REFERENCES review_receipts(id) ON DELETE CASCADE,
+          finding_id TEXT NOT NULL,
+          severity TEXT NOT NULL,
+          location TEXT,
+          rationale TEXT NOT NULL,
+          suggested_correction TEXT NOT NULL,
+          disposition TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          UNIQUE(review_receipt_id, finding_id)
+        );
+        CREATE INDEX IF NOT EXISTS review_receipts_run ON review_receipts(run_id, round, id);
+        CREATE INDEX IF NOT EXISTS review_findings_receipt ON review_findings(review_receipt_id, id);
+      `);
+    },
+  },
 ];
 
 function summarizeGoal(goal: string, maxLength = 180): string {
@@ -760,6 +874,9 @@ const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
   catalog_refreshes: ["provider", "status", "source", "model_count", "detail", "refreshed_at"],
   provider_catalog_models: ["id", "provider", "canonical_name", "display_name", "metadata_json", "first_seen_at", "last_seen_at", "missing_observations", "retired"],
   invocation_receipts: ["id", "run_id", "task_id", "role", "provider", "connection_id", "requested_model_id", "resolved_model_id", "input_tokens", "output_tokens", "cost_usd", "duration_ms", "workload_class", "fallback_reason", "created_at"],
+  tool_policy_receipts: ["id", "run_id", "task_id", "attempt_id", "tool_id", "actor_role", "stage", "side_effect", "outcome", "reason", "request_json", "lock_keys_json", "approval_id", "created_at"],
+  review_receipts: ["id", "run_id", "round", "integration_sha256", "verdict", "provider", "model_id", "connection_id", "summary", "raw_text", "invalidated_at", "invalidation_reason", "created_at"],
+  review_findings: ["id", "review_receipt_id", "finding_id", "severity", "location", "rationale", "suggested_correction", "disposition", "created_at"],
   model_performance_policies: ["model_id", "ignored_before", "excluded", "updated_at"],
   schema_migrations: ["version", "name", "applied_at"],
 };
@@ -1220,15 +1337,44 @@ export class Ledger {
       result_envelope_json: undefined,
     }));
     const blackboard = this.listBlackboardEntries(runId);
-    const canonical = JSON.stringify({ run, attempts: normalizedAttempts, blackboard });
+    const toolReceipts = this.listToolPolicyReceipts(runId);
+    const reviews = this.listReviewReceipts(runId);
+    const canonical = JSON.stringify({ run, attempts: normalizedAttempts, blackboard, toolReceipts, reviews });
     return {
-      version: 1,
+      version: 3,
       generatedAt: new Date().toISOString(),
       run,
       attempts: normalizedAttempts,
       blackboard,
+      toolReceipts,
+      reviews,
       integritySha256: createHash("sha256").update(canonical).digest("hex"),
     };
+  }
+
+  addTask(runId: string, task: PlannedTask): void {
+    this.database.prepare(
+      `INSERT INTO tasks
+       (run_id, task_id, title, description, dependencies_json, checks_json, status, preferred_provider, task_contract_json)
+       VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+    ).run(
+      runId,
+      task.id,
+      redactText(task.title),
+      redactText(task.description),
+      JSON.stringify(task.dependencies),
+      JSON.stringify(task.checks),
+      task.preferredProvider,
+      JSON.stringify(redactValue({
+        kind: task.kind ?? "implementation",
+        repositoryScope: task.repositoryScope ?? ["."],
+        permission: task.permission ?? "workspace_write",
+        risk: task.risk ?? "medium",
+        capabilityNeeds: task.capabilityNeeds ?? ["code"],
+        acceptanceCriteria: task.acceptanceCriteria ?? [],
+        expectedArtifacts: task.expectedArtifacts ?? [],
+      })),
+    );
   }
 
   listModelPerformanceProfiles(modelId?: string): ModelPerformanceProfile[] {
@@ -1803,6 +1949,164 @@ export class Ledger {
       input.fallbackReason ? redactText(input.fallbackReason) : null,
       new Date().toISOString(),
     );
+  }
+
+  recordToolPolicyReceipt(input: ToolPolicyReceiptInput): number {
+    const now = new Date().toISOString();
+    const safeReason = redactText(input.reason);
+    const safeRequest = redactValue(input.request) as Record<string, unknown>;
+    const result = this.database.prepare(
+      `INSERT INTO tool_policy_receipts
+       (run_id, task_id, attempt_id, tool_id, actor_role, stage, side_effect, outcome,
+        reason, request_json, lock_keys_json, approval_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      input.runId,
+      input.taskId ?? null,
+      input.attemptId ?? null,
+      input.toolId,
+      input.actorRole,
+      input.stage,
+      input.sideEffect,
+      input.outcome,
+      safeReason,
+      JSON.stringify(safeRequest),
+      JSON.stringify([...input.lockKeys]),
+      input.approvalId ?? null,
+      now,
+    );
+    const id = Number(result.lastInsertRowid);
+    const eventKind = input.outcome === "allow"
+      ? "tool.allowed"
+      : input.outcome === "deny"
+        ? "tool.denied"
+        : "tool.approval_required";
+    this.addEvent(input.runId, eventKind, `${input.toolId} ${input.outcome.replace("_", " ")}: ${safeReason}`, {
+      receiptId: id,
+      taskId: input.taskId ?? null,
+      attemptId: input.attemptId ?? null,
+      toolId: input.toolId,
+      actorRole: input.actorRole,
+      stage: input.stage,
+      sideEffect: input.sideEffect,
+      outcome: input.outcome,
+      lockKeys: [...input.lockKeys],
+      approvalId: input.approvalId ?? null,
+    });
+    return id;
+  }
+
+  listToolPolicyReceipts(runId: string): ToolPolicyReceiptRecord[] {
+    const rows = this.database.prepare(
+      "SELECT * FROM tool_policy_receipts WHERE run_id = ? ORDER BY id",
+    ).all(runId) as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      id: Number(row.id),
+      runId: String(row.run_id),
+      taskId: row.task_id === null ? null : String(row.task_id),
+      attemptId: row.attempt_id === null ? null : Number(row.attempt_id),
+      toolId: String(row.tool_id),
+      actorRole: String(row.actor_role),
+      stage: String(row.stage),
+      sideEffect: String(row.side_effect),
+      outcome: String(row.outcome) as ToolPolicyReceiptRecord["outcome"],
+      reason: String(row.reason),
+      request: JSON.parse(String(row.request_json)) as Record<string, unknown>,
+      lockKeys: JSON.parse(String(row.lock_keys_json)) as string[],
+      approvalId: row.approval_id === null ? null : String(row.approval_id),
+      createdAt: String(row.created_at),
+    }));
+  }
+
+  recordReviewReceipt(input: {
+    runId: string;
+    round: number;
+    integrationSha256: string;
+    review: StructuredReview;
+  }): number {
+    const now = new Date().toISOString();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.database.prepare(
+        `INSERT INTO review_receipts
+         (run_id, round, integration_sha256, verdict, provider, model_id, connection_id,
+          summary, raw_text, invalidated_at, invalidation_reason, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
+      ).run(
+        input.runId,
+        input.round,
+        input.integrationSha256,
+        input.review.verdict,
+        input.review.provider,
+        input.review.modelId,
+        input.review.connectionId,
+        redactText(input.review.summary),
+        redactText(input.review.rawText),
+        now,
+      );
+      const reviewId = Number(result.lastInsertRowid);
+      const insertFinding = this.database.prepare(
+        `INSERT INTO review_findings
+         (review_receipt_id, finding_id, severity, location, rationale, suggested_correction, disposition, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const finding of input.review.findings) {
+        insertFinding.run(
+          reviewId,
+          finding.id,
+          finding.severity,
+          finding.location,
+          redactText(finding.rationale),
+          redactText(finding.suggestedCorrection),
+          finding.disposition,
+          now,
+        );
+      }
+      this.database.exec("COMMIT");
+      return reviewId;
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  listReviewReceipts(runId: string): ReviewReceiptRecord[] {
+    const reviews = this.database.prepare(
+      "SELECT * FROM review_receipts WHERE run_id = ? ORDER BY round, id",
+    ).all(runId) as unknown as Array<Record<string, unknown>>;
+    const findFindings = this.database.prepare(
+      "SELECT * FROM review_findings WHERE review_receipt_id = ? ORDER BY id",
+    );
+    return reviews.map((review) => ({
+      id: Number(review.id),
+      runId: String(review.run_id),
+      round: Number(review.round),
+      integrationSha256: String(review.integration_sha256),
+      verdict: String(review.verdict) as StructuredReview["verdict"],
+      provider: String(review.provider),
+      modelId: review.model_id === null ? null : String(review.model_id),
+      connectionId: String(review.connection_id),
+      summary: String(review.summary),
+      rawText: String(review.raw_text),
+      invalidatedAt: review.invalidated_at === null ? null : String(review.invalidated_at),
+      invalidationReason: review.invalidation_reason === null ? null : String(review.invalidation_reason),
+      createdAt: String(review.created_at),
+      findings: (findFindings.all(Number(review.id)) as unknown as Array<Record<string, unknown>>).map((finding) => ({
+        id: String(finding.finding_id),
+        severity: String(finding.severity) as ReviewFinding["severity"],
+        location: finding.location === null ? null : String(finding.location),
+        rationale: String(finding.rationale),
+        suggestedCorrection: String(finding.suggested_correction),
+        disposition: String(finding.disposition) as ReviewFinding["disposition"],
+      })),
+    }));
+  }
+
+  invalidateReviewReceipts(runId: string, reason: string): number {
+    const result = this.database.prepare(
+      "UPDATE review_receipts SET invalidated_at = ?, invalidation_reason = ? WHERE run_id = ? AND invalidated_at IS NULL",
+    ).run(new Date().toISOString(), redactText(reason), runId);
+    return Number(result.changes);
   }
 
   listModels(connectionId?: string): ModelRecord[] {

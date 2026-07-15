@@ -4,6 +4,24 @@ All notable DevHarmonics changes are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Bounded Ollama implementation through scoped `file.read`, `file.search`, and hash-checked `file.patch` tools inside the assigned worktree, with typed policy and execution receipts.
+- Mellum2 Instruct and Thinking profiles as separate local specialist upgrade tracks, with published capability provenance and no automatic download or activation.
+- A machine-checked local specialist benchmark covering strict structured output, contradiction detection, and requirement counting; Mellum2 scheduling requires this benchmark in addition to its role qualification.
+- A visible **Benchmark specialist** model action plus family, capability, parameter-size, and quantization details in the model fleet.
+
+### Changed
+
+- Narrow, low-risk single-scope implementation tasks can use the economy specialist lane; standard, high-risk, architectural, and release work retain stronger tier requirements.
+- Manual assignments and adaptive routing now enforce declared code, tool, vision, and structured-output capability needs.
+- Stale models are excluded from role selectors, and local family-tracked workers must pass bounded-tool qualification before promotion.
+- Routing model selectors are role-aware; incompatible existing choices remain visible as disabled warnings instead of appearing usable for roles they have not passed.
+
+### Fixed
+
+- Explicit local model assignment can no longer turn a read-only qualification into workspace-write authority.
+
 ## [0.4.0] - 2026-07-15
 
 ### Added

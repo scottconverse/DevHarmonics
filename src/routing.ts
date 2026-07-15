@@ -67,6 +67,7 @@ export class ModelRouter {
           assignment.upgradePolicy === "track_family" && model.id !== assignment.modelId ? "newest qualified and benchmarked family member" : "manual role assignment",
           ...manualTierOverride,
           "role qualification passed",
+          ...(profile.family.startsWith("mellum2") ? ["local specialist benchmark passed"] : []),
           ...(model.pinned ? ["user pin"] : []),
           "connection and model eligible",
         ], false);
@@ -121,6 +122,7 @@ export class ModelRouter {
           ...(selected.breakdown.providerDiversity > 0 ? ["independent provider from implementation"] : []),
           ...(selected.breakdown.costAwareness > 0 ? ["lower relative catalog price among comparable paid candidates"] : selected.breakdown.costAwareness < 0 ? ["higher relative catalog price penalty"] : []),
           "role qualification and health passed",
+          ...(selected.profile.family.startsWith("mellum2") ? ["local specialist benchmark passed"] : []),
         ], Boolean(assignment.modelId));
       }
     }
@@ -184,15 +186,23 @@ export class ModelRouter {
     if (!explicit && !model.active) return false;
     if (input.excludedModelIds?.has(model.id) || input.excludedConnectionIds?.has(connection.id)) return false;
     if (!this.ledger.isConnectionEligible(connection.id) || !this.ledger.isModelEligible(model.id)) return false;
-    if ((connection.transport === "local" || connection.transport === "api") && input.permission === "workspace_write") return false;
+    if (connection.transport === "api" && input.permission === "workspace_write") return false;
     if (connection.transport !== "local" && !input.allowedProviders.includes(connection.provider)) return false;
-    if (!explicit && !this.qualifiedForRole(model.id, input.role, input.permission)) return false;
-    return explicit || this.qualifiedForRole(model.id, input.role, input.permission);
+    const roleQualified = this.qualifiedForRole(model, input.role, input.permission);
+    // Manual assignments may override workload tier fit, but never the exact
+    // current-fingerprint qualification required by the assigned role.
+    if (!roleQualified) return false;
+    const profile = inferModelProfile(model, connection);
+    if (connection.transport === "local" && input.permission === "read_only" && (input.task?.capabilityNeeds ?? []).some((need) => need.toLowerCase() === "tools")) return false;
+    if (!supportsTask(profile, input.task)) return false;
+    if (profile.family.startsWith("mellum2") && !this.isBenchmarked(model)) return false;
+    return true;
   }
 
-  private qualifiedForRole(modelId: string, role: AgentRole, permission: InvocationPermission): boolean {
-    return this.ledger.listModelQualifications(modelId).some((qualification) => {
-      if (!qualification.passed) return false;
+  private qualifiedForRole(model: ModelRecord, role: AgentRole, permission: InvocationPermission): boolean {
+    return this.ledger.listModelQualifications(model.id).some((qualification) => {
+      if (!qualification.passed || qualification.fingerprint !== model.qualificationFingerprint) return false;
+      if (qualification.role === "local_tools") return permission === "workspace_write" && role === "worker";
       if (qualification.role === "general" || qualification.role === role) return true;
       return qualification.role === "analysis" && permission === "read_only" && role !== "architect";
     });
@@ -316,6 +326,9 @@ function supportsTask(profile: ModelProfile, task?: PlannedTask | null): boolean
   if (capabilities.includes("embedding") && !capabilities.includes("text")) return false;
   const needs = (task?.capabilityNeeds ?? []).map((item) => item.toLowerCase());
   if (needs.includes("vision") && !capabilities.includes("vision")) return false;
+  if (needs.includes("code") && !capabilities.includes("code")) return false;
+  if (needs.includes("tools") && !capabilities.includes("tools")) return false;
+  if (needs.includes("structured-output") && !capabilities.includes("structured-output") && !capabilities.includes("tools")) return false;
   if (capabilities.includes("cyber-restricted") && needs.some((need) => need === "security" || need === "cybersecurity" || need === "authentication")) return false;
   return true;
 }

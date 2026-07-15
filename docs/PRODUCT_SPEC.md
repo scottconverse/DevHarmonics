@@ -1,15 +1,17 @@
 # DevHarmonics Canonical Product Specification
 
 Document status: **Canonical product direction**
-Specification version: **1.5**
+Specification version: **1.6**
 Written: **2026-07-13**
 Revised: **2026-07-15**
 Current implementation baseline: **DevHarmonics v0.4.0**
 Google Doc: [DevHarmonics Canonical Product Specification](https://docs.google.com/document/d/1rd-_gqHHPZHhTkrULJR9tHcbAVUOGONsbuEFCV-8pRQ/edit?usp=drivesdk)
 
-Revision history: **v1.5 (2026-07-15)** — Reconciled the current implementation baseline with the accepted v0.4.0 adaptive workforce: exact-model qualification, fair cross-provider scheduling, workload-specific worker and reviewer observations, explicit manual tier overrides, retained CivicSuite acceptance evidence, and verified full/compact cockpit behavior.
+Revision history: **v1.6 (2026-07-15)** — Added the first named local specialist policy: Mellum2 Instruct and Thinking as separate exact-model upgrade tracks, benchmark-gated specialist scheduling, a narrow low-risk economy implementation lane, enforced task-capability matching, and no automatic download, activation, promotion, or universal-default behavior.
 
-Prior revision: **v1.4 (2026-07-14)** — Added campaign-scale development orchestration: pilot-to-scale promotion, staged fan-out/fan-in execution, adversarial review quorums, enforced command policy, diagnostic partitioning, anti-shortcut and test-integrity gates, differential validation, resource-aware sharding, regression accounting, and restart-safe campaign recovery.
+Prior revision: **v1.5 (2026-07-15)** — Reconciled the current implementation baseline with the accepted v0.4.0 adaptive workforce: exact-model qualification, fair cross-provider scheduling, workload-specific worker and reviewer observations, explicit manual tier overrides, retained CivicSuite acceptance evidence, and verified full/compact cockpit behavior.
+
+Earlier revision: **v1.4 (2026-07-14)** — Added campaign-scale development orchestration: pilot-to-scale promotion, staged fan-out/fan-in execution, adversarial review quorums, enforced command policy, diagnostic partitioning, anti-shortcut and test-integrity gates, differential validation, resource-aware sharding, regression accounting, and restart-safe campaign recovery.
 
 Earlier revision: **v1.3 (2026-07-14)** — Reconciled the canonical specification with the implemented v0.3.0 model fleet, enforceable per-run Observe mode, substantive diagnostic evidence gates, bounded local report review, and classified reviewer fallback.
 
@@ -348,6 +350,8 @@ Ollama is the first required local runtime. The adapter must discover installed 
 
 Compatible local models may fill read-only or mutating agent roles, including planning, documentation, test generation, diff review, run reporting, private/offline work, and bounded implementation. Tool-enabled local agents remain confined to their assigned worktree, receive only explicitly scoped file/search/patch/validator tools, never receive unrestricted shell access, and cannot commit or integrate outside orchestrator control.
 
+Mellum2 is the first named local specialist family. The registry and scheduler MUST treat Instruct and Thinking as separate exact-model tracking families and qualify them independently. Published capabilities MAY seed a provisional profile for code, structured output, tool use, routing, context preparation, and—only for Thinking—reasoning, but MUST NOT establish schedulability by themselves. Before assignment, Mellum2 requires the role-compatible qualification plus a current specialist benchmark covering strict structured output, contradiction detection, and requirement/feature counting. Instruct initially targets narrow, low-risk economy work; Thinking MAY target standard reasoning work after independent qualification. Neither variant may become the coordinator, final authority, universal local default, or replacement for independent review merely because of its name, size, or published benchmark results. DevHarmonics MUST NOT download, activate, or promote either variant without user action and passing evidence.
+
 #### Optional API gateways
 
 OpenRouter is the preferred first implementation for API-based cloud breadth. It is disconnected and paid routing is disabled by default. Connection uses OAuth and OS-protected credential storage so a user never manually handles an API key. OAuth connection does not authorize spending: paid fallback separately requires project and OpenRouter policy gates, positive per-run and monthly limits, explicit model activation, current qualification, and live credit/limit verification. The rest of DevHarmonics remains usable with no model API keys.
@@ -442,10 +446,12 @@ discovered
 
 Auditions should use small, representative, non-destructive tasks and historical evaluation fixtures. A model may qualify for one role but not another. A small local model might qualify for classification, repository mapping, documentation cleanup, or bulk test generation without qualifying as an architect or final reviewer.
 
+For named local specialists, a marker-echo probe is insufficient. Qualification SHOULD include machine-checked task properties that can expose feature blindness or internal contradiction. A local implementation candidate MUST retain independent evidence for bounded tool use and specialist fidelity; one qualification cannot silently confer the other.
+
 Users need two auditable upgrade policies:
 
 - **Pinned:** retain an exact model identifier until explicitly changed.
-- **Track family:** evaluate the newest observed member of the selected Sol/Terra/Luna, Fable/Opus/Sonnet/Haiku, Gemini, local, or API family and promote it only after exact-ID invocation qualification and configured benchmarks pass.
+- **Track family:** evaluate the newest observed member of the selected Sol/Terra/Luna, Fable/Opus/Sonnet/Haiku, Gemini, exact local variant, or API family and promote it only after exact-ID invocation qualification and configured benchmarks pass. Variant contracts such as Mellum2 Instruct and Thinking cannot cross-promote.
 
 Provider moving aliases may inform discovery, but they cannot silently change the model used by a run.
 

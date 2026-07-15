@@ -1,16 +1,18 @@
 # DevHarmonics Detailed Implementation Plan
 
 Document status: **Build-ready execution plan**
-Plan version: **1.7**
+Plan version: **1.8**
 Written: **2026-07-14**
 Revised: **2026-07-15**
-Product specification baseline: **DevHarmonics Product Specification v1.5**
+Product specification baseline: **DevHarmonics Product Specification v1.6**
 Current implementation baseline: **DevHarmonics v0.4.0**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 
-Revision history: **v1.7 (2026-07-15)** — Closed the v0.4 adaptive-workforce release gate with a successful CivicSuite acceptance run, full automated and dependency audits, a Computer Use UI/UX walkthrough, reviewer-invocation empirical observations, explicit manual tier-override evidence, cache-safe dashboard assets, and responsive cockpit fixes.
+Revision history: **v1.8 (2026-07-15)** — Added Mellum2 as the first named local specialist milestone: separate Instruct/Thinking tracks, strict specialist-fidelity benchmark, bounded-tool plus benchmark scheduling gates, hard task-capability matching, a narrow low-risk economy implementation lane, live installed-model proof, and explicit no-download/no-silent-promotion policy.
 
-Prior revision: **v1.6 (2026-07-14)** — Recorded workload-specific empirical profiles, validator and integration-conflict attribution, non-causal NOT READY participation evidence, observation reset/exclusion policy, established latency weighting, relative paid-model cost scoring, independent-reviewer provider preference, and expanded failure-scope fallback classification.
+Prior revision: **v1.7 (2026-07-15)** — Closed the v0.4 adaptive-workforce release gate with a successful CivicSuite acceptance run, full automated and dependency audits, a Computer Use UI/UX walkthrough, reviewer-invocation empirical observations, explicit manual tier-override evidence, cache-safe dashboard assets, and responsive cockpit fixes.
+
+Earlier revision: **v1.6 (2026-07-14)** — Recorded workload-specific empirical profiles, validator and integration-conflict attribution, non-causal NOT READY participation evidence, observation reset/exclusion policy, established latency weighting, relative paid-model cost scoring, independent-reviewer provider preference, and expanded failure-scope fallback classification.
 
 Earlier revision: **v1.5 (2026-07-14)** — Added the campaign-scale delivery program: stage orchestration, pilot promotion, resource-aware sharding, centralized diagnostics, review quorums, enforced command policy, verification-integrity and differential gates, regression accounting, and campaign recovery.
 
@@ -669,6 +671,8 @@ Acceptance:
 
 #### DH-500: Ollama runtime adapter — L
 
+Status: **Core adapter complete; Mellum2 named-specialist profile implemented in the v0.5 development line.**
+
 Deliverables:
 
 - discover the Ollama server and installed models;
@@ -680,10 +684,13 @@ Deliverables:
 Acceptance:
 
 - installed Gemma and Qwen variants appear as separate model candidates;
+- installed Mellum2 Instruct and Thinking variants appear as separate exact-model tracking families and preserve runtime metadata;
 - the user can pin or exclude each model;
 - local inference works without cloud credentials.
 
 #### DH-510: Local-model tool execution — XL
+
+Status: **Bounded read/search/hash-checked-patch loop, permission-specific qualification, and Mellum2 specialist benchmark implemented in the v0.5 development line; live acceptance and release gate remain.**
 
 Deliverables:
 
@@ -695,6 +702,8 @@ Deliverables:
 Acceptance:
 
 - a qualified local model completes a bounded code change and validator cycle;
+- Mellum2 requires both current bounded-tool evidence and the structured-output/contradiction/requirement-count specialist benchmark before scheduling;
+- narrow low-risk work may select qualified Mellum2 Instruct, while standard/high-risk work and Mellum2 Thinking remain independently tiered and qualified;
 - path traversal, unrestricted shell, and out-of-scope writes are blocked;
 - DevHarmonics, not the model, controls commit and integration.
 
@@ -1098,6 +1107,8 @@ Exit gate:
 - routing and fallback decisions are explainable and replayable.
 
 ### Increment 4: Verified local implementation — v0.5
+
+Status: **In progress.** DH-440 through DH-470 foundations and DH-510's bounded local tool loop are implemented on the v0.5 development branch. Mellum2 Instruct is the first named live specialist candidate; exact-machine qualification, UI walkthrough, adversarial review, and the aggregate release gate remain before v0.5 can ship.
 
 Work:
 

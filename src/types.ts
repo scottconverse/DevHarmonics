@@ -73,6 +73,12 @@ export interface DevHarmonicsConfig {
     allowPaidApi: boolean;
     allowExternalWrites: boolean;
   };
+  reviewPolicy: {
+    reviewerCountByRisk: Record<"low" | "medium" | "high", number>;
+    minimumDistinctProvidersByRisk: Record<"low" | "medium" | "high", number>;
+    requireImplementorIndependenceByRisk: Record<"low" | "medium" | "high", boolean>;
+    maxFixRounds: number;
+  };
   routing: {
     mode: "adaptive" | "manual";
     architect: RoleRoutingConfig;

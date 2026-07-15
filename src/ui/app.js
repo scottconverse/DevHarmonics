@@ -13,6 +13,7 @@ const state = {
   models: [],
   resources: null,
   evidence: null,
+  report: null,
   products: [],
   qualifications: [],
   performanceProfiles: [],
@@ -118,13 +119,29 @@ function renderSettings() {
   $("#openrouter-paid-fallback").checked = config.openRouter.allowPaidFallback;
   $("#openrouter-run-limit").value = config.openRouter.perRunLimitUsd;
   $("#openrouter-month-limit").value = config.openRouter.monthlyLimitUsd;
-  const modelOptions = ['<option value="">Configured provider default</option>', ...state.models.filter((model) => model.qualified && !model.excluded).map((model) => {
-    const connection = state.connections.find((item) => item.id === model.connectionId);
-    return `<option value="${escapeHtml(model.id)}">${escapeHtml(connection?.displayName || model.connectionId)} / ${escapeHtml(model.displayName)}</option>`;
-  })].join("");
   const effortOptions = ["low", "medium", "high", "xhigh", "max"].map((effort) => `<option value="${effort}">${effort}</option>`).join("");
   const tierOptions = [["auto", "Automatic"], ["economy", "Economy"], ["standard", "Standard"], ["premium", "Premium"]].map(([value, label]) => `<option value="${value}">${label}</option>`).join("");
   for (const role of ["architect", "worker", "reviewer"]) {
+    const eligibleModels = state.models.filter((model) => model.qualified
+      && !model.qualificationStale
+      && !model.excluded
+      && hasCurrentOperationalQualification(model)
+      && hasCurrentSpecialistBenchmark(model)
+      && hasCurrentQualificationForUiRole(model, role));
+    const configuredModel = state.models.find((model) => model.id === config.routing[role].modelId);
+    const configuredModelIsEligible = eligibleModels.some((model) => model.id === configuredModel?.id);
+    const configuredConnection = state.connections.find((item) => item.id === configuredModel?.connectionId);
+    const unavailableConfiguredOption = configuredModel && !configuredModelIsEligible
+      ? `<option value="${escapeHtml(configuredModel.id)}" disabled>${escapeHtml(configuredConnection?.displayName || configuredModel.connectionId)} / ${escapeHtml(configuredModel.displayName)} (not currently role-qualified)</option>`
+      : "";
+    const modelOptions = [
+      '<option value="">Configured provider default</option>',
+      ...eligibleModels.map((model) => {
+        const connection = state.connections.find((item) => item.id === model.connectionId);
+        return `<option value="${escapeHtml(model.id)}">${escapeHtml(connection?.displayName || model.connectionId)} / ${escapeHtml(model.displayName)}</option>`;
+      }),
+      unavailableConfiguredOption,
+    ].join("");
     $(`#setting-${role}-model`).innerHTML = modelOptions;
     $(`#setting-${role}-model`).value = config.routing[role].modelId || "";
     $(`#setting-${role}-effort`).innerHTML = effortOptions;
@@ -157,6 +174,48 @@ function renderRunAutonomyHelp() {
   $("#run-autonomy-help").textContent = help[$("#run-autonomy").value] || help.supervised;
 }
 
+function requiresSpecialistBenchmark(model) {
+  return String(model?.metadata?.devHarmonicsProfile?.family || "").startsWith("mellum2");
+}
+
+function hasCurrentSpecialistBenchmark(model) {
+  if (!requiresSpecialistBenchmark(model)) return true;
+  return state.qualifications.some((item) => item.modelId === model.id
+    && item.role === "benchmark"
+    && item.passed
+    && item.fingerprint === model.qualificationFingerprint);
+}
+
+function hasCurrentOperationalQualification(model) {
+  return state.qualifications.some((item) => item.modelId === model.id
+    && item.role !== "benchmark"
+    && item.passed
+    && item.fingerprint === model.qualificationFingerprint);
+}
+
+function hasCurrentQualificationForUiRole(model, role) {
+  const connection = state.connections.find((item) => item.id === model.connectionId);
+  const currentPasses = state.qualifications.filter((item) => item.modelId === model.id
+    && item.role !== "benchmark"
+    && item.passed
+    && item.fingerprint === model.qualificationFingerprint);
+  if (connection?.transport === "local") {
+    if (role === "architect") return false;
+    if (role === "worker") return currentPasses.some((item) => item.role === "local_tools");
+    return currentPasses.some((item) => item.role === "analysis" || item.role === "reviewer");
+  }
+  return currentPasses.some((item) => item.role === "general" || item.role === role);
+}
+
+function isModelSchedulable(model) {
+  return Boolean(model?.active
+    && model.qualified
+    && !model.qualificationStale
+    && !model.excluded
+    && hasCurrentOperationalQualification(model)
+    && hasCurrentSpecialistBenchmark(model));
+}
+
 function renderModels() {
   const allCurrentModels = state.models.filter((model) => !model.retired);
   const query = $("#model-filter")?.value.trim().toLowerCase() || "";
@@ -164,12 +223,13 @@ function renderModels() {
   const currentModels = allCurrentModels.filter((model) => {
     const matchesQuery = !query || `${model.displayName} ${model.canonicalName} ${model.connectionId}`.toLowerCase().includes(query);
     const isStale = model.qualified && model.qualificationStale;
-    const matchesStatus = statusFilter === "all" || statusFilter === "active" && model.active && !isStale || statusFilter === "qualified" && model.qualified && !isStale || statusFilter === "stale" && isStale || statusFilter === "unqualified" && !model.qualified;
+    const operationallyQualified = hasCurrentOperationalQualification(model);
+    const matchesStatus = statusFilter === "all" || statusFilter === "active" && isModelSchedulable(model) || statusFilter === "qualified" && operationallyQualified && !isStale || statusFilter === "stale" && isStale || statusFilter === "unqualified" && !operationallyQualified;
     return matchesQuery && matchesStatus;
   });
-  const qualified = allCurrentModels.filter((model) => model.qualified && !model.qualificationStale).length;
-  const active = allCurrentModels.filter((model) => model.active && !model.qualificationStale).length;
-  $("#model-summary").innerHTML = `<div class="metric"><span>Current</span><strong>${allCurrentModels.length}</strong></div><div class="metric"><span>Currently qualified</span><strong>${qualified}</strong></div><div class="metric"><span>Schedulable active</span><strong>${active}</strong></div><div class="metric"><span>Advisory local slots</span><strong>${state.resources?.advisoryLocalSlots ?? "?"}</strong></div>`;
+  const qualified = allCurrentModels.filter((model) => hasCurrentOperationalQualification(model) && !model.qualificationStale).length;
+  const active = allCurrentModels.filter(isModelSchedulable).length;
+  $("#model-summary").innerHTML = `<div class="metric"><span>Current</span><strong>${allCurrentModels.length}</strong></div><div class="metric"><span>Role-qualified models</span><strong>${qualified}</strong></div><div class="metric"><span>Schedulable active</span><strong>${active}</strong></div><div class="metric"><span>Advisory local slots</span><strong>${state.resources?.advisoryLocalSlots ?? "?"}</strong></div>`;
   const runtimes = state.bootstrap.config.localRuntimes?.ollama || [];
   $("#runtime-list").innerHTML = runtimes.map((runtime) => {
     const connection = state.connections.find((item) => item.metadata?.runtimeId === runtime.id);
@@ -180,12 +240,22 @@ function renderModels() {
     const connection = state.connections.find((item) => item.id === model.connectionId);
     const profile = model.metadata?.devHarmonicsProfile || {};
     const tier = profile.tier || "unclassified";
+    const family = profile.family || "unclassified";
+    const capabilities = Array.isArray(profile.capabilities) ? profile.capabilities : [];
     const effort = profile.reasoningEffort ? ` · reasoning: ${profile.reasoningEffort}` : "";
     const confidence = profile.confidence ? ` · evidence: ${profile.confidence}` : "";
-    const qualify = `<button class="secondary small" data-qualify-model="${escapeHtml(model.id)}">${model.qualified ? "Requalify" : connection?.transport === "local" ? "Qualify locally" : connection?.provider === "openrouter" ? "Qualify paid model" : "Verify subscription model"}</button>`;
+    const allHistory = state.qualifications.filter((item) => item.modelId === model.id);
+    const history = allHistory.slice(0, 5);
+    const currentRoleQualifications = allHistory.filter((item) => item.fingerprint === model.qualificationFingerprint);
+    const hasCurrentRoleFailure = currentRoleQualifications.some((item) => !item.passed);
+    const operationallyQualified = hasCurrentOperationalQualification(model);
+    const specialistBenchmarkRequired = requiresSpecialistBenchmark(model);
+    const specialistBenchmarkPassed = hasCurrentSpecialistBenchmark(model);
+    const qualify = `<button class="secondary small" data-qualify-model="${escapeHtml(model.id)}">${operationallyQualified ? "Requalify" : connection?.transport === "local" ? "Qualify locally" : connection?.provider === "openrouter" ? "Qualify paid model" : "Verify subscription model"}</button>`;
+    const qualifyTools = connection?.transport === "local" ? `<button class="secondary small" data-qualify-local-tools="${escapeHtml(model.id)}">Qualify bounded write tools</button>` : "";
+    const qualifyBenchmark = connection?.transport === "local" ? `<button class="secondary small" data-qualify-benchmark="${escapeHtml(model.id)}">Benchmark specialist</button>` : "";
     const activate = `<button class="secondary small" data-activate-model="${escapeHtml(model.id)}">${model.active ? "Deactivate" : "Activate"}</button>`;
     const health = model.health?.state && model.health.state !== "ready" ? ` · ${model.health.state}` : "";
-    const history = state.qualifications.filter((item) => item.modelId === model.id).slice(0, 5);
     const performance = state.performanceProfiles.find((item) => item.modelId === model.id);
     const performancePolicy = state.performancePolicies.find((item) => item.modelId === model.id);
     const empiricalHtml = performance
@@ -197,8 +267,16 @@ function renderModels() {
     const performanceActions = `<button class="secondary small" data-reset-performance="${escapeHtml(model.id)}">Reset observation baseline</button><button class="secondary small" data-exclude-performance="${escapeHtml(model.id)}">${performancePolicy?.excluded ? "Include empirical history" : "Exclude empirical history"}</button>`;
     const historyHtml = `<details class="qualification-history"><summary>Qualification history (${history.length})</summary>${history.length ? history.map((item) => `<p><strong>${escapeHtml(item.passed ? "PASS" : "FAIL")}</strong> ${escapeHtml(item.role)} · ${escapeHtml(item.fixtureVersion)} · ${escapeHtml(new Date(item.createdAt).toLocaleString())}</p>`).join("") : "<p>No probes recorded.</p>"}</details>`;
     const isStale = model.qualified && model.qualificationStale;
-    const stateText = isStale ? "Qualification stale; it will not be scheduled until requalified" : model.excluded ? "Excluded from scheduling" : model.active ? "Active for adaptive scheduling" : model.qualified ? "Qualified; activate to make it available to the adaptive scheduler" : "Not schedulable until runtime verification and qualification pass";
-    return `<article class="model-card"><div><span class="connection-kind">${escapeHtml(connection?.displayName || model.connectionId)}</span><h3>${escapeHtml(model.displayName)}</h3><code>${escapeHtml(model.canonicalName)}</code></div><span class="lifecycle ${isStale ? "degraded" : escapeHtml(model.lifecycle)}">${isStale ? "stale" : escapeHtml(model.lifecycle)}</span><p>Tier: ${escapeHtml(tier + effort + confidence)}${escapeHtml(health)}. ${stateText}. Upgrade policy: ${model.upgradePolicy === "track_family" ? "track family" : "pinned exact"}.</p>${empiricalHtml}${workloadHtml}<div class="model-actions">${qualify}${activate}<button class="secondary small" data-pin-model="${escapeHtml(model.id)}">${model.pinned ? "Unpin" : "Pin"}</button><button class="secondary small" data-track-model="${escapeHtml(model.id)}">${model.upgradePolicy === "track_family" ? "Pin exact" : "Track family"}</button><button class="secondary small" data-exclude-model="${escapeHtml(model.id)}">${model.excluded ? "Include" : "Exclude"}</button>${performanceActions}</div>${historyHtml}</article>`;
+    const stateText = isStale ? "Qualification stale; it will not be scheduled until requalified" : model.excluded ? "Excluded from scheduling" : specialistBenchmarkRequired && !specialistBenchmarkPassed ? "Specialist scheduling requires the benchmark pass" : !operationallyQualified ? "No current role qualification; not schedulable" : hasCurrentRoleFailure ? "Qualified only for passing roles; failed roles remain unschedulable" : model.active ? "Active for adaptive scheduling" : "Qualified; activate to make it available to the adaptive scheduler";
+    const lifecycleText = isStale ? "stale" : !operationallyQualified && specialistBenchmarkPassed ? "benchmark only" : hasCurrentRoleFailure ? "partial" : model.lifecycle;
+    const lifecycleClass = isStale || !operationallyQualified || hasCurrentRoleFailure ? "degraded" : model.lifecycle;
+    const detailParts = [
+      `Family: ${family}`,
+      `Capabilities: ${capabilities.length ? capabilities.join(", ") : "not declared"}`,
+      model.metadata?.details?.parameter_size ? `Parameters: ${model.metadata.details.parameter_size}` : "",
+      model.metadata?.details?.quantization_level ? `Quantization: ${model.metadata.details.quantization_level}` : "",
+    ].filter(Boolean).join(" · ");
+    return `<article class="model-card"><div><span class="connection-kind">${escapeHtml(connection?.displayName || model.connectionId)}</span><h3>${escapeHtml(model.displayName)}</h3><code>${escapeHtml(model.canonicalName)}</code></div><span class="lifecycle ${escapeHtml(lifecycleClass)}">${escapeHtml(lifecycleText)}</span><p>Tier: ${escapeHtml(tier + effort + confidence)}${escapeHtml(health)}. ${stateText}. Upgrade policy: ${model.upgradePolicy === "track_family" ? "track family" : "pinned exact"}.</p><p class="model-profile">${escapeHtml(detailParts)}.</p>${empiricalHtml}${workloadHtml}<div class="model-actions">${qualify}${qualifyTools}${qualifyBenchmark}${activate}<button class="secondary small" data-pin-model="${escapeHtml(model.id)}">${model.pinned ? "Unpin" : "Pin"}</button><button class="secondary small" data-track-model="${escapeHtml(model.id)}">${model.upgradePolicy === "track_family" ? "Pin exact" : "Track family"}</button><button class="secondary small" data-exclude-model="${escapeHtml(model.id)}">${model.excluded ? "Include" : "Exclude"}</button>${performanceActions}</div>${historyHtml}</article>`;
   }).join("") : '<div class="panel empty-state">No current models match this filter.</div>';
   $("#model-connection").innerHTML = state.connections.map((connection) => `<option value="${escapeHtml(connection.id)}">${escapeHtml(connection.displayName)}</option>`).join("");
 }
@@ -231,13 +309,23 @@ async function refreshEvidence() {
     return;
   }
   state.selectedRunId = runId;
-  state.evidence = await api(`/api/runs/${runId}/evidence`);
+  [state.evidence, state.report] = await Promise.all([
+    api(`/api/runs/${runId}/evidence`),
+    api(`/api/runs/${runId}/report`),
+  ]);
   const evidence = state.evidence;
+  const report = state.report;
   $("#evidence-empty").classList.add("hidden");
   $("#evidence-content").classList.remove("hidden");
-  $("#evidence-metrics").innerHTML = `<div class="metric"><span>Tasks</span><strong>${evidence.run.tasks.length}</strong></div><div class="metric"><span>Attempts</span><strong>${evidence.attempts.length}</strong></div><div class="metric"><span>Checks</span><strong>${evidence.run.tasks.flatMap((task) => task.checks).length}</strong></div><div class="metric"><span>Blackboard entries</span><strong>${evidence.blackboard.length}</strong></div>`;
+  $("#evidence-metrics").innerHTML = `<div class="metric"><span>Tasks</span><strong>${report.counts.tasks}</strong></div><div class="metric"><span>Attempts</span><strong>${report.counts.attempts}</strong></div><div class="metric"><span>Checks</span><strong>${report.counts.checks}</strong></div><div class="metric"><span>Reviews</span><strong>${report.counts.reviews}</strong></div><div class="metric"><span>Tool decisions</span><strong>${report.counts.toolReceipts}</strong></div>`;
+  const reportIssues = [...report.missingEvidence.map((item) => `Missing: ${item}`), ...report.inconsistencies];
+  $("#evidence-verdict").innerHTML = `<div><span class="connection-kind">DERIVED VERDICT</span><h3>${escapeHtml(report.verdict.replaceAll("_", " "))}</h3><p>${escapeHtml(report.summary)}</p></div><span class="status-pill report-${escapeHtml(report.verdict.toLowerCase())}">${escapeHtml(report.verdict.replaceAll("_", " "))}</span>${reportIssues.length ? `<ul>${reportIssues.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : '<p class="report-consistent">No missing or contradictory retained evidence detected.</p>'}`;
   $("#evidence-hash").textContent = evidence.integritySha256;
+  $("#evidence-review-count").textContent = `${evidence.reviews.length} retained`;
+  $("#evidence-reviews").innerHTML = evidence.reviews.length ? evidence.reviews.map((review) => `<article><div><strong>Round ${review.round} · ${escapeHtml(review.provider)}</strong><span>${escapeHtml(review.modelId || "provider default")} · integration ${escapeHtml(review.integrationSha256.slice(0, 12))}</span></div><span class="lifecycle ${review.invalidatedAt ? "retired" : review.verdict === "READY" ? "qualified" : "degraded"}">${review.invalidatedAt ? "invalidated" : escapeHtml(review.verdict.replaceAll("_", " "))}</span><p class="evidence-report">${escapeHtml(review.summary)}${review.findings.length ? `\n${review.findings.map((finding) => `${finding.severity.toUpperCase()} ${finding.location || "no location"}: ${finding.rationale} [${finding.disposition}]`).join("\n")}` : ""}${review.invalidationReason ? `\nInvalidated: ${escapeHtml(review.invalidationReason)}` : ""}</p></article>`).join("") : '<div class="empty-state">No structured review receipts were retained for this run.</div>';
   $("#evidence-attempts").innerHTML = evidence.attempts.length ? evidence.attempts.map((attempt) => `<article><div><strong>${escapeHtml(attempt.task_id)}</strong><span>${escapeHtml(attempt.provider)} / ${escapeHtml(attempt.model_id || "provider default")}</span></div><span class="lifecycle ${attempt.status === "completed" ? "qualified" : ""}">${escapeHtml(attempt.status)}</span><details class="evidence-report"><summary>View normalized report</summary><p>${escapeHtml(attempt.result_envelope?.summary || attempt.error || "No normalized summary")}</p></details></article>`).join("") : '<div class="empty-state">No attempts were started.</div>';
+  $("#evidence-tool-count").textContent = `${evidence.toolReceipts.length} retained`;
+  $("#evidence-tools").innerHTML = evidence.toolReceipts.length ? evidence.toolReceipts.map((receipt) => `<article><div><strong>${escapeHtml(receipt.toolId)}</strong><span>${escapeHtml(receipt.actorRole)} · ${escapeHtml(receipt.stage)} · ${escapeHtml(receipt.sideEffect)}</span></div><span class="lifecycle ${receipt.outcome === "allow" ? "qualified" : receipt.outcome === "deny" ? "retired" : "degraded"}">${escapeHtml(receipt.outcome.replaceAll("_", " "))}</span><p class="evidence-report">${escapeHtml(receipt.reason)}${receipt.lockKeys.length ? `\nLocks: ${escapeHtml(receipt.lockKeys.join(", "))}` : ""}</p></article>`).join("") : '<div class="empty-state">No tool policy decisions were retained for this run.</div>';
 }
 
 function renderProviders() {
@@ -530,6 +618,16 @@ document.querySelector(".app-nav").addEventListener("click", async (event) => {
 });
 $("#refresh-products").addEventListener("click", refreshProducts);
 $("#refresh-evidence").addEventListener("click", refreshEvidence);
+$("#export-evidence").addEventListener("click", () => {
+  const runId = state.selectedRunId || state.runs[0]?.id;
+  if (!runId) return;
+  const link = document.createElement("a");
+  link.href = `/api/runs/${runId}/evidence/export`;
+  link.download = `devharmonics-${runId}-evidence.json`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+});
 $("#pause-run").addEventListener("click", async () => {
   const runId = state.selectedRunId;
   if (!runId) return;
@@ -735,13 +833,15 @@ $("#model-form").addEventListener("submit", async (event) => {
 });
 $("#model-list").addEventListener("click", async (event) => {
   const qualify = event.target.closest("[data-qualify-model]");
+  const qualifyLocalTools = event.target.closest("[data-qualify-local-tools]");
+  const qualifyBenchmark = event.target.closest("[data-qualify-benchmark]");
   const activate = event.target.closest("[data-activate-model]");
   const pin = event.target.closest("[data-pin-model]");
   const track = event.target.closest("[data-track-model]");
   const exclude = event.target.closest("[data-exclude-model]");
   const resetPerformance = event.target.closest("[data-reset-performance]");
   const excludePerformance = event.target.closest("[data-exclude-performance]");
-  const button = qualify || activate || pin || track || exclude || resetPerformance || excludePerformance;
+  const button = qualify || qualifyLocalTools || qualifyBenchmark || activate || pin || track || exclude || resetPerformance || excludePerformance;
   if (!button) return;
   button.disabled = true;
   let qualifiedModelId = null;
@@ -757,11 +857,11 @@ $("#model-list").addEventListener("click", async (event) => {
         body: JSON.stringify(resetPerformance ? { reset: true } : { excluded: !policy?.excluded }),
       });
       preferenceModelId = modelId;
-    } else if (qualify) {
-      const model = state.models.find((item) => item.id === qualify.dataset.qualifyModel);
+    } else if (qualify || qualifyLocalTools || qualifyBenchmark) {
+      const model = state.models.find((item) => item.id === (qualify?.dataset.qualifyModel || qualifyLocalTools?.dataset.qualifyLocalTools || qualifyBenchmark.dataset.qualifyBenchmark));
       const connection = state.connections.find((item) => item.id === model.connectionId);
-      const role = connection?.transport === "local" ? "analysis" : "general";
-      $("#model-message").textContent = `Running a small, read-only ${role} qualification for ${model.displayName}...`;
+      const role = qualifyLocalTools ? "local_tools" : qualifyBenchmark ? "benchmark" : connection?.transport === "local" ? "analysis" : "general";
+      $("#model-message").textContent = role === "local_tools" ? `Running a bounded read-and-patch qualification for ${model.displayName} in a disposable fixture...` : role === "benchmark" ? `Benchmarking structured output, contradiction detection, and requirement counting for ${model.displayName}...` : `Running a small, read-only ${role} qualification for ${model.displayName}...`;
       try {
         await api(`/api/models/${encodeURIComponent(model.id)}/qualify`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role }) });
       } catch (error) {
@@ -785,7 +885,12 @@ $("#model-list").addEventListener("click", async (event) => {
     await refreshFleet();
     if (qualifiedModelId) {
       const qualifiedModel = state.models.find((model) => model.id === qualifiedModelId);
-      $("#model-message").textContent = `${qualifiedModel?.displayName || "Model"} passed qualification. ${qualifiedModel?.active ? "It is active and schedulable." : "Activate it to schedule it."}`;
+      const nextStep = isModelSchedulable(qualifiedModel) ? "It is active and schedulable."
+        : requiresSpecialistBenchmark(qualifiedModel) && !hasCurrentSpecialistBenchmark(qualifiedModel) ? "It still needs the specialist benchmark before it can be scheduled."
+          : !hasCurrentOperationalQualification(qualifiedModel) ? "It still needs a current role qualification before it can be scheduled."
+          : qualifiedModel?.active ? "It is active but not currently schedulable."
+            : "Activate it to schedule it.";
+      $("#model-message").textContent = `${qualifiedModel?.displayName || "Model"} passed qualification. ${nextStep}`;
     } else if (preferenceModelId) {
       const preferenceModel = state.models.find((model) => model.id === preferenceModelId);
       $("#model-message").textContent = `${preferenceModel?.displayName || "Model"} scheduling preference updated.`;

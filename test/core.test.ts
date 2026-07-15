@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -39,7 +40,7 @@ import { classifyWorkload, inferModelProfile, profileMetadata, SUBSCRIPTION_COMP
 import { parseCurrentClaudeModels } from "../src/catalog.js";
 import { estimateInvocationCost, estimateQualificationCost, isExactOpenRouterModelId } from "../src/openrouter.js";
 import { architectPrompt, localReviewerContextHeader, reviewerPrompt, workerPrompt } from "../src/prompts.js";
-import { ensureSchedulerCandidateQualified } from "../src/qualification.js";
+import { ensureSchedulerCandidateQualified, hasCurrentOperationalQualification, qualifyRuntimeModel, trackedFamilyQualificationRole } from "../src/qualification.js";
 import { aggregateModelPerformance } from "../src/model-performance.js";
 
 test("provider output parsers extract each CLI's final response", () => {
@@ -361,6 +362,27 @@ test("workload classification maps architecture, routine work, and low-risk bulk
   }).requiredTier, "premium");
 });
 
+test("workload classification gives narrow low-risk bounded implementation to the economy specialist lane", () => {
+  const classification = classifyWorkload("worker", {
+    id: "small-fix", title: "Small fix", description: "Patch one bounded file", dependencies: [], preferredProvider: null,
+    checks: ["test"], kind: "implementation", permission: "workspace_write", risk: "low",
+    repositoryScope: ["src/value.ts"], capabilityNeeds: ["code"], acceptanceCriteria: ["targeted test passes"], expectedArtifacts: ["src/value.ts"],
+  });
+  assert.equal(classification.complexity, "simple");
+  assert.equal(classification.requiredTier, "economy");
+  assert.ok(classification.factors.includes("narrow bounded implementation"));
+});
+
+test("workload classification keeps repository-wide writes out of the economy specialist lane", () => {
+  const classification = classifyWorkload("worker", {
+    id: "wide-fix", title: "Wide fix", description: "Change whichever repository files are needed", dependencies: [], preferredProvider: null,
+    checks: ["test"], kind: "implementation", permission: "workspace_write", risk: "low",
+    repositoryScope: ["."], capabilityNeeds: ["code"], acceptanceCriteria: ["tests pass"], expectedArtifacts: [],
+  });
+  assert.equal(classification.complexity, "standard");
+  assert.equal(classification.requiredTier, "standard");
+});
+
 test("read-only task watchdogs bound simple stalls without shortening workspace-write attempts", () => {
   assert.equal(taskAttemptTimeoutMs("simple", "read_only", 30 * 60_000), 3 * 60_000);
   assert.equal(taskAttemptTimeoutMs("standard", "read_only", 30 * 60_000), 10 * 60_000);
@@ -650,6 +672,637 @@ test("tool policy allows receipted local work but gates external and unrestricte
   assert.equal(evaluateToolPolicy("shell.unrestricted", config).outcome, "deny");
   config.runPolicy.allowExternalWrites = true;
   assert.equal(evaluateToolPolicy("github.pull_request", config).outcome, "require_approval");
+});
+
+test("Mellum2 local variants are distinct qualified-only specialist tracks", () => {
+  const connection = { provider: "ollama", transport: "local" as const };
+  const instruct = inferModelProfile({
+    canonicalName: "JetBrains/mellum2-instruct-q4_k_m",
+    displayName: "JetBrains/mellum2-instruct-q4_k_m",
+    metadata: { capabilities: ["completion", "tools"] },
+  }, connection);
+  const thinking = inferModelProfile({
+    canonicalName: "hf.co/JetBrains/Mellum2-12B-A2.5B-Thinking:Q4_K_M",
+    displayName: "hf.co/JetBrains/Mellum2-12B-A2.5B-Thinking:Q4_K_M",
+    metadata: { capabilities: ["completion", "tools", "thinking"] },
+  }, connection);
+
+  assert.equal(instruct.family, "mellum2-instruct");
+  assert.equal(instruct.tier, "economy");
+  assert.equal(instruct.confidence, "official");
+  assert.equal(instruct.reasoningEffort, null);
+  assert.ok(instruct.capabilities.includes("code"));
+  assert.ok(instruct.capabilities.includes("tools"));
+  assert.ok(instruct.capabilities.includes("structured-output"));
+  assert.ok(instruct.capabilities.includes("routing"));
+  assert.ok(instruct.evidenceUrls?.includes("https://arxiv.org/abs/2605.31268"));
+
+  assert.equal(thinking.family, "mellum2-thinking");
+  assert.equal(thinking.tier, "standard");
+  assert.equal(thinking.confidence, "official");
+  assert.equal(thinking.reasoningEffort, "medium");
+  assert.ok(thinking.capabilities.includes("reasoning"));
+  assert.notEqual(instruct.family, thinking.family, "family tracking must never promote across Mellum2 variants");
+});
+
+test("local specialist benchmark verifies structured feature fidelity instead of marker echoing", async () => {
+  let observedPrompt = "";
+  let specialistResponse = { valid: false, reason: "60 exceeds 40", holeCount: 4 };
+  const server = createServer(async (request, response) => {
+    response.setHeader("Content-Type", "application/json");
+    if (request.url === "/api/version") return response.end(JSON.stringify({ version: "fixture-1" }));
+    if (request.url === "/api/tags") return response.end(JSON.stringify({ models: [{ name: "mellum2-thinking:12b" }] }));
+    if (request.url === "/api/show") return response.end(JSON.stringify({ capabilities: ["completion", "tools", "thinking"] }));
+    if (request.url === "/api/chat" && request.method === "POST") {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      observedPrompt = (JSON.parse(body) as { messages: Array<{ content: string }> }).messages[0]?.content ?? "";
+      return response.end(JSON.stringify({
+        message: { content: JSON.stringify(specialistResponse) },
+        prompt_eval_count: 30,
+        eval_count: 12,
+      }));
+    }
+    response.statusCode = 404;
+    response.end(JSON.stringify({ error: "not found" }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-local-specialist-"));
+  try {
+    const outcome = await qualifyRuntimeModel({
+      model: {
+        id: "ollama:mellum2-thinking:12b",
+        connectionId: "local:ollama",
+        canonicalName: "mellum2-thinking:12b",
+        displayName: "Mellum2 Thinking",
+        lifecycle: "visible",
+        visible: true,
+        verified: false,
+        qualified: false,
+        active: false,
+        metadata: {},
+        source: "runtime_discovery",
+        degraded: false,
+        retired: false,
+        firstSeenAt: new Date().toISOString(),
+        lastSeenAt: new Date().toISOString(),
+        lastVerifiedAt: null,
+        pinned: false,
+        excluded: false,
+        qualificationFingerprint: null,
+        qualificationStale: false,
+        missingObservations: 0,
+        upgradePolicy: "pinned",
+      },
+      connection: {
+        id: "local:ollama",
+        provider: "ollama",
+        transport: "local",
+        authentication: "local_none",
+        displayName: "Ollama",
+        enabled: true,
+        installed: true,
+        authenticated: true,
+        visible: true,
+        healthy: true,
+        available: true,
+        entitlement: "local",
+        capacity: "available",
+        adapterVersion: "test",
+        runtimeVersion: "fixture-1",
+        metadata: { baseUrl },
+        firstSeenAt: new Date().toISOString(),
+        lastSeenAt: new Date().toISOString(),
+      },
+      config: structuredClone(defaultConfig),
+      cwd: root,
+      role: "benchmark",
+    });
+    assert.match(observedPrompt, /40 mm bounding box/i);
+    assert.match(observedPrompt, /two M4 holes per leg/i);
+    assert.doesNotMatch(observedPrompt, /\{"valid":false,"reason":"60 exceeds 40","holeCount":4\}/, "the benchmark must require computation rather than expose the accepted answer");
+    assert.equal(outcome.role, "benchmark");
+    assert.equal(outcome.fixtureVersion, "local-specialist-v2");
+    assert.equal(outcome.passed, true);
+    const evidence = outcome.evidence as Readonly<Record<string, unknown>>;
+    assert.equal(evidence.resolvedModelId, "ollama:mellum2-thinking:12b");
+    assert.equal(typeof evidence.durationMs, "number");
+    assert.equal(evidence.inputTokens, 30);
+    assert.equal(evidence.outputTokens, 12);
+    assert.equal(evidence.structuredOutput, true);
+    assert.equal(evidence.contradictionDetected, true);
+    assert.equal(evidence.featureCountMatched, true);
+
+    specialistResponse = { valid: false, reason: "40 exceeds 60", holeCount: 4 };
+    const reversed = await qualifyRuntimeModel({
+      model: {
+        id: "ollama:mellum2-thinking:12b", connectionId: "local:ollama", canonicalName: "mellum2-thinking:12b", displayName: "Mellum2 Thinking", lifecycle: "visible", visible: true, verified: false, qualified: false, active: false, metadata: {}, source: "runtime_discovery", degraded: false, retired: false, firstSeenAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(), lastVerifiedAt: null, pinned: false, excluded: false, qualificationFingerprint: null, qualificationStale: false, missingObservations: 0, upgradePolicy: "pinned",
+      },
+      connection: {
+        id: "local:ollama", provider: "ollama", transport: "local", authentication: "local_none", displayName: "Ollama", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "local", capacity: "available", adapterVersion: "test", runtimeVersion: "fixture-1", metadata: { baseUrl }, firstSeenAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(),
+      },
+      config: structuredClone(defaultConfig), cwd: root, role: "benchmark",
+    });
+    assert.equal(reversed.passed, false);
+    assert.equal((reversed.evidence as Record<string, unknown>).contradictionDetected, false);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Mellum2 workspace writes require bounded tools and a current specialist benchmark", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-mellum-routing-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    ledger.upsertConnection({ id: "local:ollama", provider: "ollama", transport: "local", authentication: "local_none", displayName: "Ollama", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "local", capacity: "available", adapterVersion: "test", runtimeVersion: "test", metadata: {} });
+    const modelId = "ollama:JetBrains/mellum2-instruct-q4_k_m:latest";
+    const name = "JetBrains/mellum2-instruct-q4_k_m:latest";
+    const profile = inferModelProfile({ canonicalName: name, displayName: name, metadata: { capabilities: ["completion", "tools"] } }, { provider: "ollama", transport: "local" });
+    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "local:ollama", canonicalName: name, displayName: name, source: "runtime_discovery", lifecycle: "visible", visible: true, verified: false, qualified: false, active: false, metadata: profileMetadata(profile) });
+    ledger.recordModelQualification({ modelId, fixtureVersion: "local-tools-v1", role: "local_tools", passed: true, score: 1, evidence: {}, fingerprint: null });
+    ledger.setModelPreference(modelId, { active: true });
+    const config = structuredClone(defaultConfig);
+    config.routing.worker.modelId = modelId;
+    config.routing.allowFallback = false;
+    const task = { id: "mellum-write", title: "Small patch", description: "Patch one bounded file", dependencies: [], preferredProvider: null, checks: ["test"], kind: "implementation" as const, repositoryScope: ["src/value.ts"], permission: "workspace_write" as const, risk: "low" as const, capabilityNeeds: ["code", "structured-output"], acceptanceCriteria: ["change is correct"], expectedArtifacts: ["src/value.ts"] };
+
+    assert.throws(() => new ModelRouter(ledger).route({ role: "worker", config, fallbackProvider: "codex", allowedProviders: ["codex"], permission: "workspace_write", task }), /unqualified for the role|incompatible with workspace_write/i);
+
+    ledger.recordModelQualification({ modelId, fixtureVersion: "local-specialist-v2", role: "benchmark", passed: true, score: 1, evidence: { structuredOutput: true, contradictionDetected: true, featureCountMatched: true }, fingerprint: null });
+    const routed = new ModelRouter(ledger).route({ role: "worker", config, fallbackProvider: "codex", allowedProviders: ["codex"], permission: "workspace_write", task });
+    assert.equal(routed.provider, "ollama");
+    assert.equal(routed.model.requestedModelId, modelId);
+    assert.equal(routed.model.alias, name);
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("manual Mellum2 assignments require a current role qualification as well as a current benchmark", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-mellum-role-fingerprint-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    ledger.upsertConnection({ id: "local:ollama", provider: "ollama", transport: "local", authentication: "local_none", displayName: "Ollama", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "local", capacity: "available", adapterVersion: "test", runtimeVersion: "test", metadata: {} });
+    const modelId = "ollama:mellum2-thinking:12b";
+    const name = "mellum2-thinking:12b";
+    const profile = inferModelProfile({ canonicalName: name, displayName: name, metadata: { capabilities: ["completion", "tools", "thinking"] } }, { provider: "ollama", transport: "local" });
+    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "local:ollama", canonicalName: name, displayName: name, source: "runtime_discovery", lifecycle: "visible", visible: true, verified: false, qualified: false, active: false, metadata: profileMetadata(profile) });
+    ledger.recordModelQualification({ modelId, fixtureVersion: "local-analysis-v1", role: "analysis", passed: true, score: 1, evidence: {}, fingerprint: "old-fingerprint" });
+    ledger.recordModelQualification({ modelId, fixtureVersion: "local-specialist-v2", role: "benchmark", passed: true, score: 1, evidence: {}, fingerprint: "current-fingerprint" });
+    assert.equal(hasCurrentOperationalQualification(ledger, ledger.getModel(modelId)!), false);
+    ledger.setModelPreference(modelId, { active: true });
+    const config = structuredClone(defaultConfig);
+    config.routing.reviewer.modelId = modelId;
+    config.routing.allowFallback = false;
+
+    assert.throws(
+      () => new ModelRouter(ledger).route({ role: "reviewer", config, fallbackProvider: "codex", allowedProviders: ["ollama"], permission: "read_only" }),
+      /unqualified for the role|incompatible with read_only/i,
+    );
+
+    ledger.recordModelQualification({ modelId, fixtureVersion: "local-analysis-v1", role: "analysis", passed: true, score: 1, evidence: {}, fingerprint: "current-fingerprint" });
+    assert.equal(hasCurrentOperationalQualification(ledger, ledger.getModel(modelId)!), true);
+    const routed = new ModelRouter(ledger).route({ role: "reviewer", config, fallbackProvider: "codex", allowedProviders: ["ollama"], permission: "read_only" });
+    assert.equal(routed.model.requestedModelId, modelId);
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("scheduler qualifies Mellum2 tool use and specialist fidelity before activation", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-mellum-first-use-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    ledger.upsertConnection({ id: "local:ollama", provider: "ollama", transport: "local", authentication: "local_none", displayName: "Ollama", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "local", capacity: "available", adapterVersion: "test", runtimeVersion: "test", metadata: {} });
+    const modelId = "ollama:JetBrains/mellum2-instruct-q4_k_m:latest";
+    const name = "JetBrains/mellum2-instruct-q4_k_m:latest";
+    const profile = inferModelProfile({ canonicalName: name, displayName: name, metadata: { capabilities: ["completion", "tools"] } }, { provider: "ollama", transport: "local" });
+    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "local:ollama", canonicalName: name, displayName: name, source: "runtime_discovery", lifecycle: "visible", visible: true, verified: false, qualified: false, active: false, metadata: profileMetadata(profile) });
+    const config = structuredClone(defaultConfig);
+    config.routing.worker.modelId = modelId;
+    const task = { id: "mellum", title: "Small fix", description: "Patch one file", dependencies: [], preferredProvider: null, checks: ["test"], kind: "implementation" as const, repositoryScope: ["src/value.ts"], permission: "workspace_write" as const, risk: "low" as const, capabilityNeeds: ["code", "structured-output"], acceptanceCriteria: ["passes"], expectedArtifacts: [] };
+    const probedRoles: string[] = [];
+    const result = await ensureSchedulerCandidateQualified({
+      ledger, config, cwd: root, role: "worker", preferredProvider: "codex", permission: "workspace_write", task,
+      qualify: async ({ role }) => {
+        probedRoles.push(role);
+        return { fixtureVersion: role === "benchmark" ? "local-specialist-v2" : "local-tools-v1", role, passed: true, score: 1, evidence: role === "benchmark" ? { structuredOutput: true, contradictionDetected: true, featureCountMatched: true } : { toolSequence: ["file.read", "file.patch"] } };
+      },
+    });
+    assert.deepEqual(probedRoles, ["local_tools", "benchmark"]);
+    assert.equal(result?.passed, true);
+    assert.equal(result?.activated, true);
+    assert.equal(ledger.listModelQualifications(modelId).some((item) => item.role === "local_tools" && item.passed), true);
+    assert.equal(ledger.listModelQualifications(modelId).some((item) => item.role === "benchmark" && item.passed), true);
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("tracked local worker families qualify bounded tools before promotion", () => {
+  assert.equal(trackedFamilyQualificationRole("local", "worker"), "local_tools");
+  assert.equal(trackedFamilyQualificationRole("local", "reviewer"), "analysis");
+  assert.equal(trackedFamilyQualificationRole("subscription_cli", "worker"), "worker");
+});
+
+test("manual local assignment cannot bypass declared task capabilities", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-local-capability-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    ledger.upsertConnection({ id: "local:ollama", provider: "ollama", transport: "local", authentication: "local_none", displayName: "Ollama", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "local", capacity: "available", adapterVersion: "test", runtimeVersion: "test", metadata: {} });
+    const modelId = "ollama:not-code:latest";
+    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "local:ollama", canonicalName: "not-code:latest", displayName: "not-code:latest", source: "runtime_discovery", lifecycle: "visible", visible: true, verified: false, qualified: false, active: false, metadata: profileMetadata({ tier: "economy", family: "not-code", capabilities: ["text", "analysis"], source: "runtime" }) });
+    ledger.recordModelQualification({ modelId, fixtureVersion: "local-tools-v1", role: "local_tools", passed: true, score: 1, evidence: {} });
+    ledger.setModelPreference(modelId, { active: true });
+    const config = structuredClone(defaultConfig);
+    config.routing.worker.modelId = modelId;
+    config.routing.allowFallback = false;
+    const task = { id: "code", title: "Code", description: "Patch code", dependencies: [], preferredProvider: null, checks: ["test"], kind: "implementation" as const, repositoryScope: ["src/value.ts"], permission: "workspace_write" as const, risk: "low" as const, capabilityNeeds: ["code"], acceptanceCriteria: ["passes"], expectedArtifacts: [] };
+    assert.throws(() => new ModelRouter(ledger).route({ role: "worker", config, fallbackProvider: "codex", allowedProviders: ["codex"], permission: "workspace_write", task }), /unqualified for the role|incompatible with workspace_write/i);
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("local read-only assignments reject tool-required tasks until a read-only tool loop exists", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-local-read-tools-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    ledger.upsertConnection({ id: "local:ollama", provider: "ollama", transport: "local", authentication: "local_none", displayName: "Ollama", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "local", capacity: "available", adapterVersion: "test", runtimeVersion: "test", metadata: {} });
+    const modelId = "ollama:read-tools:12b";
+    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "local:ollama", canonicalName: "read-tools:12b", displayName: "read-tools:12b", source: "runtime_discovery", lifecycle: "visible", visible: true, verified: false, qualified: false, active: false, metadata: profileMetadata({ tier: "standard", family: "read-tools", capabilities: ["text", "analysis", "tools"], source: "runtime" }) });
+    ledger.recordModelQualification({ modelId, fixtureVersion: "local-analysis-v1", role: "analysis", passed: true, score: 1, evidence: {}, fingerprint: null });
+    ledger.setModelPreference(modelId, { active: true });
+    const config = structuredClone(defaultConfig);
+    config.routing.reviewer.modelId = modelId;
+    config.routing.allowFallback = false;
+    const task = { id: "tool-review", title: "Inspect with tools", description: "Use repository tools to inspect one file", dependencies: [], preferredProvider: null, checks: [], kind: "review" as const, repositoryScope: ["src/value.ts"], permission: "read_only" as const, risk: "low" as const, capabilityNeeds: ["tools"], acceptanceCriteria: ["report evidence"], expectedArtifacts: [] };
+
+    const qualification = await ensureSchedulerCandidateQualified({
+      ledger, config, cwd: root, role: "reviewer", preferredProvider: "codex", permission: "read_only", task,
+      qualify: async () => { throw new Error("unsupported local read-only tool tasks must not be probed"); },
+    });
+    assert.equal(qualification, null);
+    assert.throws(() => new ModelRouter(ledger).route({ role: "reviewer", config, fallbackProvider: "codex", allowedProviders: ["codex"], permission: "read_only", task }), /unqualified for the role|incompatible with read_only/i);
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("local write scheduling requires the dedicated bounded-tool qualification", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-local-writer-qualification-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    ledger.upsertConnection({ id: "local:ollama", provider: "ollama", transport: "local", authentication: "local_none", displayName: "Ollama", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "local", capacity: "available", adapterVersion: "test", runtimeVersion: "test", metadata: { baseUrl: "http://127.0.0.1:11434" } });
+    const modelId = "ollama:qwen-writer:14b";
+    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "local:ollama", canonicalName: "qwen-writer:14b", displayName: "qwen-writer:14b", source: "runtime_discovery", lifecycle: "visible", visible: true, verified: false, qualified: false, active: false, metadata: profileMetadata({ tier: "standard", family: "qwen-writer", capabilities: ["text", "analysis", "code"], source: "runtime" }) });
+    const config = structuredClone(defaultConfig);
+    config.routing.worker.modelId = modelId;
+    const task = { id: "local", title: "Local patch", description: "Patch src/value.ts", dependencies: [], preferredProvider: null, checks: ["diff-check"], kind: "implementation" as const, repositoryScope: ["src"], permission: "workspace_write" as const, risk: "medium" as const, capabilityNeeds: ["code"], acceptanceCriteria: ["patch applied"], expectedArtifacts: ["src/value.ts"] };
+    let selectedRole = "";
+    const qualification = await ensureSchedulerCandidateQualified({
+      ledger, config, cwd: root, role: "worker", preferredProvider: "codex", permission: "workspace_write", task,
+      qualify: async ({ role }) => { selectedRole = role; return { fixtureVersion: "local-tools-v1", role, passed: true, score: 1, evidence: { toolSequence: ["file.read", "file.patch"] } }; },
+    });
+    assert.equal(selectedRole, "local_tools");
+    assert.equal(qualification?.modelId, modelId);
+    const routed = new ModelRouter(ledger).route({ role: "worker", config, fallbackProvider: "codex", allowedProviders: ["codex"], permission: "workspace_write", task });
+    assert.equal(routed.provider, "ollama");
+    assert.equal(routed.model.requestedModelId, modelId);
+    assert.equal(ledger.listModelQualifications(modelId).some((item) => item.role === "local_tools" && item.passed), true);
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("typed tool policy enforces actor, stage, path scope, and consequential approval", async () => {
+  const policy = await import("../src/policy.js") as unknown as {
+    listToolDefinitions?: () => Array<Record<string, unknown>>;
+    evaluateToolRequest?: (request: Record<string, unknown>, config: DevHarmonicsConfig) => {
+      outcome: string;
+      reason: string;
+      receiptRequired: boolean;
+      lockKeys: string[];
+    };
+  };
+  assert.equal(typeof policy.listToolDefinitions, "function", "DH-440 requires a typed registry surface");
+  assert.equal(typeof policy.evaluateToolRequest, "function", "DH-440 requires scoped policy evaluation");
+
+  const definitions = policy.listToolDefinitions!();
+  const patchTool = definitions.find((tool) => tool.id === "file.patch");
+  assert.deepEqual(patchTool?.allowedRoles, ["worker", "coordinator"]);
+  assert.deepEqual(patchTool?.allowedStages, ["implementation", "repair"]);
+  assert.equal(patchTool?.secretPolicy, "forbid");
+  assert.deepEqual(patchTool?.inputSchema, { type: "object", required: ["patch", "targetPaths"] });
+
+  const config = structuredClone(defaultConfig);
+  const worktree = path.resolve(os.tmpdir(), "devharmonics-policy-worktree");
+  const baseRequest = {
+    toolId: "file.patch",
+    actorRole: "worker",
+    stage: "implementation",
+    taskPermission: "workspace_write",
+    assignedWorktree: worktree,
+    cwd: worktree,
+    targetPaths: ["src/app.ts"],
+    planApproved: true,
+    approval: null,
+  };
+
+  const allowed = policy.evaluateToolRequest!(baseRequest, config);
+  assert.equal(allowed.outcome, "allow");
+  assert.equal(allowed.receiptRequired, true);
+  assert.deepEqual(allowed.lockKeys, [`worktree:${worktree}`]);
+
+  const escaped = policy.evaluateToolRequest!({ ...baseRequest, targetPaths: ["../outside.txt"] }, config);
+  assert.equal(escaped.outcome, "deny");
+  assert.match(escaped.reason, /outside the assigned worktree/i);
+
+  const wrongStage = policy.evaluateToolRequest!({ ...baseRequest, toolId: "git.merge", actorRole: "coordinator" }, config);
+  assert.equal(wrongStage.outcome, "deny");
+  assert.match(wrongStage.reason, /not available during implementation/i);
+
+  const externalRequest = {
+    ...baseRequest,
+    toolId: "github.pull_request",
+    actorRole: "coordinator",
+    stage: "release",
+    targetPaths: [],
+  };
+  assert.equal(policy.evaluateToolRequest!(externalRequest, config).outcome, "deny");
+  config.runPolicy.allowExternalWrites = true;
+  assert.equal(policy.evaluateToolRequest!(externalRequest, config).outcome, "require_approval");
+  const approved = policy.evaluateToolRequest!({
+    ...externalRequest,
+    approval: { id: "approval-1", kind: "external_write", approvedBy: "user", approvedAt: new Date().toISOString() },
+  }, config);
+  assert.equal(approved.outcome, "allow");
+  assert.deepEqual(approved.lockKeys, ["external:github"]);
+});
+
+test("ledger retains redacted tool-policy receipts in the run evidence package", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-tool-receipts-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db")) as Ledger & {
+    recordToolPolicyReceipt?: (input: Record<string, unknown>) => number;
+    listToolPolicyReceipts?: (runId: string) => Array<Record<string, unknown>>;
+  };
+  try {
+    assert.equal(typeof ledger.recordToolPolicyReceipt, "function");
+    assert.equal(typeof ledger.listToolPolicyReceipts, "function");
+    const runId = ledger.createRun("Retain denied tool evidence", root);
+    const secret = "sk-test-tool-receipt-12345678901234567890";
+    const receiptId = ledger.recordToolPolicyReceipt!({
+      runId,
+      taskId: null,
+      attemptId: null,
+      toolId: "file.patch",
+      actorRole: "worker",
+      stage: "implementation",
+      sideEffect: "workspace_write",
+      outcome: "deny",
+      reason: "Target is outside the assigned worktree",
+      request: { targetPaths: ["../outside.txt"], payload: secret },
+      lockKeys: [],
+      approvalId: null,
+    });
+    assert.ok(receiptId > 0);
+
+    const [receipt] = ledger.listToolPolicyReceipts!(runId);
+    assert.equal(receipt?.toolId, "file.patch");
+    assert.equal(receipt?.outcome, "deny");
+    assert.equal(receipt?.actorRole, "worker");
+    assert.equal(JSON.stringify(receipt).includes(secret), false);
+    assert.match(JSON.stringify(receipt?.request), /\[REDACTED\]/);
+    assert.ok(ledger.getRun(runId)?.events.some((event) => String(event.kind) === "tool.denied"));
+
+    const evidence = ledger.getRunEvidence(runId) as ReturnType<Ledger["getRunEvidence"]> & {
+      toolReceipts?: Array<Record<string, unknown>>;
+    };
+    assert.equal((evidence as unknown as { version: number } | null)?.version, 3);
+    assert.equal(evidence?.toolReceipts?.length, 1);
+    assert.equal(evidence?.toolReceipts?.[0]?.id, receiptId);
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("immutable Run Reporter derives verdicts only from retained evidence", async () => {
+  const reporterPath = "../src/reporter.js";
+  const reporterModule = await import(reporterPath).catch(() => ({})) as {
+    createRunReport?: (evidence: Record<string, unknown>) => Record<string, any>;
+    createRunEvidenceExport?: (evidence: Record<string, unknown>) => Record<string, any>;
+  };
+  assert.equal(typeof reporterModule.createRunReport, "function", "DH-450 requires a pure Run Reporter");
+  assert.equal(typeof reporterModule.createRunEvidenceExport, "function", "DH-450 requires a portable deterministic evidence export");
+  const evidence = {
+    version: 2,
+    generatedAt: "2026-07-15T12:00:00.000Z",
+    integritySha256: "a".repeat(64),
+    run: {
+      id: "run-ready",
+      goal: "Ship the bounded change",
+      status: "ready",
+      finalReview: "READY\n\nAll retained gates passed.",
+      tasks: [{ id: "one", status: "passed", checks: [{ name: "test", passed: true }] }],
+      events: [],
+    },
+    attempts: [{ id: 1, status: "completed" }],
+    blackboard: [],
+    toolReceipts: [{ id: 1, outcome: "allow" }],
+    reviews: [{ id: 1, verdict: "READY", integrationSha256: "b".repeat(64), invalidatedAt: null }],
+  };
+  const report = reporterModule.createRunReport!(evidence);
+  assert.deepEqual(report, {
+    version: 1,
+    runId: "run-ready",
+    verdict: "READY",
+    evidenceHash: "a".repeat(64),
+    summary: "All retained gates passed.",
+    counts: { tasks: 1, attempts: 1, checks: 1, toolReceipts: 1, reviews: 1 },
+    missingEvidence: [],
+    inconsistencies: [],
+  });
+  assert.equal(Object.isFrozen(report), true);
+  assert.equal(Object.isFrozen(report.counts), true);
+
+  const sameEvidence = structuredClone(evidence);
+  sameEvidence.generatedAt = "2026-07-16T09:00:00.000Z";
+  assert.deepEqual(reporterModule.createRunReport!(sameEvidence), report, "displayed verdict must not depend on report time");
+  const evidenceExport = reporterModule.createRunEvidenceExport!(evidence);
+  assert.deepEqual(reporterModule.createRunEvidenceExport!(sameEvidence), evidenceExport, "portable export must not depend on report time");
+  assert.equal(evidenceExport.version, 1);
+  assert.equal(evidenceExport.evidenceVersion, 2);
+  assert.equal(evidenceExport.integritySha256, evidence.integritySha256);
+  assert.deepEqual(evidenceExport.report, report);
+  assert.equal(Object.hasOwn(evidenceExport, "generatedAt"), false);
+  assert.equal(Object.isFrozen(evidenceExport), true);
+
+  const contradictory = structuredClone(evidence);
+  contradictory.run.status = "not_ready";
+  const contradictedReport = reporterModule.createRunReport!(contradictory);
+  assert.equal(contradictedReport.verdict, "NOT_READY");
+  assert.match(contradictedReport.inconsistencies.join(" "), /READY review conflicts with run status not_ready/i);
+
+  const incomplete = structuredClone(evidence);
+  incomplete.run.status = "running";
+  incomplete.run.finalReview = null as unknown as string;
+  incomplete.attempts = [];
+  const incompleteReport = reporterModule.createRunReport!(incomplete);
+  assert.equal(incompleteReport.verdict, "INCONCLUSIVE");
+  assert.ok(incompleteReport.missingEvidence.includes("final review"));
+  assert.ok(incompleteReport.missingEvidence.includes("attempt receipts"));
+});
+
+test("risk-based review quorum fails closed on weak independence and open findings", async () => {
+  const reviewPath = "../src/review.js";
+  const reviewModule = await import(reviewPath).catch(() => ({})) as Record<string, any>;
+  assert.equal(typeof reviewModule.reviewRequirement, "function", "DH-460 requires risk-derived quorum policy");
+  assert.equal(typeof reviewModule.parseReviewerResponse, "function", "DH-460 requires structured reviewer findings");
+  assert.equal(typeof reviewModule.adjudicateReviewQuorum, "function", "DH-460 requires deterministic quorum adjudication");
+
+  const requirement = reviewModule.reviewRequirement(
+    [{ id: "low", risk: "low" }, { id: "critical", risk: "high" }],
+    defaultConfig.reviewPolicy,
+  );
+  assert.deepEqual(requirement, { risk: "high", requiredReviewers: 2, minimumDistinctProviders: 2, requireImplementorIndependence: true });
+
+  const ready = reviewModule.parseReviewerResponse("READY\nNo material findings.", { provider: "claude", modelId: "sonnet", connectionId: "claude" });
+  assert.equal(ready.verdict, "READY");
+  assert.deepEqual(ready.findings, []);
+  const notReady = reviewModule.parseReviewerResponse(`NOT READY\n\n\`\`\`json\n{"findings":[{"severity":"high","location":"src/a.ts:7","rationale":"Unsafe bypass remains.","suggestedCorrection":"Remove the bypass.","disposition":"open"}]}\n\`\`\``, { provider: "codex", modelId: "terra", connectionId: "codex" });
+  assert.equal(notReady.verdict, "NOT_READY");
+  assert.equal(notReady.findings[0].location, "src/a.ts:7");
+
+  const passing = reviewModule.adjudicateReviewQuorum({
+    requirement,
+    implementationProviders: ["codex"],
+    reviews: [ready, { ...ready, provider: "gemini", modelId: "gemini-pro", connectionId: "gemini" }],
+  });
+  assert.equal(passing.passed, true);
+  assert.equal(passing.distinctProviders, 2);
+
+  const sameProvider = reviewModule.adjudicateReviewQuorum({ requirement, implementationProviders: ["codex"], reviews: [ready, { ...ready, modelId: "opus" }] });
+  assert.equal(sameProvider.passed, false);
+  assert.match(sameProvider.reasons.join(" "), /distinct reviewer providers/i);
+
+  const rejected = reviewModule.adjudicateReviewQuorum({ requirement, implementationProviders: ["codex"], reviews: [ready, notReady] });
+  assert.equal(rejected.passed, false);
+  assert.equal(rejected.openFindings.length, 1);
+  assert.match(rejected.reasons.join(" "), /open reviewer finding/i);
+});
+
+test("ledger retains structured reviews and invalidates them when fixer evidence changes", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-review-ledger-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db")) as Ledger & Record<string, any>;
+  try {
+    const runId = ledger.createRun("Repair and re-review", root);
+    const reviewId = ledger.recordReviewReceipt({
+      runId,
+      round: 1,
+      integrationSha256: "a".repeat(64),
+      review: {
+        verdict: "NOT_READY",
+        provider: "claude",
+        modelId: "sonnet",
+        connectionId: "subscription-cli:claude",
+        summary: "A blocking defect remains.",
+        rawText: "NOT READY",
+        findings: [{ id: "unsafe", severity: "high", location: "src/a.ts:7", rationale: "Unsafe bypass remains.", suggestedCorrection: "Remove it.", disposition: "open" }],
+      },
+    });
+    assert.equal(typeof reviewId, "number");
+    let reviews = ledger.listReviewReceipts(runId);
+    assert.equal(reviews.length, 1);
+    assert.equal(reviews[0]!.findings[0]!.location, "src/a.ts:7");
+    assert.equal(reviews[0]!.invalidatedAt, null);
+    assert.equal(ledger.invalidateReviewReceipts(runId, "Fixer changed the integration evidence"), 1);
+    reviews = ledger.listReviewReceipts(runId);
+    assert.ok(reviews[0]!.invalidatedAt);
+    assert.match(reviews[0]!.invalidationReason!, /fixer changed/i);
+    const evidence = ledger.getRunEvidence(runId) as Record<string, any>;
+    assert.equal(evidence.version, 3);
+    assert.equal(evidence.reviews[0].id, reviewId);
+    assert.ok(evidence.reviews[0].invalidatedAt);
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("verification-integrity gate fails closed on test weakening and reports bounded evidence", async () => {
+  const integrityPath = "../src/verification-integrity.js";
+  const integrityModule = await import(integrityPath).catch(() => ({})) as Record<string, any>;
+  assert.equal(typeof integrityModule.analyzeVerificationIntegrity, "function", "DH-470 requires a deterministic verification-integrity gate");
+  const result = integrityModule.analyzeVerificationIntegrity([
+    { path: "test/auth.test.ts", diff: "diff --git a/test/auth.test.ts b/test/auth.test.ts\n@@ -1,4 +1,5 @@\n-test(\"denies invalid token\", () => {\n-  assert.equal(authorize(\"bad\"), false);\n+test.skip(\"denies invalid token\", () => {\n+  assert.ok(true);\n });" },
+    { path: "package.json", diff: "@@ -4,1 +4,1 @@\n-\"test\": \"node --test\"\n+\"test\": \"node --test || true\"" },
+  ]);
+  assert.equal(result.passed, false);
+  assert.ok(result.findings.some((finding: any) => finding.kind === "test-skipped" && finding.path === "test/auth.test.ts"));
+  assert.ok(result.findings.some((finding: any) => finding.kind === "assertion-weakened"));
+  assert.ok(result.findings.some((finding: any) => finding.kind === "unconditional-success" && finding.path === "package.json"));
+  assert.ok(result.summary.includes("3"));
+
+  const legitimate = integrityModule.analyzeVerificationIntegrity([
+    { path: "src/auth.ts", diff: "@@ -1 +1 @@\n-return false;\n+return token === expected;" },
+    { path: "test/auth.test.ts", diff: "@@ -1 +1,2 @@\n assert.equal(authorize(\"bad\"), false);\n+assert.equal(authorize(expected), true);" },
+  ]);
+  assert.equal(legitimate.passed, true);
+  assert.deepEqual(legitimate.findings, []);
+  assert.deepEqual(legitimate.census, { changedTestFiles: 1, deletedTestFiles: 0, addedSkips: 0, removedAssertions: 0, addedAssertions: 1 });
+});
+
+test("local model tool loop executes only bounded typed file tools", async () => {
+  const localToolsPath = "../src/local-tools.js";
+  const localTools = await import(localToolsPath).catch(() => ({})) as Record<string, any>;
+  assert.equal(typeof localTools.runLocalToolLoop, "function", "DH-510 requires an orchestrator-managed local tool loop");
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-local-tools-"));
+  try {
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "src", "value.txt"), "before\n", "utf8");
+    let call = 0;
+    const adapter = {
+      connection: { id: "local:test", provider: "ollama" },
+      metadata: async () => ({ adapterVersion: "test", runtimeVersion: "test" }),
+      invoke: async () => {
+        call++;
+        const text = call === 1
+          ? JSON.stringify({ toolRequests: [{ id: "read-1", toolId: "file.read", arguments: { path: "src/value.txt" } }] })
+          : call === 2
+            ? JSON.stringify({ toolRequests: [{ id: "patch-1", toolId: "file.patch", arguments: { path: "src/value.txt", expectedSha256: createHash("sha256").update("before\n").digest("hex"), content: "after\n" } }] })
+            : JSON.stringify({ final: "Updated src/value.txt with the approved bounded patch." });
+        return { connectionId: "local:test", provider: "ollama", adapterVersion: "test", runtimeVersion: "test", model: { requestedModelId: "ollama:test", alias: "test", settings: {}, resolvedModelId: "ollama:test", resolution: "concrete" }, text, stdout: text, stderr: "", exitCode: 0, durationMs: 1, usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 }, toolRequests: [] };
+      },
+    };
+    const authorized: string[] = [];
+    const result = await localTools.runLocalToolLoop({
+      adapter,
+      request: { role: "worker", prompt: "Update the bounded file", cwd: root, permission: "workspace_write", timeoutMs: 10_000, model: { requestedModelId: "ollama:test", alias: "test", settings: {} } },
+      worktreePath: root,
+      repositoryScope: ["src"],
+      authorize: (request: any) => { authorized.push(request.toolId); return { outcome: "allow", reason: "fixture", lockKeys: request.targetPaths }; },
+    });
+    assert.equal(result.text, "Updated src/value.txt with the approved bounded patch.");
+    assert.deepEqual(authorized, ["file.read", "file.patch"]);
+    assert.equal(await readFile(path.join(root, "src", "value.txt"), "utf8"), "after\n");
+    assert.equal(result.toolExecutions.length, 2);
+
+    const escapingAdapter = { ...adapter, invoke: async () => ({ ...(await adapter.invoke()), text: JSON.stringify({ toolRequests: [{ id: "escape", toolId: "file.read", arguments: { path: "../outside.txt" } }] }) }) };
+    await assert.rejects(() => localTools.runLocalToolLoop({ adapter: escapingAdapter, request: { role: "worker", prompt: "escape", cwd: root, permission: "workspace_write", timeoutMs: 10_000, model: { requestedModelId: "ollama:test", alias: "test", settings: {} } }, worktreePath: root, repositoryScope: ["src"], authorize: () => ({ outcome: "allow", reason: "fixture", lockKeys: [] }) }), /outside the assigned worktree|outside repository scope/i);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("configuration v1 migrates atomically into separated v2 scopes", async () => {
@@ -1086,6 +1739,8 @@ test("ledger upgrades a v0.1 database transactionally and preserves a pre-migrat
           { version: 13, name: "durable-run-autonomy" },
           { version: 14, name: "model-performance-observation-policy" },
           { version: 15, name: "reviewer-invocation-performance" },
+          { version: 16, name: "typed-tool-policy-receipts" },
+          { version: 17, name: "structured-review-quorums" },
         ],
       );
     } finally {

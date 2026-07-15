@@ -1,4 +1,5 @@
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { projectLegacyProvider } from "./compatibility.js";
 import { CapacityBroker } from "./capacity.js";
 import { normalizeAgentResult, validateDiagnosticResult } from "./agents.js";
@@ -26,16 +27,20 @@ import {
   type DevHarmonicsConfig,
   type RunPlan,
   type RunRequest,
+  type RunAutonomy,
   type TaskStatus,
 } from "./types.js";
 import { invocationFailureScope, RuntimeInvocationError, type InvocationPermission, type RuntimeAdapter } from "./runtime.js";
 import { syncSubscriptionConnections } from "./registry.js";
 import { ModelRouter } from "./routing.js";
 import { observeLocalResources } from "./resources.js";
-import { requireAllowedTool } from "./policy.js";
+import { evaluateToolRequest, type ToolStage } from "./policy.js";
+import { adjudicateReviewQuorum, parseReviewerResponse, reviewRequirement, type ReviewQuorumDecision, type ReviewRequirement, type StructuredReview } from "./review.js";
 import { estimateInvocationCost, OpenRouterService } from "./openrouter.js";
 import { ensureSchedulerCandidateQualified, type SchedulerQualificationResult } from "./qualification.js";
 import { runValidator, unknownValidator } from "./validators.js";
+import { analyzeVerificationIntegrity } from "./verification-integrity.js";
+import { runLocalToolLoop } from "./local-tools.js";
 import { WorktreeManager, WorkspaceIsolationError } from "./worktrees.js";
 
 export class Orchestrator {
@@ -321,8 +326,30 @@ export class Orchestrator {
       );
       failed ||= !integrationPassed;
     }
+    if (autonomy !== "observe") {
+      const integrity = analyzeVerificationIntegrity(await worktrees.integrationDiffFiles());
+      const integrityTaskId = integrationChecks.length ? "__integration__" : plan.tasks[0]!.id;
+      this.ledger.recordCheck(runId, integrityTaskId, {
+        name: "verification-integrity",
+        passed: integrity.passed,
+        exitCode: integrity.passed ? 0 : 1,
+        stdout: JSON.stringify({ summary: integrity.summary, census: integrity.census, findings: integrity.findings }, null, 2),
+        stderr: "",
+        durationMs: 0,
+      });
+      if (!integrity.passed) {
+        this.ledger.addBlackboardEntry({ runId, taskId: integrityTaskId, kind: "risk", content: integrity.summary, sourceAttemptId: null });
+        failed = true;
+      }
+    }
     const checkSummary = this.checkSummary(runId);
     const taskReports = this.taskReportSummary(runId);
+    const integrationReviewSha256 = this.reviewEvidenceSha256({
+      autonomy,
+      plan,
+      taskReports,
+      diff: autonomy === "observe" ? [] : await worktrees.integrationDiffFiles(),
+    });
     const reviewerName = availableProviders.includes(config.product.reviewer)
       ? config.product.reviewer
       : availableProviders[0]!;
@@ -332,9 +359,16 @@ export class Orchestrator {
         .filter((task) => task.id !== "__integration__" && task.provider)
         .map((task) => String(task.provider)),
     )];
+    const reviewPolicy = reviewRequirement(plan.tasks, config.reviewPolicy);
     const excludedReviewerModels = new Set<string>();
     const excludedReviewerConnections = new Set<string>();
+    if (reviewPolicy.requireImplementorIndependence) {
+      for (const connection of this.ledger.listConnections()) {
+        if (implementationProviders.includes(connection.provider)) excludedReviewerConnections.add(connection.id);
+      }
+    }
     let reviewText: string | null = null;
+    let completedReviewerIdentity: { provider: string; modelId: string | null; connectionId: string } | null = null;
     let reviewerFallbackReason: string | null = null;
     let lastReviewerError: Error | null = null;
     for (let reviewAttempt = 1; reviewAttempt <= config.application.retry.maxAttempts; reviewAttempt++) {
@@ -411,6 +445,11 @@ export class Orchestrator {
           });
           reviewText = review.text;
         }
+        completedReviewerIdentity = {
+          provider: reviewerDecision.provider,
+          modelId: reviewerDecision.model.requestedModelId ? String(reviewerDecision.model.requestedModelId) : null,
+          connectionId: String(reviewer.connection.id),
+        };
         this.recordConnectionOutcome(reviewer.connection.id, { success: true });
         if (reviewerDecision.model.requestedModelId) this.recordModelOutcome(String(reviewerDecision.model.requestedModelId), { success: true });
         break;
@@ -433,13 +472,316 @@ export class Orchestrator {
       }
     }
     if (reviewText === null) throw lastReviewerError ?? new Error("No eligible reviewer completed final review");
-    const ready = !failed && reviewText.trimStart().startsWith("READY");
-    this.ledger.setRunStatus(runId, ready ? "ready" : "not_ready", reviewText);
+    if (!completedReviewerIdentity) throw new Error("Completed final review is missing its reviewer identity");
+    const firstReview = parseReviewerResponse(reviewText, completedReviewerIdentity);
+    const firstReceiptId = this.ledger.recordReviewReceipt({
+      runId,
+      round: 1,
+      integrationSha256: integrationReviewSha256,
+      review: firstReview,
+    });
+    this.ledger.addEvent(runId, "review.completed", `${firstReview.provider} completed quorum review 1/${reviewPolicy.requiredReviewers}: ${firstReview.verdict.replace("_", " ")}`, { receiptId: firstReceiptId, reviewSlot: 1, provider: firstReview.provider, modelId: firstReview.modelId, connectionId: firstReview.connectionId, verdict: firstReview.verdict, findingCount: firstReview.findings.length, integrationSha256: integrationReviewSha256 });
+    const structuredReviews: StructuredReview[] = [firstReview];
+    excludedReviewerConnections.add(firstReview.connectionId);
+    if (firstReview.modelId) excludedReviewerModels.add(firstReview.modelId);
+    if (reviewPolicy.minimumDistinctProviders > 1) {
+      for (const connection of this.ledger.listConnections()) {
+        if (connection.provider === firstReview.provider) excludedReviewerConnections.add(connection.id);
+      }
+    }
+    for (let reviewSlot = 2; reviewSlot <= reviewPolicy.requiredReviewers; reviewSlot++) {
+      const additional = await this.completeQuorumReview({
+        runId,
+        reviewSlot,
+        requiredReviewers: reviewPolicy.requiredReviewers,
+        reviewerName,
+        reviewerProviders,
+        implementationProviders,
+        excludedReviewerModels,
+        excludedReviewerConnections,
+        config,
+        worktrees,
+        signal,
+        goal: request.goal,
+        constitution,
+        plan,
+        checkSummary,
+        taskReports,
+        autonomy,
+      });
+      const receiptId = this.ledger.recordReviewReceipt({ runId, round: 1, integrationSha256: integrationReviewSha256, review: additional });
+      structuredReviews.push(additional);
+      this.ledger.addEvent(runId, "review.completed", `${additional.provider} completed quorum review ${reviewSlot}/${reviewPolicy.requiredReviewers}: ${additional.verdict.replace("_", " ")}`, { receiptId, reviewSlot, provider: additional.provider, modelId: additional.modelId, connectionId: additional.connectionId, verdict: additional.verdict, findingCount: additional.findings.length, integrationSha256: integrationReviewSha256 });
+      excludedReviewerConnections.add(additional.connectionId);
+      if (additional.modelId) excludedReviewerModels.add(additional.modelId);
+      if (new Set(structuredReviews.map((review) => review.provider)).size < reviewPolicy.minimumDistinctProviders) {
+        for (const connection of this.ledger.listConnections()) {
+          if (connection.provider === additional.provider) excludedReviewerConnections.add(connection.id);
+        }
+      }
+    }
+    let finalQuorum = adjudicateReviewQuorum({ requirement: reviewPolicy, implementationProviders, reviews: structuredReviews });
+    let finalReviews = structuredReviews;
+    let finalReviewSha256 = integrationReviewSha256;
+    for (let fixRound = 1; !finalQuorum.passed && finalQuorum.openFindings.length && autonomy !== "observe" && fixRound <= config.reviewPolicy.maxFixRounds; fixRound++) {
+      const reviewerSet = new Set(finalReviews.map((review) => review.provider));
+      const fixerProviders = workerProviders.filter((provider) => !reviewerSet.has(provider));
+      if (!fixerProviders.length) {
+        this.ledger.addEvent(runId, "fixer.failed", "No implementor provider independent from the review quorum is available", { fixRound, reviewerProviders: [...reviewerSet] });
+        break;
+      }
+      const repairTask: PlannedTask = {
+        id: `__review_fix_${fixRound}`,
+        title: `Resolve review findings (round ${fixRound})`,
+        description: `Correct only these retained review findings:\n${finalQuorum.openFindings.map((finding) => `- ${finding.severity.toUpperCase()} ${finding.location ?? "location not supplied"}: ${finding.rationale}\n  Suggested correction: ${finding.suggestedCorrection}`).join("\n")}`,
+        dependencies: [],
+        preferredProvider: fixerProviders[0] ?? null,
+        checks: integrationChecks.length ? integrationChecks : ["diff-check"],
+        kind: "repair",
+        repositoryScope: [...new Set(finalQuorum.openFindings.map((finding) => finding.location?.split(":")[0]).filter((value): value is string => Boolean(value)))].length
+          ? [...new Set(finalQuorum.openFindings.map((finding) => finding.location?.split(":")[0]).filter((value): value is string => Boolean(value)))]
+          : ["."],
+        permission: "workspace_write",
+        risk: reviewPolicy.risk,
+        capabilityNeeds: ["implementation", "repair"],
+        acceptanceCriteria: finalQuorum.openFindings.map((finding) => finding.suggestedCorrection),
+        expectedArtifacts: ["committed repair diff", "passing validator receipts"],
+      };
+      this.ledger.addTask(runId, repairTask);
+      this.ledger.addEvent(runId, "fixer.started", `${fixerProviders[0]} is addressing ${finalQuorum.openFindings.length} open review finding(s)`, { fixRound, taskId: repairTask.id, findings: finalQuorum.openFindings.map((finding) => finding.id), excludedReviewerProviders: [...reviewerSet] });
+      const fixStatus = await this.executeTask({ runId, goal: request.goal, task: repairTask, constitution, config, providers: fixerProviders, providerCursor: providerCursor + fixRound, worktrees, signal });
+      if (fixStatus !== "passed") {
+        this.ledger.addEvent(runId, "fixer.failed", `Review fixer round ${fixRound} did not pass its validators`, { fixRound, taskId: repairTask.id, status: fixStatus });
+        break;
+      }
+      const postFixChecks = await this.verifyTask({ runId, task: repairTask, config }, worktrees.integrationPath);
+      if (!postFixChecks.every((check) => check.passed)) {
+        this.ledger.addEvent(runId, "fixer.failed", `Review fixer round ${fixRound} failed integration validation`, { fixRound, taskId: repairTask.id });
+        break;
+      }
+      const refreshedTaskReports = this.taskReportSummary(runId);
+      const refreshedCheckSummary = this.checkSummary(runId);
+      const refreshedSha256 = this.reviewEvidenceSha256({ autonomy, plan, taskReports: refreshedTaskReports, diff: await worktrees.integrationDiffFiles() });
+      if (refreshedSha256 === finalReviewSha256) {
+        this.ledger.addEvent(runId, "fixer.failed", `Review fixer round ${fixRound} produced no change to the reviewed integration evidence`, { fixRound, taskId: repairTask.id, integrationSha256: refreshedSha256 });
+        break;
+      }
+      const invalidated = this.ledger.invalidateReviewReceipts(runId, `Fixer round ${fixRound} changed integration evidence from ${finalReviewSha256} to ${refreshedSha256}`);
+      this.ledger.addEvent(runId, "review.invalidated", `Fixer round ${fixRound} invalidated ${invalidated} prior review receipt(s)`, { fixRound, invalidated, previousIntegrationSha256: finalReviewSha256, integrationSha256: refreshedSha256 });
+      this.ledger.addEvent(runId, "fixer.completed", `Review fixer round ${fixRound} passed integration validation; bounded re-review is required`, { fixRound, taskId: repairTask.id, integrationSha256: refreshedSha256 });
+      const refreshedImplementors = [...new Set((this.ledger.getRun(runId)?.tasks ?? []).filter((task) => task.id !== "__integration__" && task.provider).map((task) => String(task.provider)))];
+      const rereview = await this.completeReviewRound({ runId, round: fixRound + 1, integrationSha256: refreshedSha256, requirement: reviewPolicy, reviewerName, reviewerProviders, implementationProviders: refreshedImplementors, config, worktrees, signal, goal: request.goal, constitution, plan, checkSummary: refreshedCheckSummary, taskReports: refreshedTaskReports, autonomy });
+      finalQuorum = rereview.decision;
+      finalReviews = rereview.reviews;
+      finalReviewSha256 = refreshedSha256;
+    }
+    const quorumText = `${finalQuorum.passed ? "READY" : "NOT READY"}\n\nReview quorum: ${finalQuorum.completedReviews}/${finalQuorum.requiredReviewers} completed across ${finalQuorum.distinctProviders} provider(s).${finalQuorum.reasons.length ? `\n${finalQuorum.reasons.join("\n")}` : "\nAll configured review gates passed."}\n\n${finalReviews.map((review, index) => `Reviewer ${index + 1} (${review.provider}${review.modelId ? ` / ${review.modelId}` : ""}): ${review.verdict.replace("_", " ")}\n${review.summary}`).join("\n\n")}`;
+    this.ledger.addEvent(runId, finalQuorum.passed ? "review.quorum_passed" : "review.quorum_failed", finalQuorum.passed ? "Independent review quorum passed" : "Independent review quorum requires follow-up", { requirement: reviewPolicy, decision: finalQuorum, integrationSha256: finalReviewSha256 });
+    const ready = !failed && finalQuorum.passed;
+    this.ledger.setRunStatus(runId, ready ? "ready" : "not_ready", quorumText);
     this.ledger.addEvent(
       runId,
       ready ? "run.ready" : "run.not_ready",
       ready ? "Run passed final review" : "Run requires follow-up",
     );
+  }
+
+  private async completeQuorumReview(input: {
+    runId: string;
+    reviewSlot: number;
+    requiredReviewers: number;
+    reviewerName: ProviderName;
+    reviewerProviders: readonly string[];
+    implementationProviders: readonly string[];
+    excludedReviewerModels: Set<string>;
+    excludedReviewerConnections: Set<string>;
+    config: DevHarmonicsConfig;
+    worktrees: WorktreeManager;
+    signal: AbortSignal;
+    goal: string;
+    constitution: string;
+    plan: RunPlan;
+    checkSummary: string;
+    taskReports: string;
+    autonomy: RunAutonomy;
+  }): Promise<StructuredReview> {
+    const router = new ModelRouter(this.ledger);
+    let lastError: Error | null = null;
+    let fallbackReason: string | null = null;
+    for (let reviewAttempt = 1; reviewAttempt <= input.config.application.retry.maxAttempts; reviewAttempt++) {
+      const start = input.reviewerProviders.indexOf(input.reviewerName);
+      const qualificationProviders = input.reviewerProviders.map((_, index) => input.reviewerProviders[(Math.max(0, start) + input.reviewSlot + reviewAttempt - 2 + index) % input.reviewerProviders.length]!);
+      let fallbackProvider = qualificationProviders[0]!;
+      for (const provider of qualificationProviders) {
+        const qualification = await ensureSchedulerCandidateQualified({
+          ledger: this.ledger,
+          config: input.config,
+          cwd: input.worktrees.integrationPath,
+          role: "reviewer",
+          preferredProvider: provider,
+          permission: "read_only",
+          excludedModelIds: input.excludedReviewerModels,
+          excludedConnectionIds: input.excludedReviewerConnections,
+        });
+        this.recordSchedulerQualification(input.runId, qualification, "reviewer");
+        if (qualification?.attempted && !qualification.passed) {
+          input.excludedReviewerModels.add(qualification.modelId);
+          fallbackReason = `${qualification.provider} reviewer candidate failed scheduler-time qualification`;
+          lastError = new Error(fallbackReason);
+          continue;
+        }
+        if (qualification?.passed) {
+          fallbackProvider = qualification.provider;
+          break;
+        }
+      }
+      let decision;
+      try {
+        decision = router.route({
+          role: "reviewer",
+          config: input.config,
+          fallbackProvider: fallbackProvider as ProviderName,
+          allowedProviders: input.reviewerProviders,
+          permission: "read_only",
+          excludedModelIds: input.excludedReviewerModels,
+          excludedConnectionIds: input.excludedReviewerConnections,
+          avoidProviders: input.implementationProviders,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        lastError = error instanceof Error ? error : new Error(message);
+        fallbackReason = message;
+        continue;
+      }
+      const reviewer = await this.provider(decision.provider, input.config, decision.connectionId);
+      this.ledger.addEvent(input.runId, "review.started", `${decision.provider} is completing quorum review ${input.reviewSlot}/${input.requiredReviewers}${reviewAttempt > 1 ? ` (fallback ${reviewAttempt})` : ""}`, { routing: decision, reviewSlot: input.reviewSlot, requiredReviewers: input.requiredReviewers, reviewAttempt, fallbackReason });
+      try {
+        let text: string;
+        if (reviewer.connection.capabilities.providerManagedTools) {
+          const review = await reviewer.invoke({
+            role: "reviewer",
+            prompt: reviewerPrompt({ goal: input.goal, constitution: input.constitution, plan: input.plan, checkSummary: input.checkSummary, taskReports: input.taskReports, workspacePath: input.worktrees.integrationPath, autonomy: input.autonomy }),
+            cwd: input.worktrees.integrationPath,
+            permission: "read_only",
+            timeoutMs: null,
+            model: decision.model,
+          }, { signal: input.signal });
+          this.recordInvocation(input.runId, null, "reviewer", decision, review, fallbackReason);
+          text = review.text;
+        } else {
+          const chunks = input.autonomy === "observe"
+            ? this.diagnosticReportChunks(input.runId)
+            : chunkDiffFiles(await input.worktrees.integrationDiffFiles());
+          if (decision.provider === "openrouter") {
+            const selected = decision.model.requestedModelId ? this.ledger.getModel(String(decision.model.requestedModelId)) : null;
+            const estimated = selected ? estimateInvocationCost(selected, chunks.map((chunk) => chunk.content).join("\n"), Math.max(500, chunks.length * 192)) ?? 0 : 0;
+            await new OpenRouterService(this.ledger).assertPaidRoutingAllowed(input.config, input.runId, estimated);
+          }
+          const localTaskReports = input.autonomy === "observe" ? "Each accepted diagnostic report is supplied as an independent evidence chunk." : input.taskReports;
+          const review = await runContextOnlyReview({
+            adapter: reviewer,
+            model: decision.model,
+            cwd: input.worktrees.integrationPath,
+            contextHeader: localReviewerContextHeader({ goal: input.goal, constitution: input.constitution, plan: input.plan, checkSummary: input.checkSummary, taskReports: localTaskReports, autonomy: input.autonomy }),
+            chunks,
+            evidenceLabel: input.autonomy === "observe" ? "diagnostic report" : "diff chunk",
+            signal: input.signal,
+            onChunk: (receipt, index, total) => {
+              this.ledger.addEvent(input.runId, "review.chunk_completed", `${decision.provider} reviewed chunk ${index + 1}/${total}: ${receipt.label} â€” ${receipt.verdict}`, { reviewSlot: input.reviewSlot, label: receipt.label, verdict: receipt.verdict, durationMs: receipt.durationMs, inputTokens: receipt.inputTokens, outputTokens: receipt.outputTokens, costUsd: receipt.costUsd });
+              this.ledger.recordInvocationReceipt({ runId: input.runId, role: "reviewer", provider: receipt.provider, connectionId: receipt.connectionId, requestedModelId: decision.model.requestedModelId ? String(decision.model.requestedModelId) : null, resolvedModelId: receipt.resolvedModelId, inputTokens: receipt.inputTokens, outputTokens: receipt.outputTokens, costUsd: receipt.costUsd, durationMs: receipt.durationMs, workloadClass: "complex:premium", fallbackReason: fallbackReason ?? (decision.fallback ? decision.factors.join("; ") : null) });
+            },
+          });
+          text = review.text;
+        }
+        this.recordConnectionOutcome(reviewer.connection.id, { success: true });
+        if (decision.model.requestedModelId) this.recordModelOutcome(String(decision.model.requestedModelId), { success: true });
+        return parseReviewerResponse(text, {
+          provider: decision.provider,
+          modelId: decision.model.requestedModelId ? String(decision.model.requestedModelId) : null,
+          connectionId: String(reviewer.connection.id),
+        });
+      } catch (error) {
+        if (input.signal.aborted) throw error;
+        const failureKind = error instanceof RuntimeInvocationError ? error.kind : "unknown";
+        const message = error instanceof Error ? error.message : String(error);
+        lastError = error instanceof Error ? error : new Error(message);
+        fallbackReason = `${decision.provider} review failed (${failureKind}): ${message}`;
+        const scope = invocationFailureScope(failureKind, Boolean(decision.model.requestedModelId));
+        if (scope === "model" && decision.model.requestedModelId) {
+          const modelId = String(decision.model.requestedModelId);
+          input.excludedReviewerModels.add(modelId);
+          this.recordModelOutcome(modelId, { success: false, failureKind, detail: message });
+        } else if (scope === "connection") {
+          input.excludedReviewerConnections.add(String(reviewer.connection.id));
+          this.recordConnectionOutcome(reviewer.connection.id, { success: false, failureKind, detail: message });
+        }
+        this.ledger.addEvent(input.runId, "review.failed", `${fallbackReason}; trying the next eligible reviewer`, { provider: decision.provider, connectionId: reviewer.connection.id, modelId: decision.model.requestedModelId, failureKind, reviewSlot: input.reviewSlot, reviewAttempt });
+      }
+    }
+    throw lastError ?? new Error(`No eligible reviewer completed quorum slot ${input.reviewSlot}`);
+  }
+
+  private reviewEvidenceSha256(input: {
+    autonomy: RunAutonomy;
+    plan: RunPlan;
+    taskReports: string;
+    diff: readonly unknown[];
+  }): string {
+    const exactIntegrationSet = input.autonomy === "observe"
+      ? { autonomy: input.autonomy, plan: input.plan, taskReports: input.taskReports }
+      : { autonomy: input.autonomy, plan: input.plan, diff: input.diff };
+    return createHash("sha256").update(JSON.stringify(exactIntegrationSet)).digest("hex");
+  }
+
+  private async completeReviewRound(input: {
+    runId: string;
+    round: number;
+    integrationSha256: string;
+    requirement: ReviewRequirement;
+    reviewerName: ProviderName;
+    reviewerProviders: readonly string[];
+    implementationProviders: readonly string[];
+    config: DevHarmonicsConfig;
+    worktrees: WorktreeManager;
+    signal: AbortSignal;
+    goal: string;
+    constitution: string;
+    plan: RunPlan;
+    checkSummary: string;
+    taskReports: string;
+    autonomy: RunAutonomy;
+  }): Promise<{ reviews: StructuredReview[]; decision: ReviewQuorumDecision }> {
+    const excludedModels = new Set<string>();
+    const excludedConnections = new Set<string>();
+    if (input.requirement.requireImplementorIndependence) {
+      for (const connection of this.ledger.listConnections()) {
+        if (input.implementationProviders.includes(connection.provider)) excludedConnections.add(connection.id);
+      }
+    }
+    const reviews: StructuredReview[] = [];
+    for (let reviewSlot = 1; reviewSlot <= input.requirement.requiredReviewers; reviewSlot++) {
+      const review = await this.completeQuorumReview({
+        ...input,
+        reviewSlot,
+        requiredReviewers: input.requirement.requiredReviewers,
+        excludedReviewerModels: excludedModels,
+        excludedReviewerConnections: excludedConnections,
+      });
+      const receiptId = this.ledger.recordReviewReceipt({ runId: input.runId, round: input.round, integrationSha256: input.integrationSha256, review });
+      reviews.push(review);
+      this.ledger.addEvent(input.runId, "review.completed", `${review.provider} completed round ${input.round} review ${reviewSlot}/${input.requirement.requiredReviewers}: ${review.verdict.replace("_", " ")}`, { receiptId, round: input.round, reviewSlot, provider: review.provider, modelId: review.modelId, connectionId: review.connectionId, verdict: review.verdict, findingCount: review.findings.length, integrationSha256: input.integrationSha256 });
+      excludedConnections.add(review.connectionId);
+      if (review.modelId) excludedModels.add(review.modelId);
+      if (new Set(reviews.map((item) => item.provider)).size < input.requirement.minimumDistinctProviders) {
+        for (const connection of this.ledger.listConnections()) {
+          if (connection.provider === review.provider) excludedConnections.add(connection.id);
+        }
+      }
+    }
+    return {
+      reviews,
+      decision: adjudicateReviewQuorum({ requirement: input.requirement, implementationProviders: input.implementationProviders, reviews }),
+    };
   }
 
   private async executeTask(input: {
@@ -508,7 +850,7 @@ export class Orchestrator {
         excludedModelIds,
         excludedConnectionIds,
       });
-      if (!(PROVIDERS as readonly string[]).includes(routing.provider) && taskPermission === "workspace_write") {
+      if (!(PROVIDERS as readonly string[]).includes(routing.provider) && routing.provider !== "ollama" && taskPermission === "workspace_write") {
         throw new Error(`Worker model '${routing.model.requestedModelId}' cannot write until the local tool policy engine is enabled`);
       }
       const providerName = routing.provider;
@@ -552,23 +894,43 @@ export class Orchestrator {
           await new OpenRouterService(this.ledger).assertPaidRoutingAllowed(input.config, input.runId, estimated);
         }
         await input.worktrees.assertPrimaryClean?.(`before ${input.task.id} attempt ${attempt}`);
-        const result = await provider.invoke(
-          {
-            role: "worker",
-            prompt,
-            cwd: taskWorktree.path,
-            permission: taskPermission,
-            timeoutMs: taskAttemptTimeoutMs(
-              routing.workload.complexity,
-              taskPermission,
-              (PROVIDERS as readonly string[]).includes(providerName)
-                ? input.config.connections[providerName as ProviderName].timeoutMs
-                : 15 * 60_000,
-            ),
-            model,
-          },
-          { signal: input.signal },
-        );
+        const invocationRequest = {
+          role: "worker" as const,
+          prompt,
+          cwd: taskWorktree.path,
+          permission: taskPermission,
+          timeoutMs: taskAttemptTimeoutMs(
+            routing.workload.complexity,
+            taskPermission,
+            (PROVIDERS as readonly string[]).includes(providerName)
+              ? input.config.connections[providerName as ProviderName].timeoutMs
+              : 15 * 60_000,
+          ),
+          model,
+        };
+        const result = providerName === "ollama" && taskPermission === "workspace_write"
+          ? await runLocalToolLoop({
+              adapter: provider,
+              request: invocationRequest,
+              worktreePath: taskWorktree.path,
+              repositoryScope: input.task.repositoryScope ?? ["."],
+              authorize: (toolRequest) => this.enforceToolPolicy({
+                runId: input.runId,
+                taskId: input.task.id,
+                attemptId,
+                toolId: toolRequest.toolId,
+                actorRole: "worker",
+                stage: input.task.kind === "repair" ? "repair" : "implementation",
+                taskPermission,
+                assignedWorktree: taskWorktree.path,
+                repositoryRoot: input.worktrees.root,
+                cwd: taskWorktree.path,
+                targetPaths: toolRequest.targetPaths,
+                config: input.config,
+                request: sanitizeLocalToolRequest(toolRequest.arguments),
+              }),
+            })
+          : await provider.invoke(invocationRequest, { signal: input.signal });
         await input.worktrees.assertPrimaryClean?.(`after ${input.task.id} attempt ${attempt}`);
         const fallbackReason = routing.fallback
           ? routing.factors.join("; ")
@@ -644,7 +1006,7 @@ export class Orchestrator {
       }
 
       this.ledger.setTaskStatus(input.runId, input.task.id, "verifying");
-      const checks = await this.verifyTask(input, taskWorktree.path);
+      const checks = await this.verifyTask(input, taskWorktree.path, attemptId);
       // A cancel that landed during validator verification must not be overwritten
       // to passed/retry/failed, and the worktree must not be committed or merged.
       if (input.signal.aborted) return "cancelled";
@@ -655,11 +1017,35 @@ export class Orchestrator {
           return "passed";
         }
         try {
-          requireAllowedTool("git.commit", input.config);
+          this.enforceToolPolicy({
+            runId: input.runId,
+            taskId: input.task.id,
+            attemptId,
+            toolId: "git.commit",
+            stage: input.task.kind === "repair" ? "repair" : "implementation",
+            taskPermission,
+            assignedWorktree: taskWorktree.path,
+            repositoryRoot: input.worktrees.root,
+            cwd: taskWorktree.path,
+            config: input.config,
+            request: { message: `devharmonics: complete ${input.task.id}` },
+          });
           const committed = await input.worktrees.commitTask(taskWorktree.path, input.task.id);
           if (input.signal.aborted) return "cancelled";
           if (committed) {
-            requireAllowedTool("git.merge", input.config);
+            this.enforceToolPolicy({
+              runId: input.runId,
+              taskId: input.task.id,
+              attemptId,
+              toolId: "git.merge",
+              stage: "integration",
+              taskPermission,
+              assignedWorktree: input.worktrees.integrationPath,
+              repositoryRoot: input.worktrees.root,
+              cwd: input.worktrees.integrationPath,
+              config: input.config,
+              request: { branch: taskWorktree.branch },
+            });
             await input.worktrees.mergeTask(taskWorktree.branch, input.task.id);
           }
           // A cancel that landed during the commit/merge awaits must not overwrite
@@ -695,11 +1081,24 @@ export class Orchestrator {
   private async verifyTask(
     input: { runId: string; task: PlannedTask; config: DevHarmonicsConfig },
     worktreePath: string,
+    attemptId: number | null = null,
   ): Promise<CheckResult[]> {
     const results: CheckResult[] = [];
     for (const name of input.task.checks) {
-      requireAllowedTool(`validator:${name}`, input.config);
       const validator = input.config.repository.validators[name];
+      this.enforceToolPolicy({
+        runId: input.runId,
+        taskId: input.task.id,
+        attemptId,
+        toolId: `validator:${name}`,
+        stage: input.task.id === "__integration__" ? "integration" : "verification",
+        taskPermission: input.task.permission ?? "workspace_write",
+        assignedWorktree: worktreePath,
+        repositoryRoot: worktreePath,
+        cwd: worktreePath,
+        config: input.config,
+        request: validator ? { command: validator.command, args: validator.args } : { validator: name },
+      });
       const result = validator
         ? await runValidator(name, validator, worktreePath)
         : unknownValidator(name);
@@ -712,6 +1111,55 @@ export class Orchestrator {
       );
     }
     return results;
+  }
+
+  private enforceToolPolicy(input: {
+    runId: string;
+    taskId: string | null;
+    attemptId: number | null;
+    toolId: string;
+    stage: ToolStage;
+    taskPermission: "read_only" | "workspace_write";
+    assignedWorktree: string;
+    repositoryRoot: string;
+    cwd: string;
+    config: DevHarmonicsConfig;
+    request: Readonly<Record<string, unknown>>;
+    actorRole?: "worker" | "coordinator";
+    targetPaths?: readonly string[];
+  }) {
+    const planApproved = !input.config.runPolicy.requirePlanApproval
+      || Boolean(this.ledger.getRun(input.runId)?.events.some((event) => event.kind === "plan.approved"));
+    const result = evaluateToolRequest({
+      toolId: input.toolId,
+      actorRole: input.actorRole ?? "coordinator",
+      stage: input.stage,
+      taskPermission: input.taskPermission,
+      assignedWorktree: input.assignedWorktree,
+      repositoryRoot: input.repositoryRoot,
+      cwd: input.cwd,
+      targetPaths: input.targetPaths ?? [],
+      planApproved,
+      approval: null,
+    }, input.config);
+    this.ledger.recordToolPolicyReceipt({
+      runId: input.runId,
+      taskId: input.taskId,
+      attemptId: input.attemptId,
+      toolId: input.toolId,
+      actorRole: input.actorRole ?? "coordinator",
+      stage: input.stage,
+      sideEffect: result.tool.sideEffect,
+      outcome: result.outcome,
+      reason: result.reason,
+      request: input.request,
+      lockKeys: result.lockKeys,
+      approvalId: result.approvalId,
+    });
+    if (result.outcome !== "allow") {
+      throw new Error(`${input.toolId} ${result.outcome.replace("_", " ")}: ${result.reason}`);
+    }
+    return result;
   }
 
   private availableProviders(config: DevHarmonicsConfig, requested?: ProviderName[]): ProviderName[] {
@@ -859,6 +1307,13 @@ export function taskAttemptTimeoutMs(
   if (permission === "workspace_write") return null;
   const workloadLimitMs = complexity === "simple" ? 3 * 60_000 : complexity === "standard" ? 10 * 60_000 : 15 * 60_000;
   return Math.min(configuredTimeoutMs, workloadLimitMs);
+}
+
+function sanitizeLocalToolRequest(argumentsValue: Readonly<Record<string, unknown>>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(argumentsValue).map(([key, value]) => [
+    key,
+    key === "content" && typeof value === "string" ? `[${Buffer.byteLength(value, "utf8")} bytes of bounded file content]` : value,
+  ]));
 }
 
 export function parseFirstJsonObject(text: string): unknown {

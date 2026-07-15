@@ -132,7 +132,11 @@ ${input.checkSummary}
 Diagnostic task reports and handoffs:
 ${input.taskReports || "No task reports were recorded."}
 
-${reviewSubject} Return a concise verdict beginning with exactly READY or NOT READY, followed by evidence, material risks, and any required follow-up. Do not modify files.`;
+${reviewSubject} Return a concise verdict beginning with exactly READY or NOT READY. After the verdict, explain the evidence and material risks. Then include exactly one fenced JSON object with this shape:
+\`\`\`json
+{"findings":[{"id":"stable-short-id","severity":"low|medium|high|critical","location":"path:line or null","rationale":"evidence-backed reason","suggestedCorrection":"bounded correction","disposition":"open"}]}
+\`\`\`
+READY must use an empty findings array. NOT READY must include every blocking finding. Do not inherit implementor claims as fact, do not modify files, and do not emit another verdict after the first line.`;
 }
 
 export function localReviewerContextHeader(input: {

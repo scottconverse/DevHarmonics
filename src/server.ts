@@ -9,10 +9,11 @@ import { Ledger } from "./ledger.js";
 import { Orchestrator } from "./orchestrator.js";
 import { ModelCatalogCoordinator } from "./catalog.js";
 import { modelQualificationFingerprint } from "./model-fingerprint.js";
-import { QUALIFICATION_FINGERPRINT_FIXTURE, qualificationFixtureVersion, qualifyRuntimeModel, qualifyWithAdapter, type QualificationRole } from "./qualification.js";
+import { QUALIFICATION_FINGERPRINT_FIXTURE, hasCurrentOperationalQualification, hasCurrentRoleQualification, qualificationFixtureVersion, qualifyRuntimeModel, qualifyWithAdapter, trackedFamilyQualificationRole, type QualificationRole } from "./qualification.js";
 import { estimateQualificationCost, isExactOpenRouterModelId, OpenRouterService } from "./openrouter.js";
 import { PRODUCT_NAME, VERSION } from "./product.js";
 import { redactText } from "./redaction.js";
+import { createRunEvidenceExport, createRunReport } from "./reporter.js";
 import { observeLocalResources } from "./resources.js";
 import { manualModelSchema, productRegistrationSchema } from "./schemas.js";
 import type { ProviderName, RunRequest } from "./types.js";
@@ -286,7 +287,7 @@ async function route(
       return;
     }
     const body = await readJson(request) as { role?: QualificationRole; confirmPaidCost?: boolean };
-    const allowedRoles: QualificationRole[] = ["general", "architect", "worker", "reviewer", "analysis", "benchmark"];
+    const allowedRoles: QualificationRole[] = ["general", "architect", "worker", "reviewer", "analysis", "benchmark", "local_tools"];
     const role = body.role ?? (connection.transport === "local" ? "analysis" : "general");
     if (!allowedRoles.includes(role)) {
       sendJson(response, 400, { error: "Unknown qualification role" });
@@ -312,7 +313,7 @@ async function route(
       sendJson(response, 404, { error: "Model not found" });
       return;
     }
-    if (body.active && (!existing.qualified || existing.qualificationStale)) {
+    if (body.active && (!existing.qualified || existing.qualificationStale || !hasCurrentOperationalQualification(context.ledger, existing))) {
       const connection = context.ledger.listConnections().find((item) => item.id === existing.connectionId);
       if (connection?.provider === "openrouter" && !body.confirmPaidCost) {
         sendJson(response, 409, { error: "Paid qualification requires explicit cost confirmation", requiresCostConfirmation: true, estimatedCostUsd: estimateQualificationCost(existing) });
@@ -405,6 +406,30 @@ async function route(
   if (request.method === "GET" && evidenceMatch?.[1]) {
     const evidence = context.ledger.getRunEvidence(evidenceMatch[1]);
     sendJson(response, evidence ? 200 : 404, evidence ?? { error: "Run not found" });
+    return;
+  }
+
+  const reportMatch = url.pathname.match(/^\/api\/runs\/([a-f0-9-]+)\/report$/i);
+  if (request.method === "GET" && reportMatch?.[1]) {
+    const evidence = context.ledger.getRunEvidence(reportMatch[1]);
+    sendJson(response, evidence ? 200 : 404, evidence ? createRunReport(evidence) : { error: "Run not found" });
+    return;
+  }
+
+  const evidenceExportMatch = url.pathname.match(/^\/api\/runs\/([a-f0-9-]+)\/evidence\/export$/i);
+  if (request.method === "GET" && evidenceExportMatch?.[1]) {
+    const evidence = context.ledger.getRunEvidence(evidenceExportMatch[1]);
+    if (!evidence) {
+      sendJson(response, 404, { error: "Run not found" });
+      return;
+    }
+    response.writeHead(200, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Content-Disposition": `attachment; filename="devharmonics-${evidenceExportMatch[1]}-evidence.json"`,
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    });
+    response.end(`${JSON.stringify(createRunEvidenceExport(evidence), null, 2)}\n`);
     return;
   }
 
@@ -536,8 +561,8 @@ async function qualifyEligibleCandidates(context: { defaultProject: string; ledg
   for (const { model, role, benchmark } of candidates.values()) {
     const connection = context.ledger.listConnections().find((item) => item.id === model.connectionId);
     if (!connection?.available || connection.provider === "openrouter") continue;
-    const effectiveRole = connection.transport === "local" ? "analysis" : role;
-    if (!model.qualified || model.qualificationStale || !context.ledger.listModelQualifications(model.id).some((item) => item.passed && item.role === effectiveRole)) {
+    const effectiveRole = trackedFamilyQualificationRole(connection.transport, role);
+    if (!model.qualified || model.qualificationStale || !hasCurrentRoleQualification(context.ledger, model, effectiveRole, effectiveRole === "local_tools" ? "workspace_write" : "read_only")) {
       await qualifyAndRecord(context, model.id, effectiveRole);
     }
     if (benchmark && context.ledger.getModel(model.id)?.qualified && !context.ledger.listModelQualifications(model.id).some((item) => item.passed && item.role === "benchmark" && item.fingerprint === context.ledger.getModel(model.id)?.qualificationFingerprint)) {

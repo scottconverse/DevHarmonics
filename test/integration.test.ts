@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { createServer } from "node:http";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { initializeProject, loadConfig, devHarmonicsDirectory } from "../src/config.js";
@@ -41,7 +43,7 @@ async function createFakeCli(root: string, authenticated = true): Promise<string
   const script = path.join(root, "fake-cli.mjs");
   await writeFile(
     script,
-    `import { writeFileSync } from "node:fs";
+    `import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 let input = "";
 process.stdin.setEncoding("utf8");
 for await (const chunk of process.stdin) input += chunk;
@@ -63,16 +65,39 @@ if (process.argv.includes("--version")) {
   const observe = input.includes("This is an OBSERVE run");
   const task = observe
     ? {id:"observe",title:"Audit fixture",description:"Report the README heading",dependencies:[],preferredProvider:"codex",checks:["diff-check"],kind:"diagnostic",repositoryScope:["README.md"],permission:"read_only",risk:"low",capabilityNeeds:["analysis"],acceptanceCriteria:["Cite the README heading"],expectedArtifacts:["evidence report"]}
-    : {id:"one",title:"Create result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"]};
+    : input.includes("High-risk fixture")
+      ? {id:"one",title:"Create critical result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"],kind:"implementation",repositoryScope:["result.txt"],permission:"workspace_write",risk:"high",capabilityNeeds:["implementation"],acceptanceCriteria:["Create result.txt"],expectedArtifacts:["result.txt"]}
+      : input.includes("Fixer fixture")
+        ? {id:"one",title:"Create repairable result",description:"Create needs-fix.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"],kind:"implementation",repositoryScope:["needs-fix.txt","result.txt"],permission:"workspace_write",risk:"medium",capabilityNeeds:["implementation"],acceptanceCriteria:["Create a reviewable result"],expectedArtifacts:["result.txt"]}
+      : input.includes("Shortcut fixture")
+        ? {id:"one",title:"Add a shortcut test",description:"Add a skipped test",dependencies:[],preferredProvider:"codex",checks:["diff-check"],kind:"implementation",repositoryScope:["test/shortcut.test.ts"],permission:"workspace_write",risk:"medium",capabilityNeeds:["implementation","testing"],acceptanceCriteria:["Add verification"],expectedArtifacts:["test/shortcut.test.ts"]}
+      : input.includes("Local orchestrator fixture")
+        ? {id:"one",title:"Create local result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"],kind:"implementation",repositoryScope:["result.txt"],permission:"workspace_write",risk:"medium",capabilityNeeds:["implementation"],acceptanceCriteria:["Create result.txt"],expectedArtifacts:["result.txt"]}
+      : {id:"one",title:"Create result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"]};
   const plan = {summary:"fixture plan",recommendedConcurrency:1,tasks:[task]};
   console.log(JSON.stringify({result:JSON.stringify(plan)}));
 } else if (input.includes("You are the final reviewer")) {
-  const review = input.includes("Audit fixture") && !input.includes("README.md:1 contains the heading Fixture") ? "NOT READY\\n\\nDiagnostic report was not supplied." : "READY\\n\\nFixture integration is valid.";
+  const review = input.includes("Audit fixture") && !input.includes("README.md:1 contains the heading Fixture")
+    ? "NOT READY\\n\\nDiagnostic report was not supplied."
+    : input.includes("Fixer fixture") && existsSync("needs-fix.txt")
+      ? "NOT READY\\n\\nA retained defect marker remains.\\n" + JSON.stringify({findings:[{id:"remove-defect-marker",severity:"high",location:"needs-fix.txt:1",rationale:"The defect marker remains in the integration set.",suggestedCorrection:"Remove needs-fix.txt and create the corrected result.txt.",disposition:"open"}]})
+      : "READY\\n\\nFixture integration is valid.";
   if (process.argv.includes("--json")) console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:review}}));
   else if (process.argv.includes("--output-format")) console.log(JSON.stringify({result:review}));
   else console.log(review);
 } else if (input.includes("diagnostic investigator")) {
   console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"README.md:1 contains the heading Fixture. This directly satisfies the assigned diagnostic criterion, and the read-only inspection identified no contradictory heading elsewhere. No files were changed."}}));
+} else if (input.includes("Resolve review findings")) {
+  if (existsSync("needs-fix.txt")) unlinkSync("needs-fix.txt");
+  writeFileSync("result.txt", "corrected by independent fixer\\n", "utf8");
+  console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"Removed needs-fix.txt and created corrected result.txt"}}));
+} else if (input.includes("Fixer fixture")) {
+  writeFileSync("needs-fix.txt", "defect marker\\n", "utf8");
+  console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"Created needs-fix.txt for review"}}));
+} else if (input.includes("Shortcut fixture")) {
+  mkdirSync("test", {recursive:true});
+  writeFileSync("test/shortcut.test.ts", "test.skip('important behavior', () => {});\\n", "utf8");
+  console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"Added shortcut test"}}));
 } else {
   writeFileSync("result.txt", "created by worker\\n", "utf8");
   console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"Created result.txt"}}));
@@ -90,6 +115,56 @@ if (process.argv.includes("--version")) {
   await writeFile(wrapper, `#!/bin/sh\n"${process.execPath}" "${script}" "$@"\n`, "utf8");
   await chmod(wrapper, 0o755);
   return wrapper;
+}
+
+async function startFakeOllama(): Promise<{ baseUrl: string; close: () => Promise<void> }> {
+  const beforeHash = createHash("sha256").update("DEVHARMONICS_LOCAL_TOOL_BEFORE\n").digest("hex");
+  const server = createServer(async (request, response) => {
+    const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    response.setHeader("content-type", "application/json");
+    if (url.pathname === "/api/version") {
+      response.end(JSON.stringify({ version: "fixture-1.0" }));
+      return;
+    }
+    if (url.pathname === "/api/tags") {
+      response.end(JSON.stringify({ models: [{ name: "fixture-writer:14b", model: "fixture-writer:14b", size: 1_000, digest: "fixture" }] }));
+      return;
+    }
+    if (url.pathname === "/api/show") {
+      response.end(JSON.stringify({ capabilities: ["completion"], details: { parameter_size: "14B", family: "fixture" } }));
+      return;
+    }
+    if (url.pathname === "/api/chat") {
+      let raw = "";
+      for await (const chunk of request) raw += chunk;
+      const body = JSON.parse(raw) as { messages?: Array<{ content?: string }> };
+      const prompt = body.messages?.[0]?.content ?? "";
+      const toolResultCount = (prompt.match(/TOOL RESULTS FOR STEP/g) ?? []).length;
+      let content: string;
+      if (prompt.includes("bounded local-tool qualification")) {
+        content = toolResultCount === 0
+          ? JSON.stringify({ toolRequests: [{ id: "qualification-read", toolId: "file.read", arguments: { path: "fixture.txt" } }] })
+          : toolResultCount === 1
+            ? JSON.stringify({ toolRequests: [{ id: "qualification-patch", toolId: "file.patch", arguments: { path: "fixture.txt", expectedSha256: beforeHash, content: "DEVHARMONICS_LOCAL_TOOL_AFTER\n" } }] })
+            : JSON.stringify({ final: "Bounded qualification completed." });
+      } else {
+        content = toolResultCount === 0
+          ? JSON.stringify({ toolRequests: [{ id: "result-patch", toolId: "file.patch", arguments: { path: "result.txt", expectedSha256: null, content: "created by bounded local tools\n" } }] })
+          : JSON.stringify({ final: "Created result.txt through the approved file.patch tool." });
+      }
+      response.end(JSON.stringify({ message: { content }, prompt_eval_count: 20, eval_count: 10 }));
+      return;
+    }
+    response.statusCode = 404;
+    response.end(JSON.stringify({ error: "not found" }));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Fake Ollama did not bind a TCP port");
+  return { baseUrl: `http://127.0.0.1:${address.port}`, close: () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())) };
 }
 
 async function createSlowArchitectCli(root: string): Promise<string> {
@@ -288,7 +363,21 @@ test("orchestrator completes a verified run through fake subscription CLIs", asy
     assert.equal(run?.tasks[0]?.checks[0]?.passed, true);
     assert.equal(run?.tasks.find((task) => task.id === "__integration__")?.status, "passed");
     assert.match(run?.finalReview ?? "", /^READY/);
+    const reviews = ledger.listReviewReceipts(runId);
+    assert.equal(reviews.length, 1);
+    assert.equal(reviews[0]!.verdict, "READY");
+    assert.notEqual(reviews[0]!.provider, "codex", "the reviewer should be independent from the implementor when another provider is available");
+    assert.equal(reviews[0]!.integrationSha256.length, 64);
+    assert.equal(reviews[0]!.invalidatedAt, null);
     assert.ok(run?.events.some((event) => event.message === "Scheduler using concurrency 37"));
+    const toolReceipts = ledger.listToolPolicyReceipts(runId);
+    assert.deepEqual(
+      toolReceipts.map((receipt) => `${receipt.toolId}:${receipt.outcome}`),
+      ["validator:diff-check:allow", "git.commit:allow", "git.merge:allow", "validator:diff-check:allow"],
+    );
+    assert.ok(toolReceipts.every((receipt) => receipt.actorRole === "coordinator"));
+    assert.ok(toolReceipts.every((receipt) => receipt.lockKeys.length === 1));
+    assert.ok(toolReceipts.filter((receipt) => receipt.toolId.startsWith("git.")).every((receipt) => receipt.attemptId !== null));
     const receiptDatabase = new DatabaseSync(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
     try {
       const attempt = receiptDatabase
@@ -321,6 +410,143 @@ test("orchestrator completes a verified run through fake subscription CLIs", asy
     );
   } finally {
     ledger.close();
+    if (runId) {
+      const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
+      await runProcess({ command: "git", args: ["worktree", "remove", "--force", path.join(runRoot, "tasks", "one")], cwd: project, timeoutMs: 30_000 });
+      await runProcess({ command: "git", args: ["worktree", "remove", "--force", path.join(runRoot, "integration")], cwd: project, timeoutMs: 30_000 });
+      await rm(runRoot, { recursive: true, force: true });
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("high-risk orchestration requires two independent provider reviews", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-review-quorum-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  config.routing.reviewer.preferredTier = "standard";
+  for (const provider of ["codex", "claude", "gemini"] as const) {
+    config.connections[provider].command = command;
+    config.connections[provider].timeoutMs = 30_000;
+  }
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  const ledger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  try {
+    const runId = await new Orchestrator(ledger).run({ goal: "High-risk fixture", projectPath: project, agents: 1 });
+    const run = ledger.getRun(runId);
+    assert.equal(run?.status, "ready", run?.finalReview ?? "missing final review");
+    const reviews = ledger.listReviewReceipts(runId);
+    assert.equal(reviews.length, 2);
+    assert.equal(new Set(reviews.map((review) => review.provider)).size, 2);
+    assert.ok(reviews.every((review) => review.provider !== "codex"), "both reviewers must be independent from the implementor provider");
+    assert.ok(reviews.every((review) => review.verdict === "READY"));
+    assert.ok(run?.events.some((event) => event.kind === "review.quorum_passed"));
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("review fixer changes evidence, invalidates the rejected receipt, and requires re-review", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-review-fixer-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  for (const provider of ["codex", "claude", "gemini"] as const) {
+    config.connections[provider].command = command;
+    config.connections[provider].timeoutMs = 30_000;
+  }
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  const ledger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  try {
+    const runId = await new Orchestrator(ledger).run({ goal: "Fixer fixture", projectPath: project, agents: 1 });
+    const run = ledger.getRun(runId);
+    assert.equal(run?.status, "ready", run?.finalReview ?? "missing final review");
+    const reviews = ledger.listReviewReceipts(runId);
+    assert.equal(reviews.length, 2);
+    assert.equal(reviews[0]!.verdict, "NOT_READY");
+    assert.ok(reviews[0]!.invalidatedAt, "the rejected review must remain retained but invalidated");
+    assert.equal(reviews[1]!.verdict, "READY");
+    assert.equal(reviews[1]!.invalidatedAt, null);
+    assert.notEqual(reviews[0]!.integrationSha256, reviews[1]!.integrationSha256);
+    assert.equal(run?.tasks.find((task) => task.id === "__review_fix_1")?.status, "passed");
+    assert.ok(run?.events.some((event) => event.kind === "review.invalidated"));
+    assert.ok(run?.events.some((event) => event.kind === "fixer.completed"));
+    assert.ok(run?.events.some((event) => event.kind === "review.quorum_passed"));
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("green validators cannot hide a verification-integrity shortcut", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-integrity-shortcut-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  const ledger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  try {
+    const runId = await new Orchestrator(ledger).run({ goal: "Shortcut fixture", projectPath: project, agents: 1 });
+    const run = ledger.getRun(runId);
+    assert.equal(run?.status, "not_ready");
+    const integration = run?.tasks.find((task) => task.id === "__integration__");
+    assert.equal(integration?.checks.find((check) => check.name === "diff-check")?.passed, true);
+    const integrity = integration?.checks.find((check) => check.name === "verification-integrity");
+    assert.equal(integrity?.passed, false);
+    assert.match(integrity?.stdout ?? "", /test-skipped/);
+    assert.match(run?.finalReview ?? "", /^READY/, "the reviewer may pass while the independent integrity gate still blocks readiness");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("qualified Ollama implementor completes a bounded receipted local-tool change", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-local-tool-orchestration-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  const ollama = await startFakeOllama();
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  config.localRuntimes.ollama = [{ id: "system", displayName: "Fixture Ollama", baseUrl: ollama.baseUrl, enabled: true }];
+  config.routing.worker.modelId = "ollama:fixture-writer:14b";
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  const ledger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  let runId = "";
+  try {
+    runId = await new Orchestrator(ledger).run({ goal: "Local orchestrator fixture", projectPath: project, agents: 1 });
+    const run = ledger.getRun(runId);
+    assert.equal(run?.status, "ready", run?.finalReview ?? "missing final review");
+    assert.equal(run?.tasks.find((task) => task.id === "one")?.provider, "ollama");
+    const localQualifications = ledger.listModelQualifications("ollama:fixture-writer:14b");
+    assert.ok(localQualifications.some((qualification) => qualification.role === "local_tools" && qualification.passed));
+    const receipts = ledger.listToolPolicyReceipts(runId);
+    assert.ok(receipts.some((receipt) => receipt.toolId === "file.patch" && receipt.actorRole === "worker" && receipt.outcome === "allow"));
+    assert.ok(receipts.some((receipt) => receipt.toolId === "git.commit" && receipt.outcome === "allow"));
+    const integrationRoot = path.join(os.tmpdir(), "devharmonics", runId, "integration");
+    assert.equal((await readFile(path.join(integrationRoot, "result.txt"), "utf8")).replace(/\r\n/g, "\n"), "created by bounded local tools\n");
+  } finally {
+    ledger.close();
+    await ollama.close();
     if (runId) {
       const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
       await runProcess({ command: "git", args: ["worktree", "remove", "--force", path.join(runRoot, "tasks", "one")], cwd: project, timeoutMs: 30_000 });
@@ -496,6 +722,26 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
     assert.ok(longRun?.goalSummary);
     assert.ok(longRun.goalSummary.length <= 180, longRun.goalSummary);
     assert.match(longRun.goalSummary, /…$/);
+    const reportResponse = await fetch(`${dashboard.url}/api/runs/${runId}/report`);
+    assert.equal(reportResponse.status, 200);
+    const reportValue = await reportResponse.json() as { runId: string; verdict: string; evidenceHash: string };
+    assert.equal(reportValue.runId, runId);
+    assert.equal(reportValue.verdict, "INCONCLUSIVE");
+    assert.equal(reportValue.evidenceHash.length, 64);
+    const exportResponse = await fetch(`${dashboard.url}/api/runs/${runId}/evidence/export`);
+    assert.equal(exportResponse.status, 200);
+    assert.match(exportResponse.headers.get("content-disposition") ?? "", new RegExp(`attachment; filename="devharmonics-${runId}-evidence\\.json"`));
+    const exportValue = await exportResponse.json() as { version: number; evidenceVersion: number; integritySha256: string; report: { runId: string } };
+    assert.equal(exportValue.version, 1);
+    assert.equal(exportValue.evidenceVersion, 3);
+    assert.equal(exportValue.integritySha256, reportValue.evidenceHash);
+    assert.equal(exportValue.report.runId, runId);
+    const reporterMutation = await fetch(`${dashboard.url}/api/runs/${runId}/report`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(reporterMutation.status, 404, "the read-only reporter must expose no mutation route");
     const replay = await fetch(`${dashboard.url}/api/runs/${runId}/events?after=${firstCursor}&limit=1`);
     assert.equal(replay.status, 200);
     const replayValue = (await replay.json()) as {
@@ -542,6 +788,20 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
     assert.doesNotMatch(appScript, /setInterval\(refreshRuns/);
     assert.match(appScript, /autonomy:\s*\$\("#run-autonomy"\)\.value/);
     assert.match(appScript, /window\.scrollTo\(\{\s*top:\s*0/);
+    assert.match(appScript, /\/api\/runs\/\$\{runId\}\/report/);
+    assert.match(appScript, /\/api\/runs\/\$\{runId\}\/evidence\/export/);
+    assert.match(appScript, /data-qualify-benchmark/);
+    assert.match(appScript, /model\.qualified\s*&&\s*!model\.qualificationStale\s*&&\s*!model\.excluded/);
+    assert.match(appScript, /Specialist scheduling requires the benchmark pass/);
+    assert.match(appScript, /function isModelSchedulable\(model\)/);
+    assert.match(appScript, /function hasCurrentOperationalQualification\(model\)/);
+    assert.match(appScript, /function hasCurrentQualificationForUiRole\(model, role\)/);
+    assert.match(appScript, /hasCurrentQualificationForUiRole\(model, role\)/);
+    assert.match(appScript, /not currently role-qualified/);
+    assert.match(appScript, /isModelSchedulable\(qualifiedModel\)\s*\?\s*"It is active and schedulable\."/);
+    assert.match(appScript, /Role-qualified models/);
+    assert.match(appScript, /Qualified only for passing roles; failed roles remain unschedulable/);
+    assert.match(appScript, /No current role qualification; not schedulable/);
 
     const appStyles = await fetch(`${dashboard.url}/app.css?v=0.4.0`).then((response) => response.text());
     assert.match(appStyles, /@media \(max-width:\s*1200px\)[\s\S]*?\.board\s*\{\s*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);

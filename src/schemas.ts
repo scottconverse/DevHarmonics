@@ -199,6 +199,17 @@ export const devHarmonicsConfigSchema = z.object({
     allowPaidApi: z.boolean(),
     allowExternalWrites: z.boolean(),
   }),
+  reviewPolicy: z.object({
+    reviewerCountByRisk: z.object({ low: z.number().int().min(1).max(8), medium: z.number().int().min(1).max(8), high: z.number().int().min(1).max(8) }),
+    minimumDistinctProvidersByRisk: z.object({ low: z.number().int().min(1).max(4), medium: z.number().int().min(1).max(4), high: z.number().int().min(1).max(4) }),
+    requireImplementorIndependenceByRisk: z.object({ low: z.boolean(), medium: z.boolean(), high: z.boolean() }),
+    maxFixRounds: z.number().int().min(0).max(5),
+  }).default({
+    reviewerCountByRisk: { low: 1, medium: 1, high: 2 },
+    minimumDistinctProvidersByRisk: { low: 1, medium: 1, high: 2 },
+    requireImplementorIndependenceByRisk: { low: false, medium: true, high: true },
+    maxFixRounds: 2,
+  }),
   routing: z.object({
     mode: z.enum(["adaptive", "manual"]).default("adaptive"),
     architect: roleRoutingSchema(),

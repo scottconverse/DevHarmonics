@@ -75,6 +75,15 @@ button { cursor: pointer; }
 .lifecycle { align-self: start; border: 1px solid var(--border); border-radius: 999px; padding: 5px 8px; color: var(--muted); font-size: 10px; font-weight: 800; text-transform: uppercase; }
 .lifecycle.qualified, .lifecycle.active { color: var(--lime); border-color: #3d5428; }
 .evidence-panel { margin-top: 16px; padding: 20px; }
+.evidence-actions { display: flex; gap: 9px; flex-wrap: wrap; }
+.evidence-verdict { margin-top: 16px; padding: 20px; display: grid; grid-template-columns: 1fr auto; gap: 12px 20px; align-items: start; }
+.evidence-verdict h3 { margin: 5px 0; font-size: 22px; }
+.evidence-verdict p { margin: 0; color: var(--muted); line-height: 1.55; }
+.evidence-verdict ul, .evidence-verdict .report-consistent { grid-column: 1 / -1; margin: 0; padding-top: 12px; border-top: 1px solid var(--border); }
+.evidence-verdict ul { padding-left: 20px; color: var(--amber); }
+.report-ready { background: rgba(60, 189, 135, .14); color: var(--green); }
+.report-not_ready { background: rgba(238, 95, 91, .14); color: var(--red); }
+.report-inconclusive { background: rgba(230, 176, 75, .14); color: var(--amber); }
 .evidence-panel code { color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
 .evidence-list { display: grid; gap: 8px; }
 .evidence-list article { display: grid; grid-template-columns: 1fr auto; gap: 5px 12px; padding: 13px; border: 1px solid var(--border); border-radius: 10px; background: #0d1014; }

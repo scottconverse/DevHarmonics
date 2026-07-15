@@ -231,11 +231,14 @@
         </section>
 
         <section id="evidence-view" class="workspace-view hidden" aria-labelledby="evidence-title">
-          <div class="view-heading"><div><p class="eyebrow">READ-ONLY REPORTER</p><h2 id="evidence-title">Run evidence</h2></div><button id="refresh-evidence" class="secondary" type="button">Refresh evidence</button></div>
+          <div class="view-heading"><div><p class="eyebrow">READ-ONLY REPORTER</p><h2 id="evidence-title">Run evidence</h2></div><div class="evidence-actions"><button id="refresh-evidence" class="secondary" type="button">Refresh evidence</button><button id="export-evidence" class="primary" type="button">Export JSON</button></div></div>
           <div id="evidence-empty" class="panel empty-state">Select a run to inspect its immutable execution receipts.</div>
           <div id="evidence-content" class="hidden">
             <div id="evidence-metrics" class="metrics"></div>
+            <section id="evidence-verdict" class="panel evidence-verdict" aria-live="polite"></section>
+            <section class="panel evidence-panel"><div class="panel-heading"><h3>Independent review receipts</h3><span id="evidence-review-count" class="muted"></span></div><div id="evidence-reviews" class="evidence-list"></div></section>
             <section class="panel evidence-panel"><div class="panel-heading"><h3>Integrity and attempts</h3><code id="evidence-hash"></code></div><div id="evidence-attempts" class="evidence-list"></div></section>
+            <section class="panel evidence-panel"><div class="panel-heading"><h3>Tool policy receipts</h3><span id="evidence-tool-count" class="muted"></span></div><div id="evidence-tools" class="evidence-list"></div></section>
           </div>
         </section>
       </main>

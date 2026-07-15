@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { lstat, mkdir, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -11,24 +12,44 @@ export class WorkspaceIsolationError extends Error {
   }
 }
 
+export interface WorktreePreflight {
+  repositoryRoot: string;
+  baseCommit: string;
+}
+
+export interface WorktreeStatus extends WorktreePreflight {
+  headCommit: string;
+  branch: string;
+  path: string;
+}
+
 export class WorktreeManager {
   readonly root: string;
   readonly integrationPath: string;
   readonly integrationBranch: string;
   private mergeQueue: Promise<void> = Promise.resolve();
-  private baseCommit: string | null = null;
+  private baseCommitValue: string | null = null;
+  private repositoryRootValue: string | null = null;
+  private initialized = false;
 
   constructor(
     private readonly projectPath: string,
     private readonly runId: string,
+    workspaceKey?: string,
   ) {
     const shortId = runId.slice(0, 8);
-    this.root = path.join(os.tmpdir(), "devharmonics", runId);
+    const workspaceSuffix = workspaceKey ? safeWorkspaceKey(workspaceKey) : null;
+    this.root = path.join(os.tmpdir(), "devharmonics", runId, ...(workspaceSuffix ? [workspaceSuffix] : []));
     this.integrationPath = path.join(this.root, "integration");
-    this.integrationBranch = `devharmonics/${shortId}`;
+    this.integrationBranch = `devharmonics/${shortId}${workspaceSuffix ? `-${workspaceSuffix}` : ""}`;
   }
 
-  async initialize(): Promise<void> {
+  get baseCommit(): string {
+    if (!this.baseCommitValue) throw new Error("Integration worktree has not been initialized or preflighted");
+    return this.baseCommitValue;
+  }
+
+  async preflight(): Promise<WorktreePreflight> {
     const inside = await this.git(this.projectPath, ["rev-parse", "--is-inside-work-tree"]);
     if (inside.exitCode !== 0 || inside.stdout.trim() !== "true") {
       throw new Error("DevHarmonics requires the target project to be a Git repository");
@@ -41,7 +62,23 @@ export class WorktreeManager {
     if (base.exitCode !== 0 || !base.stdout.trim()) {
       throw new Error(`Could not resolve the run base commit: ${base.stderr.trim() || "git rev-parse failed"}`);
     }
-    this.baseCommit = base.stdout.trim();
+    const root = await this.git(this.projectPath, ["rev-parse", "--show-toplevel"]);
+    if (root.exitCode !== 0 || !root.stdout.trim()) {
+      throw new Error(`Could not resolve the repository root: ${root.stderr.trim() || "git rev-parse failed"}`);
+    }
+    const result = {
+      repositoryRoot: path.resolve(root.stdout.trim()),
+      baseCommit: base.stdout.trim(),
+    };
+    this.baseCommitValue = result.baseCommit;
+    this.repositoryRootValue = result.repositoryRoot;
+    return result;
+  }
+
+  async initialize(preflight?: WorktreePreflight): Promise<void> {
+    const verified = preflight ?? await this.preflight();
+    this.baseCommitValue = verified.baseCommit;
+    this.repositoryRootValue = verified.repositoryRoot;
     await mkdir(this.root, { recursive: true });
     const created = await this.git(this.projectPath, [
       "worktree",
@@ -49,9 +86,10 @@ export class WorktreeManager {
       "-b",
       this.integrationBranch,
       this.integrationPath,
-      "HEAD",
+      verified.baseCommit,
     ]);
     if (created.exitCode !== 0) throw new Error(`Could not create integration worktree: ${created.stderr}`);
+    this.initialized = true;
     await this.linkSharedDependencies(this.integrationPath);
   }
 
@@ -73,8 +111,8 @@ export class WorktreeManager {
   }
 
   async integrationDiffFiles(): Promise<DiffFileContext[]> {
-    if (!this.baseCommit) throw new Error("Integration worktree has not been initialized");
-    const range = `${this.baseCommit}..HEAD`;
+    if (!this.baseCommitValue || !this.initialized) throw new Error("Integration worktree has not been initialized");
+    const range = `${this.baseCommitValue}..HEAD`;
     const names = await this.git(this.integrationPath, ["diff", "--name-only", range]);
     if (names.exitCode !== 0) {
       throw new Error(`Could not list integration changes: ${names.stderr.trim() || "git diff failed"}`);
@@ -89,6 +127,26 @@ export class WorktreeManager {
       contexts.push({ path: file, diff: diff.stdout });
     }
     return contexts;
+  }
+
+  async resolveIntegrationHead(): Promise<string> {
+    if (!this.initialized) throw new Error("Integration worktree has not been initialized");
+    const head = await this.git(this.integrationPath, ["rev-parse", "HEAD"]);
+    if (head.exitCode !== 0 || !head.stdout.trim()) {
+      throw new Error(`Could not resolve the integration HEAD: ${head.stderr.trim() || "git rev-parse failed"}`);
+    }
+    return head.stdout.trim();
+  }
+
+  async status(): Promise<WorktreeStatus> {
+    if (!this.repositoryRootValue) throw new Error("Integration worktree has not been initialized or preflighted");
+    return {
+      repositoryRoot: this.repositoryRootValue,
+      baseCommit: this.baseCommit,
+      headCommit: await this.resolveIntegrationHead(),
+      branch: this.integrationBranch,
+      path: this.integrationPath,
+    };
   }
 
   async createTask(taskId: string): Promise<{ path: string; branch: string }> {
@@ -168,4 +226,10 @@ export class WorktreeManager {
       await symlink(source, destination, process.platform === "win32" ? "junction" : "dir");
     }
   }
+}
+
+function safeWorkspaceKey(value: string): string {
+  const slug = value.trim().replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "repository";
+  const digest = createHash("sha256").update(value).digest("hex").slice(0, 8);
+  return `${slug}-${digest}`;
 }

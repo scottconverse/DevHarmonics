@@ -200,6 +200,12 @@ textarea { resize: vertical; min-height: 122px; line-height: 1.55; }
 .repository-impact span { color: var(--muted); font-size: 11px; margin-top: 6px; line-height: 1.45; }
 .repository-impact.affected { border-color: #59663e; }
 .repository-impact.excluded { opacity: .72; }
+.integration-set-panel { margin-bottom: 16px; }
+.integration-set-repositories { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
+.integration-repository-card { min-width: 0; padding: 13px; border: 1px solid var(--border); border-radius: 10px; background: #0d1014; }
+.integration-repository-card header { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
+.integration-repository-card code { display: block; margin-top: 7px; overflow-wrap: anywhere; color: var(--muted); }
+.integration-commit-range { font-size: 11px; }
 .plan-task { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 18px; padding: 15px; border: 1px solid var(--border); border-radius: 11px; background: #0d1014; }
 .plan-task h3 { margin: 0; font-size: 14px; }
 .plan-task p { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }

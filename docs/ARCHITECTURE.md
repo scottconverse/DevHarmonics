@@ -38,10 +38,11 @@ Read-only architect -> typed task DAG -> dependency scheduler
 - `src/catalog.ts`, `src/qualification.ts`, and `src/model-fingerprint.ts`: discovery freshness, exact-model invocation qualification, and stale-evidence detection.
 - `src/model-intelligence.ts`, `src/model-performance.ts`, and `src/routing.ts`: task complexity, model tiers, empirical observations with uncertainty gates, replayable score decomposition, adaptive selection, health exclusions, and fallback decisions.
 - `src/ollama.ts` and `src/openrouter.ts`: qualified read-only local inference and governed opt-in API inference.
-- `src/worktrees.ts`: integration branch and isolated task worktree lifecycle.
+- `src/worktrees.ts` and `src/integration-sets.ts`: repository-local integration/task worktrees plus exact multi-repository integration-set coordination.
 - `src/validators.ts`: execution of user-configured validator allowlists.
 - `src/repository-intelligence.ts`: non-mutating local Git identity, branch, remote, dirty-state, and compatibility inspection.
-- `src/ledger.ts`: SQLite-backed Workbench discussions, objective drafts, immutable plan revisions, approved run linkage, and run/task/attempt/check/event receipts.
+- `src/ledger.ts`: SQLite-backed Workbench discussions, objective drafts, immutable plan revisions, approved run linkage, exact integration-set state, and run/task/attempt/check/event receipts.
+- `src/reporter.ts`: immutable evidence export, including exact per-repository integration-set commits and status.
 - `src/redaction.ts`: centralized secret scrubbing before data crosses the ledger or UI-error boundary.
 - `src/ui/`: dependency-free browser interface.
 
@@ -71,7 +72,11 @@ Workbench is a separate read-only consultation plane. A durable session contains
 
 The product registry preserves repository boundaries rather than treating a product as a monorepo. Each repository can retain a local path, functional role, expected branch, owners, dependency repository IDs, validator definitions, and governance sources/rules. A separate inspection projection records the observed branch, HEAD, origin, dirty flag, compatibility issues, and check time. Inspection uses only read-only Git and filesystem operations; registration and rescan do not create a run, checkout a branch, fetch, reset, stash, or modify files. Remote-only observations migrate forward with neutral defaults until a local checkout is explicitly attached.
 
-An objective may reference one product and an explicit set of its repositories. Before the architect invocation, the orchestrator assembles read-only registry context for the selected repositories, their dependencies and dependents, and relevant umbrella, shared-platform, documentation, installer, and release-truth repositories. The validated plan records each considered repository as affected or excluded with rationale, scopes every task to affected repository IDs, and requires explicit integration conditions whenever several repositories are affected. This analysis remains a pre-run control-plane operation. For a product-scoped objective, current execution accepts only one affected, compatible local repository whose path matches the objective project folder; multi-repository start attempts fail closed until DH-720 can produce exact per-repository integration sets.
+An objective may reference one product and an explicit set of its repositories. Before the architect invocation, the orchestrator assembles read-only registry context for the selected repositories, their dependencies and dependents, and relevant umbrella, shared-platform, documentation, installer, and release-truth repositories. The validated plan records each considered repository as affected or excluded with rationale, scopes every task to affected repository IDs, and requires explicit integration conditions whenever several repositories are affected. This analysis remains a pre-run control-plane operation.
+
+The first DH-720 execution slice accepts a multi-repository plan only when every affected repository has a compatible local checkout, every task targets exactly one affected repository, and integration conditions are explicit. `IntegrationSetManager` preflights the Git roots, rejects duplicate roots, and creates a separate `WorktreeManager` per repository. Each manager pins a base commit, creates a repository-specific integration branch/worktree, creates task branches/worktrees, and serializes merges targeting that repository; schedulable tasks targeting different repositories can run concurrently. Each repository loads its own constitution and validator map. Repository-local validators and verification-integrity checks run before an aggregate context-only review receives repository-prefixed diff chunks. Ledger schema 21 retains the exact base and integration HEAD commits, branch/worktree paths, status, errors, and integration conditions; the API, evidence export, and run UI project that same record. No operation checks out or merges into a registered primary checkout.
+
+This slice deliberately fails closed outside that topology. It has no automatic multi-repository fixer/re-review, and it supports one aggregate reviewer only; a policy requiring a quorum or more than one provider leaves the run `NOT READY`. It also does not reconstruct interrupted integration sets, clean worktrees automatically, push branches, open pull requests, or allow one task to mutate several repositories.
 
 The ledger uses ordered, transactional schema migrations tracked by SQLite's `user_version` and a `schema_migrations` table. Before upgrading an existing schema, DevHarmonics creates a consistent SQLite backup beside the ledger using the filename pattern `devharmonics.db.backup-v<from>-to-v<to>-<timestamp>-<id>.sqlite`. It validates the required table shape, SQLite integrity, foreign keys, and migration history before accepting the upgraded database. Failed migrations roll back and retain the pre-migration backup; databases from newer DevHarmonics schema versions are rejected instead of being modified.
 
@@ -103,6 +108,7 @@ Prompts, provider output, validator stdout/stderr, errors, reviews, event messag
 - No remote DevHarmonics service
 - No automatic merge into the user's checked-out branch
 - No automatic conflict repair
+- Multi-repository execution does not yet provide automatic fixing or review quorums greater than one, restart reconstruction, cleanup, pushes/pull requests, or one task spanning several repositories
 - Local Ollama models cannot inspect or write arbitrary repository paths; reviewers receive orchestrator-supplied context, while qualified implementors receive only scoped read/search/hash-checked-patch tools inside the assigned worktree
 - Large CPU-only local reviews can be materially slower than subscription reviewers, so capacity-aware background scheduling and stronger local-model profiles remain follow-up work
 - No Agent Client Protocol transport yet

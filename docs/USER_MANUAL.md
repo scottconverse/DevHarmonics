@@ -114,10 +114,12 @@ Register CivicSuite repositories independently. Use roles such as **Umbrella**, 
 6. Enable the authenticated providers you want in the worker pool.
 7. Add acceptance criteria, constraints, risk, priority, an optional deadline, and any policy notes.
 8. Click **Build plan preview**. This saves a durable objective draft but starts no run.
-9. Review every proposed task and dependency plus the affected/excluded repository impact map, repository rationale, integration conditions, permissions, checks, model assignments, and capacity estimate.
+9. Review every proposed task and dependency plus the affected/excluded repository impact map, repository rationale, integration conditions, permissions, checks, model assignments, and capacity estimate. For a multi-repository run, every task must name exactly one affected repository.
 10. Enter requested changes and click **Revise plan**, or click **Approve revision & start**. DevHarmonics retains every revision and its rationale, and execution uses the exact revision you approved without asking the architect to silently produce another plan.
 
-Multi-repository planning is available before multi-repository execution. If more than one repository is affected, the preview explains that execution is blocked until DH-720 provides exact per-repository worktrees, commits, and integration-set validation. This is an intentional safety gate: revise the objective to one affected local repository for a current executable run, or retain the multi-repository plan for later execution.
+Multi-repository execution is available as the first DH-720 vertical slice. Every affected repository must have a compatible registered local checkout, every task must target exactly one affected repository, and the plan must retain explicit integration conditions. DevHarmonics then creates a separate integration branch/worktree per repository at an exact base commit, gives each task a repository-local branch/worktree, and runs repository-local validators. Work in different repositories can proceed concurrently; merges into the same repository are serialized. Final review receives aggregate, repository-prefixed diff evidence without write access. The run's **Exact integration set** card and evidence export retain every repository's base and integration HEAD commit, branch, worktree, status, error, and the integration conditions. The primary checkouts remain untouched.
+
+This first slice does not yet let one task mutate several repositories, reconstruct an interrupted integration set after restart, clean up retained worktrees automatically, push branches, open pull requests, or automatically fix and re-review a failed multi-repository result. It supports one aggregate reviewer; when project policy requires more than one reviewer or provider, the run remains **NOT READY** rather than weakening that policy.
 
 ### Explore in Workbench first
 
@@ -146,6 +148,8 @@ The agent count is not artificially capped. High settings can consume substantia
 
 The metrics show task count, passed checks, attempts, and currently active agents. Select a task to inspect its validator receipts. The activity panel records durable run events; refreshing the browser does not erase them.
 
+For a multi-repository run, the **Exact integration set** card shows the overall set status and one card per affected repository, including its exact base-to-HEAD commit range and integration branch. Repository IDs also appear on task cards and in the task drawer so evidence cannot be mistaken for a monorepo change.
+
 For an Observe run, DevHarmonics stores the selected mode with the run, requires every planned task to be `diagnostic`, `read_only`, and `low` risk, and rejects a worker that asks for approval again or omits contracted path-and-line evidence. Accepted findings are retained in the evidence package and reviewed independently; an empty Git diff alone is not sufficient for success.
 
 ## 7. Cancel a run
@@ -154,15 +158,19 @@ Select an active run and click **Cancel run**. DevHarmonics stops scheduling new
 
 Closing the DevHarmonics server terminal also stops the local server. Prefer **Cancel run** first when work is active so the ledger records the explicit cancellation.
 
+Refreshing or reconnecting the browser preserves ledger evidence, but the first DH-720 slice does not yet reconstruct and resume an interrupted multi-repository integration set after a server or machine restart. Cancel active work before a planned restart and inspect the retained branches/worktrees afterward.
+
 ## 8. Review the result
 
-Passing task commits are merged into a run-specific integration branch:
+Passing task commits are merged into a run-specific integration branch. A standalone or single-repository run uses:
 
 ```text
 devharmonics/<run-prefix>
 ```
 
 DevHarmonics deliberately does not merge that branch into your checked-out branch. Review it with normal Git tools, run any additional checks, and merge it only when satisfied.
+
+A multi-repository run creates a separate integration branch and worktree for every affected repository. Use the **Exact integration set** card or exported evidence to copy the precise branch name and base-to-HEAD commit range for each repository. DevHarmonics does not push those branches, open pull requests, or merge them into any primary checkout.
 
 Useful commands:
 

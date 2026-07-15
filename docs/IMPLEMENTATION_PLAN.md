@@ -1,16 +1,18 @@
 # DevHarmonics Detailed Implementation Plan
 
 Document status: **Build-ready execution plan**
-Plan version: **1.12**
+Plan version: **1.13**
 Written: **2026-07-14**
 Revised: **2026-07-15**
 Product specification baseline: **DevHarmonics Product Specification v1.6**
 Current implementation baseline: **DevHarmonics v0.4.0**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 
-Revision history: **v1.12 (2026-07-15)** — Implemented DH-710 cross-repository objective planning: explicit product/repository selection, registry-informed dependency context, affected/excluded repository impact maps, repository-scoped tasks, cross-repository integration conditions, and a fail-closed execution gate until DH-720 can execute exact multi-repository integration sets.
+Revision history: **v1.13 (2026-07-15)** — Implemented the first DH-720 vertical slice: exact multi-repository integration sets with one repository per task, isolated per-repository integration/task branches and worktrees, retained base/HEAD commit evidence, repository-local validators, concurrent work across repositories, serialized same-repository merges, aggregate context-only review, evidence export, and a visible run-board integration-set card. Primary checkouts remain untouched.
 
-Prior revision: **v1.11 (2026-07-15)** — Implemented the DH-700 product/repository registry core: local checkout registration without monorepo collapse, typed repository roles/owners/dependencies/validators/governance, non-mutating Git inspection, durable branch/HEAD/remote/dirty state, and compatibility issue reporting.
+Prior revision: **v1.12 (2026-07-15)** — Implemented DH-710 cross-repository objective planning: explicit product/repository selection, registry-informed dependency context, affected/excluded repository impact maps, repository-scoped tasks, cross-repository integration conditions, and a fail-closed execution gate pending the first DH-720 integration-set slice.
+
+Earlier revision: **v1.11 (2026-07-15)** — Implemented the DH-700 product/repository registry core: local checkout registration without monorepo collapse, typed repository roles/owners/dependencies/validators/governance, non-mutating Git inspection, durable branch/HEAD/remote/dirty state, and compatibility issue reporting.
 
 Earlier revision: **v1.10 (2026-07-15)** — Implemented the DH-640 Workbench core: durable read-only project scratchpads, exact selected-model comparison, provider/model/usage attribution, visible separation from execution, and explicit provenance-preserving conversion into an objective draft without starting a run.
 
@@ -848,7 +850,7 @@ Acceptance:
 
 #### DH-710: Cross-repository planning — L
 
-Status: **Implemented in the v0.5 development line.** The objective composer can target a registered product and selected repositories. Read-only planning expands the relevant registry context, records affected or excluded repositories with rationale, scopes tasks to repository IDs, and requires integration conditions for multi-repository plans. Planning creates no run. A multi-repository plan remains intentionally non-executable until DH-720 can create and validate exact integration sets; the preview and start endpoint fail closed with that reason.
+Status: **Implemented in the v0.5 development line.** The objective composer can target a registered product and selected repositories. Read-only planning expands the relevant registry context, records affected or excluded repositories with rationale, scopes tasks to repository IDs, and requires integration conditions for multi-repository plans. Planning creates no run. The first DH-720 slice can now execute a supported multi-repository plan when every affected repository has a compatible local checkout, every task targets exactly one affected repository, and explicit integration conditions are present.
 
 Deliverables:
 
@@ -864,6 +866,10 @@ Acceptance:
 - documentation, version, installer, and release impacts are explicit tasks rather than afterthoughts.
 
 #### DH-720: Integration sets — XL
+
+Status: **First vertical slice implemented in the v0.5 development line; milestone remains in progress.** A supported approved plan creates an exact integration set across compatible local repositories. Each repository receives its own run integration branch and worktree pinned to a retained base commit; each task targets one repository and receives its own branch/worktree. Tasks in different repositories may run concurrently, while merges targeting the same repository use that repository's serialized merge queue. Repository-local validators and verification-integrity checks run against each integration branch. Final review is read-only and context-only across the aggregate, repository-prefixed diff evidence. The ledger, evidence export, API, and run-board card retain every repository's base commit, integration HEAD, branch, worktree, status, error, and integration conditions. The registered primary checkouts are not checked out, merged, reset, or otherwise changed.
+
+Deferred from this first slice: automatic multi-repository fixer/re-review and review quorums greater than one; runs remain `NOT READY` when review policy requires more than the single supported reviewer. Restart/resume reconstruction, automatic worktree cleanup, pushing branches or opening pull requests, and a single task mutating more than one repository also remain unimplemented.
 
 Deliverables:
 
@@ -1146,7 +1152,7 @@ Exit gate:
 
 ### Increment 5: CivicSuite single- and multi-repository operation — v0.6
 
-Status: **In progress.** DH-700's registry/local Git inspection and DH-710's product-aware repository selection and cross-repository impact planning are implemented. Exact multi-repository integration sets and the bounded CivicSuite pilot remain.
+Status: **In progress.** DH-700's registry/local Git inspection, DH-710's product-aware repository selection and impact planning, and the first DH-720 exact multi-repository execution slice are implemented. DH-720 still needs automatic multi-repository fixing/quorum support, restart reconstruction, cleanup, and delivery automation; the bounded CivicSuite pilot also remains.
 
 Work:
 

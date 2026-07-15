@@ -38,6 +38,9 @@ import {
 } from "./registry.js";
 import type {
   CheckResult,
+  IntegrationRepositoryStatus,
+  IntegrationSetRecord,
+  IntegrationSetStatus,
   ObjectiveInput,
   ObjectiveRecord,
   PlanRevisionRecord,
@@ -144,7 +147,7 @@ interface CheckRow {
   duration_ms: number;
 }
 
-export const LEDGER_SCHEMA_VERSION = 20;
+export const LEDGER_SCHEMA_VERSION = 21;
 
 export const REPOSITORY_ROLES = [
   "umbrella",
@@ -423,13 +426,14 @@ export interface ReviewReceiptRecord {
 }
 
 export interface RunEvidencePackage {
-  version: 3;
+  version: 4;
   generatedAt: string;
   run: RunSummary;
   attempts: Array<Record<string, unknown>>;
   blackboard: BlackboardEntry[];
   toolReceipts: ToolPolicyReceiptRecord[];
   reviews: ReviewReceiptRecord[];
+  integrationSet: IntegrationSetRecord | null;
   integritySha256: string;
 }
 
@@ -1001,6 +1005,38 @@ const MIGRATIONS: readonly LedgerMigration[] = [
       database.exec("CREATE INDEX IF NOT EXISTS repositories_local_path ON repositories(local_path) WHERE local_path IS NOT NULL;");
     },
   },
+  {
+    version: 21,
+    name: "multi-repository-integration-sets",
+    apply(database) {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS integration_sets (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
+          product_id TEXT NOT NULL REFERENCES products(id) ON DELETE RESTRICT,
+          status TEXT NOT NULL,
+          integration_conditions_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS integration_set_repositories (
+          integration_set_id TEXT NOT NULL REFERENCES integration_sets(id) ON DELETE CASCADE,
+          repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE RESTRICT,
+          local_path TEXT NOT NULL,
+          base_commit TEXT NOT NULL,
+          integration_branch TEXT NOT NULL,
+          integration_worktree_path TEXT NOT NULL,
+          head_commit TEXT,
+          status TEXT NOT NULL,
+          error TEXT,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (integration_set_id, repository_id)
+        );
+        CREATE INDEX IF NOT EXISTS integration_set_repositories_status
+          ON integration_set_repositories(integration_set_id, status);
+      `);
+    },
+  },
 ];
 
 function summarizeGoal(goal: string, maxLength = 180): string {
@@ -1127,6 +1163,8 @@ const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
   plan_revisions: ["objective_id", "revision", "plan_json", "rationale", "approved", "created_at", "approved_at"],
   workbench_sessions: ["id", "project_path", "title", "mode", "objective_id", "converted_at", "created_at", "updated_at"],
   workbench_messages: ["id", "session_id", "role", "content", "provider", "connection_id", "requested_model_id", "resolved_model_id", "status", "error", "input_tokens", "output_tokens", "cost_usd", "duration_ms", "created_at"],
+  integration_sets: ["id", "run_id", "product_id", "status", "integration_conditions_json", "created_at", "updated_at"],
+  integration_set_repositories: ["integration_set_id", "repository_id", "local_path", "base_commit", "integration_branch", "integration_worktree_path", "head_commit", "status", "error", "updated_at"],
   model_performance_policies: ["model_id", "ignored_before", "excluded", "updated_at"],
   schema_migrations: ["version", "name", "applied_at"],
 };
@@ -1431,6 +1469,8 @@ export class Ledger {
       recommendedConcurrency: plan.recommendedConcurrency,
       ...(plan.revision === undefined ? {} : { revision: plan.revision }),
       ...(plan.previousRevision === undefined ? {} : { previousRevision: plan.previousRevision }),
+      repositoryImpact: (plan.repositoryImpact ?? []).map((impact) => ({ ...impact, rationale: redactText(impact.rationale) })),
+      integrationConditions: (plan.integrationConditions ?? []).map(redactText),
       tasks: plan.tasks.map((task) => ({
         ...task,
         title: redactText(task.title),
@@ -1462,6 +1502,7 @@ export class Ledger {
         task.preferredProvider,
         JSON.stringify(redactValue({
           kind: task.kind ?? "implementation",
+          repositoryIds: task.repositoryIds ?? [],
           repositoryScope: task.repositoryScope ?? ["."],
           permission: task.permission ?? "workspace_write",
           risk: task.risk ?? "medium",
@@ -1478,15 +1519,111 @@ export class Ledger {
     });
   }
 
-  addIntegrationTask(runId: string, checks: string[]): void {
+  createIntegrationSet(input: {
+    runId: string;
+    productId: string;
+    integrationConditions: string[];
+    repositories: Array<{
+      repositoryId: string;
+      localPath: string;
+      baseCommit: string;
+      integrationBranch: string;
+      integrationWorktreePath: string;
+    }>;
+  }): IntegrationSetRecord {
+    if (this.getIntegrationSet(input.runId)) throw new Error(`Run '${input.runId}' already has an integration set`);
+    if (!input.repositories.length) throw new Error("An integration set requires at least one repository");
+    if (new Set(input.repositories.map((repository) => repository.repositoryId)).size !== input.repositories.length) {
+      throw new Error("Integration set repository IDs must be unique");
+    }
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare(`
+        INSERT INTO integration_sets (id, run_id, product_id, status, integration_conditions_json, created_at, updated_at)
+        VALUES (?, ?, ?, 'preparing', ?, ?, ?)
+      `).run(id, input.runId, input.productId, JSON.stringify(input.integrationConditions.map((condition) => redactText(condition))), now, now);
+      const insert = this.database.prepare(`
+        INSERT INTO integration_set_repositories (
+          integration_set_id, repository_id, local_path, base_commit, integration_branch,
+          integration_worktree_path, head_commit, status, error, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', NULL, ?)
+      `);
+      for (const repository of input.repositories) {
+        insert.run(id, repository.repositoryId, repository.localPath, repository.baseCommit, repository.integrationBranch, repository.integrationWorktreePath, now);
+      }
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+    return this.getIntegrationSet(input.runId)!;
+  }
+
+  setIntegrationSetStatus(runId: string, status: IntegrationSetStatus): IntegrationSetRecord {
+    const now = new Date().toISOString();
+    const updated = this.database.prepare("UPDATE integration_sets SET status = ?, updated_at = ? WHERE run_id = ?").run(status, now, runId);
+    if (!updated.changes) throw new Error(`Run '${runId}' has no integration set`);
+    return this.getIntegrationSet(runId)!;
+  }
+
+  updateIntegrationSetRepository(
+    runId: string,
+    repositoryId: string,
+    input: { status: IntegrationRepositoryStatus; headCommit?: string | null; error?: string | null },
+  ): IntegrationSetRecord {
+    const set = this.getIntegrationSet(runId);
+    if (!set) throw new Error(`Run '${runId}' has no integration set`);
+    const current = set.repositories.find((repository) => repository.repositoryId === repositoryId);
+    if (!current) throw new Error(`Repository '${repositoryId}' is not part of the integration set`);
+    const now = new Date().toISOString();
+    this.database.prepare(`
+      UPDATE integration_set_repositories
+      SET status = ?, head_commit = ?, error = ?, updated_at = ?
+      WHERE integration_set_id = ? AND repository_id = ?
+    `).run(input.status, input.headCommit === undefined ? current.headCommit : input.headCommit, input.error === undefined ? current.error : input.error, now, set.id, repositoryId);
+    this.database.prepare("UPDATE integration_sets SET updated_at = ? WHERE id = ?").run(now, set.id);
+    return this.getIntegrationSet(runId)!;
+  }
+
+  getIntegrationSet(runId: string): IntegrationSetRecord | null {
+    const row = this.database.prepare("SELECT * FROM integration_sets WHERE run_id = ?").get(runId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    const repositories = this.database.prepare(`
+      SELECT * FROM integration_set_repositories WHERE integration_set_id = ? ORDER BY repository_id
+    `).all(String(row.id)) as unknown as Array<Record<string, unknown>>;
+    return {
+      id: String(row.id),
+      runId: String(row.run_id),
+      productId: String(row.product_id),
+      status: String(row.status) as IntegrationSetStatus,
+      integrationConditions: JSON.parse(String(row.integration_conditions_json)) as string[],
+      repositories: repositories.map((repository) => ({
+        repositoryId: String(repository.repository_id),
+        localPath: String(repository.local_path),
+        baseCommit: String(repository.base_commit),
+        integrationBranch: String(repository.integration_branch),
+        integrationWorktreePath: String(repository.integration_worktree_path),
+        headCommit: repository.head_commit === null ? null : String(repository.head_commit),
+        status: String(repository.status) as IntegrationRepositoryStatus,
+        error: repository.error === null ? null : String(repository.error),
+        updatedAt: String(repository.updated_at),
+      })),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
+  }
+
+  addIntegrationTask(runId: string, checks: string[], taskId = "__integration__", title = "Integration suite"): void {
     this.database
       .prepare(
         `INSERT INTO tasks
           (run_id, task_id, title, description, dependencies_json, checks_json, status, preferred_provider)
-         VALUES (?, '__integration__', 'Integration suite', 'Validate the combined integration branch', '[]', ?, 'queued', NULL)`,
+         VALUES (?, ?, ?, 'Validate the combined integration branch', '[]', ?, 'queued', NULL)`,
       )
-      .run(runId, JSON.stringify(checks));
-    this.addEvent(runId, "integration.queued", `Queued ${checks.length} integration validators`);
+      .run(runId, taskId, redactText(title), JSON.stringify(checks));
+    this.addEvent(runId, "integration.queued", `Queued ${checks.length} integration validators`, { taskId });
   }
 
   setRunStatus(runId: string, status: RunStatus, finalReview?: string): void {
@@ -1779,6 +1916,7 @@ export class Ledger {
       objectiveId: run.objective_id,
       approvedPlanRevision: run.approved_plan_revision,
       plan: run.plan_json ? JSON.parse(run.plan_json) as RunPlan : null,
+      integrationSet: this.getIntegrationSet(runId),
       tasks: tasks.map((task) => {
         const contract = JSON.parse(task.task_contract_json || "{}") as Partial<PlannedTask>;
         return {
@@ -1786,6 +1924,7 @@ export class Ledger {
           title: task.title,
           description: task.description,
           kind: contract.kind ?? "implementation",
+          repositoryIds: contract.repositoryIds ?? [],
           repositoryScope: contract.repositoryScope ?? ["."],
           permission: contract.permission ?? "workspace_write",
           risk: contract.risk ?? "medium",
@@ -1830,15 +1969,17 @@ export class Ledger {
     const blackboard = this.listBlackboardEntries(runId);
     const toolReceipts = this.listToolPolicyReceipts(runId);
     const reviews = this.listReviewReceipts(runId);
-    const canonical = JSON.stringify({ run, attempts: normalizedAttempts, blackboard, toolReceipts, reviews });
+    const integrationSet = this.getIntegrationSet(runId);
+    const canonical = JSON.stringify({ run, attempts: normalizedAttempts, blackboard, toolReceipts, reviews, integrationSet });
     return {
-      version: 3,
+      version: 4,
       generatedAt: new Date().toISOString(),
       run,
       attempts: normalizedAttempts,
       blackboard,
       toolReceipts,
       reviews,
+      integrationSet,
       integritySha256: createHash("sha256").update(canonical).digest("hex"),
     };
   }
@@ -1858,6 +1999,7 @@ export class Ledger {
       task.preferredProvider,
       JSON.stringify(redactValue({
         kind: task.kind ?? "implementation",
+        repositoryIds: task.repositoryIds ?? [],
         repositoryScope: task.repositoryScope ?? ["."],
         permission: task.permission ?? "workspace_write",
         risk: task.risk ?? "medium",
@@ -2769,6 +2911,7 @@ export class Ledger {
       preferredProvider: row.preferred_provider,
       checks: JSON.parse(row.checks_json) as string[],
       kind: contract.kind ?? "implementation",
+      repositoryIds: contract.repositoryIds ?? [],
       repositoryScope: contract.repositoryScope ?? ["."],
       permission: contract.permission ?? "workspace_write",
       risk: contract.risk ?? "medium",

@@ -7,7 +7,8 @@ All notable DevHarmonics changes are documented here.
 ### Added
 
 - A local product/repository registry that preserves multi-repository boundaries and records repository roles, owners, dependencies, validator commands, governance sources, branch/HEAD/remote identity, dirty state, and compatibility issues through read-only Git inspection.
-- Product-aware objective composition and cross-repository planning with explicit repository selection, affected/excluded impact rationale, repository-scoped tasks, required integration conditions, and a fail-closed multi-repository execution gate pending DH-720 integration sets.
+- Product-aware objective composition and cross-repository planning with explicit repository selection, affected/excluded impact rationale, repository-scoped tasks, required integration conditions, and fail-closed topology checks before execution.
+- The first DH-720 exact integration-set execution slice: one repository per task; isolated per-repository integration/task branches and worktrees pinned to retained base commits; concurrent work across repositories with serialized same-repository merges; repository-local validators and verification-integrity checks; aggregate context-only review; exact base/HEAD evidence in the ledger, export, API, and run UI; and no mutation of primary checkouts.
 - A durable, discussion-only Workbench for project questions and side-by-side consultation of selected qualified models, with exact provider/model/usage attribution and explicit conversion into a linked objective draft without starting a run.
 - Durable structured objective drafts and immutable plan revisions with approval rationale, exact-revision run linkage, and restart-safe persistence.
 - A two-step objective composer that previews task dependencies, repository scope, permissions, checks, proposed model assignments, and capacity before execution.
@@ -18,6 +19,7 @@ All notable DevHarmonics changes are documented here.
 
 ### Changed
 
+- Supported multi-repository plans can now start when all affected repositories have compatible local checkouts, every task targets exactly one repository, and explicit integration conditions are present. Automatic multi-repository fixing, review quorums greater than one, resume reconstruction, cleanup, pushes/pull requests, and one task spanning repositories remain deferred and fail closed where policy requires them.
 - Narrow, low-risk single-scope implementation tasks can use the economy specialist lane; standard, high-risk, architectural, and release work retain stronger tier requirements.
 - Manual assignments and adaptive routing now enforce declared code, tool, vision, and structured-output capability needs.
 - Stale models are excluded from role selectors, and local family-tracked workers must pass bounded-tool qualification before promotion.

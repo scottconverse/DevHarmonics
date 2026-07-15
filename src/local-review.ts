@@ -55,6 +55,9 @@ export async function runContextOnlyReview(input: {
 }): Promise<{ text: string; receipts: ChunkReviewReceipt[] }> {
   const receipts: ChunkReviewReceipt[] = [];
   const evidenceLabel = input.evidenceLabel?.trim() || "diff chunk";
+  const supportedSettings = new Set(input.adapter.connection.capabilities.modelSettings);
+  const boundedReviewSettings = Object.fromEntries(Object.entries({ temperature: 0, num_ctx: 8_192, num_predict: 192 })
+    .filter(([name]) => supportedSettings.has(name)));
   for (const [index, chunk] of input.chunks.entries()) {
     const prompt = `${input.contextHeader.trim()}
 
@@ -74,9 +77,7 @@ Review only the supplied evidence against the stated goal and acceptance criteri
         ...input.model,
         settings: {
           ...input.model.settings,
-          temperature: 0,
-          num_ctx: 8_192,
-          num_predict: 192,
+          ...boundedReviewSettings,
         },
       },
     }, input.signal ? { signal: input.signal } : {});

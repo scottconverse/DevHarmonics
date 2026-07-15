@@ -560,9 +560,30 @@ function renderSelectedRun() {
   $("#metric-checks").textContent = run.tasks.flatMap((task) => task.checks).filter((check) => check.passed).length;
   $("#metric-attempts").textContent = run.tasks.reduce((sum, task) => sum + task.attemptCount, 0);
   $("#metric-active").textContent = run.tasks.filter((task) => ["working", "verifying", "retry"].includes(task.status)).length;
+  renderIntegrationSet(run);
   renderBoard(run);
   renderActivity(run);
   renderVerdict(run);
+}
+
+function renderIntegrationSet(run) {
+  const panel = $("#integration-set-panel");
+  const integrationSet = run.integrationSet;
+  panel.classList.toggle("hidden", !integrationSet);
+  if (!integrationSet) return;
+  $("#integration-set-status").textContent = integrationSet.status.replaceAll("_", " ");
+  $("#integration-set-status").className = `lifecycle ${integrationSet.status === "ready" ? "qualified" : integrationSet.status === "failed" || integrationSet.status === "not_ready" ? "degraded" : ""}`;
+  $("#integration-set-conditions").textContent = integrationSet.integrationConditions.length
+    ? `Integration conditions: ${integrationSet.integrationConditions.join(" · ")}`
+    : "No cross-repository integration conditions were retained.";
+  $("#integration-set-repositories").innerHTML = integrationSet.repositories.map((repository) => `
+    <article class="integration-repository-card">
+      <header><strong>${escapeHtml(repository.repositoryId)}</strong><span class="lifecycle ${repository.status === "ready" ? "qualified" : repository.status === "failed" ? "degraded" : ""}">${escapeHtml(repository.status)}</span></header>
+      <code class="integration-commit-range">${escapeHtml(repository.baseCommit.slice(0, 12))} → ${escapeHtml((repository.headCommit || "pending").slice(0, 12))}</code>
+      <code>${escapeHtml(repository.integrationBranch)}</code>
+      <code>${escapeHtml(repository.localPath)}</code>
+      ${repository.error ? `<p class="error">${escapeHtml(repository.error)}</p>` : ""}
+    </article>`).join("");
 }
 
 function renderBoard(run) {
@@ -580,7 +601,7 @@ function renderBoard(run) {
 
 function taskCard(task) {
   const passed = task.checks.filter((check) => check.passed).length;
-  return `<button class="task-card ${task.status}" data-task-id="${escapeHtml(task.id)}"><strong>${escapeHtml(task.title)}</strong><div class="task-contract"><span>${escapeHtml(task.permission.replaceAll("_", " "))}</span><span>${escapeHtml(task.risk)} risk</span></div><div class="task-meta"><span class="provider-tag">${escapeHtml(task.provider || "unassigned")}</span><span>${passed}/${task.checks.length} checks · ${task.attemptCount} tries</span></div></button>`;
+  return `<button class="task-card ${task.status}" data-task-id="${escapeHtml(task.id)}"><strong>${escapeHtml(task.title)}</strong>${task.repositoryIds?.length ? `<small>${escapeHtml(task.repositoryIds.join(", "))}</small>` : ""}<div class="task-contract"><span>${escapeHtml(task.permission.replaceAll("_", " "))}</span><span>${escapeHtml(task.risk)} risk</span></div><div class="task-meta"><span class="provider-tag">${escapeHtml(task.provider || "unassigned")}</span><span>${passed}/${task.checks.length} checks · ${task.attemptCount} tries</span></div></button>`;
 }
 
 function renderActivity(run) {
@@ -615,6 +636,7 @@ function openTask(taskId) {
       <div><dt>Permission</dt><dd>${escapeHtml(task.permission.replaceAll("_", " "))}</dd></div>
       <div><dt>Risk</dt><dd>${escapeHtml(task.risk)}</dd></div>
       <div><dt>Kind</dt><dd>${escapeHtml(task.kind)}</dd></div>
+      <div><dt>Repositories</dt><dd>${task.repositoryIds?.length ? task.repositoryIds.map(escapeHtml).join("<br>") : "Current project"}</dd></div>
       <div><dt>Repository scope</dt><dd>${task.repositoryScope.map(escapeHtml).join("<br>")}</dd></div>
     </dl>
     <p>${escapeHtml(task.description)}</p>

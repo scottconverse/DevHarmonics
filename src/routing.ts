@@ -214,8 +214,6 @@ export class ModelRouter {
       if (provider !== "codex" && provider !== "claude" && provider !== "gemini") continue;
       const connection = this.connection(`subscription-cli:${provider}`);
       if (!connection || input.excludedConnectionIds?.has(connection.id) || !this.ledger.isConnectionEligible(connection.id)) continue;
-      const concreteCatalogAvailable = this.ledger.listModels(connection.id).some((model) => model.visible && !model.retired && !model.excluded);
-      if (concreteCatalogAvailable) continue;
       const managedFleet = this.ledger.listModels(connection.id).some((model) => model.active && model.qualified && !model.excluded);
       if (managedFleet) continue;
       return provider;

@@ -197,6 +197,32 @@ export interface RunObjectiveLink {
   approvedPlanRevision: number;
 }
 
+export type IntegrationSetStatus = "preparing" | "running" | "ready" | "not_ready" | "failed";
+export type IntegrationRepositoryStatus = "pending" | "prepared" | "running" | "ready" | "failed";
+
+export interface IntegrationSetRepositoryRecord {
+  repositoryId: string;
+  localPath: string;
+  baseCommit: string;
+  integrationBranch: string;
+  integrationWorktreePath: string;
+  headCommit: string | null;
+  status: IntegrationRepositoryStatus;
+  error: string | null;
+  updatedAt: string;
+}
+
+export interface IntegrationSetRecord {
+  id: string;
+  runId: string;
+  productId: string;
+  status: IntegrationSetStatus;
+  integrationConditions: string[];
+  repositories: IntegrationSetRepositoryRecord[];
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type WorkbenchMessageRole = "user" | "assistant" | "system";
 export type WorkbenchMessageStatus = "complete" | "failed";
 
@@ -262,11 +288,13 @@ export interface RunSummary {
   objectiveId: string | null;
   approvedPlanRevision: number | null;
   plan: RunPlan | null;
+  integrationSet: IntegrationSetRecord | null;
   tasks: Array<{
     id: string;
     title: string;
     description: string;
     kind: NonNullable<PlannedTask["kind"]>;
+    repositoryIds: string[];
     repositoryScope: string[];
     permission: NonNullable<PlannedTask["permission"]>;
     risk: NonNullable<PlannedTask["risk"]>;

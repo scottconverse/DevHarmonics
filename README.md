@@ -25,6 +25,7 @@ Normal subscription and local-model use requires no model API keys. Each subscri
 - Durable run, task, attempt, check, and event records in SQLite
 - Multi-product repository registry with read-only local Git inspection, repository roles, ownership, dependencies, validators, governance sources, and dirty/incompatible-state reporting
 - Product-aware objective planning with selected repository scope, affected/excluded impact rationale, repository-scoped tasks, and explicit cross-repository integration conditions
+- Exact multi-repository integration sets with separate per-repository branches/worktrees, retained base and integration HEAD commits, repository-local validation, aggregate read-only review, and visible/exportable evidence
 - Durable read-only Workbench with exact selected-model comparison and explicit conversion into an objective draft
 - Transactional ledger migrations with automatic pre-upgrade backups and integrity checks
 - Provider-neutral assignment identities layered over the current subscription CLI providers
@@ -157,20 +158,22 @@ Workbench is a durable, read-only project scratchpad for questions, tradeoff ana
 
 The **Products** surface groups independent repositories into a product without turning them into a monorepo. Register a product, then add each local Git checkout with its role, expected branch, owners, dependencies, validator commands, and governance sources. DevHarmonics inspects repository identity and status using read-only Git commands and retains the current branch, HEAD, origin, dirty state, and compatibility issues. Registry inspection does not create a run or change the checkout.
 
-In the objective composer, optionally select a registered product and one or more repositories. The read-only planner uses their registry roles and dependencies to produce an affected/excluded repository impact map, repository-scoped tasks, and any required cross-repository integration conditions. A plan can cover several repositories today, but starting that plan is intentionally blocked until DH-720 can create and validate exact multi-repository integration sets. Single-repository plans continue through the normal approval flow when the selected checkout matches the objective project folder and has no compatibility issues.
+In the objective composer, optionally select a registered product and one or more repositories. The read-only planner uses their registry roles and dependencies to produce an affected/excluded repository impact map, repository-scoped tasks, and any required cross-repository integration conditions. A multi-repository plan can execute when every affected repository has a compatible registered local checkout, every task targets exactly one affected repository, and the plan includes explicit integration conditions. Single-repository plans continue through the normal approval flow when the selected checkout matches the objective project folder and has no compatibility issues.
+
+The first DH-720 execution slice creates an exact integration set rather than treating the product as a monorepo. Every affected repository gets an independent run integration branch and worktree pinned to its retained base commit, and every task gets a repository-local branch/worktree. Tasks in different repositories can run concurrently; merges into the same repository's integration branch remain serialized. DevHarmonics runs each repository's configured validators and verification-integrity check, then performs one aggregate context-only review over repository-prefixed diff evidence. The run card and evidence export retain each base/HEAD commit, branch, worktree, status, error, and the cross-repository integration conditions. The primary checkouts are untouched.
 
 ## Run lifecycle
 
 1. Save a structured objective draft containing the outcome, acceptance criteria, constraints, risk, priority, deadline, policy, run mode, and optional product/repository scope. Saving or refining a draft starts no run.
 2. Ask a read-only architect for an immutable plan revision and preview its dependency graph, affected/excluded repository map, repository-scoped tasks, integration conditions, permissions, checks, proposed model assignments, and capacity.
 3. Revise the plan or approve an exact revision. Execution uses that stored revision without silently replanning it.
-4. Require a clean Git working tree and authenticated providers, then create `devharmonics/<run-prefix>` as the integration branch.
-5. Assign each ready task a `devharmonics/<run-prefix>-task-<task>` branch and temporary worktree.
+4. Require clean affected Git working trees and authenticated providers. A standalone or single-repository run creates `devharmonics/<run-prefix>`; a multi-repository run creates a distinct integration branch/worktree for every affected repository and records its base commit.
+5. Assign each ready task a repository-local task branch and temporary worktree. One task targets one repository; tasks in different repositories may execute concurrently.
 6. Run a worker in that isolated worktree and execute only allowlisted validators.
 7. Return failed check receipts to a worker for a bounded retry.
-8. For writable tasks, commit passing work and merge it serially into the integration branch; Observe tasks retain reports without commits.
+8. For writable tasks, commit passing work and merge it serially into the target repository's integration branch; Observe tasks retain reports without commits.
 9. Start dependent tasks only after their dependencies merge.
-10. Ask a read-only reviewer to evaluate the combined diff or each accepted diagnostic report; reroute after a classified reviewer runtime failure.
+10. Ask a read-only reviewer to evaluate the combined diff or each accepted diagnostic report. Multi-repository evidence is aggregated with repository-prefixed paths while preserving exact per-repository commits.
 
 DevHarmonics does not merge the integration branch into your checked-out branch. You review and merge it yourself.
 
@@ -190,6 +193,7 @@ DevHarmonics does not merge the integration branch into your checked-out branch.
 
 - Merge conflicts fail the affected task; automatic conflict repair is not implemented.
 - Temporary worktrees are retained for inspection until explicit archival/cleanup is added.
+- The first multi-repository execution slice supports one repository per task and one aggregate reviewer. It does not yet reconstruct an interrupted integration set after restart, push branches, open pull requests, run an automatic multi-repository fixer, or satisfy review policies requiring more than one reviewer; such a run remains `NOT READY`.
 - Provider quotas and throttling originate with each subscription; DevHarmonics classifies observed failures and can cool and reroute qualified workers/reviewers, but provider-supplied remaining-quota telemetry is not consistently available.
 - Ollama models are discovered locally and remain unschedulable until their exact runtime fingerprint passes the qualifications required for the assigned work. Read-only local reviewers receive bounded per-file diff or per-report chunks with progress receipts and fail-closed aggregation. Qualified local implementors can use only DevHarmonics' scoped `file.read`, `file.search`, and hash-checked `file.patch` loop inside their assigned worktree; they receive no unrestricted shell, commit, merge, or external-write authority. ACP remains future work.
 - Mellum2 is the first named local specialist family. Instruct and Thinking are separate upgrade tracks; neither is downloaded, activated, promoted, or made the universal default automatically. In addition to analysis or bounded-tool qualification, Mellum2 must pass the current structured-output, contradiction-detection, and requirement-count benchmark before scheduling. Instruct is initially eligible only for narrow, low-risk specialist work; Thinking is evaluated independently for standard reasoning work.

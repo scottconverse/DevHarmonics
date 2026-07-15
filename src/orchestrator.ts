@@ -46,6 +46,7 @@ import { runValidator, unknownValidator } from "./validators.js";
 import { analyzeVerificationIntegrity } from "./verification-integrity.js";
 import { runLocalToolLoop } from "./local-tools.js";
 import { WorktreeManager, WorkspaceIsolationError } from "./worktrees.js";
+import { IntegrationSetManager } from "./integration-sets.js";
 
 export class Orchestrator {
   private readonly backgroundRuns = new Map<string, Promise<void>>();
@@ -213,8 +214,17 @@ export class Orchestrator {
     const product = this.ledger.getProduct(objective.productId);
     if (!product) return { supported: false, reason: "The selected product is no longer registered." };
     const affectedIds = (plan.repositoryImpact ?? []).filter((impact) => impact.disposition === "affected").map((impact) => impact.repositoryId);
-    if (affectedIds.length !== 1) {
-      return { supported: false, reason: "Multi-repository execution remains gated until DH-720 integration sets are implemented." };
+    if (!affectedIds.length) return { supported: false, reason: "The approved plan does not identify an affected repository." };
+    if (affectedIds.length > 1) {
+      const affected = affectedIds.map((id) => product.repositories.find((repository) => repository.id === id));
+      const missing = affectedIds.filter((_, index) => !affected[index]?.localPath);
+      if (missing.length) return { supported: false, reason: `Register local checkouts for every affected repository: ${missing.join(", ")}` };
+      const incompatible = affected.flatMap((repository) => repository?.inspection?.compatibilityIssues.map((issue) => `${repository.name}: ${issue}`) ?? []);
+      if (incompatible.length) return { supported: false, reason: `Resolve repository compatibility issues before execution: ${incompatible.join("; ")}` };
+      const invalidTasks = plan.tasks.filter((task) => (task.repositoryIds ?? []).length !== 1 || !affectedIds.includes((task.repositoryIds ?? [])[0]!));
+      if (invalidTasks.length) return { supported: false, reason: `Each DH-720 task must target exactly one affected repository: ${invalidTasks.map((task) => task.id).join(", ")}` };
+      if (!(plan.integrationConditions ?? []).length) return { supported: false, reason: "Multi-repository execution requires explicit integration conditions." };
+      return { supported: true, reason: `Exact integration-set execution is available for ${affectedIds.length} compatible local repositories.` };
     }
     const repository = product.repositories.find((item) => item.id === affectedIds[0]);
     if (!repository?.localPath) return { supported: false, reason: "The single affected repository does not have a registered local checkout." };
@@ -398,6 +408,25 @@ export class Orchestrator {
     const workerProviders = config.product.workers.filter((name) => availableProviders.includes(name));
     if (!workerProviders.length) throw new Error("No healthy provider is configured in the worker pool");
 
+    const approvedObjective = request.objectiveLink ? this.ledger.getObjective(request.objectiveLink.objectiveId) : null;
+    const affectedRepositoryIds = (request.approvedPlan?.repositoryImpact ?? [])
+      .filter((impact) => impact.disposition === "affected")
+      .map((impact) => impact.repositoryId);
+    if (approvedObjective?.productId && request.approvedPlan && affectedRepositoryIds.length > 1) {
+      await this.executeMultiRepository({
+        runId,
+        request,
+        objective: approvedObjective,
+        plan: request.approvedPlan,
+        config,
+        autonomy,
+        availableProviders,
+        workerProviders,
+        signal,
+      });
+      return;
+    }
+
     const worktrees = new WorktreeManager(projectPath, runId);
     await worktrees.initialize();
     this.ledger.addEvent(runId, "worktree.created", `Integration branch ${worktrees.integrationBranch}`);
@@ -471,6 +500,12 @@ export class Orchestrator {
     }
     if (!plan) throw lastArchitectError ?? new Error("No eligible architect produced a valid plan");
     this.ledger.savePlan(runId, plan);
+    if (request.approvedPlan) {
+      this.ledger.addEvent(runId, "plan.approved", "Exact objective plan revision approved for execution", {
+        objectiveId: request.objectiveLink?.objectiveId ?? null,
+        approvedPlanRevision: request.objectiveLink?.approvedPlanRevision ?? plan.revision ?? 1,
+      });
+    }
     if (config.runPolicy.requirePlanApproval && !request.approvedPlan) {
       this.ledger.requestPlanApproval(runId);
       await new Promise<void>((resolve) => {
@@ -835,6 +870,253 @@ export class Orchestrator {
       ready ? "run.ready" : "run.not_ready",
       ready ? "Run passed final review" : "Run requires follow-up",
     );
+  }
+
+  private async executeMultiRepository(input: {
+    runId: string;
+    request: RunRequest;
+    objective: ObjectiveRecord;
+    plan: RunPlan;
+    config: DevHarmonicsConfig;
+    autonomy: RunAutonomy;
+    availableProviders: ProviderName[];
+    workerProviders: ProviderName[];
+    signal: AbortSignal;
+  }): Promise<void> {
+    const productId = input.objective.productId;
+    if (!productId) throw new Error("Multi-repository execution requires a registered product");
+    const product = this.ledger.getProduct(productId);
+    if (!product) throw new Error(`Product '${productId}' is no longer registered`);
+    const affectedIds = (input.plan.repositoryImpact ?? []).filter((impact) => impact.disposition === "affected").map((impact) => impact.repositoryId);
+    const repositories = affectedIds.map((repositoryId) => {
+      const repository = product.repositories.find((candidate) => candidate.id === repositoryId);
+      if (!repository?.localPath) throw new Error(`Repository '${repositoryId}' does not have a registered local checkout`);
+      if (repository.inspection?.compatibilityIssues.length) {
+        throw new Error(`${repository.name} is not execution-compatible: ${repository.inspection.compatibilityIssues.join("; ")}`);
+      }
+      return repository;
+    });
+    for (const task of input.plan.tasks) {
+      const repositoryIds = task.repositoryIds ?? [];
+      if (repositoryIds.length !== 1 || !affectedIds.includes(repositoryIds[0]!)) {
+        throw new Error(`Task '${task.id}' must target exactly one affected repository`);
+      }
+    }
+
+    const integration = new IntegrationSetManager(input.runId, repositories.map((repository) => ({
+      repositoryId: repository.id,
+      projectPath: repository.localPath!,
+    })));
+
+    try {
+      await integration.initialize();
+      const initialStatus = await integration.status();
+      this.ledger.createIntegrationSet({
+        runId: input.runId,
+        productId,
+        integrationConditions: input.plan.integrationConditions ?? [],
+        repositories: initialStatus.map((repository) => ({
+          repositoryId: repository.repositoryId,
+          localPath: repository.repositoryRoot,
+          baseCommit: repository.baseCommit,
+          integrationBranch: repository.branch,
+          integrationWorktreePath: repository.path,
+        })),
+      });
+      this.ledger.savePlan(input.runId, input.plan);
+      this.ledger.addEvent(input.runId, "plan.approved", "Exact cross-repository objective plan revision approved for execution", {
+        objectiveId: input.request.objectiveLink?.objectiveId ?? null,
+        approvedPlanRevision: input.request.objectiveLink?.approvedPlanRevision ?? input.plan.revision ?? 1,
+      });
+      this.ledger.setIntegrationSetStatus(input.runId, "running");
+      for (const repository of initialStatus) {
+        this.ledger.updateIntegrationSetRepository(input.runId, repository.repositoryId, { status: "running", headCommit: repository.headCommit });
+        this.ledger.addEvent(input.runId, "worktree.created", `${repository.repositoryId}: integration branch ${repository.branch}`, {
+          repositoryId: repository.repositoryId,
+          baseCommit: repository.baseCommit,
+          integrationBranch: repository.branch,
+          integrationWorktreePath: repository.path,
+        });
+      }
+
+      const repositoryContexts = new Map<string, { config: DevHarmonicsConfig; constitution: string }>();
+      for (const repository of repositories) {
+        const localConfig = await loadConfig(repository.localPath!);
+        repositoryContexts.set(repository.id, {
+          config: {
+            ...input.config,
+            repository: { validators: { ...localConfig.repository.validators, ...repository.validators } },
+          },
+          constitution: await loadConstitution(repository.localPath!),
+        });
+      }
+
+      const requestedAgents = input.request.agents ??
+        (input.config.application.concurrency.mode === "auto" ? "auto" : input.config.application.concurrency.agents);
+      const requestedConcurrency = requestedAgents === "auto" ? input.plan.recommendedConcurrency : requestedAgents;
+      const capacity = new CapacityBroker().decide({ requestedConcurrency, userCeiling: input.config.application.concurrency.ceiling, resources: await observeLocalResources() });
+      const concurrency = capacity.effectiveConcurrency;
+      this.ledger.addEvent(input.runId, "scheduler.started", `Cross-repository scheduler using concurrency ${concurrency}`, { capacity, repositoryCount: repositories.length });
+
+      const statuses = new Map<string, TaskStatus>(input.plan.tasks.map((task) => [task.id, "queued"]));
+      const pending = new Map(input.plan.tasks.map((task) => [task.id, task]));
+      const active = new Map<string, Promise<void>>();
+      let providerCursor = 0;
+      while (pending.size || active.size) {
+        if (input.signal.aborted) return;
+        for (const [taskId, task] of pending) {
+          if (task.dependencies.some((dependency) => ["failed", "blocked"].includes(statuses.get(dependency) ?? ""))) {
+            statuses.set(taskId, "blocked");
+            pending.delete(taskId);
+            this.ledger.setTaskStatus(input.runId, taskId, "blocked");
+            this.ledger.addEvent(input.runId, "task.blocked", `${task.title} blocked by a failed dependency`);
+          }
+        }
+        const ready = [...pending.values()].filter((task) => task.dependencies.every((dependency) => statuses.get(dependency) === "passed"));
+        while (active.size < concurrency && ready.length) {
+          const task = ready.shift()!;
+          pending.delete(task.id);
+          const repositoryId = task.repositoryIds![0]!;
+          const context = repositoryContexts.get(repositoryId)!;
+          const manager = integration.manager(repositoryId);
+          const taskPromise = this.executeTask({
+            runId: input.runId,
+            goal: input.request.goal,
+            task,
+            constitution: context.constitution,
+            config: context.config,
+            providers: input.workerProviders,
+            providerCursor: providerCursor++,
+            worktrees: manager,
+            signal: input.signal,
+          }).then(async (status) => {
+            statuses.set(task.id, status);
+            const headCommit = await manager.resolveIntegrationHead();
+            this.ledger.updateIntegrationSetRepository(input.runId, repositoryId, {
+              status: status === "passed" ? "running" : "failed",
+              headCommit,
+              ...(status === "passed" ? {} : { error: `Task '${task.id}' ended ${status}` }),
+            });
+          }).finally(() => active.delete(task.id));
+          active.set(task.id, taskPromise);
+        }
+        if (active.size) await Promise.race(active.values());
+        else if (pending.size) throw new Error("The cross-repository task graph cannot make progress; check for cyclic dependencies");
+      }
+      if (input.signal.aborted) return;
+
+      let failed = false;
+      const aggregatedDiffs: Array<{ path: string; diff: string }> = [];
+      for (const repository of repositories) {
+        const repositoryId = repository.id;
+        const context = repositoryContexts.get(repositoryId)!;
+        const manager = integration.manager(repositoryId);
+        let repositoryFailed = input.plan.tasks
+          .filter((task) => task.repositoryIds?.[0] === repositoryId)
+          .some((task) => statuses.get(task.id) !== "passed");
+        const checks = input.autonomy === "observe" ? [] : [...new Set(input.plan.tasks.filter((task) => task.repositoryIds?.[0] === repositoryId).flatMap((task) => task.checks))];
+        const integrationTaskId = `__integration__-${repositoryId.replace(/[^a-z0-9_-]/gi, "-")}`;
+        if (checks.length) {
+          this.ledger.addIntegrationTask(input.runId, checks, integrationTaskId, `${repository.name} integration suite`);
+          this.ledger.setTaskStatus(input.runId, integrationTaskId, "verifying");
+          const integrationTask: PlannedTask = {
+            id: integrationTaskId,
+            title: `${repository.name} integration suite`,
+            description: `Validate the ${repository.name} integration branch`,
+            dependencies: [],
+            repositoryIds: [repositoryId],
+            preferredProvider: null,
+            checks,
+            permission: "workspace_write",
+          };
+          const results = await this.verifyTask({ runId: input.runId, task: integrationTask, config: context.config }, manager.integrationPath);
+          const passed = results.every((check) => check.passed);
+          this.ledger.setTaskStatus(input.runId, integrationTaskId, passed ? "passed" : "failed");
+          this.ledger.addEvent(input.runId, passed ? "integration.passed" : "integration.failed", `${repository.name} integration checks ${passed ? "passed" : "failed"}`, { repositoryId });
+          repositoryFailed ||= !passed;
+        }
+        const diffs = input.autonomy === "observe" ? [] : await manager.integrationDiffFiles();
+        aggregatedDiffs.push(...diffs.map((diff) => ({ path: `${repositoryId}/${diff.path}`, diff: diff.diff })));
+        if (input.autonomy !== "observe") {
+          const integrity = analyzeVerificationIntegrity(diffs);
+          this.ledger.recordCheck(input.runId, integrationTaskId, {
+            name: "verification-integrity",
+            passed: integrity.passed,
+            exitCode: integrity.passed ? 0 : 1,
+            stdout: JSON.stringify({ repositoryId, summary: integrity.summary, census: integrity.census, findings: integrity.findings }, null, 2),
+            stderr: "",
+            durationMs: 0,
+          });
+          repositoryFailed ||= !integrity.passed;
+        }
+        const headCommit = await manager.resolveIntegrationHead();
+        failed ||= repositoryFailed;
+        this.ledger.updateIntegrationSetRepository(input.runId, repositoryId, { status: repositoryFailed ? "failed" : "ready", headCommit });
+      }
+
+      const checkSummary = this.checkSummary(input.runId);
+      const taskReports = this.taskReportSummary(input.runId);
+      const constitution = [...repositoryContexts.entries()].map(([repositoryId, context]) => `Repository ${repositoryId}:\n${context.constitution}`).join("\n\n");
+      const integrationSha256 = this.reviewEvidenceSha256({ autonomy: input.autonomy, plan: input.plan, taskReports, diff: aggregatedDiffs });
+      const reviewerName = input.availableProviders.includes(input.config.product.reviewer) ? input.config.product.reviewer : input.availableProviders[0]!;
+      const implementationProviders = [...new Set((this.ledger.getRun(input.runId)?.tasks ?? []).filter((task) => !task.id.startsWith("__integration__") && task.provider).map((task) => String(task.provider)))];
+      const reviewerDecision = new ModelRouter(this.ledger).route({
+        role: "reviewer",
+        config: input.config,
+        fallbackProvider: reviewerName,
+        allowedProviders: input.availableProviders,
+        permission: "read_only",
+        avoidProviders: implementationProviders,
+      });
+      const qualification = await ensureSchedulerCandidateQualified({
+        ledger: this.ledger,
+        config: input.config,
+        cwd: integration.manager(affectedIds[0]!).integrationPath,
+        role: "reviewer",
+        preferredProvider: reviewerDecision.provider,
+        permission: "read_only",
+      });
+      this.recordSchedulerQualification(input.runId, qualification, "reviewer");
+      if (qualification?.attempted && !qualification.passed) throw new Error(`${qualification.provider} failed multi-repository reviewer qualification`);
+      const reviewer = await this.provider(reviewerDecision.provider, input.config, reviewerDecision.connectionId);
+      this.ledger.addEvent(input.runId, "review.started", `${reviewerDecision.provider} is reviewing the exact multi-repository integration set`, { routing: reviewerDecision, repositoryIds: affectedIds });
+      const chunks = input.autonomy === "observe" ? this.diagnosticReportChunks(input.runId) : chunkDiffFiles(aggregatedDiffs);
+      if (!chunks.length) throw new Error("Multi-repository review has no accepted evidence chunks");
+      const review = await runContextOnlyReview({
+        adapter: reviewer,
+        model: reviewerDecision.model,
+        cwd: integration.manager(affectedIds[0]!).integrationPath,
+        contextHeader: localReviewerContextHeader({ goal: input.request.goal, constitution, plan: input.plan, checkSummary, taskReports, autonomy: input.autonomy }),
+        chunks,
+        evidenceLabel: input.autonomy === "observe" ? "diagnostic report" : "repository diff chunk",
+        signal: input.signal,
+        onChunk: (receipt, index, total) => {
+          this.ledger.addEvent(input.runId, "review.chunk_completed", `${reviewerDecision.provider} reviewed chunk ${index + 1}/${total}: ${receipt.label} — ${receipt.verdict}`, { label: receipt.label, verdict: receipt.verdict, repositoryIds: affectedIds });
+          this.ledger.recordInvocationReceipt({ runId: input.runId, role: "reviewer", provider: receipt.provider, connectionId: receipt.connectionId, requestedModelId: reviewerDecision.model.requestedModelId ? String(reviewerDecision.model.requestedModelId) : null, resolvedModelId: receipt.resolvedModelId, inputTokens: receipt.inputTokens, outputTokens: receipt.outputTokens, costUsd: receipt.costUsd, durationMs: receipt.durationMs, workloadClass: "complex:premium", fallbackReason: reviewerDecision.fallback ? reviewerDecision.factors.join("; ") : null });
+        },
+      });
+      const structured = parseReviewerResponse(review.text, {
+        provider: reviewerDecision.provider,
+        modelId: reviewerDecision.model.requestedModelId ? String(reviewerDecision.model.requestedModelId) : null,
+        connectionId: String(reviewer.connection.id),
+      });
+      const receiptId = this.ledger.recordReviewReceipt({ runId: input.runId, round: 1, integrationSha256, review: structured });
+      this.ledger.addEvent(input.runId, "review.completed", `${structured.provider} completed multi-repository review: ${structured.verdict.replace("_", " ")}`, { receiptId, repositoryIds: affectedIds, integrationSha256 });
+      const requirement = reviewRequirement(input.plan.tasks, input.config.reviewPolicy);
+      const independent = !requirement.requireImplementorIndependence || !implementationProviders.includes(structured.provider);
+      const reviewComplete = requirement.requiredReviewers === 1 && requirement.minimumDistinctProviders === 1;
+      const ready = !failed && structured.verdict === "READY" && independent && reviewComplete;
+      const finalReview = `${ready ? "READY" : "NOT READY"}\n\nExact integration set: ${affectedIds.map((repositoryId) => {
+        const repository = this.ledger.getIntegrationSet(input.runId)?.repositories.find((item) => item.repositoryId === repositoryId);
+        return `${repositoryId} ${repository?.baseCommit ?? "unknown"} -> ${repository?.headCommit ?? "unknown"}`;
+      }).join("; ")}\n\nReviewer (${structured.provider}): ${structured.summary}${reviewComplete ? "" : `\nThis initial DH-720 slice supports one required reviewer; policy requires ${requirement.requiredReviewers}.`}${independent ? "" : "\nReviewer independence policy was not satisfied."}`;
+      this.ledger.setIntegrationSetStatus(input.runId, ready ? "ready" : "not_ready");
+      this.ledger.setRunStatus(input.runId, ready ? "ready" : "not_ready", finalReview);
+      this.ledger.addEvent(input.runId, ready ? "run.ready" : "run.not_ready", ready ? "Multi-repository integration set passed final review" : "Multi-repository integration set requires follow-up", { repositoryIds: affectedIds, integrationSha256 });
+    } catch (error) {
+      if (this.ledger.getIntegrationSet(input.runId)) this.ledger.setIntegrationSetStatus(input.runId, "failed");
+      throw error;
+    }
   }
 
   private async completeQuorumReview(input: {
@@ -1342,7 +1624,7 @@ export class Orchestrator {
         taskId: input.task.id,
         attemptId,
         toolId: `validator:${name}`,
-        stage: input.task.id === "__integration__" ? "integration" : "verification",
+        stage: input.task.id.startsWith("__integration__") ? "integration" : "verification",
         taskPermission: input.task.permission ?? "workspace_write",
         assignedWorktree: worktreePath,
         repositoryRoot: worktreePath,

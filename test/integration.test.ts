@@ -90,6 +90,11 @@ if (process.argv.includes("--version")) {
       }
     : {summary:"fixture plan",recommendedConcurrency:1,tasks:[task]};
   console.log(JSON.stringify({result:JSON.stringify(plan)}));
+} else if (input.includes("You are reviewing bounded") || (args.includes("--new-project") && process.cwd().includes("integration"))) {
+  const review = "READY\\n\\nThe supplied repository diff chunk matches the approved task scope.";
+  if (process.argv.includes("--json")) console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:review}}));
+  else if (process.argv.includes("--output-format")) console.log(JSON.stringify({result:review}));
+  else console.log(review);
 } else if (input.includes("You are the final reviewer")) {
   const review = input.includes("Audit fixture") && !input.includes("README.md:1 contains the heading Fixture")
     ? "NOT READY\\n\\nDiagnostic report was not supplied."
@@ -1001,7 +1006,7 @@ test("cross-repository objective planning maps impact without starting an unsupp
     assert.deepEqual(proposal.revision.plan.tasks.flatMap((task) => task.repositoryIds).sort(), ["repo:core", "repo:docs"]);
     assert.equal(proposal.revision.plan.integrationConditions.length, 1);
     assert.equal(proposal.preview.execution.supported, false);
-    assert.match(proposal.preview.execution.reason, /DH-720|multi-repository/i);
+    assert.match(proposal.preview.execution.reason, /register local checkouts|multi-repository/i);
 
     const startResponse = await fetch(`${dashboard.url}/api/objectives/${objective.objective.id}/plans/1/start`, {
       method: "POST",
@@ -1013,6 +1018,130 @@ test("cross-repository objective planning maps impact without starting an unsupp
     assert.equal(runs.runs.length, 0, "planning must not start a run before multi-repository execution exists");
   } finally {
     await dashboard.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("DH-720 executes an exact two-repository integration set without changing the primary checkouts", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-integration-set-"));
+  const core = await createRepository(path.join(root, "core"));
+  const docs = await createRepository(path.join(root, "docs"));
+  await git(core, ["remote", "add", "origin", "https://github.com/fixture-product/core.git"]);
+  await git(docs, ["remote", "add", "origin", "https://github.com/fixture-product/docs.git"]);
+  const coreBase = (await git(core, ["rev-parse", "HEAD"])).stdout.trim();
+  const docsBase = (await git(docs, ["rev-parse", "HEAD"])).stdout.trim();
+  const command = await createFakeCli(root);
+  await initializeProject(core);
+  const config = await loadConfig(core);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  config.reviewPolicy.reviewerCountByRisk.medium = 1;
+  config.reviewPolicy.minimumDistinctProvidersByRisk.medium = 1;
+  config.reviewPolicy.requireImplementorIndependenceByRisk.medium = true;
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(core), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+  const dashboard = await startDashboard({ projectPath: core, port: 0, open: false });
+  type IntegrationSetFixture = { repositories: Array<{ repositoryId: string; localPath: string; baseCommit: string; headCommit: string; integrationBranch: string; integrationWorktreePath: string }> };
+  let runId = "";
+  let integrationSet: IntegrationSetFixture | null = null;
+  try {
+    const productResponse = await fetch(`${dashboard.url}/api/products`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "fixture-product",
+        name: "Fixture Product",
+        organizationUrl: "https://github.com/fixture-product",
+        description: "Two-repository execution fixture",
+        repositories: [
+          { id: "repo:core", name: "core", fullName: "fixture-product/core", url: "https://github.com/fixture-product/core", cloneUrl: "https://github.com/fixture-product/core.git", defaultBranch: "main", visibility: "public", archived: false, sizeKb: 100, language: "TypeScript", description: "Core product", intelligence: {} },
+          { id: "repo:docs", name: "docs", fullName: "fixture-product/docs", url: "https://github.com/fixture-product/docs", cloneUrl: "https://github.com/fixture-product/docs.git", defaultBranch: "main", visibility: "public", archived: false, sizeKb: 50, language: null, description: "Product documentation", intelligence: {} },
+        ],
+      }),
+    });
+    assert.equal(productResponse.status, 201, await productResponse.clone().text());
+    for (const [localPath, role] of [[core, "module"], [docs, "documentation"]] as const) {
+      const response = await fetch(`${dashboard.url}/api/products/fixture-product/repositories`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ localPath, role, expectedBranch: "main", owners: ["fixture"], dependencyRepositoryIds: [], governanceSources: ["README.md"], validators: { "diff-check": "git diff --check" } }),
+      });
+      assert.equal(response.status, 201, await response.clone().text());
+    }
+
+    const objectiveResponse = await fetch(`${dashboard.url}/api/objectives`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        outcome: "Cross repository fixture: implement and document the product change",
+        acceptanceCriteria: ["Both repositories contain the approved result"],
+        constraints: ["Keep the primary checkouts unchanged"],
+        projectPath: core,
+        productId: "fixture-product",
+        repositoryIds: ["repo:core", "repo:docs"],
+        risk: "medium",
+        autonomy: "supervised",
+        priority: "normal",
+        policyNotes: [],
+      }),
+    });
+    assert.equal(objectiveResponse.status, 201, await objectiveResponse.clone().text());
+    const objective = await objectiveResponse.json() as { objective: { id: string } };
+    const planResponse = await fetch(`${dashboard.url}/api/objectives/${objective.objective.id}/plans`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabledProviders: ["codex", "claude", "gemini"] }),
+    });
+    assert.equal(planResponse.status, 201, await planResponse.clone().text());
+    const proposal = await planResponse.json() as { preview: { execution: { supported: boolean; reason: string } } };
+    assert.equal(proposal.preview.execution.supported, true, proposal.preview.execution.reason);
+
+    const startResponse = await fetch(`${dashboard.url}/api/objectives/${objective.objective.id}/plans/1/start`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agents: 2, enabledProviders: ["codex", "claude", "gemini"] }),
+    });
+    assert.equal(startResponse.status, 202, await startResponse.clone().text());
+    runId = ((await startResponse.json()) as { runId: string }).runId;
+    const run = await poll(
+      () => fetch(`${dashboard.url}/api/runs/${runId}`).then((response) => response.json() as Promise<{ status: string; finalReview: string | null }>),
+      (candidate) => ["ready", "not_ready", "failed"].includes(candidate.status),
+      45_000,
+    );
+    assert.equal(run.status, "ready", run.finalReview ?? "run did not become ready");
+    assert.match(run.finalReview ?? "", /repo:core .* -> .*repo:docs/s);
+
+    const integrationResponse = await fetch(`${dashboard.url}/api/runs/${runId}/integration-set`);
+    assert.equal(integrationResponse.status, 200, await integrationResponse.clone().text());
+    integrationSet = await integrationResponse.json() as IntegrationSetFixture;
+    assert.ok(integrationSet);
+    assert.equal(integrationSet.repositories.length, 2);
+    const byId = new Map(integrationSet.repositories.map((repository) => [repository.repositoryId, repository]));
+    assert.equal(byId.get("repo:core")?.baseCommit, coreBase);
+    assert.equal(byId.get("repo:docs")?.baseCommit, docsBase);
+    assert.notEqual(byId.get("repo:core")?.headCommit, coreBase);
+    assert.notEqual(byId.get("repo:docs")?.headCommit, docsBase);
+    assert.equal((await readFile(path.join(byId.get("repo:core")!.integrationWorktreePath, "result.txt"), "utf8")).replace(/\r\n/g, "\n"), "created by worker\n");
+    assert.equal((await readFile(path.join(byId.get("repo:docs")!.integrationWorktreePath, "result.txt"), "utf8")).replace(/\r\n/g, "\n"), "created by worker\n");
+    await assert.rejects(readFile(path.join(core, "result.txt"), "utf8"));
+    await assert.rejects(readFile(path.join(docs, "result.txt"), "utf8"));
+    assert.equal((await git(core, ["status", "--porcelain"])).stdout.trim(), "");
+    assert.equal((await git(docs, ["status", "--porcelain"])).stdout.trim(), "");
+    const evidenceExport = await fetch(`${dashboard.url}/api/runs/${runId}/evidence/export`).then((response) => response.json()) as { evidence: { integrationSet: IntegrationSetFixture } };
+    assert.deepEqual(evidenceExport.evidence.integrationSet.repositories.map((repository) => repository.repositoryId), ["repo:core", "repo:docs"]);
+  } finally {
+    await dashboard.close();
+    if (integrationSet) {
+      for (const repository of integrationSet.repositories) {
+        const taskId = repository.repositoryId === "repo:core" ? "core" : "docs";
+        const repositoryRoot = repository.repositoryId === "repo:core" ? core : docs;
+        await runProcess({ command: "git", args: ["worktree", "remove", "--force", path.join(path.dirname(repository.integrationWorktreePath), "tasks", taskId)], cwd: repositoryRoot, timeoutMs: 30_000 });
+        await runProcess({ command: "git", args: ["worktree", "remove", "--force", repository.integrationWorktreePath], cwd: repositoryRoot, timeoutMs: 30_000 });
+      }
+    }
+    if (runId) await rm(path.join(os.tmpdir(), "devharmonics", runId), { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });

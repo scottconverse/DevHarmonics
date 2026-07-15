@@ -350,6 +350,17 @@ async function route(
   }
 
   const runMatch = url.pathname.match(/^\/api\/runs\/([a-f0-9-]+)$/i);
+  const integrationSetMatch = url.pathname.match(/^\/api\/runs\/([a-f0-9-]+)\/integration-set$/i);
+  if (request.method === "GET" && integrationSetMatch?.[1]) {
+    if (!context.ledger.getRun(integrationSetMatch[1])) {
+      sendJson(response, 404, { error: "Run not found" });
+      return;
+    }
+    const integrationSet = context.ledger.getIntegrationSet(integrationSetMatch[1]);
+    sendJson(response, integrationSet ? 200 : 404, integrationSet ?? { error: "Run has no multi-repository integration set" });
+    return;
+  }
+
   if (request.method === "GET" && runMatch?.[1]) {
     const run = context.ledger.getRun(runMatch[1]);
     sendJson(response, run ? 200 : 404, run ?? { error: "Run not found" });

@@ -1,13 +1,27 @@
 import path from "node:path";
+import { realpath } from "node:fs/promises";
 import type { CheckResult, ValidatorConfig } from "./types.js";
 import { runProcess } from "./process.js";
+
+function inside(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+export async function resolveValidatorCwd(config: ValidatorConfig, worktreePath: string): Promise<string> {
+  const root = await realpath(worktreePath);
+  const requested = path.resolve(root, config.cwd ?? ".");
+  const cwd = await realpath(requested);
+  if (!inside(root, cwd)) throw new Error("Validator working directory is outside the assigned worktree");
+  return cwd;
+}
 
 export async function runValidator(
   name: string,
   config: ValidatorConfig,
   worktreePath: string,
 ): Promise<CheckResult> {
-  const cwd = config.cwd ? path.resolve(worktreePath, config.cwd) : worktreePath;
+  const cwd = await resolveValidatorCwd(config, worktreePath);
   const result = await runProcess({
     command: config.command,
     args: config.args,

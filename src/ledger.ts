@@ -2780,9 +2780,18 @@ export class Ledger {
     return Number(row.total);
   }
 
+  getWorkbenchSpendUsd(sessionId: string): number {
+    const row = this.database.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS total FROM workbench_messages WHERE session_id = ? AND status = 'complete'").get(sessionId) as { total: number };
+    return Number(row.total);
+  }
+
   getMonthlySpendUsd(at = new Date()): number {
     const start = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), 1)).toISOString();
-    const row = this.database.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS total FROM invocation_receipts WHERE created_at >= ?").get(start) as { total: number };
+    const row = this.database.prepare(`
+      SELECT
+        (SELECT COALESCE(SUM(cost_usd), 0) FROM invocation_receipts WHERE created_at >= ?) +
+        (SELECT COALESCE(SUM(cost_usd), 0) FROM workbench_messages WHERE created_at >= ? AND status = 'complete') AS total
+    `).get(start, start) as { total: number };
     return Number(row.total);
   }
 

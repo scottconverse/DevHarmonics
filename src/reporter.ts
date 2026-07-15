@@ -107,7 +107,7 @@ export function createRunReport(evidence: RunEvidencePackage | Record<string, an
   }
   const integrationHashes = new Set(currentReviews.map((review) => String((review as { integrationSha256?: unknown }).integrationSha256 ?? "")).filter(Boolean));
   if (integrationHashes.size > 1) inconsistencies.push("Current review receipts refer to different integration evidence hashes");
-  if (run.status === "ready" && integrationSet?.status !== "ready") inconsistencies.push("Run status ready conflicts with integration-set status");
+  if (run.status === "ready" && integrationSet && integrationSet.status !== "ready") inconsistencies.push("Run status ready conflicts with integration-set status");
 
   let verdict: RunReportVerdict = "INCONCLUSIVE";
   if (["not_ready", "failed", "cancelled"].includes(run.status) || retainedVerdict === "NOT_READY") {

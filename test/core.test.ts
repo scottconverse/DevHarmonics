@@ -38,12 +38,14 @@ import { WorkspaceIsolationError, WorktreeManager } from "../src/worktrees.js";
 import { chunkDiffFiles, classifyVerdict, runContextOnlyReview } from "../src/local-review.js";
 import { classifyWorkload, inferModelProfile, profileMetadata, SUBSCRIPTION_COMPATIBILITY_MODELS } from "../src/model-intelligence.js";
 import { parseCurrentClaudeModels } from "../src/catalog.js";
-import { estimateInvocationCost, estimateQualificationCost, isExactOpenRouterModelId } from "../src/openrouter.js";
+import { estimateInvocationCost, estimateQualificationCost, isExactOpenRouterModelId, OpenRouterService } from "../src/openrouter.js";
 import { architectPrompt, localReviewerContextHeader, reviewerPrompt, workerPrompt } from "../src/prompts.js";
 import { QUALIFICATION_FINGERPRINT_FIXTURE, ensureReviewerCandidateQualified, ensureSchedulerCandidateQualified, hasCurrentOperationalQualification, qualifyRuntimeModel, trackedFamilyQualificationRole } from "../src/qualification.js";
 import { modelQualificationFingerprint } from "../src/model-fingerprint.js";
 import { aggregateModelPerformance } from "../src/model-performance.js";
 import { quotaResetAt } from "../src/antigravity.js";
+import { runValidator } from "../src/validators.js";
+import { parseReviewerResponse } from "../src/review.js";
 
 test("provider output parsers extract each CLI's final response", () => {
   const codex = [
@@ -454,6 +456,73 @@ test("workload classification maps architecture, routine work, and low-risk bulk
   }).requiredTier, "premium");
 });
 
+test("OpenRouter Workbench consultation enforces budgets and contributes to monthly spend", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-openrouter-workbench-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    await initializeProject(root);
+    const config = await loadConfig(root);
+    config.openRouter.enabled = true;
+    config.openRouter.allowPaidFallback = true;
+    config.openRouter.perRunLimitUsd = 0;
+    config.openRouter.monthlyLimitUsd = 0;
+    config.runPolicy.allowPaidApi = true;
+    await writeFile(path.join(root, ".devharmonics", "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+    ledger.upsertConnection({ id: "api:openrouter", provider: "openrouter", transport: "api", authentication: "credential_reference", displayName: "OpenRouter", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "paid", capacity: "available", adapterVersion: "test", runtimeVersion: "test", metadata: {} });
+    const modelId = "api:openrouter:model:anthropic-claude-test";
+    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "api:openrouter", canonicalName: "anthropic/claude-test-20260715", displayName: "Claude Test", source: "provider_catalog", lifecycle: "known", visible: true, verified: false, qualified: false, active: false, metadata: { ...profileMetadata({ tier: "premium", family: "claude-test", capabilities: ["text", "analysis"], source: "catalog" }), promptPrice: 0.000001, completionPrice: 0.000002 } });
+    ledger.recordModelQualification({ modelId, fixtureVersion: "test", role: "reviewer", passed: true, score: 1, evidence: {} });
+    ledger.setModelPreference(modelId, { active: true });
+    const session = ledger.createWorkbenchSession({ projectPath: root, title: "Paid consultation" });
+
+    let invoked = false;
+    const orchestrator = new Orchestrator(ledger);
+    (orchestrator as any).provider = async () => ({
+      connection: { id: domainId("ProviderConnection", "api:openrouter"), provider: "openrouter", displayName: "OpenRouter", transport: "api", authentication: "credential_reference", capabilities: { structuredOutput: true, streaming: false, providerManagedTools: false, modelSelection: true, modelSettings: [], permissions: ["read_only"] } },
+      metadata: async () => ({ adapterVersion: "test", runtimeVersion: "test" }),
+      invoke: async (request: any) => { invoked = true; return { connectionId: "api:openrouter", provider: "openrouter", adapterVersion: "test", runtimeVersion: "test", model: { ...request.model, resolvedModelId: modelId, resolution: "concrete" }, text: "paid result", stdout: "", stderr: "", exitCode: 0, durationMs: 1, usage: { inputTokens: 1, outputTokens: 1, costUsd: 0.25 }, toolRequests: [] }; },
+    });
+    const results = await (orchestrator as any).consultWorkbench({ projectPath: root, sessionId: session.id, question: "Compare approaches", discussionContext: "", modelIds: [modelId] }) as Array<{ status: string; error: string | null }>;
+    assert.equal(results[0]?.status, "failed");
+    assert.match(results[0]?.error ?? "", /positive per-run and monthly spending limits/i);
+    assert.equal(invoked, false);
+
+    ledger.appendWorkbenchMessage({ sessionId: session.id, role: "assistant", content: "prior paid result", provider: "openrouter", connectionId: "api:openrouter", requestedModelId: modelId, resolvedModelId: modelId, status: "complete", costUsd: 1.25 });
+    assert.equal((ledger as any).getWorkbenchSpendUsd?.(session.id), 1.25);
+    assert.equal(ledger.getMonthlySpendUsd(), 1.25);
+
+    const service = new OpenRouterService(ledger, {} as any);
+    (service as any).status = async () => ({ connected: true, key: { limit_remaining: 0.01 } });
+    config.openRouter.perRunLimitUsd = 2;
+    config.openRouter.monthlyLimitUsd = 2;
+    await assert.rejects(() => (service as any).assertPaidWorkbenchAllowed(config, session.id, 1), /per-run limit would be exceeded/i);
+
+    const secondModelId = "api:openrouter:model:openai-gpt-test";
+    ledger.upsertDiscoveredModel({ id: secondModelId, connectionId: "api:openrouter", canonicalName: "openai/gpt-test-20260715", displayName: "GPT Test", source: "provider_catalog", lifecycle: "known", visible: true, verified: false, qualified: false, active: false, metadata: { ...profileMetadata({ tier: "premium", family: "gpt-test", capabilities: ["text", "analysis"], source: "catalog" }), promptPrice: 0.000001, completionPrice: 0.000002 } });
+    ledger.recordModelQualification({ modelId: secondModelId, fixtureVersion: "test", role: "reviewer", passed: true, score: 1, evidence: {} });
+    ledger.setModelPreference(secondModelId, { active: true });
+    const aggregateSession = ledger.createWorkbenchSession({ projectPath: root, title: "Aggregate paid consultation" });
+    config.openRouter.perRunLimitUsd = 0.005;
+    config.openRouter.monthlyLimitUsd = 10;
+    await writeFile(path.join(root, ".devharmonics", "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+    const originalStatus = OpenRouterService.prototype.status;
+    OpenRouterService.prototype.status = async () => ({ connected: true, key: { limit_remaining: 10 } });
+    try {
+      invoked = false;
+      const aggregate = await (orchestrator as any).consultWorkbench({ projectPath: root, sessionId: aggregateSession.id, question: "Compare both paid models", discussionContext: "", modelIds: [modelId, secondModelId] }) as Array<{ status: string; error: string | null }>;
+      assert.deepEqual(aggregate.map((result) => result.status), ["failed", "failed"]);
+      assert.ok(aggregate.every((result) => /per-run limit would be exceeded/i.test(result.error ?? "")));
+      assert.equal(invoked, false, "aggregate paid estimates must be checked before concurrent invocation fan-out");
+    } finally {
+      OpenRouterService.prototype.status = originalStatus;
+    }
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("workload classification gives narrow low-risk bounded implementation to the economy specialist lane", () => {
   const classification = classifyWorkload("worker", {
     id: "small-fix", title: "Small fix", description: "Patch one bounded file", dependencies: [], preferredProvider: null,
@@ -754,6 +823,41 @@ test("READY local review preserves target risks instead of claiming none exist",
   assert.match(result.text, /^READY/);
   assert.doesNotMatch(result.text, /Material risks: none/i);
   assert.match(result.text, /READY means the evidence package passed review/i);
+});
+
+test("context-only review retains repository-prefixed findings for the automatic fixer", async () => {
+  let prompt = "";
+  const adapter = {
+    connection: { id: domainId("ProviderConnection", "local:ollama"), provider: "ollama", displayName: "Ollama", transport: "local" as const, authentication: "local_none" as const, capabilities: { structuredOutput: true, streaming: false, providerManagedTools: false, modelSelection: true, modelSettings: [], permissions: ["read_only" as const] } },
+    metadata: async () => ({ adapterVersion: "test", runtimeVersion: "test" }),
+    invoke: async (request: any) => {
+      prompt = request.prompt;
+      const text = `NOT READY\nThe retained defect blocks delivery.\n\n\`\`\`json\n{"findings":[{"id":"core-defect","severity":"high","location":"repo:core/src/a.ts:7","rationale":"Unsafe bypass remains.","suggestedCorrection":"Remove the bypass.","disposition":"open"}]}\n\`\`\``;
+      return { connectionId: domainId("ProviderConnection", "local:ollama"), provider: "ollama", adapterVersion: "test", runtimeVersion: "test", model: { ...request.model, resolvedModelId: domainId("Model", "ollama:test"), resolution: "concrete" as const }, text, stdout: "", stderr: "", exitCode: 0, durationMs: 1, usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 }, toolRequests: [] };
+    },
+  };
+  const result = await runContextOnlyReview({ adapter, model: { requestedModelId: null, alias: "test", settings: {} }, cwd: os.tmpdir(), contextHeader: "Repositories: repo:core", chunks: [{ label: "repo:core/src/a.ts", content: "+unsafe bypass" }] });
+  assert.match(prompt, /exactly one fenced JSON object/i);
+  assert.match(prompt, /repository-prefixed location/i);
+  const review = parseReviewerResponse(result.text, { provider: "ollama", modelId: "ollama:test", connectionId: "local:ollama" });
+  const assignment = assignReviewFindings(review.findings, ["repo:core"]);
+  assert.deepEqual(assignment.byRepository.get("repo:core")?.map((finding) => finding.id), ["core-defect"]);
+  assert.deepEqual(assignment.unassigned, []);
+});
+
+test("context-only prose-only rejection remains visibly unassigned and fails closed", async () => {
+  const adapter = {
+    connection: { id: domainId("ProviderConnection", "local:ollama"), provider: "ollama", displayName: "Ollama", transport: "local" as const, authentication: "local_none" as const, capabilities: { structuredOutput: true, streaming: false, providerManagedTools: false, modelSelection: true, modelSettings: [], permissions: ["read_only" as const] } },
+    metadata: async () => ({ adapterVersion: "test", runtimeVersion: "test" }),
+    invoke: async (request: any) => ({ connectionId: domainId("ProviderConnection", "local:ollama"), provider: "ollama", adapterVersion: "test", runtimeVersion: "test", model: { ...request.model, resolvedModelId: domainId("Model", "ollama:test"), resolution: "concrete" as const }, text: "NOT READY\nA defect remains, but no structured location was supplied.", stdout: "", stderr: "", exitCode: 0, durationMs: 1, usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 }, toolRequests: [] }),
+  };
+  const result = await runContextOnlyReview({ adapter, model: { requestedModelId: null, alias: "test", settings: {} }, cwd: os.tmpdir(), contextHeader: "Repositories: repo:core", chunks: [{ label: "repo:core/src/a.ts", content: "+unsafe bypass" }] });
+  const review = parseReviewerResponse(result.text, { provider: "ollama", modelId: "ollama:test", connectionId: "local:ollama" });
+  const assignment = assignReviewFindings(review.findings, ["repo:core"]);
+  assert.equal(review.verdict, "NOT_READY");
+  assert.deepEqual([...assignment.byRepository], []);
+  assert.equal(assignment.unassigned.length, 1);
+  assert.equal(assignment.unassigned[0]?.location, null);
 });
 
 test("tool policy allows receipted local work but gates external and unrestricted actions", () => {
@@ -1171,6 +1275,27 @@ test("typed tool policy enforces actor, stage, path scope, and consequential app
   assert.deepEqual(approved.lockKeys, ["external:github"]);
 });
 
+test("repository validators cannot escape their assigned worktree through cwd", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-validator-scope-"));
+  const worktree = path.join(root, "worktree");
+  const outside = path.join(root, "outside.txt");
+  await mkdir(worktree, { recursive: true });
+  try {
+    await assert.rejects(
+      () => runValidator("escape", {
+        command: process.execPath,
+        args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(outside)}, "mutated")`],
+        cwd: "..",
+        timeoutMs: 5_000,
+      }, worktree),
+      /outside the assigned worktree/i,
+    );
+    await assert.rejects(() => readFile(outside, "utf8"), /ENOENT/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("ledger retains redacted tool-policy receipts in the run evidence package", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-tool-receipts-"));
   const ledger = new Ledger(path.join(root, "devharmonics.db")) as Ledger & {
@@ -1209,7 +1334,7 @@ test("ledger retains redacted tool-policy receipts in the run evidence package",
     const evidence = ledger.getRunEvidence(runId) as ReturnType<Ledger["getRunEvidence"]> & {
       toolReceipts?: Array<Record<string, unknown>>;
     };
-    assert.equal((evidence as unknown as { version: number } | null)?.version, 3);
+    assert.equal((evidence as unknown as { version: number } | null)?.version, 4);
     assert.equal(evidence?.toolReceipts?.length, 1);
     assert.equal(evidence?.toolReceipts?.[0]?.id, receiptId);
   } finally {
@@ -1360,7 +1485,7 @@ test("ledger retains structured reviews and invalidates them when fixer evidence
     assert.ok(reviews[0]!.invalidatedAt);
     assert.match(reviews[0]!.invalidationReason!, /fixer changed/i);
     const evidence = ledger.getRunEvidence(runId) as Record<string, any>;
-    assert.equal(evidence.version, 3);
+    assert.equal(evidence.version, 4);
     assert.equal(evidence.reviews[0].id, reviewId);
     assert.ok(evidence.reviews[0].invalidatedAt);
   } finally {
@@ -1530,7 +1655,7 @@ test("Ollama discovery registers installed models and supports read-only inferen
     });
     assert.equal(result.text, "local result");
     assert.deepEqual(result.usage, { inputTokens: 7, outputTokens: 3, costUsd: 0 });
-    const qualification = ledger.recordModelQualification({ modelId: "ollama:qwen-fixture:7b", fixtureVersion: "fixture-v1", role: "analysis", passed: true, score: 1, evidence: { durationMs: result.durationMs } });
+    const qualification = ledger.recordModelQualification({ modelId: "ollama:qwen-fixture:7b", fixtureVersion: "fixture-v1", role: "architect", passed: true, score: 1, evidence: { durationMs: result.durationMs } });
     assert.equal(qualification.passed, true);
     assert.equal(ledger.getModel("ollama:qwen-fixture:7b")?.qualified, true);
     const routingConfig = structuredClone(defaultConfig);
@@ -2589,6 +2714,79 @@ test("executeTask preserves cancellation at the commit/merge boundary", async ()
   assert.ok(!failingCommit.eventKinds.includes("task.failed"));
 });
 
+test("executeTask cannot pass a no-change retry while its task branch remains unmerged", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-unmerged-retry-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    const worktreePath = path.join(root, "task-worktree");
+    await mkdir(worktreePath, { recursive: true });
+    const task = {
+      id: "conflicting-change",
+      title: "Conflicting change",
+      description: "Apply a change that conflicts during integration",
+      dependencies: [],
+      preferredProvider: "codex" as const,
+      checks: ["pass"],
+      kind: "implementation" as const,
+      permission: "workspace_write" as const,
+      risk: "medium" as const,
+      repositoryScope: ["src/value.ts"],
+      capabilityNeeds: ["code"],
+      acceptanceCriteria: ["change is integrated"],
+      expectedArtifacts: ["src/value.ts"],
+    };
+    const runId = ledger.createRun("Reject an unmerged retry", root);
+    ledger.upsertConnection({ id: "subscription-cli:codex", provider: "codex", transport: "subscription_cli", authentication: "subscription", displayName: "Codex", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "unknown", capacity: "unknown", adapterVersion: "test", runtimeVersion: "test", metadata: {} });
+    ledger.savePlan(runId, { summary: "One conflicting task", recommendedConcurrency: 1, tasks: [task] });
+
+    const orchestrator = new Orchestrator(ledger);
+    (orchestrator as any).provider = () => ({
+      connection: projectLegacyProvider("codex"),
+      metadata: async () => ({ adapterVersion: "test", runtimeVersion: "test" }),
+      invoke: async () => ({
+        connectionId: "subscription-cli:codex", provider: "codex", adapterVersion: "test", runtimeVersion: "test",
+        model: { requestedModelId: null, alias: null, settings: {}, resolvedModelId: "provider-default:codex", resolution: "provider_default_unresolved" },
+        text: "done", stdout: "", stderr: "", exitCode: 0, durationMs: 0,
+        usage: { inputTokens: null, outputTokens: null, costUsd: null }, toolRequests: [],
+      }),
+    });
+    const config: DevHarmonicsConfig = structuredClone(defaultConfig);
+    config.application.retry.maxAttempts = 2;
+    config.application.retry.backoffMs = 1;
+    config.product.workers = ["codex"];
+    config.repository.validators = { pass: { command: process.execPath, args: ["-e", "process.exit(0)"], timeoutMs: 30_000 } };
+    let commitCalls = 0;
+    let mergeCalls = 0;
+    const result = await (orchestrator as any).executeTask({
+      runId,
+      goal: "Reject an unmerged retry",
+      task,
+      constitution: "Test constitution",
+      config,
+      providers: ["codex"],
+      providerCursor: 0,
+      worktrees: {
+        root,
+        integrationPath: worktreePath,
+        createTask: async () => ({ path: worktreePath, branch: "devharmonics/task-conflicting-change" }),
+        commitTask: async () => ++commitCalls === 1,
+        mergeTask: async () => { mergeCalls++; throw new Error("Merge conflict for conflicting-change: fixture conflict"); },
+      },
+      signal: new AbortController().signal,
+    });
+
+    assert.equal(result, "failed");
+    assert.equal(commitCalls, 2);
+    assert.equal(mergeCalls, 2, "the existing task commit must be retried even when the agent produced no new commit");
+    const run = ledger.getRun(runId)!;
+    assert.equal(run.tasks.find((candidate) => candidate.id === task.id)?.status, "failed");
+    assert.equal(run.events.some((event) => event.kind === "task.passed"), false);
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("read-only task contracts survive persistence and never cross the commit boundary", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-read-only-task-"));
   const ledger = new Ledger(path.join(root, "devharmonics.db"));
@@ -2639,7 +2837,7 @@ test("read-only task contracts survive persistence and never cross the commit bo
     assert.equal(result, "passed");
     assert.equal(invokedPermission, "read_only");
     assert.equal(committed, false);
-    assert.equal(isolationChecks, 2);
+    assert.equal(isolationChecks, 3);
   } finally {
     ledger.close();
     await rm(root, { recursive: true, force: true });
@@ -2670,7 +2868,7 @@ test("quota exhaustion cools a subscription connection and falls back with durab
     config.application.retry.backoffMs = 1;
     config.product.workers = ["codex", "claude"];
     config.repository.validators = { pass: { command: process.execPath, args: ["-e", "process.exit(0)"], timeoutMs: 5_000 } };
-    const result = await (orchestrator as any).executeTask({ runId, goal: "Fallback", task, constitution: "test", config, providers: ["codex", "claude"], providerCursor: 0, worktrees: { createTask: async () => ({ path: root, branch: "fixture" }), commitTask: async () => false, mergeTask: async () => undefined }, signal: new AbortController().signal });
+    const result = await (orchestrator as any).executeTask({ runId, goal: "Fallback", task, constitution: "test", config, providers: ["codex", "claude"], providerCursor: 0, worktrees: { root, integrationPath: root, createTask: async () => ({ path: root, branch: "fixture" }), commitTask: async () => false, mergeTask: async () => undefined }, signal: new AbortController().signal });
     assert.equal(result, "passed");
     assert.equal(ledger.getConnectionHealth("subscription-cli:codex")?.state, "quota_exhausted");
     assert.equal(ledger.getConnectionHealth("subscription-cli:claude")?.state, "ready");
@@ -2921,7 +3119,7 @@ test("repository registry migrates remote observations and persists local govern
     DROP TABLE repositories;
     ALTER TABLE repositories_v19 RENAME TO repositories;
     CREATE INDEX repositories_product_id ON repositories(product_id);
-    DELETE FROM schema_migrations WHERE version = 20;
+    DELETE FROM schema_migrations WHERE version >= 20;
     PRAGMA user_version = 19;
     COMMIT;
     PRAGMA foreign_keys = ON;

@@ -757,7 +757,7 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
     assert.match(exportResponse.headers.get("content-disposition") ?? "", new RegExp(`attachment; filename="devharmonics-${runId}-evidence\\.json"`));
     const exportValue = await exportResponse.json() as { version: number; evidenceVersion: number; integritySha256: string; report: { runId: string } };
     assert.equal(exportValue.version, 1);
-    assert.equal(exportValue.evidenceVersion, 3);
+    assert.equal(exportValue.evidenceVersion, 4);
     assert.equal(exportValue.integritySha256, reportValue.evidenceHash);
     assert.equal(exportValue.report.runId, runId);
     const reporterMutation = await fetch(`${dashboard.url}/api/runs/${runId}/report`, {

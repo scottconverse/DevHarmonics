@@ -42,7 +42,7 @@ import { evaluateToolRequest, type ToolStage } from "./policy.js";
 import { adjudicateReviewQuorum, parseReviewerResponse, reviewRequirement, type ReviewFinding, type ReviewQuorumDecision, type ReviewRequirement, type StructuredReview } from "./review.js";
 import { estimateInvocationCost, OpenRouterService } from "./openrouter.js";
 import { ensureSchedulerCandidateQualified, type SchedulerQualificationResult } from "./qualification.js";
-import { runValidator, unknownValidator } from "./validators.js";
+import { resolveValidatorCwd, runValidator, unknownValidator } from "./validators.js";
 import { analyzeVerificationIntegrity } from "./verification-integrity.js";
 import { runLocalToolLoop } from "./local-tools.js";
 import { WorktreeManager, WorkspaceIsolationError } from "./worktrees.js";
@@ -247,6 +247,7 @@ export class Orchestrator {
   }
 
   async consultWorkbench(input: {
+    sessionId: string;
     projectPath: string;
     question: string;
     discussionContext: string;
@@ -269,7 +270,28 @@ export class Orchestrator {
     if (!input.question.trim()) throw new Error("Workbench question is required");
     if (!input.modelIds.length) throw new Error("Select at least one qualified model to consult");
 
-    return Promise.all([...new Set(input.modelIds)].map(async (modelId) => {
+    const modelIds = [...new Set(input.modelIds)];
+    const prompt = workbenchConsultationPrompt({
+      projectPath,
+      question: input.question,
+      discussionContext: input.discussionContext,
+    });
+    const paidModels = modelIds.flatMap((modelId) => {
+      const model = this.ledger.getModel(modelId);
+      const connection = model ? this.ledger.listConnections().find((item) => item.id === model.connectionId) : null;
+      return model && connection?.provider === "openrouter" && model.active && !model.excluded && !model.retired && !model.qualificationStale ? [model] : [];
+    });
+    let paidBudgetError: Error | null = null;
+    if (paidModels.length) {
+      const estimatedCost = paidModels.reduce((sum, model) => sum + (estimateInvocationCost(model, prompt) ?? 0), 0);
+      try {
+        await new OpenRouterService(this.ledger).assertPaidWorkbenchAllowed(config, input.sessionId, estimatedCost);
+      } catch (error) {
+        paidBudgetError = error instanceof Error ? error : new Error(String(error));
+      }
+    }
+
+    return Promise.all(modelIds.map(async (modelId) => {
       const model = this.ledger.getModel(modelId);
       const connection = model ? this.ledger.listConnections().find((item) => item.id === model.connectionId) : null;
       const provider = connection?.provider ?? "unknown";
@@ -293,6 +315,7 @@ export class Orchestrator {
       if (provider === "openrouter" && !(config.openRouter.enabled && config.openRouter.allowPaidFallback && config.runPolicy.allowPaidApi)) {
         return failed(new Error("Paid API consultation is disabled by project policy"));
       }
+      if (provider === "openrouter" && paidBudgetError) return failed(paidBudgetError);
 
       const consultationConfig: DevHarmonicsConfig = {
         ...config,
@@ -317,11 +340,7 @@ export class Orchestrator {
         const adapter = await this.provider(decision.provider, consultationConfig, decision.connectionId);
         const result = await adapter.invoke({
           role: "reviewer",
-          prompt: workbenchConsultationPrompt({
-            projectPath,
-            question: input.question,
-            discussionContext: input.discussionContext,
-          }),
+          prompt,
           cwd: projectPath,
           permission: "read_only",
           timeoutMs: null,
@@ -1684,6 +1703,7 @@ export class Orchestrator {
 
       this.ledger.setTaskStatus(input.runId, input.task.id, "verifying");
       const checks = await this.verifyTask(input, taskWorktree.path, attemptId);
+      await input.worktrees.assertPrimaryClean?.(`after ${input.task.id} validators`);
       // A cancel that landed during validator verification must not be overwritten
       // to passed/retry/failed, and the worktree must not be committed or merged.
       if (input.signal.aborted) return "cancelled";
@@ -1707,24 +1727,25 @@ export class Orchestrator {
             config: input.config,
             request: { message: `devharmonics: complete ${input.task.id}` },
           });
-          const committed = await input.worktrees.commitTask(taskWorktree.path, input.task.id);
+          await input.worktrees.commitTask(taskWorktree.path, input.task.id);
           if (input.signal.aborted) return "cancelled";
-          if (committed) {
-            this.enforceToolPolicy({
-              runId: input.runId,
-              taskId: input.task.id,
-              attemptId,
-              toolId: "git.merge",
-              stage: "integration",
-              taskPermission,
-              assignedWorktree: input.worktrees.integrationPath,
-              repositoryRoot: input.worktrees.root,
-              cwd: input.worktrees.integrationPath,
-              config: input.config,
-              request: { branch: taskWorktree.branch },
-            });
-            await input.worktrees.mergeTask(taskWorktree.branch, input.task.id);
-          }
+          // A retry can reuse a task branch that already contains a commit from a
+          // failed merge. Always attempt integration, even when this attempt made
+          // no new commit, so unmerged work can never be reported as passed.
+          this.enforceToolPolicy({
+            runId: input.runId,
+            taskId: input.task.id,
+            attemptId,
+            toolId: "git.merge",
+            stage: "integration",
+            taskPermission,
+            assignedWorktree: input.worktrees.integrationPath,
+            repositoryRoot: input.worktrees.root,
+            cwd: input.worktrees.integrationPath,
+            config: input.config,
+            request: { branch: taskWorktree.branch },
+          });
+          await input.worktrees.mergeTask(taskWorktree.branch, input.task.id);
           // A cancel that landed during the commit/merge awaits must not overwrite
           // the cancelled status to passed.
           if (input.signal.aborted) return "cancelled";
@@ -1763,6 +1784,7 @@ export class Orchestrator {
     const results: CheckResult[] = [];
     for (const name of input.task.checks) {
       const validator = input.config.repository.validators[name];
+      const validatorCwd = validator ? await resolveValidatorCwd(validator, worktreePath) : worktreePath;
       this.enforceToolPolicy({
         runId: input.runId,
         taskId: input.task.id,
@@ -1772,9 +1794,9 @@ export class Orchestrator {
         taskPermission: input.task.permission ?? "workspace_write",
         assignedWorktree: worktreePath,
         repositoryRoot: worktreePath,
-        cwd: worktreePath,
+        cwd: validatorCwd,
         config: input.config,
-        request: validator ? { command: validator.command, args: validator.args } : { validator: name },
+        request: validator ? { command: validator.command, args: validator.args, cwd: validatorCwd } : { validator: name },
       });
       const result = validator
         ? await runValidator(name, validator, worktreePath)

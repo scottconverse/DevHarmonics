@@ -108,11 +108,16 @@ export function classifyWorkload(
   const normalizedArtifacts = (task.expectedArtifacts ?? []).map((artifact) => artifact.trim().replaceAll("\\", "/").replace(/\/+$/, ""));
   const exactSingleArtifact = normalizedArtifacts.length === 1 && normalizedArtifacts[0] === normalizedScopes[0];
   const narrowBoundedImplementation = (task.kind === "implementation" || task.kind === "repair") && task.permission === "workspace_write" && exactSingleArtifact;
-  if (task.risk === "low" && narrowScope && (simpleKind || simplePermission || narrowBoundedImplementation)) {
+  const lowRiskReadOnlyAnalysis = task.risk === "low" && simplePermission && simpleKind;
+  if (lowRiskReadOnlyAnalysis || (task.risk === "low" && narrowScope && narrowBoundedImplementation)) {
     return {
       complexity: "simple",
       requiredTier: "economy",
-      factors: ["low-risk task", narrowBoundedImplementation ? "narrow bounded implementation" : simplePermission ? "read-only task" : `${task.kind} task`, "narrow repository scope"],
+      factors: [
+        "low-risk task",
+        narrowBoundedImplementation ? "narrow bounded implementation" : "read-only task",
+        ...(narrowScope ? ["narrow repository scope"] : [`${task.kind} workload`]),
+      ],
     };
   }
   return { complexity: "standard", requiredTier: "standard", factors: ["routine implementation workload"] };

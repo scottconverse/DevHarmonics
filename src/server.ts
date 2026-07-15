@@ -566,6 +566,7 @@ async function route(
     }).join("\n\n");
     const userMessage = context.ledger.appendWorkbenchMessage({ sessionId: session.id, role: "user", content: question });
     const consultations = await context.orchestrator.consultWorkbench({
+      sessionId: session.id,
       projectPath: session.projectPath,
       question,
       discussionContext,

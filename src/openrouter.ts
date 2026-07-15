@@ -104,15 +104,22 @@ export class OpenRouterService {
   }
 
   async assertPaidRoutingAllowed(config: DevHarmonicsConfig, runId: string, estimatedCostUsd = 0): Promise<void> {
+    await this.assertPaidSpendAllowed(config, this.ledger.getRunSpendUsd(runId), estimatedCostUsd);
+  }
+
+  async assertPaidWorkbenchAllowed(config: DevHarmonicsConfig, sessionId: string, estimatedCostUsd = 0): Promise<void> {
+    await this.assertPaidSpendAllowed(config, this.ledger.getWorkbenchSpendUsd(sessionId), estimatedCostUsd);
+  }
+
+  private async assertPaidSpendAllowed(config: DevHarmonicsConfig, scopeSpent: number, estimatedCostUsd: number): Promise<void> {
     if (!config.openRouter.enabled || !config.openRouter.allowPaidFallback || !config.runPolicy.allowPaidApi) {
       throw new Error("OpenRouter paid routing is disabled by policy");
     }
     if (config.openRouter.perRunLimitUsd <= 0 || config.openRouter.monthlyLimitUsd <= 0) {
       throw new Error("OpenRouter requires positive per-run and monthly spending limits");
     }
-    const runSpent = this.ledger.getRunSpendUsd(runId);
     const monthlySpent = this.ledger.getMonthlySpendUsd();
-    if (runSpent + estimatedCostUsd > config.openRouter.perRunLimitUsd) throw new Error(`OpenRouter per-run limit would be exceeded ($${runSpent.toFixed(4)} spent of $${config.openRouter.perRunLimitUsd.toFixed(2)})`);
+    if (scopeSpent + estimatedCostUsd > config.openRouter.perRunLimitUsd) throw new Error(`OpenRouter per-run limit would be exceeded ($${scopeSpent.toFixed(4)} spent of $${config.openRouter.perRunLimitUsd.toFixed(2)})`);
     if (monthlySpent + estimatedCostUsd > config.openRouter.monthlyLimitUsd) throw new Error(`OpenRouter monthly limit would be exceeded ($${monthlySpent.toFixed(4)} spent of $${config.openRouter.monthlyLimitUsd.toFixed(2)})`);
     const status = await this.status();
     if (!status.connected) throw new Error("OpenRouter OAuth connection is unavailable");

@@ -1,6 +1,6 @@
 # DevHarmonics Architecture
 
-Architecture version: **0.4.0**
+Architecture version: **0.5.0**
 
 DevHarmonics is a local-first, provider-neutral software factory for product owners managing AI agents as development teams. Its current architecture is a local orchestration layer over official subscription-authenticated coding-agent CLIs. It does not proxy provider HTTP APIs.
 
@@ -12,7 +12,7 @@ Read-only architect -> typed task DAG -> dependency scheduler
                                            |
                            +---------------+---------------+
                            |               |               |
-                      Codex worker    Claude worker   Gemini worker
+                      Codex worker    Claude worker   Antigravity worker
                            |               |               |
                            +------- isolated worktrees ----+
                                            |
@@ -79,7 +79,7 @@ Configured governance sources also serve as canonical product-intelligence sourc
 
 An objective may reference one product and an explicit set of its repositories. Before the architect invocation, the orchestrator assembles read-only registry context for the selected repositories, their dependencies and dependents, and relevant umbrella, shared-platform, documentation, installer, and release-truth repositories. The validated plan records each considered repository as affected or excluded with rationale, scopes every task to affected repository IDs, and requires explicit integration conditions whenever several repositories are affected. This analysis remains a pre-run control-plane operation.
 
-The DH-720 execution path accepts a multi-repository plan only when every affected repository has a compatible local checkout, every task targets exactly one affected repository, and integration conditions are explicit. `IntegrationSetManager` preflights the Git roots, rejects duplicate roots, and creates a separate `WorktreeManager` per repository. Each manager pins a base commit, creates a repository-specific integration branch/worktree, creates task branches/worktrees, and serializes merges targeting that repository; schedulable tasks targeting different repositories can run concurrently. Each repository loads its own constitution and validator map. Repository-local validators and verification-integrity checks run before the risk-configured review quorum receives aggregate repository-prefixed diff chunks. Reviewer routing enforces the configured reviewer count, provider diversity, and implementor independence. Blocking findings are assigned only when their location has an exact repository-ID prefix; unscoped findings fail closed. Repository-specific fixer tasks run in the affected integration worktrees, the changed repositories are revalidated, the prior review receipts are retained but invalidated against a new evidence hash, and a fresh quorum is mandatory. Ledger schema 21 retains the exact base and integration HEAD commits, branch/worktree paths, status, errors, integration conditions, fixer tasks, and review receipts; the API, evidence export, and run UI project that record. No operation checks out or merges into a registered primary checkout.
+The DH-720 execution path accepts a multi-repository plan only when every affected repository has a compatible local checkout, every task targets exactly one affected repository, and integration conditions are explicit. `IntegrationSetManager` preflights the Git roots, rejects duplicate roots, and creates a separate `WorktreeManager` per repository. Each manager pins a base commit, creates a repository-specific integration branch/worktree, creates task branches/worktrees, and serializes merges targeting that repository; schedulable tasks targeting different repositories can run concurrently. Each repository loads its own constitution and validator map. Repository-local validators and verification-integrity checks run before the risk-configured review quorum receives aggregate repository-prefixed diff chunks. Reviewer routing enforces the configured reviewer count, provider diversity, and implementor independence. Blocking findings are assigned only when their location has an exact repository-ID prefix; unscoped findings fail closed. Repository-specific fixer tasks run in the affected integration worktrees, the changed repositories are revalidated, the prior review receipts are retained but invalidated against a new evidence hash, and a fresh quorum is mandatory. Ledger schema 21 retains the exact base and integration HEAD commits, branch/worktree paths, status, errors, integration conditions, fixer tasks, and review receipts; schema 24 binds every current review receipt to hashes of the exact plan, check evidence, task reports, diff, and repository base/HEAD set. The API, evidence export, and run UI project that record. No operation checks out or merges into a registered primary checkout.
 
 This path deliberately fails closed outside that topology. It does not reconstruct interrupted integration sets, clean worktrees automatically, push branches, open pull requests, or allow one task to mutate several repositories. A blocking finding without one exact repository prefix is not guessed or repaired automatically; the run remains `NOT READY` for explicit disposition.
 
@@ -107,12 +107,12 @@ On a controlled server shutdown, the orchestrator pauses and aborts active runs,
 
 Prompts, provider output, validator stdout/stderr, errors, reviews, event messages, and event payloads are redacted before persistence. Migration backups are byte-consistent snapshots of pre-existing data, so a backup may contain sensitive values written by an older version and must be protected like the original ledger.
 
-## Deliberate non-features in v0.4.0
+## Deliberate non-features in v0.5.0
 
 - No general API-key configuration; OpenRouter OAuth is the only API transport and paid use remains separately opt-in
 - No remote DevHarmonics service
 - No automatic merge into the user's checked-out branch
-- No automatic conflict repair
+- No automatic Git merge-conflict repair; structured reviewer findings can be fixed and independently re-reviewed
 - Multi-repository execution does not yet provide restart reconstruction, automatic cleanup, pushes/pull requests, or one task spanning several repositories
 - Local Ollama models cannot inspect or write arbitrary repository paths; reviewers receive orchestrator-supplied context, while qualified implementors receive only scoped read/search/hash-checked-patch tools inside the assigned worktree
 - Large CPU-only local reviews can be materially slower than subscription reviewers, so capacity-aware background scheduling and stronger local-model profiles remain follow-up work

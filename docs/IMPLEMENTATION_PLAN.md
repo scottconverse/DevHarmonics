@@ -1,14 +1,16 @@
 # DevHarmonics Detailed Implementation Plan
 
 Document status: **Build-ready execution plan**
-Plan version: **1.18**
+Plan version: **1.19**
 Written: **2026-07-14**
 Revised: **2026-07-15**
-Product specification baseline: **DevHarmonics Product Specification v1.9**
-Current implementation baseline: **DevHarmonics v0.4.0**
+Product specification baseline: **DevHarmonics Product Specification v1.10**
+Current implementation baseline: **DevHarmonics v0.5.0**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 
-Revision history: **v1.18 (2026-07-15)** — Re-scoped the roadmap around a locally operated factory for a solo product owner or very small product team. Added live run steering, bounded GitHub/Linear/local-schedule/monitoring triggers, approved PR handoff, evidence-based analytics and evaluation promotion, and Git-versioned workflows/skills. Removed remote workers, DevHarmonics cloud hosting, enterprise workforce/IAM/compliance/secrets administration, and arbitrary email/chat-driven execution from the roadmap. Product release numbering remains unchanged.
+Revision history: **v1.19 (2026-07-15)** — Reconciled the v0.5 release candidate with the implemented verified-development capabilities and locked the owner-approved next sequence: approved branch/draft-PR delivery; a real bounded single-repository CivicSuite implementation; live run steering; real provider/local fallback during that work; a real cross-repository CivicSuite implementation; and reusable Git-versioned development workflows. Restart reconstruction, cleanup, analytics, triggers, and campaign breadth remain in the plan but may not displace this capability sequence.
+
+Prior revision: **v1.18 (2026-07-15)** — Re-scoped the roadmap around a locally operated factory for a solo product owner or very small product team. Added live run steering, bounded GitHub/Linear/local-schedule/monitoring triggers, approved PR handoff, evidence-based analytics and evaluation promotion, and Git-versioned workflows/skills. Removed remote workers, DevHarmonics cloud hosting, enterprise workforce/IAM/compliance/secrets administration, and arbitrary email/chat-driven execution from the roadmap. Product release numbering remains unchanged.
 
 Prior revision: **v1.17 (2026-07-15)** — Implemented DH-720's automatic multi-repository correction loop: risk-configured independent review quorums, exact repository-scoped finding assignment, per-repository fixer tasks, repository-local revalidation, changed-evidence hashing and receipt invalidation, and mandatory independent re-review. Unscoped or ambiguous findings fail closed. Product release numbering remains unchanged.
 
@@ -48,7 +50,7 @@ This plan converts the canonical product specification into an incremental engin
 
 The plan is intentionally designed around two facts:
 
-1. DevHarmonics v0.4.0 has a working subscription/local execution path, durable adaptive model fleet, and a passed CivicSuite Observe acceptance workflow.
+1. DevHarmonics v0.5.0 has a working subscription/local execution path, durable adaptive model fleet, verified local implementation, exact multi-repository integration foundations, and a passed CivicSuite Observe acceptance workflow.
 2. Scott needs the product to become useful on real work before every long-term capability is complete.
 
 The implementation therefore MUST evolve the current system without a big-bang rewrite. Every release increment must leave a working product, preserve durable evidence, and provide a safe rollback path.
@@ -1134,7 +1136,9 @@ Implementation status as of 2026-07-14:
 - Increment 1 (v0.2 cockpit): complete in the v0.3.0 release line.
 - Increment 2 (v0.3 model fleet and Ollama): complete; the CivicSuite pilot proved local Qwen review using three bounded diagnostic-report chunks.
 - Increment 3 (v0.4 adaptive workforce): complete and accepted. The representative CivicSuite Observe run `c13f39e7-3f0c-45e5-95ae-b37d78beadfb` independently selected Codex Terra, Claude Sonnet, and Gemini 3.5 Flash for three bounded diagnostics, passed every evidence check on the first attempt, and completed three context-only final-review chunks with local Ollama `qwen2.5:7b`. The full 68-test gate, version audit, dependency audit, routing-evidence inspection, model-fleet walkthrough, evidence-view walkthrough, and full/compact responsive passes all succeeded. Reviewer invocations now participate in empirical profiles, manual tier overrides are explicit, and stale assets cannot silently preserve an older cockpit. Task-linked structured reviewer findings remain part of DH-460 rather than being inferred from a run-level verdict.
-- Increments 4 through 8: planned, with selected foundations already present where noted by the work-package evidence.
+- Increment 4 (v0.5 verified local implementation): feature scope and automated verification complete; release publication gate in progress.
+- Increment 5 (v0.6 CivicSuite operation): in progress, with registry, planning, intelligence, exact integration sets, and automatic fix/re-review foundations implemented.
+- Increments 6 through 8: planned, with selected foundations already present where noted by the work-package evidence.
 
 ### Increment 0: Stabilized baseline — v0.1.x
 
@@ -1209,7 +1213,7 @@ Exit gate:
 
 ### Increment 4: Verified local implementation — v0.5
 
-Status: **Feature scope implemented; integration gate pending.** DH-440 through DH-470 foundations, DH-510's bounded local tool loop, Mellum2 scheduling, DH-620's durable single-workspace objective/plan approval core, and DH-640's read-only multi-model Workbench are implemented on the v0.5 development branch. The aggregate release gate remains before v0.5 can ship.
+Status: **Feature scope and automated verification complete; release publication gate in progress.** DH-440 through DH-470 foundations, DH-510's bounded local tool loop, Mellum2 scheduling, DH-620's durable single-workspace objective/plan approval core, DH-640's read-only multi-model Workbench, exact review-evidence binding, collision-proof internal task IDs, same-provider architect qualification fallback, complete concurrent-abort settling, and bounded OpenRouter spending enforcement are implemented on the v0.5 development branch.
 
 Work:
 
@@ -1231,7 +1235,7 @@ Exit gate:
 
 ### Increment 5: CivicSuite single- and multi-repository operation — v0.6
 
-Status: **In progress.** DH-700's registry/local Git inspection, DH-710's product-aware repository selection and impact planning, and DH-720's exact multi-repository execution plus automatic fixer/re-review quorum loop are implemented. DH-720 still needs restart reconstruction, cleanup, and delivery automation; the bounded CivicSuite pilot also remains.
+Status: **In progress.** DH-700's registry/local Git inspection, DH-710's product-aware repository selection and impact planning, and DH-720's exact multi-repository execution plus automatic fixer/re-review quorum loop are implemented. Approved delivery and the bounded CivicSuite pilots are next. Restart reconstruction and cleanup remain follow-on reliability work and do not displace the owner-locked capability sequence.
 
 Work:
 
@@ -1545,13 +1549,16 @@ The product specification remains the authority for product scope. This implemen
 
 ## 15. Immediate recommendation
 
-Increment 4 feature scope is implemented on the v0.5 development line, with its aggregate integration gate intentionally deferred while feature throughput remains the priority. The next meaningful delivery target is the operational completion of Increment 5:
+Increment 4 is at its v0.5 release gate. After publication, implement the following capability sequence in this exact order:
 
-> Complete a real, bounded CivicSuite objective through multi-repository implementation, automatic fix/re-review, restart-safe recovery, and a reviewable delivery handoff without modifying registered primary checkouts.
+1. **Approved branch/draft-PR delivery.** Present the exact resulting commits and evidence, require explicit approval before pushing a delivery branch or creating a draft pull request, and never merge automatically.
+2. **First real CivicSuite implementation.** Select one bounded, useful single-repository change and run it from objective through implementation, validation, review, repair, and approved delivery. Fix only blockers actually encountered in that run.
+3. **Live run steering.** Pause task admission; redirect, reprioritize, or reassign queued work; interrupt an active attempt; continue with new instructions; and retain exactly what changed.
+4. **Real provider/local fallback.** Continue an interrupted CivicSuite task through another subscription model or qualified local model while preserving context, evidence, and task state.
+5. **Real cross-repository CivicSuite implementation.** Make and deliver one coordinated change across at least two registered repositories with exact integration evidence.
+6. **Reusable development workflows.** Save proven issue-to-PR, dependency-upgrade, module-finishing, compatibility-checking, and release-truth-review processes as Git-versioned workflows.
 
-The existing DH-700, DH-710, DH-720, and DH-730 slices already provide the product registry, repository-aware planning, exact multi-repository integration sets, source-backed product intelligence, and automatic repository-scoped fix/revalidation/re-review under configured quorums. The next build slice should reconstruct interrupted integration sets and clean completed temporary worktrees safely.
-
-Once that vertical slice works, run the first bounded CivicSuite implementation objective through the product and retain its plan, model routing, worktree, validation, review, recovery, and delivery evidence. Draft pull-request or branch-delivery automation follows under explicit human approval. Campaign-scale orchestration remains after this proven product workflow rather than ahead of it.
+Restart reconstruction, automatic worktree cleanup, analytics, triggers, and campaign-scale orchestration remain planned. They must not be pulled ahead of this sequence unless a real run exposes one as a direct blocker or Scott explicitly changes the plan.
 
 ## Sources
 

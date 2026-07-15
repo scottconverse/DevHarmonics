@@ -4,6 +4,8 @@ All notable DevHarmonics changes are documented here.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-15
+
 ### Added
 
 - Immutable source-backed product-intelligence snapshots over configured canonical repository files, retaining exact HEAD revisions, blob/content hashes, working-tree state, explicit subject-aware claims, cited contradictions, and missing/unsafe-source findings without modifying repositories.
@@ -33,6 +35,14 @@ All notable DevHarmonics changes are documented here.
 
 ### Fixed
 
+- Review receipts are now cryptographically bound to the exact plan, check evidence, task reports, diff, and repository base/HEAD set; the immutable reporter fails closed when retained evidence no longer matches.
+- Architect qualification now tries the next eligible exact model on the same provider before abandoning that provider.
+- Internal multi-repository integration and repair task IDs retain readable slugs plus collision-resistant repository hashes.
+- Cancellation and shutdown now settle every concurrent active attempt before returning.
+- Malformed JSON requests return a stable HTTP 400 response instead of an internal-server error.
+- Repository validators cannot escape their assigned worktree through a relative working directory.
+- OpenRouter Workbench consultations now enforce aggregate session/run/monthly spending limits and contribute to retained paid spend.
+- A task retry can no longer report success while an existing task-branch commit remains unmerged.
 - Antigravity quota exhaustion is scoped to the provider-reported **Gemini Models** or **Claude and GPT Models** group, so one exhausted group no longer cools the entire connection or blocks qualified fallback through the other group.
 - Approved objective runs execute the exact stored plan revision without invoking the architect again or depending on an in-memory approval callback.
 - Explicit local model assignment can no longer turn a read-only qualification into workspace-write authority.
@@ -70,7 +80,7 @@ All notable DevHarmonics changes are documented here.
 - Compact run boards and metrics collapse to two columns, then one column, instead of forcing a four-column canvas.
 - Graceful server shutdown pauses and awaits active orchestrator work before closing SQLite, preventing cancellation callbacks from racing a closed ledger.
 
-## [0.3.0] - 2026-07-14
+## 0.3.0 - 2026-07-14
 
 ### Added
 
@@ -137,5 +147,5 @@ All notable DevHarmonics changes are documented here.
 - Detailed Antigravity browser-code handoff and multi-screen onboarding instructions.
 
 [0.1.0]: https://github.com/scottconverse/DevHarmonics/releases/tag/v0.1.0
+[0.5.0]: https://github.com/scottconverse/DevHarmonics/releases/tag/v0.5.0
 [0.4.0]: https://github.com/scottconverse/DevHarmonics/releases/tag/v0.4.0
-[0.3.0]: https://github.com/scottconverse/DevHarmonics/releases/tag/v0.3.0

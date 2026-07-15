@@ -2,7 +2,7 @@
 
 **One objective. A verified AI development crew.**
 
-Current release: **v0.4.0**
+Current release: **v0.5.0**
 
 **DevHarmonics is a local-first, provider-neutral software factory for product owners managing AI agents as development teams.**
 
@@ -10,7 +10,7 @@ It coordinates the official Codex, Claude Code, and Google Antigravity CLIs; tur
 
 Normal subscription and local-model use requires no model API keys. Each subscription provider uses the account session already established by its official CLI, and API-key environment variables are removed from child processes. Optional OpenRouter access is separately connected through OAuth, disabled for paid routing by default, and never requires pasting a key into DevHarmonics.
 
-[Product specification](docs/PRODUCT_SPEC.md) · [Spec Google Doc](https://docs.google.com/document/d/1rd-_gqHHPZHhTkrULJR9tHcbAVUOGONsbuEFCV-8pRQ/edit?usp=drivesdk) · [Implementation plan](docs/IMPLEMENTATION_PLAN.md) · [Plan Google Doc](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk) · [User manual](docs/USER_MANUAL.md) · [Architecture](docs/ARCHITECTURE.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md) · [Landing page](https://scottconverse.github.io/DevHarmonics/)
+[Product specification](docs/PRODUCT_SPEC.md) · [Spec Google Doc](https://docs.google.com/document/d/1rd-_gqHHPZHhTkrULJR9tHcbAVUOGONsbuEFCV-8pRQ/edit?usp=drivesdk) · [Implementation plan](docs/IMPLEMENTATION_PLAN.md) · [Plan Google Doc](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk) · [User manual](docs/USER_MANUAL.md) · [Architecture](docs/ARCHITECTURE.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md) · [Landing page](https://scottconverse.github.io/DevHarmonics/)
 
 ## What works today
 
@@ -197,7 +197,7 @@ DevHarmonics does not merge the integration branch into your checked-out branch.
 
 ## MVP limitations
 
-- Merge conflicts fail the affected task; automatic conflict repair is not implemented.
+- Merge conflicts still fail the affected task; the automatic fixer handles structured reviewer findings, not Git merge conflicts.
 - Temporary worktrees are retained for inspection until explicit archival/cleanup is added.
 - Multi-repository execution still supports one repository per task. It does not yet reconstruct an interrupted integration set after restart, clean retained worktrees automatically, push branches, open pull requests, or let one task mutate several repositories.
 - Provider quotas and throttling originate with each subscription; DevHarmonics classifies observed failures and can cool and reroute qualified workers/reviewers, but provider-supplied remaining-quota telemetry is not consistently available. Antigravity's observed Gemini and Claude/GPT quota groups are tracked separately rather than cooling the entire connection.
@@ -218,4 +218,4 @@ The automated suite covers configuration, credential stripping, provider parsing
 
 ## Project status and licensing
 
-DevHarmonics v0.4.0 is an early public preview. The repository is public for evaluation and collaboration. No open-source license has been selected yet, so public visibility alone does not grant reuse rights. License selection is intentionally open for community discussion.
+DevHarmonics v0.5.0 is an early public preview. The repository is public for evaluation and collaboration. No open-source license has been selected yet, so public visibility alone does not grant reuse rights. License selection is intentionally open for community discussion.

@@ -1,13 +1,15 @@
 # DevHarmonics Canonical Product Specification
 
 Document status: **Canonical product direction**
-Specification version: **1.9**
+Specification version: **1.10**
 Written: **2026-07-13**
 Revised: **2026-07-15**
-Current implementation baseline: **DevHarmonics v0.4.0**
+Current implementation baseline: **DevHarmonics v0.5.0**
 Google Doc: [DevHarmonics Canonical Product Specification](https://docs.google.com/document/d/1rd-_gqHHPZHhTkrULJR9tHcbAVUOGONsbuEFCV-8pRQ/edit?usp=drivesdk)
 
-Revision history: **v1.9 (2026-07-15)** — Fixed the product boundary around a locally operated software factory for a solo product owner or very small product team. Added live run steering, GitHub/Linear and bounded local triggers, approved PR/delivery handoff, evidence-based analytics and evaluation loops, and Git-versioned workflows/skills. Explicitly rejected a DevHarmonics cloud-hosting platform, remote workers that continue while the user's computer is off, enterprise workforce/IAM/compliance administration, and message-driven execution from arbitrary email or chat.
+Revision history: **v1.10 (2026-07-15)** — Reconciled the canonical baseline with the v0.5 verified-implementation line: durable objectives and exact plan approval, Workbench, bounded local-model write tools, product/repository intelligence, exact multi-repository integration sets, structured reviewer fix/re-review, and cryptographic review binding to the exact plan, checks, diff, and repository base/HEAD set. Locked the next capability sequence as approved branch/draft-PR delivery, a real single-repository CivicSuite implementation, live run steering, real provider/local fallback, a real cross-repository CivicSuite implementation, and reusable Git-versioned development workflows.
+
+Prior revision: **v1.9 (2026-07-15)** — Fixed the product boundary around a locally operated software factory for a solo product owner or very small product team. Added live run steering, GitHub/Linear and bounded local triggers, approved PR/delivery handoff, evidence-based analytics and evaluation loops, and Git-versioned workflows/skills. Explicitly rejected a DevHarmonics cloud-hosting platform, remote workers that continue while the user's computer is off, enterprise workforce/IAM/compliance administration, and message-driven execution from arbitrary email or chat.
 
 Prior revision: **v1.8 (2026-07-15)** — Established the canonical product-category positioning: DevHarmonics is a local-first, provider-neutral software factory for product owners managing AI agents as development teams.
 
@@ -1036,7 +1038,7 @@ The moat is not access to any one model. It is the accumulated operational intel
 
 ## 14. Current baseline and delivery roadmap
 
-### 14.1 Current implementation baseline: v0.4.0
+### 14.1 Current implementation baseline: v0.5.0
 
 The current release already provides:
 
@@ -1064,8 +1066,13 @@ The current release already provides:
 - scheduler-time exact-model qualification and fair independent selection across Codex, Claude, Gemini/Antigravity, Ollama, and explicitly enabled OpenRouter candidates;
 - replayable routing-score explanations, workload-specific empirical worker and reviewer observations, and user-controlled observation baselines; and
 - retained CivicSuite v0.4 acceptance evidence plus verified full-width and compact cockpit behavior.
+- durable structured objectives, immutable plan revisions, exact-revision approval, and read-only multi-model Workbench discussions;
+- bounded qualified local-model implementation through scoped read/search/hash-checked-patch tools;
+- a product/repository registry, source-backed product intelligence, cross-repository impact planning, and exact multi-repository integration sets;
+- configured independent review quorums with repository-scoped fixer tasks, revalidation, invalidation, and re-review; and
+- review receipts cryptographically bound to the exact plan, check evidence, task reports, diff, and repository base/HEAD set.
 
-It does not yet provide the complete product defined here. In particular, secure local-model write tools, long-running campaign orchestration and recovery, structured task-linked reviewer attribution, ACP runtimes, and multi-repository CivicSuite execution remain active roadmap work.
+It does not yet provide the complete product defined here. Approved branch/draft-PR delivery, a completed real CivicSuite implementation, live run steering, proven in-run provider/local fallback, restart reconstruction for interrupted multi-repository integration sets, reusable development workflows, campaign orchestration/recovery, and ACP runtimes remain active roadmap work.
 
 ### 14.2 Milestone A: Personal production cockpit
 

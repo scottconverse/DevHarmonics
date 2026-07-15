@@ -8,10 +8,12 @@ import { qualifyOllamaModel, qualifyOllamaSpecialistModel, qualifyOllamaToolMode
 import { createRuntimeAdapter } from "./providers.js";
 import type { AgentRole, DevHarmonicsConfig, PlannedTask, ProviderName } from "./types.js";
 import type { InvocationPermission, RuntimeAdapter } from "./runtime.js";
+import { modelQuotaGroup } from "./antigravity.js";
 
 export type QualificationRole = "general" | "architect" | "worker" | "reviewer" | "analysis" | "benchmark" | "local_tools";
 
 export const QUALIFICATION_FINGERPRINT_FIXTURE = "model-qualification-suite-v2";
+const qualificationFlights = new Map<string, Promise<QualificationOutcome>>();
 
 export interface QualificationOutcome {
   fixtureVersion: string;
@@ -61,19 +63,30 @@ export async function ensureSchedulerCandidateQualified(input: {
   }
 
   const probe = async (role: QualificationRole): Promise<QualificationOutcome> => {
+    const flightKey = `${refreshed.id}\u0000${fingerprint}\u0000${role}`;
+    const existing = qualificationFlights.get(flightKey);
+    if (existing) return existing;
+    const flight = (async (): Promise<QualificationOutcome> => {
+      try {
+        const probed = await (input.qualify
+          ? input.qualify({ model: refreshed, connection, role })
+          : qualifyRuntimeModel({ model: refreshed, connection, config: input.config, cwd: input.cwd, role }));
+        return { ...probed, role };
+      } catch (error) {
+        return {
+          fixtureVersion: qualificationFixtureVersion(connection.transport, role),
+          role,
+          passed: false,
+          score: 0,
+          evidence: { connectionId: connection.id, requestedModelId: refreshed.id, error: error instanceof Error ? error.message : String(error) },
+        };
+      }
+    })();
+    qualificationFlights.set(flightKey, flight);
     try {
-      const probed = await (input.qualify
-        ? input.qualify({ model: refreshed, connection, role })
-        : qualifyRuntimeModel({ model: refreshed, connection, config: input.config, cwd: input.cwd, role }));
-      return { ...probed, role };
-    } catch (error) {
-      return {
-        fixtureVersion: qualificationFixtureVersion(connection.transport, role),
-        role,
-        passed: false,
-        score: 0,
-        evidence: { connectionId: connection.id, requestedModelId: refreshed.id, error: error instanceof Error ? error.message : String(error) },
-      };
+      return await flight;
+    } finally {
+      if (qualificationFlights.get(flightKey) === flight) qualificationFlights.delete(flightKey);
     }
   };
 
@@ -151,7 +164,8 @@ function selectSchedulerQualificationCandidate(input: {
   const eligible = input.ledger.listModels().flatMap((model) => {
     const connection = connections.get(model.connectionId);
     if (!connection || model.retired || model.excluded || input.excludedModelIds?.has(model.id) || input.excludedConnectionIds?.has(connection.id)) return [];
-    if (!connection.available || !input.ledger.isConnectionEligible(connection.id) || !input.ledger.isModelEligible(model.id)) return [];
+    const quotaGroup = modelQuotaGroup(model);
+    if (!connection.available || !input.ledger.isConnectionEligible(connection.id) || !input.ledger.isModelEligible(model.id) || (quotaGroup && !input.ledger.isQuotaGroupEligible(connection.id, quotaGroup.id))) return [];
     if (connection.transport === "api") return []; // Paid probes always require an explicit user confirmation.
     const assigned = assignmentId === model.id;
     if (!assigned && connection.provider !== input.preferredProvider) return [];

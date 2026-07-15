@@ -28,8 +28,9 @@ async function main(): Promise<void> {
     const config = await loadConfig(projectPath);
     const providers = await inspectProviders(config, projectPath);
     for (const provider of providers) {
+      const providerLabel = provider.name === "gemini" ? "Google Antigravity" : provider.name;
       console.log(
-        `${provider.available ? "READY" : "SETUP"} ${provider.name.padEnd(7)} ${provider.version || "not installed"} — ${provider.summary}; login: ${provider.loginCommand}`,
+        `${provider.available ? "READY" : "SETUP"} ${providerLabel.padEnd(18)} ${provider.version || "not installed"} — ${provider.summary}; login: ${provider.loginCommand}`,
       );
       for (const diagnostic of provider.diagnostics.filter((item) => item.state !== "pass")) {
         console.log(`  ${diagnostic.state.toUpperCase().padEnd(8)} ${diagnostic.layer}: ${diagnostic.detail}${diagnostic.action ? `; ${diagnostic.action}` : ""}`);

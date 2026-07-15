@@ -45,7 +45,7 @@ Normal subscription and local-model use requires no model API keys. Each subscri
 - At least one installed and subscription-authenticated provider CLI:
   - Codex: `codex login`
   - Claude Code: `claude auth login`
-  - Gemini through Google Antigravity: launch `agy` and complete first-run sign-in
+  - Google Antigravity (Gemini, Claude, and GPT models exposed by the signed-in account): launch `agy` and complete first-run sign-in
 
 DevHarmonics never asks for an OpenAI, Anthropic, or Google email password. Authentication happens only in provider-owned terminals and browser pages.
 
@@ -148,11 +148,13 @@ DevHarmonics refreshes provider and Ollama catalogs at application launch, every
 
 Models can be pinned to an exact identifier or configured to track a Sol/Terra/Luna, Fable/Opus/Sonnet/Haiku, or Gemini family. A newly discovered family member is never promoted until its exact identifier passes invocation qualification and the deterministic baseline benchmark. A model is retired only after three consecutive authoritative missing observations.
 
+Google Antigravity is one subscription connection, not a synonym for Gemini. Its catalog may contain Google, Anthropic, and OpenAI models. DevHarmonics schedules Antigravity's **Gemini Models** and **Claude and GPT Models** quota groups independently: an observed exhaustion cools only that group until the reported reset, so qualified capacity in the other group can continue. The `gemini` configuration key remains an internal compatibility alias for existing projects.
+
 OpenRouter is disconnected and paid routing is disabled by default. OAuth stores its generated credential under Windows current-user protection; DevHarmonics never asks the user to paste an API key. Connecting does not authorize spending. Paid fallback additionally requires the project paid-API gate, the OpenRouter fallback gate, positive per-run and monthly limits, an activated and qualified exact model, and a live key-limit check. DevHarmonics disables OpenRouter's own model fallback and records the exact provider, model, tokens, cost, and fallback reason itself.
 
 ## Workbench
 
-Workbench is a durable, read-only project scratchpad for questions, tradeoff analysis, draft planning, and side-by-side consultation of selected qualified models. Every answer retains its provider, requested and resolved model, usage, cost, duration, and failure state. Workbench cannot start a run or change a repository. A useful discussion can be explicitly converted into a linked objective draft; planning and execution still require their normal approval steps.
+Workbench is a durable, read-only project scratchpad for questions, tradeoff analysis, draft planning, and side-by-side consultation of selected qualified models. Every answer retains its connection, requested model, runtime-verified actual model when available, usage, cost, duration, and failure state. A provider that does not report actual execution identity remains explicitly unresolved; DevHarmonics does not relabel the request as proof. Workbench cannot start a run or change a repository. A useful discussion can be explicitly converted into a linked objective draft; planning and execution still require their normal approval steps.
 
 ## Product and repository registry
 
@@ -196,7 +198,7 @@ DevHarmonics does not merge the integration branch into your checked-out branch.
 - Merge conflicts fail the affected task; automatic conflict repair is not implemented.
 - Temporary worktrees are retained for inspection until explicit archival/cleanup is added.
 - The first multi-repository execution slice supports one repository per task and one aggregate reviewer. It does not yet reconstruct an interrupted integration set after restart, push branches, open pull requests, run an automatic multi-repository fixer, or satisfy review policies requiring more than one reviewer; such a run remains `NOT READY`.
-- Provider quotas and throttling originate with each subscription; DevHarmonics classifies observed failures and can cool and reroute qualified workers/reviewers, but provider-supplied remaining-quota telemetry is not consistently available.
+- Provider quotas and throttling originate with each subscription; DevHarmonics classifies observed failures and can cool and reroute qualified workers/reviewers, but provider-supplied remaining-quota telemetry is not consistently available. Antigravity's observed Gemini and Claude/GPT quota groups are tracked separately rather than cooling the entire connection.
 - Ollama models are discovered locally and remain unschedulable until their exact runtime fingerprint passes the qualifications required for the assigned work. Read-only local reviewers receive bounded per-file diff or per-report chunks with progress receipts and fail-closed aggregation. Qualified local implementors can use only DevHarmonics' scoped `file.read`, `file.search`, and hash-checked `file.patch` loop inside their assigned worktree; they receive no unrestricted shell, commit, merge, or external-write authority. ACP remains future work.
 - Mellum2 is the first named local specialist family. Instruct and Thinking are separate upgrade tracks; neither is downloaded, activated, promoted, or made the universal default automatically. In addition to analysis or bounded-tool qualification, Mellum2 must pass the current structured-output, contradiction-detection, and requirement-count benchmark before scheduling. Instruct is initially eligible only for narrow, low-risk specialist work; Thinking is evaluated independently for standard reasoning work.
 - Exact-model/settings routing is active for qualified models. Scheduler-selected Codex, Claude, Gemini/Antigravity, and explicitly assigned Ollama candidates are qualified on first use, requalified when their fingerprint changes, and selected independently by role/task tier. Durable **Why this model** evidence explains workload fit, qualification, pins, reliability, latency, relative paid-model cost, and independent-review preference. Empirical profiles are sliced by workload and expose validator failures, integration conflicts, billed cost, uncertainty, reset, and exclusion controls; only established evidence with at least 20 observations can affect reliability or latency. Account-wide failures fall back at connection scope while exact-model quota, context, resource, compatibility, and timeout failures can fall back at model scope.

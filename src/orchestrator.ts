@@ -47,6 +47,7 @@ import { analyzeVerificationIntegrity } from "./verification-integrity.js";
 import { runLocalToolLoop } from "./local-tools.js";
 import { WorktreeManager, WorkspaceIsolationError } from "./worktrees.js";
 import { IntegrationSetManager } from "./integration-sets.js";
+import { modelQuotaGroup, quotaResetAt } from "./antigravity.js";
 
 export class Orchestrator {
   private readonly backgroundRuns = new Map<string, Promise<void>>();
@@ -144,16 +145,19 @@ export class Orchestrator {
       ? [architectName, ...availableProviders.filter((provider) => provider !== architectName)]
       : [architectName];
     const router = new ModelRouter(this.ledger);
+    const excludedArchitectModels = new Set<string>();
+    const excludedArchitectConnections = new Set<string>();
     const repositoryContext = this.objectiveRepositoryContext(input.objective);
     let plan: RunPlan | null = null;
     let lastArchitectError: Error | null = null;
-    for (const candidate of architectCandidates) {
-      const qualification = await ensureSchedulerCandidateQualified({ ledger: this.ledger, config, cwd: projectPath, role: "architect", preferredProvider: candidate, permission: "read_only" });
+    for (let candidateIndex = 0; candidateIndex < architectCandidates.length; candidateIndex++) {
+      const candidate = architectCandidates[candidateIndex]!;
+      const qualification = await ensureSchedulerCandidateQualified({ ledger: this.ledger, config, cwd: projectPath, role: "architect", preferredProvider: candidate, permission: "read_only", excludedModelIds: excludedArchitectModels, excludedConnectionIds: excludedArchitectConnections });
       if (qualification?.attempted && !qualification.passed) {
         lastArchitectError = new Error(`${qualification.provider} model '${qualification.modelId}' failed architect qualification`);
         continue;
       }
-      const decision = router.route({ role: "architect", config, fallbackProvider: candidate, allowedProviders: [candidate], permission: "read_only" });
+      const decision = router.route({ role: "architect", config, fallbackProvider: candidate, allowedProviders: [candidate], permission: "read_only", excludedModelIds: excludedArchitectModels, excludedConnectionIds: excludedArchitectConnections });
       const architect = await this.provider(decision.provider, config, decision.connectionId);
       try {
         const result = await architect.invoke({
@@ -180,12 +184,17 @@ export class Orchestrator {
         const previousRevision = input.previous?.revision ?? null;
         plan = { ...parsed, revision: previousRevision === null ? 1 : previousRevision + 1, previousRevision };
         this.recordConnectionOutcome(architect.connection.id, { success: true });
+        if (decision.model.requestedModelId) {
+          const quotaGroup = modelQuotaGroup(this.ledger.getModel(String(decision.model.requestedModelId)));
+          if (quotaGroup) this.recordQuotaGroupOutcome(String(architect.connection.id), quotaGroup.id, quotaGroup.displayName, { success: true });
+        }
         break;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const failureKind = error instanceof RuntimeInvocationError ? error.kind : "incompatible";
         lastArchitectError = new Error(`${decision.provider} could not produce a valid plan: ${message}`);
-        this.recordConnectionOutcome(architect.connection.id, { success: false, failureKind, detail: message });
+        const scope = this.recordScopedInvocationFailure({ connectionId: String(architect.connection.id), modelId: decision.model.requestedModelId ? String(decision.model.requestedModelId) : null, failureKind, detail: message, excludedModelIds: excludedArchitectModels, excludedConnectionIds: excludedArchitectConnections });
+        if (scope === "quota_group" && this.hasEligibleModelOnConnection(String(architect.connection.id), excludedArchitectModels)) architectCandidates.splice(candidateIndex + 1, 0, candidate);
       }
     }
     if (!plan) throw lastArchitectError ?? new Error("No eligible architect produced a valid plan");
@@ -438,16 +447,20 @@ export class Orchestrator {
     const architectCandidates = config.routing.allowFallback
       ? [architectName, ...availableProviders.filter((provider) => provider !== architectName)]
       : [architectName];
+    const excludedArchitectModels = new Set<string>();
+    const excludedArchitectConnections = new Set<string>();
     let plan: RunPlan | null = request.approvedPlan ?? null;
     let lastArchitectError: Error | null = null;
-    for (const candidate of plan ? [] : architectCandidates) {
-      const qualification = await ensureSchedulerCandidateQualified({ ledger: this.ledger, config, cwd: worktrees.integrationPath, role: "architect", preferredProvider: candidate, permission: "read_only" });
+    const planningCandidates = plan ? [] : architectCandidates;
+    for (let candidateIndex = 0; candidateIndex < planningCandidates.length; candidateIndex++) {
+      const candidate = planningCandidates[candidateIndex]!;
+      const qualification = await ensureSchedulerCandidateQualified({ ledger: this.ledger, config, cwd: worktrees.integrationPath, role: "architect", preferredProvider: candidate, permission: "read_only", excludedModelIds: excludedArchitectModels, excludedConnectionIds: excludedArchitectConnections });
       this.recordSchedulerQualification(runId, qualification, "architect");
       if (qualification?.attempted && !qualification.passed) {
         lastArchitectError = new Error(`${qualification.provider} model '${qualification.modelId}' failed architect qualification`);
         continue;
       }
-      const architectDecision = router.route({ role: "architect", config, fallbackProvider: candidate, allowedProviders: [candidate], permission: "read_only" });
+      const architectDecision = router.route({ role: "architect", config, fallbackProvider: candidate, allowedProviders: [candidate], permission: "read_only", excludedModelIds: excludedArchitectModels, excludedConnectionIds: excludedArchitectConnections });
       const architect = await this.provider(architectDecision.provider, config, architectDecision.connectionId);
       this.ledger.addEvent(runId, "architect.started", `${architectDecision.provider} is planning the run`, { routing: architectDecision });
       try {
@@ -474,11 +487,15 @@ export class Orchestrator {
         try {
           plan = this.parsePlan(architectResult.text, config, autonomy);
           this.recordConnectionOutcome(architect.connection.id, { success: true });
+          if (architectDecision.model.requestedModelId) {
+            const quotaGroup = modelQuotaGroup(this.ledger.getModel(String(architectDecision.model.requestedModelId)));
+            if (quotaGroup) this.recordQuotaGroupOutcome(String(architect.connection.id), quotaGroup.id, quotaGroup.displayName, { success: true });
+          }
           break;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           lastArchitectError = new Error(`${architectDecision.provider} returned an invalid plan: ${message}`);
-          this.recordConnectionOutcome(architect.connection.id, { success: false, failureKind: "incompatible", detail: message });
+          this.recordScopedInvocationFailure({ connectionId: String(architect.connection.id), modelId: architectDecision.model.requestedModelId ? String(architectDecision.model.requestedModelId) : null, failureKind: "incompatible", detail: message, excludedModelIds: excludedArchitectModels, excludedConnectionIds: excludedArchitectConnections });
           this.ledger.addEvent(runId, "architect.failed", `${architectDecision.provider} returned an invalid plan; trying the next eligible architect`, {
             provider: architectDecision.provider,
             failureKind: "incompatible",
@@ -490,7 +507,8 @@ export class Orchestrator {
         const failureKind = error instanceof RuntimeInvocationError ? error.kind : "unknown";
         const message = error instanceof Error ? error.message : String(error);
         lastArchitectError = error instanceof Error ? error : new Error(message);
-        this.recordConnectionOutcome(architect.connection.id, { success: false, failureKind, detail: message });
+        const scope = this.recordScopedInvocationFailure({ connectionId: String(architect.connection.id), modelId: architectDecision.model.requestedModelId ? String(architectDecision.model.requestedModelId) : null, failureKind, detail: message, excludedModelIds: excludedArchitectModels, excludedConnectionIds: excludedArchitectConnections });
+        if (scope === "quota_group" && this.hasEligibleModelOnConnection(String(architect.connection.id), excludedArchitectModels)) planningCandidates.splice(candidateIndex + 1, 0, candidate);
         this.ledger.addEvent(runId, "architect.failed", `${architectDecision.provider} could not produce a plan; trying the next eligible architect`, {
           provider: architectDecision.provider,
           failureKind,
@@ -737,7 +755,12 @@ export class Orchestrator {
           connectionId: String(reviewer.connection.id),
         };
         this.recordConnectionOutcome(reviewer.connection.id, { success: true });
-        if (reviewerDecision.model.requestedModelId) this.recordModelOutcome(String(reviewerDecision.model.requestedModelId), { success: true });
+        if (reviewerDecision.model.requestedModelId) {
+          const modelId = String(reviewerDecision.model.requestedModelId);
+          this.recordModelOutcome(modelId, { success: true });
+          const quotaGroup = modelQuotaGroup(this.ledger.getModel(modelId));
+          if (quotaGroup) this.recordQuotaGroupOutcome(String(reviewer.connection.id), quotaGroup.id, quotaGroup.displayName, { success: true });
+        }
         break;
       } catch (error) {
         if (signal.aborted) return;
@@ -745,15 +768,14 @@ export class Orchestrator {
         const message = error instanceof Error ? error.message : String(error);
         lastReviewerError = error instanceof Error ? error : new Error(message);
         reviewerFallbackReason = `${reviewerDecision.provider} review failed (${failureKind}): ${message}`;
-        const failureScope = invocationFailureScope(failureKind, Boolean(reviewerDecision.model.requestedModelId));
-        if (failureScope === "model" && reviewerDecision.model.requestedModelId) {
-          const modelId = String(reviewerDecision.model.requestedModelId);
-          excludedReviewerModels.add(modelId);
-          this.recordModelOutcome(modelId, { success: false, failureKind, detail: message });
-        } else if (failureScope === "connection") {
-          excludedReviewerConnections.add(String(reviewer.connection.id));
-          this.recordConnectionOutcome(reviewer.connection.id, { success: false, failureKind, detail: message });
-        }
+        this.recordScopedInvocationFailure({
+          connectionId: String(reviewer.connection.id),
+          modelId: reviewerDecision.model.requestedModelId ? String(reviewerDecision.model.requestedModelId) : null,
+          failureKind,
+          detail: message,
+          excludedModelIds: excludedReviewerModels,
+          excludedConnectionIds: excludedReviewerConnections,
+        });
         this.ledger.addEvent(runId, "review.failed", `${reviewerFallbackReason}; trying the next eligible reviewer`, { provider: reviewerDecision.provider, connectionId: reviewer.connection.id, modelId: reviewerDecision.model.requestedModelId, failureKind, reviewAttempt });
       }
     }
@@ -1227,7 +1249,12 @@ export class Orchestrator {
           text = review.text;
         }
         this.recordConnectionOutcome(reviewer.connection.id, { success: true });
-        if (decision.model.requestedModelId) this.recordModelOutcome(String(decision.model.requestedModelId), { success: true });
+        if (decision.model.requestedModelId) {
+          const modelId = String(decision.model.requestedModelId);
+          this.recordModelOutcome(modelId, { success: true });
+          const quotaGroup = modelQuotaGroup(this.ledger.getModel(modelId));
+          if (quotaGroup) this.recordQuotaGroupOutcome(String(reviewer.connection.id), quotaGroup.id, quotaGroup.displayName, { success: true });
+        }
         return parseReviewerResponse(text, {
           provider: decision.provider,
           modelId: decision.model.requestedModelId ? String(decision.model.requestedModelId) : null,
@@ -1239,15 +1266,14 @@ export class Orchestrator {
         const message = error instanceof Error ? error.message : String(error);
         lastError = error instanceof Error ? error : new Error(message);
         fallbackReason = `${decision.provider} review failed (${failureKind}): ${message}`;
-        const scope = invocationFailureScope(failureKind, Boolean(decision.model.requestedModelId));
-        if (scope === "model" && decision.model.requestedModelId) {
-          const modelId = String(decision.model.requestedModelId);
-          input.excludedReviewerModels.add(modelId);
-          this.recordModelOutcome(modelId, { success: false, failureKind, detail: message });
-        } else if (scope === "connection") {
-          input.excludedReviewerConnections.add(String(reviewer.connection.id));
-          this.recordConnectionOutcome(reviewer.connection.id, { success: false, failureKind, detail: message });
-        }
+        this.recordScopedInvocationFailure({
+          connectionId: String(reviewer.connection.id),
+          modelId: decision.model.requestedModelId ? String(decision.model.requestedModelId) : null,
+          failureKind,
+          detail: message,
+          excludedModelIds: input.excludedReviewerModels,
+          excludedConnectionIds: input.excludedReviewerConnections,
+        });
         this.ledger.addEvent(input.runId, "review.failed", `${fallbackReason}; trying the next eligible reviewer`, { provider: decision.provider, connectionId: reviewer.connection.id, modelId: decision.model.requestedModelId, failureKind, reviewSlot: input.reviewSlot, reviewAttempt });
       }
     }
@@ -1483,7 +1509,12 @@ export class Orchestrator {
         });
         this.recordInvocation(input.runId, input.task.id, "worker", routing, result, fallbackReason);
         this.recordConnectionOutcome(provider.connection.id, { success: true });
-        if (model.requestedModelId) this.recordModelOutcome(String(model.requestedModelId), { success: true });
+        if (model.requestedModelId) {
+          const modelId = String(model.requestedModelId);
+          this.recordModelOutcome(modelId, { success: true });
+          const quotaGroup = modelQuotaGroup(this.ledger.getModel(modelId));
+          if (quotaGroup) this.recordQuotaGroupOutcome(String(provider.connection.id), quotaGroup.id, quotaGroup.displayName, { success: true });
+        }
         if (diagnosticIssue) {
           feedback = `Diagnostic result rejected: ${diagnosticIssue}. The plan is already approved; execute the assigned task and return the required evidence.`;
           this.ledger.addBlackboardEntry({ runId: input.runId, taskId: input.task.id, kind: "risk", content: feedback, sourceAttemptId: attemptId });
@@ -1513,15 +1544,15 @@ export class Orchestrator {
           return "failed";
         }
         const failureKind = error instanceof RuntimeInvocationError ? error.kind : "unknown";
-        const failureScope = invocationFailureScope(failureKind, Boolean(model.requestedModelId));
-        if (failureScope === "model" && model.requestedModelId) {
-          const modelId = String(model.requestedModelId);
-          excludedModelIds.add(modelId);
-          this.recordModelOutcome(modelId, { success: false, failureKind, detail: message });
-        } else if (failureScope === "connection") {
-          excludedConnectionIds.add(String(provider.connection.id));
-          this.recordConnectionOutcome(provider.connection.id, { success: false, failureKind, detail: message });
-        } else {
+        const failureScope = this.recordScopedInvocationFailure({
+          connectionId: String(provider.connection.id),
+          modelId: model.requestedModelId ? String(model.requestedModelId) : null,
+          failureKind,
+          detail: message,
+          excludedModelIds,
+          excludedConnectionIds,
+        });
+        if (failureScope === "task") {
           this.ledger.setTaskStatus(input.runId, input.task.id, "failed");
           this.ledger.addEvent(input.runId, "task.failed", `${input.task.title}: ${message}`);
           return "failed";
@@ -1890,7 +1921,7 @@ export class Orchestrator {
     taskId: string | null,
     role: string,
     routing: { provider: string; connectionId: string; model: { requestedModelId: unknown }; fallback: boolean; factors: string[] },
-    result: { provider?: string; durationMs?: number | null; model: { resolvedModelId: unknown }; usage: { inputTokens: number | null; outputTokens: number | null; costUsd: number | null } },
+    result: { provider?: string; durationMs?: number | null; model: { resolvedModelId: unknown; resolution?: string }; usage: { inputTokens: number | null; outputTokens: number | null; costUsd: number | null } },
     fallbackReason?: string | null,
   ): void {
     this.ledger.recordInvocationReceipt({
@@ -1901,6 +1932,7 @@ export class Orchestrator {
       connectionId: routing.connectionId,
       requestedModelId: routing.model.requestedModelId ? String(routing.model.requestedModelId) : null,
       resolvedModelId: String(result.model.resolvedModelId),
+      modelResolution: result.model.resolution ?? null,
       inputTokens: result.usage.inputTokens,
       outputTokens: result.usage.outputTokens,
       costUsd: result.usage.costUsd,
@@ -1926,6 +1958,56 @@ export class Orchestrator {
     } catch {
       // Compatibility/default model receipts may not have a concrete registry row.
     }
+  }
+
+  private recordQuotaGroupOutcome(connectionId: string, quotaGroupId: string, displayName: string, input: { success: boolean; failureKind?: string; detail?: string; cooldownUntil?: string | null }): void {
+    try {
+      this.ledger.recordQuotaGroupOutcome(connectionId, quotaGroupId, displayName, input);
+    } catch {
+      // Registry reconciliation may lag a just-discovered runtime connection.
+    }
+  }
+
+  private recordScopedInvocationFailure(input: {
+    connectionId: string;
+    modelId: string | null;
+    failureKind: Parameters<typeof invocationFailureScope>[0];
+    detail: string;
+    excludedModelIds: Set<string>;
+    excludedConnectionIds: Set<string>;
+  }): ReturnType<typeof invocationFailureScope> {
+    const scope = invocationFailureScope(input.failureKind, Boolean(input.modelId));
+    if (scope === "quota_group" && input.modelId) {
+      const quotaGroup = modelQuotaGroup(this.ledger.getModel(input.modelId));
+      if (quotaGroup) {
+        for (const candidate of this.ledger.listModels(input.connectionId)) {
+          if (modelQuotaGroup(candidate)?.id === quotaGroup.id) input.excludedModelIds.add(candidate.id);
+        }
+        this.recordQuotaGroupOutcome(input.connectionId, quotaGroup.id, quotaGroup.displayName, {
+          success: false,
+          failureKind: input.failureKind,
+          detail: input.detail,
+          cooldownUntil: quotaResetAt(input.detail),
+        });
+        return scope;
+      }
+    }
+    if (scope === "model" && input.modelId) {
+      input.excludedModelIds.add(input.modelId);
+      this.recordModelOutcome(input.modelId, { success: false, failureKind: input.failureKind, detail: input.detail });
+    } else if (scope === "connection" || scope === "quota_group") {
+      input.excludedConnectionIds.add(input.connectionId);
+      this.recordConnectionOutcome(input.connectionId, { success: false, failureKind: input.failureKind, detail: input.detail });
+    }
+    return scope;
+  }
+
+  private hasEligibleModelOnConnection(connectionId: string, excludedModelIds: ReadonlySet<string>): boolean {
+    return this.ledger.listModels(connectionId).some((model) => {
+      if (excludedModelIds.has(model.id) || !model.active || !model.qualified || model.qualificationStale || model.excluded || model.retired) return false;
+      const quotaGroup = modelQuotaGroup(model);
+      return !quotaGroup || this.ledger.isQuotaGroupEligible(connectionId, quotaGroup.id);
+    });
   }
 }
 

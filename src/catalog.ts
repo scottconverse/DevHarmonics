@@ -81,6 +81,7 @@ export class ModelCatalogCoordinator {
     await openRouter.syncConnection(config.openRouter.enabled);
     const providers = await inspectProviders(config, this.projectPath);
     syncSubscriptionConnections(this.ledger, providers);
+    this.ledger.reconcileLegacyAntigravityQuotaHealth();
     for (const provider of providers) {
       this.ledger.recordCatalogRefresh({
         provider: provider.name,

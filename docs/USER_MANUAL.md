@@ -3,7 +3,7 @@
 Manual version: **0.4.0**<br>
 Product release: **v0.4.0**
 
-DevHarmonics turns one software-development objective into a planned, parallel, validated run across Codex, Claude Code, and Gemini through Google Antigravity. It runs locally and uses the subscription sessions cached by the providers' official command-line tools.
+DevHarmonics turns one software-development objective into a planned, parallel, validated run across Codex, Claude Code, and the Google Antigravity model catalog. It runs locally and uses the subscription sessions cached by the providers' official command-line tools.
 
 ## 1. Before you begin
 
@@ -63,7 +63,7 @@ Your ChatGPT/Codex subscription session is used by the Codex CLI. DevHarmonics n
 4. Verify with `claude auth status --text`.
 5. Click **Refresh sign-in status** in DevHarmonics.
 
-### Gemini / Google Antigravity
+### Google Antigravity
 
 The first Antigravity login requires both a browser-to-terminal code handoff and several terminal onboarding screens.
 
@@ -79,6 +79,8 @@ The first Antigravity login requires both a browser-to-terminal code handoff and
 10. Click **Refresh sign-in status** in DevHarmonics.
 
 The one-time authorization code is a short-lived credential. Paste it only into the Antigravity terminal that requested it. Do not paste it into DevHarmonics, chat, documentation, screenshots, or issue reports.
+
+Antigravity is one signed-in connection that may expose Gemini, Claude, and GPT models. DevHarmonics keeps each model's vendor visible and treats Antigravity's **Gemini Models** and **Claude and GPT Models** quota groups independently. If one group reports exhaustion, models in that group wait until its reported reset while qualified models in the other group can remain eligible. Existing project files may still use the internal provider key `gemini`; that is a compatibility alias, not a claim that every Antigravity task uses a Gemini model.
 
 ## 4. Check readiness
 
@@ -225,6 +227,8 @@ The application performs a complete catalog check at launch and repeats it every
 Each model card shows family, capabilities, available parameter/quantization metadata, current qualification state, **Requalify**, local bounded-tool and specialist-benchmark actions where applicable, plus recent **Qualification history**. Model selectors are role-aware and show only models with current qualification evidence compatible with that role. A previously configured incompatible model remains visible as a disabled warning until you select a qualified replacement or the provider default. Activating an unqualified or stale subscription/local model runs the required first-use qualification when selected. DevHarmonics probes only active, pinned, family-tracked, or scheduler-selected candidates; it does not invoke every model in a provider catalog.
 
 When adaptive routing first selects a concrete Codex, Claude, Gemini/Antigravity, or explicitly assigned Ollama candidate, DevHarmonics runs the smallest role-compatible fixture before giving it real work. Local writes require the disposable bounded read/patch fixture; named specialists such as Mellum2 also require their current specialist benchmark. A pass is recorded and the model becomes active; a failure cools that exact model and allows another qualified provider/model to be selected. A changed CLI/runtime, adapter, model identifier, capability profile, or fixture fingerprint makes the old result stale and triggers the same checks at the next scheduled use. Paid OpenRouter probes remain excluded from this automatic path and still require explicit cost confirmation.
+
+For every attempt, the run detail distinguishes the model DevHarmonics requested from the model the runtime verified as actually used. Some subscription CLIs accept an exact model request without returning execution identity. In that case, the requested model remains visible but actual resolution is marked unverified; it is not counted or described as a confirmed execution by that model.
 
 Read-only attempts also have workload-aware watchdogs so a stalled subscription CLI can be classified and retried in useful time: three minutes for a simple diagnostic, ten minutes for standard analysis, and fifteen minutes for complex read-only work, or the provider's shorter configured timeout. Workspace-write tasks retain their provider-configured timeout because legitimate implementation runs can take longer.
 

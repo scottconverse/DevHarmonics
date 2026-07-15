@@ -22,6 +22,8 @@ All notable DevHarmonics changes are documented here.
 
 ### Changed
 
+- Google Antigravity is now represented as one subscription connection exposing Google, Anthropic, and OpenAI model vendors rather than being presented as synonymous with Gemini. The legacy `gemini` configuration key remains an internal compatibility alias.
+- Attempt and Workbench attribution now distinguishes the requested Antigravity model from runtime-verified actual identity; an unverified request is no longer reported as proof that the requested model executed.
 - Supported multi-repository plans can now start when all affected repositories have compatible local checkouts, every task targets exactly one repository, and explicit integration conditions are present. Automatic multi-repository fixing, review quorums greater than one, resume reconstruction, cleanup, pushes/pull requests, and one task spanning repositories remain deferred and fail closed where policy requires them.
 - Narrow, low-risk single-scope implementation tasks can use the economy specialist lane; standard, high-risk, architectural, and release work retain stronger tier requirements.
 - Manual assignments and adaptive routing now enforce declared code, tool, vision, and structured-output capability needs.
@@ -30,6 +32,7 @@ All notable DevHarmonics changes are documented here.
 
 ### Fixed
 
+- Antigravity quota exhaustion is scoped to the provider-reported **Gemini Models** or **Claude and GPT Models** group, so one exhausted group no longer cools the entire connection or blocks qualified fallback through the other group.
 - Approved objective runs execute the exact stored plan revision without invoking the architect again or depending on an in-memory approval callback.
 - Explicit local model assignment can no longer turn a read-only qualification into workspace-write authority.
 

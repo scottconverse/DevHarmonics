@@ -1,14 +1,16 @@
 # DevHarmonics Detailed Implementation Plan
 
 Document status: **Build-ready execution plan**
-Plan version: **1.14**
+Plan version: **1.15**
 Written: **2026-07-14**
 Revised: **2026-07-15**
-Product specification baseline: **DevHarmonics Product Specification v1.6**
+Product specification baseline: **DevHarmonics Product Specification v1.7**
 Current implementation baseline: **DevHarmonics v0.4.0**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 
-Revision history: **v1.14 (2026-07-15)** — Implemented the first DH-730 vertical slice: immutable source-backed product-intelligence snapshots over configured canonical local files, exact repository HEAD/content-hash/working-tree provenance, explicit version/release/status/maturity claim extraction, subject-aware contradiction detection, missing/unsafe/dirty-source findings, planning-context injection, and Products-page scan/readback controls. Git tags are never treated as maturity evidence. CivicCore and CivicCode are attached as the first current CivicSuite repository set, and their live snapshot identifies the CivicCore 1.2.0 versus 1.2.1 dependency conflict with cited sources. The live Observe proof also exposed and closed DH-720's reviewer first-use qualification ordering gap.
+Revision history: **v1.15 (2026-07-15)** — Corrected the Antigravity scheduler boundary: one authenticated Antigravity connection can expose Google, Anthropic, and OpenAI model vendors; Gemini and Claude/GPT quota groups retain independent cooldowns and reset windows; exhausting one group leaves the other eligible; and run receipts distinguish requested model identity from runtime-verified actual identity. The legacy `gemini` configuration key remains an internal compatibility alias only.
+
+Prior revision: **v1.14 (2026-07-15)** — Implemented the first DH-730 vertical slice: immutable source-backed product-intelligence snapshots over configured canonical local files, exact repository HEAD/content-hash/working-tree provenance, explicit version/release/status/maturity claim extraction, subject-aware contradiction detection, missing/unsafe/dirty-source findings, planning-context injection, and Products-page scan/readback controls. Git tags are never treated as maturity evidence. CivicCore and CivicCode are attached as the first current CivicSuite repository set, and their live snapshot identifies the CivicCore 1.2.0 versus 1.2.1 dependency conflict with cited sources. The live Observe proof also exposed and closed DH-720's reviewer first-use qualification ordering gap.
 
 Prior revision: **v1.13 (2026-07-15)** — Implemented the first DH-720 vertical slice: exact multi-repository integration sets with one repository per task, isolated per-repository integration/task branches and worktrees, retained base/HEAD commit evidence, repository-local validators, concurrent work across repositories, serialized same-repository merges, aggregate context-only review, evidence export, and a visible run-board integration-set card. Primary checkouts remain untouched.
 
@@ -358,14 +360,14 @@ Deliverables:
 
 - persist provider-neutral model identities and connection-specific availability;
 - reconcile provider catalogs, signed compatibility data, runtime discovery, and empirical observations;
-- retain aliases and exact resolved model identifiers;
+- retain requested identifiers, aliases, runtime-verified resolved identifiers, and an explicit unresolved state when actual execution identity is not observable;
 - mark models known, visible, verified, qualified, active, degraded, or retired.
 
 Acceptance:
 
 - new models appear without a DevHarmonics code release when an adapter can enumerate them;
 - a provider announcement alone never marks a model usable;
-- exact model resolution is visible in every attempt receipt.
+- every attempt receipt distinguishes the requested model from runtime-verified actual resolution; an unverified request is never presented as the model that executed.
 
 #### DH-230: Health, quota, and cooldown manager — L
 
@@ -375,12 +377,14 @@ Deliverables:
 - implement cached inexpensive probes;
 - classify ready, slow, busy, cooling, rate-limited, quota-exhausted, incompatible, and unavailable states;
 - model subscription five-hour and weekly exhaustion as observed capacity windows without pretending providers expose exact counters;
+- model quota groups below connection scope, including Antigravity's independent **Gemini Models** and **Claude and GPT Models** pools;
 - probe Ollama reachability, model load, context behavior, and local resource pressure.
 
 Acceptance:
 
 - repeated failures trigger bounded cooldown rather than probe storms;
-- an exhausted provider is not repeatedly assigned new work;
+- an exhausted connection or quota group is not repeatedly assigned new work before its observed reset;
+- exhausting one Antigravity quota group does not cool its other group or the whole signed-in connection;
 - health recovery automatically returns qualified capacity to the pool.
 
 #### DH-240: Qualification harness — L
@@ -467,12 +471,14 @@ Deliverables:
 
 - classify network, provider outage, rate limit, short-window quota, long-window quota, concurrency, authentication, unsupported capability, model retirement, context overflow, tool denial, validator failure, and content-policy refusal;
 - choose a qualified fallback within the same subscription, another subscription, local runtime, or opt-in API pool;
+- scope Antigravity capacity failures to the provider-reported Gemini or Claude/GPT quota group and honor its reset window;
 - preserve the worktree, context pack, attempt history, and handoff;
 - require replanning when substitution would change quality or permissions materially.
 
 Acceptance:
 
 - a simulated subscription quota exhaustion continues on a qualified fallback;
+- simulated Antigravity Gemini-group exhaustion can continue through a qualified Claude/GPT-group model on the same connection;
 - a model change is visible and reproducible;
 - fallback never bypasses privacy, spending, role qualification, or approval policy.
 

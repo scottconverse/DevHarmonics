@@ -49,6 +49,49 @@ function escapeHtml(value = "") {
     .replaceAll("'", "&#039;");
 }
 
+function providerDisplayName(provider) {
+  return provider === "gemini" ? "Google Antigravity" : provider || "Unassigned";
+}
+
+function connectionDisplayName(connectionId, provider) {
+  return state.connections.find((connection) => connection.id === connectionId)?.displayName || providerDisplayName(provider);
+}
+
+function modelDisplayName(modelId) {
+  return state.models.find((model) => model.id === modelId)?.displayName || modelId || "provider default";
+}
+
+function taskRouting(run, taskId) {
+  return [...(run?.events || [])].reverse().find((event) => event.kind === "task.started" && event.data?.taskId === taskId && event.data?.routing)?.data?.routing || null;
+}
+
+function routingIdentity(routing, fallbackProvider) {
+  if (!routing) return providerDisplayName(fallbackProvider);
+  const connection = connectionDisplayName(routing.connectionId, routing.provider || fallbackProvider);
+  const requestedModelId = routing.model?.requestedModelId;
+  return requestedModelId ? `${connection} / ${modelDisplayName(requestedModelId)} (requested)` : `${connection} / provider default (actual model unverified)`;
+}
+
+function recordedModelIdentity(provider, modelId, resolution, connectionId) {
+  const connection = connectionDisplayName(connectionId, provider);
+  const model = modelDisplayName(modelId);
+  if (resolution === "requested_unverified") return `${connection} / ${model} requested (actual model unverified)`;
+  if (resolution === "provider_default_unresolved") return `${connection} / provider default (actual model unverified)`;
+  return `${connection} / ${model}`;
+}
+
+function eventDisplayMessage(event) {
+  const routing = event.data?.routing;
+  if (routing?.provider && event.message.startsWith(routing.provider)) {
+    return `${routingIdentity(routing, routing.provider)}${event.message.slice(routing.provider.length)}`;
+  }
+  if (event.data?.provider === "gemini" && event.message.startsWith("gemini")) {
+    const identity = recordedModelIdentity(event.data.provider, event.data.modelId, "requested_unverified", event.data.connectionId);
+    return `${identity}${event.message.slice("gemini".length)}`;
+  }
+  return event.message.replace(/\bgemini\b/g, "Google Antigravity");
+}
+
 async function initialize() {
   $("#models-view").insertBefore($("#openrouter-panel"), $("#model-filter-bar"));
   state.bootstrap = await api("/api/bootstrap");
@@ -156,7 +199,7 @@ function renderConnections() {
 
 function renderSettings() {
   const config = state.bootstrap.config;
-  const options = state.bootstrap.providers.map((provider) => `<option value="${provider.name}">${escapeHtml(provider.name)}</option>`).join("");
+  const options = state.bootstrap.providers.map((provider) => `<option value="${provider.name}">${escapeHtml(providerDisplayName(provider.name))}</option>`).join("");
   $("#setting-architect").innerHTML = options;
   $("#setting-reviewer").innerHTML = options;
   $("#setting-architect").value = config.product.architect;
@@ -206,7 +249,7 @@ function renderSettings() {
     $(`#setting-${role}-upgrade`).value = config.routing[role].upgradePolicy || "pinned";
   }
   $("#setting-workers").innerHTML = state.bootstrap.providers.map((provider) =>
-    `<label class="toggle"><input type="checkbox" name="setting-worker" value="${provider.name}" ${config.product.workers.includes(provider.name) ? "checked" : ""}><span>${escapeHtml(provider.name)}</span></label>`
+    `<label class="toggle"><input type="checkbox" name="setting-worker" value="${provider.name}" ${config.product.workers.includes(provider.name) ? "checked" : ""}><span>${escapeHtml(providerDisplayName(provider.name))}</span></label>`
   ).join("");
 }
 
@@ -326,6 +369,9 @@ function renderModels() {
     const lifecycleText = isStale ? "stale" : !operationallyQualified && specialistBenchmarkPassed ? "benchmark only" : hasCurrentRoleFailure ? "partial" : model.lifecycle;
     const lifecycleClass = isStale || !operationallyQualified || hasCurrentRoleFailure ? "degraded" : model.lifecycle;
     const detailParts = [
+      `Model vendor: ${model.metadata?.modelVendor || "not declared"}`,
+      `Quota group: ${model.metadata?.quotaGroupDisplayName || model.metadata?.quotaGroup || "not declared"}`,
+      model.quotaGroupHealth ? `Quota health: ${model.quotaGroupHealth.state}${model.quotaGroupHealth.cooldownUntil ? `; cooldown until ${new Date(model.quotaGroupHealth.cooldownUntil).toLocaleString()}` : ""}` : model.metadata?.quotaGroup ? "Quota health: no quota event observed" : "",
       `Family: ${family}`,
       `Capabilities: ${capabilities.length ? capabilities.join(", ") : "not declared"}`,
       model.metadata?.details?.parameter_size ? `Parameters: ${model.metadata.details.parameter_size}` : "",
@@ -372,7 +418,7 @@ function renderWorkbench() {
     ? state.workbenchMessages.map((message) => {
       const isUser = message.role === "user";
       const model = message.requestedModelId ? state.models.find((item) => item.id === message.requestedModelId) : null;
-      const identity = isUser ? "You" : `${message.provider || "model"} / ${model?.displayName || message.resolvedModelId || message.requestedModelId || "consultation"}`;
+      const identity = isUser ? "You" : recordedModelIdentity(message.provider, model?.id || message.resolvedModelId || message.requestedModelId, message.provider === "gemini" ? "requested_unverified" : null, message.connectionId);
       const detail = [message.status, message.durationMs ? formatDuration(message.durationMs) : null, message.costUsd != null ? `$${Number(message.costUsd).toFixed(4)}` : null].filter(Boolean).join(" · ");
       const body = message.status === "failed" ? message.error || "Consultation failed" : message.content;
       return `<article class="workbench-message ${isUser ? "user" : message.status === "failed" ? "failed" : "assistant"}"><div class="workbench-message-head"><strong>${escapeHtml(identity)}</strong><span>${escapeHtml(detail || new Date(message.createdAt).toLocaleString())}</span></div><p>${escapeHtml(body || "")}</p></article>`;
@@ -441,8 +487,8 @@ async function refreshEvidence() {
   $("#evidence-verdict").innerHTML = `<div><span class="connection-kind">DERIVED VERDICT</span><h3>${escapeHtml(report.verdict.replaceAll("_", " "))}</h3><p>${escapeHtml(report.summary)}</p></div><span class="status-pill report-${escapeHtml(report.verdict.toLowerCase())}">${escapeHtml(report.verdict.replaceAll("_", " "))}</span>${reportIssues.length ? `<ul>${reportIssues.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : '<p class="report-consistent">No missing or contradictory retained evidence detected.</p>'}`;
   $("#evidence-hash").textContent = evidence.integritySha256;
   $("#evidence-review-count").textContent = `${evidence.reviews.length} retained`;
-  $("#evidence-reviews").innerHTML = evidence.reviews.length ? evidence.reviews.map((review) => `<article><div><strong>Round ${review.round} · ${escapeHtml(review.provider)}</strong><span>${escapeHtml(review.modelId || "provider default")} · integration ${escapeHtml(review.integrationSha256.slice(0, 12))}</span></div><span class="lifecycle ${review.invalidatedAt ? "retired" : review.verdict === "READY" ? "qualified" : "degraded"}">${review.invalidatedAt ? "invalidated" : escapeHtml(review.verdict.replaceAll("_", " "))}</span><p class="evidence-report">${escapeHtml(review.summary)}${review.findings.length ? `\n${review.findings.map((finding) => `${finding.severity.toUpperCase()} ${finding.location || "no location"}: ${finding.rationale} [${finding.disposition}]`).join("\n")}` : ""}${review.invalidationReason ? `\nInvalidated: ${escapeHtml(review.invalidationReason)}` : ""}</p></article>`).join("") : '<div class="empty-state">No structured review receipts were retained for this run.</div>';
-  $("#evidence-attempts").innerHTML = evidence.attempts.length ? evidence.attempts.map((attempt) => `<article><div><strong>${escapeHtml(attempt.task_id)}</strong><span>${escapeHtml(attempt.provider)} / ${escapeHtml(attempt.model_id || "provider default")}</span></div><span class="lifecycle ${attempt.status === "completed" ? "qualified" : ""}">${escapeHtml(attempt.status)}</span><details class="evidence-report"><summary>View normalized report</summary><p>${escapeHtml(attempt.result_envelope?.summary || attempt.error || "No normalized summary")}</p></details></article>`).join("") : '<div class="empty-state">No attempts were started.</div>';
+  $("#evidence-reviews").innerHTML = evidence.reviews.length ? evidence.reviews.map((review) => `<article><div><strong>Round ${review.round} · ${escapeHtml(providerDisplayName(review.provider))}</strong><span>${escapeHtml(review.provider === "gemini" ? `${modelDisplayName(review.modelId)} requested (actual model unverified)` : review.modelId || "provider default")} · integration ${escapeHtml(review.integrationSha256.slice(0, 12))}</span></div><span class="lifecycle ${review.invalidatedAt ? "retired" : review.verdict === "READY" ? "qualified" : "degraded"}">${review.invalidatedAt ? "invalidated" : escapeHtml(review.verdict.replaceAll("_", " "))}</span><p class="evidence-report">${escapeHtml(review.summary)}${review.findings.length ? `\n${review.findings.map((finding) => `${finding.severity.toUpperCase()} ${finding.location || "no location"}: ${finding.rationale} [${finding.disposition}]`).join("\n")}` : ""}${review.invalidationReason ? `\nInvalidated: ${escapeHtml(review.invalidationReason)}` : ""}</p></article>`).join("") : '<div class="empty-state">No structured review receipts were retained for this run.</div>';
+  $("#evidence-attempts").innerHTML = evidence.attempts.length ? evidence.attempts.map((attempt) => `<article><div><strong>${escapeHtml(attempt.task_id)}</strong><span>${escapeHtml(recordedModelIdentity(attempt.provider, attempt.model_id, attempt.model_resolution, attempt.connection_id))}</span></div><span class="lifecycle ${attempt.status === "completed" ? "qualified" : ""}">${escapeHtml(attempt.status)}</span><details class="evidence-report"><summary>View normalized report</summary><p>${escapeHtml(attempt.result_envelope?.summary || attempt.error || "No normalized summary")}</p></details></article>`).join("") : '<div class="empty-state">No attempts were started.</div>';
   $("#evidence-tool-count").textContent = `${evidence.toolReceipts.length} retained`;
   $("#evidence-tools").innerHTML = evidence.toolReceipts.length ? evidence.toolReceipts.map((receipt) => `<article><div><strong>${escapeHtml(receipt.toolId)}</strong><span>${escapeHtml(receipt.actorRole)} · ${escapeHtml(receipt.stage)} · ${escapeHtml(receipt.sideEffect)}</span></div><span class="lifecycle ${receipt.outcome === "allow" ? "qualified" : receipt.outcome === "deny" ? "retired" : "degraded"}">${escapeHtml(receipt.outcome.replaceAll("_", " "))}</span><p class="evidence-report">${escapeHtml(receipt.reason)}${receipt.lockKeys.length ? `\nLocks: ${escapeHtml(receipt.lockKeys.join(", "))}` : ""}</p></article>`).join("") : '<div class="empty-state">No tool policy decisions were retained for this run.</div>';
 }
@@ -460,18 +506,18 @@ function renderProviders() {
           ? "Sign-in required"
           : "Unavailable";
   $("#provider-status").innerHTML = providers
-    .map((provider) => `<span class="provider-chip ${ready(provider) ? "online" : ""}" title="${escapeHtml(provider.summary)}"><i></i>${escapeHtml(provider.name)}</span>`)
+    .map((provider) => `<span class="provider-chip ${ready(provider) ? "online" : ""}" title="${escapeHtml(provider.summary)}"><i></i>${escapeHtml(providerDisplayName(provider.name))}</span>`)
     .join("");
   $("#provider-toggles").innerHTML = providers
-    .map((provider) => `<label class="toggle" title="${escapeHtml(provider.summary)}"><input type="checkbox" name="provider" value="${provider.name}" ${ready(provider) ? "checked" : "disabled"}><span>${escapeHtml(provider.name)}</span></label>`)
+    .map((provider) => `<label class="toggle" title="${escapeHtml(provider.summary)}"><input type="checkbox" name="provider" value="${provider.name}" ${ready(provider) ? "checked" : "disabled"}><span>${escapeHtml(providerDisplayName(provider.name))}</span></label>`)
     .join("");
   $("#provider-help-content").innerHTML = providers
-    .map((provider) => `<section class="provider-help-card"><div><strong>${escapeHtml(provider.name)} <span class="auth-label ${ready(provider) ? "ready" : "required"}">${statusLabel(provider)}</span></strong><code>${escapeHtml(provider.loginCommand)}</code></div><p class="muted">${escapeHtml(provider.summary)}</p><ol>${provider.setupSteps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></section>`)
+    .map((provider) => `<section class="provider-help-card"><div><strong>${escapeHtml(providerDisplayName(provider.name))} <span class="auth-label ${ready(provider) ? "ready" : "required"}">${statusLabel(provider)}</span></strong><code>${escapeHtml(provider.loginCommand)}</code></div><p class="muted">${escapeHtml(provider.summary)}</p><ol>${provider.setupSteps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></section>`)
     .join("");
   const unavailable = providers.filter((provider) => !ready(provider));
   $("#provider-auth-gate").classList.toggle("hidden", unavailable.length === 0);
   $("#provider-auth-message").textContent = unavailable.length
-    ? unavailable.map((provider) => `${provider.name}: ${provider.summary}`).join(" · ")
+    ? unavailable.map((provider) => `${providerDisplayName(provider.name)}: ${provider.summary}`).join(" · ")
     : "";
 }
 
@@ -615,18 +661,18 @@ function renderBoard(run) {
   ];
   $("#board").innerHTML = columns.map(([title, statuses]) => {
     const tasks = run.tasks.filter((task) => statuses.includes(task.status));
-    return `<section class="column"><div class="column-head"><span>${title}</span><b>${tasks.length}</b></div>${tasks.map(taskCard).join("") || '<div class="empty-state">No tasks</div>'}</section>`;
+    return `<section class="column"><div class="column-head"><span>${title}</span><b>${tasks.length}</b></div>${tasks.map((task) => taskCard(task, run)).join("") || '<div class="empty-state">No tasks</div>'}</section>`;
   }).join("");
 }
 
-function taskCard(task) {
+function taskCard(task, run) {
   const passed = task.checks.filter((check) => check.passed).length;
-  return `<button class="task-card ${task.status}" data-task-id="${escapeHtml(task.id)}"><strong>${escapeHtml(task.title)}</strong>${task.repositoryIds?.length ? `<small>${escapeHtml(task.repositoryIds.join(", "))}</small>` : ""}<div class="task-contract"><span>${escapeHtml(task.permission.replaceAll("_", " "))}</span><span>${escapeHtml(task.risk)} risk</span></div><div class="task-meta"><span class="provider-tag">${escapeHtml(task.provider || "unassigned")}</span><span>${passed}/${task.checks.length} checks · ${task.attemptCount} tries</span></div></button>`;
+  return `<button class="task-card ${task.status}" data-task-id="${escapeHtml(task.id)}"><strong>${escapeHtml(task.title)}</strong>${task.repositoryIds?.length ? `<small>${escapeHtml(task.repositoryIds.join(", "))}</small>` : ""}<div class="task-contract"><span>${escapeHtml(task.permission.replaceAll("_", " "))}</span><span>${escapeHtml(task.risk)} risk</span></div><div class="task-meta"><span class="provider-tag">${escapeHtml(routingIdentity(taskRouting(run, task.id), task.provider))}</span><span>${passed}/${task.checks.length} checks · ${task.attemptCount} tries</span></div></button>`;
 }
 
 function renderActivity(run) {
   $("#activity").innerHTML = run.events.length
-    ? run.events.map((event) => `<div class="event"><time>${new Date(event.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time><span>${escapeHtml(event.message)}</span></div>`).join("")
+    ? run.events.map((event) => `<div class="event"><time>${new Date(event.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time><span>${escapeHtml(eventDisplayMessage(event))}</span></div>`).join("")
     : '<div class="empty-state">Waiting for the first event…</div>';
 }
 
@@ -645,12 +691,11 @@ function openTask(taskId) {
   const run = state.runs.find((item) => item.id === state.selectedRunId);
   const task = run?.tasks.find((item) => item.id === taskId);
   if (!task) return;
-  const routingEvent = [...run.events].reverse().find((event) => event.kind === "task.started" && event.data?.taskId === taskId && event.data?.routing);
-  const routing = routingEvent?.data?.routing;
+  const routing = taskRouting(run, taskId);
   $("#drawer-content").innerHTML = `
     <p class="drawer-kicker">${escapeHtml(task.status)}</p>
     <h2 class="drawer-title">${escapeHtml(task.title)}</h2>
-    <p class="drawer-meta">${escapeHtml(task.provider || "Unassigned")} · ${task.attemptCount} attempts</p>
+    <p class="drawer-meta">${escapeHtml(routingIdentity(routing, task.provider))} · ${task.attemptCount} attempts</p>
     <h3>Task contract</h3>
     <dl class="contract-details">
       <div><dt>Permission</dt><dd>${escapeHtml(task.permission.replaceAll("_", " "))}</dd></div>
@@ -777,7 +822,7 @@ function renderPlanPreview() {
   $("#plan-task-list").innerHTML = plan.tasks.map((task) => {
     const assignment = state.planPreview.assignments.find((item) => item.taskId === task.id);
     const dependencyText = task.dependencies.length ? `After ${task.dependencies.join(", ")}` : "No dependencies";
-    return `<article class="plan-task"><h3>${escapeHtml(task.title)}</h3><div class="plan-task-meta"><span>${escapeHtml(task.permission.replaceAll("_", " "))}</span><span>${escapeHtml(task.risk)} risk</span><span>${escapeHtml(assignment?.tier || "unassigned")}</span></div><p>${escapeHtml(task.description)}</p><details><summary>${escapeHtml(dependencyText)} · ${escapeHtml(assignment?.provider || "unassigned")} / ${escapeHtml(assignment?.modelId || "provider default")} · ${task.checks.length} checks</summary><p>Repositories: ${(task.repositoryIds || []).map(escapeHtml).join(", ") || "Current workspace"}<br>Scope: ${task.repositoryScope.map(escapeHtml).join(", ")}<br>Acceptance: ${task.acceptanceCriteria.map(escapeHtml).join("; ") || "Not supplied"}<br>Capabilities: ${task.capabilityNeeds.map(escapeHtml).join(", ")}</p></details></article>`;
+    return `<article class="plan-task"><h3>${escapeHtml(task.title)}</h3><div class="plan-task-meta"><span>${escapeHtml(task.permission.replaceAll("_", " "))}</span><span>${escapeHtml(task.risk)} risk</span><span>${escapeHtml(assignment?.tier || "unassigned")}</span></div><p>${escapeHtml(task.description)}</p><details><summary>${escapeHtml(dependencyText)} · ${escapeHtml(providerDisplayName(assignment?.provider || "unassigned"))} / ${escapeHtml(assignment?.modelId ? `${modelDisplayName(assignment.modelId)} (requested)` : "provider default (actual model unverified)")} · ${task.checks.length} checks</summary><p>Repositories: ${(task.repositoryIds || []).map(escapeHtml).join(", ") || "Current workspace"}<br>Scope: ${task.repositoryScope.map(escapeHtml).join(", ")}<br>Acceptance: ${task.acceptanceCriteria.map(escapeHtml).join("; ") || "Not supplied"}<br>Capabilities: ${task.capabilityNeeds.map(escapeHtml).join(", ")}</p></details></article>`;
   }).join("");
   const execution = state.planPreview.execution || { supported: true, reason: "Single workspace execution is available." };
   $("#plan-execution-note").textContent = execution.supported ? `Execution available: ${execution.reason}` : `Planning only: ${execution.reason}`;
@@ -1186,7 +1231,7 @@ function routingEvidenceMarkup(routing) {
   const scoreRows = Object.entries(routing.scoreBreakdown || {}).filter(([, value]) => Number(value) !== 0)
     .map(([key, value]) => `<div><dt>${escapeHtml(labels[key] || key)}</dt><dd>${Number(value) > 0 ? "+" : ""}${escapeHtml(value)}</dd></div>`).join("");
   const modelName = routing.model?.alias || routing.model?.requestedModelId || "provider default";
-  return `<h3>Why this model</h3><p>${escapeHtml(routing.provider)} / ${escapeHtml(modelName)} was selected for a ${escapeHtml(routing.workload?.complexity || "classified")} task requiring the ${escapeHtml(routing.workload?.requiredTier || "configured")} tier.</p><dl class="contract-details routing-score">${scoreRows}<div><dt>Total routing score</dt><dd>${escapeHtml(routing.score)}</dd></div></dl>${routing.factors?.length ? `<ul>${routing.factors.map((factor) => `<li>${escapeHtml(factor)}</li>`).join("")}</ul>` : ""}`;
+  return `<h3>Why this model</h3><p>${escapeHtml(connectionDisplayName(routing.connectionId, routing.provider))} / ${escapeHtml(modelName)} was requested for a ${escapeHtml(routing.workload?.complexity || "classified")} task requiring the ${escapeHtml(routing.workload?.requiredTier || "configured")} tier. The actual model is only treated as verified when the runtime reports it.</p><dl class="contract-details routing-score">${scoreRows}<div><dt>Total routing score</dt><dd>${escapeHtml(routing.score)}</dd></div></dl>${routing.factors?.length ? `<ul>${routing.factors.map((factor) => `<li>${escapeHtml(factor)}</li>`).join("")}</ul>` : ""}`;
 }
 
 function formatDuration(milliseconds) {

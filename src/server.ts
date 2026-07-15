@@ -203,8 +203,16 @@ async function route(
   if (request.method === "GET" && url.pathname === "/api/models") {
     const connectionId = url.searchParams.get("connectionId") ?? undefined;
     const health = new Map(context.ledger.listModelHealth().map((item) => [item.modelId, item]));
+    const quotaGroupHealth = new Map(context.ledger.listQuotaGroupHealth().map((item) => [`${item.connectionId}\u0000${item.quotaGroupId}`, item]));
     sendJson(response, 200, {
-      models: context.ledger.listModels(connectionId).map((model) => ({ ...model, health: health.get(model.id) ?? null })),
+      models: context.ledger.listModels(connectionId).map((model) => {
+        const quotaGroup = typeof model.metadata.quotaGroup === "string" ? model.metadata.quotaGroup : null;
+        return {
+          ...model,
+          health: health.get(model.id) ?? null,
+          quotaGroupHealth: quotaGroup ? quotaGroupHealth.get(`${model.connectionId}\u0000${quotaGroup}`) ?? null : null,
+        };
+      }),
     });
     return;
   }

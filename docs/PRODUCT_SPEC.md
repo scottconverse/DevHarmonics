@@ -1,13 +1,15 @@
 # DevHarmonics Canonical Product Specification
 
 Document status: **Canonical product direction**
-Specification version: **1.6**
+Specification version: **1.7**
 Written: **2026-07-13**
 Revised: **2026-07-15**
 Current implementation baseline: **DevHarmonics v0.4.0**
 Google Doc: [DevHarmonics Canonical Product Specification](https://docs.google.com/document/d/1rd-_gqHHPZHhTkrULJR9tHcbAVUOGONsbuEFCV-8pRQ/edit?usp=drivesdk)
 
-Revision history: **v1.6 (2026-07-15)** — Added the first named local specialist policy: Mellum2 Instruct and Thinking as separate exact-model upgrade tracks, benchmark-gated specialist scheduling, a narrow low-risk economy implementation lane, enforced task-capability matching, and no automatic download, activation, promotion, or universal-default behavior.
+Revision history: **v1.7 (2026-07-15)** — Clarified provider-neutral identity and quota boundaries for Google Antigravity: one authenticated subscription connection may expose Google, Anthropic, and OpenAI model vendors; its Gemini and Claude/GPT quota groups are scheduled independently; and requested model identity is never reported as actual execution identity unless the runtime verifies it.
+
+Prior revision: **v1.6 (2026-07-15)** — Added the first named local specialist policy: Mellum2 Instruct and Thinking as separate exact-model upgrade tracks, benchmark-gated specialist scheduling, a narrow low-risk economy implementation lane, enforced task-capability matching, and no automatic download, activation, promotion, or universal-default behavior.
 
 Prior revision: **v1.5 (2026-07-15)** — Reconciled the current implementation baseline with the accepted v0.4.0 adaptive workforce: exact-model qualification, fair cross-provider scheduling, workload-specific worker and reviewer observations, explicit manual tier overrides, retained CivicSuite acceptance evidence, and verified full/compact cockpit behavior.
 
@@ -331,7 +333,7 @@ DevHarmonics must support four connection classes.
 
 #### Subscription-backed provider applications
 
-Primary providers are Codex, Claude Code, and Gemini through their official authenticated tools. DevHarmonics:
+Primary subscription transports are Codex, Claude Code, and Google Antigravity through their official authenticated tools. Antigravity is one signed-in connection that may expose models from Google, Anthropic, and OpenAI; transport, connection, model vendor, model identity, and quota group MUST remain separate concepts. DevHarmonics:
 
 - uses existing provider-owned login sessions;
 - never asks for provider email passwords;
@@ -385,7 +387,7 @@ Each registry entry should retain:
 - tool use, structured output, vision, reasoning, and other capabilities;
 - supported reasoning/effort settings;
 - local parameter size, quantization, digest, disk size, RAM/VRAM observations, and license metadata where applicable;
-- provider quota pool and observed rate-limit behavior;
+- provider quota pool and observed rate-limit behavior, including connection-internal quota groups;
 - adapter and minimum CLI/runtime compatibility;
 - qualification results by role and workload class;
 - quality, latency, reliability, and resource observations from actual runs;
@@ -455,7 +457,7 @@ Users need two auditable upgrade policies:
 
 Provider moving aliases may inform discovery, but they cannot silently change the model used by a run.
 
-DevHarmonics must record the concrete model identifier and settings used for every attempt whenever the provider exposes them. Moving aliases may be used for discovery or preference, but must not erase reproducibility.
+DevHarmonics must record the concrete model identifier and settings used for every attempt whenever the provider exposes them. When a runtime confirms only the requested model or alias but does not report the model that actually executed, the receipt MUST retain that request and mark actual resolution unverified; it MUST NOT promote the requested identifier into an observed fact. Moving aliases may be used for discovery or preference, but must not erase reproducibility.
 
 A routine model release should require only a registry/catalog update when the existing adapter supports it. A DevHarmonics adapter or application update is required only when authentication, invocation, tool semantics, reasoning controls, output formats, or minimum provider versions change.
 
@@ -507,6 +509,8 @@ Provider availability has at least three independent dimensions:
 - **capacity:** the current quota, rate limit, concurrency, or usage window permits work.
 
 Running out of a five-hour or weekly subscription allowance must not permanently mark a model unavailable.
+
+Capacity scope may be narrower than a connection. In Google Antigravity, the **Gemini Models** quota group and the **Claude and GPT Models** quota group share one authenticated connection but have independent capacity windows. Exhausting either group MUST cool only that group until its provider-reported reset, leaving qualified models in the other group eligible. The internal legacy configuration key `gemini` MAY remain as a compatibility alias, but it MUST NOT be shown or persisted as proof that an Anthropic or OpenAI model executed.
 
 The scheduler should classify failures such as:
 

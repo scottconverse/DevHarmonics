@@ -58,6 +58,7 @@ import type {
   WorkbenchSessionInput,
   WorkbenchSessionRecord,
 } from "./types.js";
+import { modelQuotaGroup, quotaResetAt } from "./antigravity.js";
 
 interface RunRow {
   id: string;
@@ -94,7 +95,7 @@ interface EventRow {
 }
 
 function healthState(failureKind: string): ConnectionHealthRecord["state"] {
-  if (failureKind === "quota_exhausted") return "quota_exhausted";
+  if (failureKind === "quota_exhausted" || failureKind === "quota_group_exhausted") return "quota_exhausted";
   if (failureKind === "rate_limited") return "rate_limited";
   if (failureKind === "authentication") return "authentication";
   if (failureKind === "incompatible") return "degraded";
@@ -104,7 +105,7 @@ function healthState(failureKind: string): ConnectionHealthRecord["state"] {
 function healthCooldownMs(failureKind: string, failures: number): number {
   const exponent = Math.max(0, Math.min(failures - 1, 8));
   if (failureKind === "authentication") return 0;
-  if (failureKind === "quota_exhausted") return Math.min(5 * 60 * 60_000, 15 * 60_000 * 2 ** exponent);
+  if (failureKind === "quota_exhausted" || failureKind === "quota_group_exhausted") return Math.min(5 * 60 * 60_000, 15 * 60_000 * 2 ** exponent);
   if (failureKind === "rate_limited") return Math.min(30 * 60_000, 60_000 * 2 ** exponent);
   if (failureKind === "incompatible") return 30 * 60_000;
   return Math.min(10 * 60_000, 30_000 * 2 ** exponent);
@@ -134,6 +135,20 @@ function mapModelHealth(row: Record<string, unknown>): ModelHealthRecord {
   };
 }
 
+function mapQuotaGroupHealth(row: Record<string, unknown>): QuotaGroupHealthRecord {
+  return {
+    connectionId: String(row.connection_id),
+    quotaGroupId: String(row.quota_group_id),
+    displayName: String(row.display_name),
+    state: String(row.state) as QuotaGroupHealthRecord["state"],
+    failureKind: row.failure_kind === null ? null : String(row.failure_kind),
+    consecutiveFailures: Number(row.consecutive_failures),
+    cooldownUntil: row.cooldown_until === null ? null : String(row.cooldown_until),
+    detail: String(row.detail),
+    lastCheckedAt: String(row.last_checked_at),
+  };
+}
+
 function isSubscriptionProvider(value: string): value is ProviderName {
   return value === "codex" || value === "claude" || value === "gemini";
 }
@@ -148,7 +163,7 @@ interface CheckRow {
   duration_ms: number;
 }
 
-export const LEDGER_SCHEMA_VERSION = 22;
+export const LEDGER_SCHEMA_VERSION = 23;
 
 export const REPOSITORY_ROLES = [
   "umbrella",
@@ -311,6 +326,18 @@ export interface ModelHealthRecord {
   lastCheckedAt: string;
 }
 
+export interface QuotaGroupHealthRecord {
+  connectionId: string;
+  quotaGroupId: string;
+  displayName: string;
+  state: ConnectionHealthRecord["state"];
+  failureKind: string | null;
+  consecutiveFailures: number;
+  cooldownUntil: string | null;
+  detail: string;
+  lastCheckedAt: string;
+}
+
 export interface AttemptRuntimeContext {
   connectionId: string;
   requestedModelId: string | null;
@@ -359,6 +386,7 @@ export interface InvocationReceiptInput {
   connectionId: string;
   requestedModelId?: string | null;
   resolvedModelId: string;
+  modelResolution?: string | null;
   inputTokens?: number | null;
   outputTokens?: number | null;
   costUsd?: number | null;
@@ -1055,6 +1083,30 @@ const MIGRATIONS: readonly LedgerMigration[] = [
       `);
     },
   },
+  {
+    version: 23,
+    name: "provider-quota-groups-and-honest-model-resolution",
+    apply(database) {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS quota_group_health (
+          connection_id TEXT NOT NULL REFERENCES provider_connections(id) ON DELETE CASCADE,
+          quota_group_id TEXT NOT NULL,
+          display_name TEXT NOT NULL,
+          state TEXT NOT NULL,
+          failure_kind TEXT,
+          consecutive_failures INTEGER NOT NULL,
+          cooldown_until TEXT,
+          detail TEXT NOT NULL,
+          last_checked_at TEXT NOT NULL,
+          PRIMARY KEY (connection_id, quota_group_id)
+        );
+      `);
+      const receiptColumns = new Set(
+        (database.prepare("SELECT name FROM pragma_table_info('invocation_receipts')").all() as unknown as Array<{ name: string }>).map((column) => column.name),
+      );
+      if (!receiptColumns.has("model_resolution")) database.exec("ALTER TABLE invocation_receipts ADD COLUMN model_resolution TEXT;");
+    },
+  },
 ];
 
 function summarizeGoal(goal: string, maxLength = 180): string {
@@ -1163,6 +1215,7 @@ const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
   model_qualifications: ["id", "model_id", "fixture_version", "role", "passed", "score", "evidence_json", "created_at", "fingerprint"],
   connection_health: ["connection_id", "state", "failure_kind", "consecutive_failures", "cooldown_until", "detail", "last_checked_at"],
   model_health: ["model_id", "state", "failure_kind", "consecutive_failures", "cooldown_until", "detail", "last_checked_at"],
+  quota_group_health: ["connection_id", "quota_group_id", "display_name", "state", "failure_kind", "consecutive_failures", "cooldown_until", "detail", "last_checked_at"],
   blackboard_entries: ["id", "run_id", "task_id", "kind", "content", "source_attempt_id", "created_at"],
   products: ["id", "name", "organization_url", "description", "created_at", "updated_at"],
   repositories: [
@@ -1173,7 +1226,7 @@ const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
   ],
   catalog_refreshes: ["provider", "status", "source", "model_count", "detail", "refreshed_at"],
   provider_catalog_models: ["id", "provider", "canonical_name", "display_name", "metadata_json", "first_seen_at", "last_seen_at", "missing_observations", "retired"],
-  invocation_receipts: ["id", "run_id", "task_id", "role", "provider", "connection_id", "requested_model_id", "resolved_model_id", "input_tokens", "output_tokens", "cost_usd", "duration_ms", "workload_class", "fallback_reason", "created_at"],
+  invocation_receipts: ["id", "run_id", "task_id", "role", "provider", "connection_id", "requested_model_id", "resolved_model_id", "model_resolution", "input_tokens", "output_tokens", "cost_usd", "duration_ms", "workload_class", "fallback_reason", "created_at"],
   tool_policy_receipts: ["id", "run_id", "task_id", "attempt_id", "tool_id", "actor_role", "stage", "side_effect", "outcome", "reason", "request_json", "lock_keys_json", "approval_id", "created_at"],
   review_receipts: ["id", "run_id", "round", "integration_sha256", "verdict", "provider", "model_id", "connection_id", "summary", "raw_text", "invalidated_at", "invalidation_reason", "created_at"],
   review_findings: ["id", "review_receipt_id", "finding_id", "severity", "location", "rationale", "suggested_correction", "disposition", "created_at"],
@@ -2449,6 +2502,93 @@ export class Ledger {
     return !health.cooldownUntil || Date.parse(health.cooldownUntil) <= at.getTime();
   }
 
+  recordQuotaGroupOutcome(
+    connectionId: string,
+    quotaGroupId: string,
+    displayName: string,
+    input: { success: boolean; failureKind?: string | null; detail?: string; cooldownUntil?: string | null },
+  ): QuotaGroupHealthRecord {
+    const connection = this.database.prepare("SELECT 1 AS present FROM provider_connections WHERE id = ?").get(connectionId);
+    if (!connection) throw new Error(`Provider connection '${connectionId}' was not found`);
+    const previous = this.getQuotaGroupHealth(connectionId, quotaGroupId);
+    const now = new Date();
+    // A provider-supplied quota reset is authoritative. A late success from an
+    // older in-flight request must not erase a newer exhaustion observation.
+    if (input.success && previous?.cooldownUntil && Date.parse(previous.cooldownUntil) > now.getTime()) return previous;
+    const failures = input.success ? 0 : (previous?.consecutiveFailures ?? 0) + 1;
+    const failureKind = input.success ? null : input.failureKind ?? "unknown";
+    const state = input.success ? "ready" : healthState(failureKind ?? "unknown");
+    const cooldownUntil = input.success
+      ? null
+      : input.cooldownUntil ?? (() => {
+          const cooldownMs = healthCooldownMs(failureKind ?? "unknown", failures);
+          return cooldownMs ? new Date(now.getTime() + cooldownMs).toISOString() : null;
+        })();
+    this.database.prepare(
+      `INSERT INTO quota_group_health
+       (connection_id, quota_group_id, display_name, state, failure_kind, consecutive_failures, cooldown_until, detail, last_checked_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(connection_id, quota_group_id) DO UPDATE SET display_name = excluded.display_name,
+         state = excluded.state, failure_kind = excluded.failure_kind, consecutive_failures = excluded.consecutive_failures,
+         cooldown_until = excluded.cooldown_until, detail = excluded.detail, last_checked_at = excluded.last_checked_at`,
+    ).run(connectionId, quotaGroupId, displayName, state, failureKind, failures, cooldownUntil, redactText(input.detail ?? (input.success ? "Invocation succeeded" : "Quota group unavailable")), now.toISOString());
+    return this.getQuotaGroupHealth(connectionId, quotaGroupId)!;
+  }
+
+  getQuotaGroupHealth(connectionId: string, quotaGroupId: string): QuotaGroupHealthRecord | null {
+    const row = this.database.prepare("SELECT * FROM quota_group_health WHERE connection_id = ? AND quota_group_id = ?").get(connectionId, quotaGroupId) as Record<string, unknown> | undefined;
+    return row ? mapQuotaGroupHealth(row) : null;
+  }
+
+  listQuotaGroupHealth(connectionId?: string): QuotaGroupHealthRecord[] {
+    const rows = (connectionId
+      ? this.database.prepare("SELECT * FROM quota_group_health WHERE connection_id = ? ORDER BY quota_group_id").all(connectionId)
+      : this.database.prepare("SELECT * FROM quota_group_health ORDER BY connection_id, quota_group_id").all()) as unknown as Array<Record<string, unknown>>;
+    return rows.map(mapQuotaGroupHealth);
+  }
+
+  isQuotaGroupEligible(connectionId: string, quotaGroupId: string, at = new Date()): boolean {
+    const health = this.getQuotaGroupHealth(connectionId, quotaGroupId);
+    if (!health) return true;
+    return !health.cooldownUntil || Date.parse(health.cooldownUntil) <= at.getTime();
+  }
+
+  reconcileLegacyAntigravityQuotaHealth(): number {
+    const rows = this.database.prepare(
+      `SELECT connection_id, model_id, error, finished_at
+       FROM attempts
+       WHERE connection_id = 'subscription-cli:gemini'
+         AND model_id IS NOT NULL
+         AND lower(error) LIKE '%individual quota reached%'
+       ORDER BY finished_at DESC`,
+    ).all() as unknown as Array<{ connection_id: string; model_id: string; error: string; finished_at: string | null }>;
+    const reconciled = new Set<string>();
+    const now = new Date();
+    for (const row of rows) {
+      const model = this.getModel(row.model_id);
+      const quotaGroup = modelQuotaGroup(model);
+      if (!quotaGroup || reconciled.has(quotaGroup.id)) continue;
+      reconciled.add(quotaGroup.id);
+      const observedAt = row.finished_at ? new Date(row.finished_at) : now;
+      const cooldownUntil = quotaResetAt(row.error, observedAt);
+      if (!cooldownUntil || Date.parse(cooldownUntil) <= now.getTime()) continue;
+      const current = this.getQuotaGroupHealth(row.connection_id, quotaGroup.id);
+      if (current && Date.parse(current.lastCheckedAt) >= observedAt.getTime()) continue;
+      this.recordQuotaGroupOutcome(row.connection_id, quotaGroup.id, quotaGroup.displayName, {
+        success: false,
+        failureKind: "quota_group_exhausted",
+        detail: row.error,
+        cooldownUntil,
+      });
+    }
+    if (reconciled.size) {
+      this.database.prepare(
+        "DELETE FROM connection_health WHERE connection_id = 'subscription-cli:gemini' AND lower(detail) LIKE '%individual quota reached%'",
+      ).run();
+    }
+    return reconciled.size;
+  }
+
   addManualModel(input: ManualModelInput): ModelRecord {
     if (!(MODEL_LIFECYCLES as readonly string[]).includes(input.lifecycle)) {
       throw new Error(`Unknown model lifecycle '${input.lifecycle}'`);
@@ -2649,9 +2789,9 @@ export class Ledger {
   recordInvocationReceipt(input: InvocationReceiptInput): void {
     this.database.prepare(
       `INSERT INTO invocation_receipts
-       (run_id, task_id, role, provider, connection_id, requested_model_id, resolved_model_id,
+       (run_id, task_id, role, provider, connection_id, requested_model_id, resolved_model_id, model_resolution,
         input_tokens, output_tokens, cost_usd, duration_ms, workload_class, fallback_reason, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       input.runId,
       input.taskId ?? null,
@@ -2660,6 +2800,7 @@ export class Ledger {
       input.connectionId,
       input.requestedModelId ?? null,
       input.resolvedModelId,
+      input.modelResolution ?? null,
       input.inputTokens ?? null,
       input.outputTokens ?? null,
       input.costUsd ?? null,

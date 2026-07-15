@@ -5,6 +5,7 @@ import type { ConnectionRecord, ModelRecord } from "./registry.js";
 import type { InvocationPermission, ModelSelection, RuntimeTransport } from "./runtime.js";
 import type { ModelPerformanceSlice } from "./model-performance.js";
 import type { AgentRole, DevHarmonicsConfig, PlannedTask, ProviderName } from "./types.js";
+import { modelQuotaGroup } from "./antigravity.js";
 
 export interface RoutingDecision {
   role: AgentRole;
@@ -186,6 +187,8 @@ export class ModelRouter {
     if (!explicit && !model.active) return false;
     if (input.excludedModelIds?.has(model.id) || input.excludedConnectionIds?.has(connection.id)) return false;
     if (!this.ledger.isConnectionEligible(connection.id) || !this.ledger.isModelEligible(model.id)) return false;
+    const quotaGroup = modelQuotaGroup(model);
+    if (quotaGroup && !this.ledger.isQuotaGroupEligible(connection.id, quotaGroup.id)) return false;
     if (connection.transport === "api" && input.permission === "workspace_write") return false;
     if (connection.transport !== "local" && !input.allowedProviders.includes(connection.provider)) return false;
     const roleQualified = this.qualifiedForRole(model, input.role, input.permission);

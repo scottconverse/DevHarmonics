@@ -40,8 +40,10 @@ import { classifyWorkload, inferModelProfile, profileMetadata, SUBSCRIPTION_COMP
 import { parseCurrentClaudeModels } from "../src/catalog.js";
 import { estimateInvocationCost, estimateQualificationCost, isExactOpenRouterModelId } from "../src/openrouter.js";
 import { architectPrompt, localReviewerContextHeader, reviewerPrompt, workerPrompt } from "../src/prompts.js";
-import { ensureReviewerCandidateQualified, ensureSchedulerCandidateQualified, hasCurrentOperationalQualification, qualifyRuntimeModel, trackedFamilyQualificationRole } from "../src/qualification.js";
+import { QUALIFICATION_FINGERPRINT_FIXTURE, ensureReviewerCandidateQualified, ensureSchedulerCandidateQualified, hasCurrentOperationalQualification, qualifyRuntimeModel, trackedFamilyQualificationRole } from "../src/qualification.js";
+import { modelQualificationFingerprint } from "../src/model-fingerprint.js";
 import { aggregateModelPerformance } from "../src/model-performance.js";
+import { quotaResetAt } from "../src/antigravity.js";
 
 test("provider output parsers extract each CLI's final response", () => {
   const codex = [
@@ -1745,9 +1747,15 @@ test("runtime failure classification distinguishes fallback-relevant causes", ()
     classifyInvocationFailure({ detail: "CUDA out of memory", exitCode: 1, timedOut: false, aborted: false }),
     { kind: "resource_exhausted", retryable: true },
   );
+  assert.deepEqual(
+    classifyInvocationFailure({ detail: "Individual quota reached. Resets in 4h35m32s.", exitCode: 1, timedOut: false, aborted: false }),
+    { kind: "quota_group_exhausted", retryable: true },
+  );
+  assert.equal(quotaResetAt("Individual quota reached. Resets in 4h35m32s.", new Date("2026-07-15T12:00:00.000Z")), "2026-07-15T16:35:32.000Z");
   assert.equal(invocationFailureScope("model_quota_exhausted", true), "model");
   assert.equal(invocationFailureScope("context_overflow", true), "model");
   assert.equal(invocationFailureScope("quota_exhausted", true), "connection");
+  assert.equal(invocationFailureScope("quota_group_exhausted", true), "quota_group");
   assert.equal(invocationFailureScope("authentication", true), "connection");
   assert.equal(invocationFailureScope("cancelled", true), "task");
 });
@@ -1863,6 +1871,9 @@ test("ledger upgrades a v0.1 database transactionally and preserves a pre-migrat
           { version: 18, name: "durable-objectives-and-plan-revisions" },
           { version: 19, name: "read-only-workbench-consultations" },
           { version: 20, name: "local-repository-configuration-and-inspection" },
+          { version: 21, name: "multi-repository-integration-sets" },
+          { version: 22, name: "source-backed-product-intelligence" },
+          { version: 23, name: "provider-quota-groups-and-honest-model-resolution" },
         ],
       );
     } finally {
@@ -2663,6 +2674,60 @@ test("quota exhaustion cools a subscription connection and falls back with durab
   }
 });
 
+test("Antigravity Gemini quota exhaustion falls back to the Claude and GPT quota group", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-antigravity-quota-group-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    const connectionId = "subscription-cli:gemini";
+    ledger.upsertConnection({ id: connectionId, provider: "gemini", transport: "subscription_cli", authentication: "subscription", displayName: "Google Antigravity", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "unknown", capacity: "unknown", adapterVersion: "test", runtimeVersion: "test", metadata: { platform: "antigravity", legacyProviderKey: "gemini" } });
+    const models = [
+      { id: `${connectionId}:model:a-gemini-flash`, name: "Gemini 3.5 Flash (Medium)", vendor: "google", quotaGroup: "antigravity:gemini-models", quotaGroupDisplayName: "Gemini Models" },
+      { id: `${connectionId}:model:z-gpt-oss`, name: "GPT-OSS 120B (Medium)", vendor: "openai", quotaGroup: "antigravity:claude-gpt-models", quotaGroupDisplayName: "Claude and GPT Models" },
+    ];
+    for (const model of models) {
+      ledger.upsertDiscoveredModel({ id: model.id, connectionId, canonicalName: model.name, displayName: model.name, source: "runtime_discovery", lifecycle: "visible", visible: true, verified: false, qualified: false, active: false, metadata: { ...profileMetadata({ tier: "standard", family: model.vendor === "google" ? "gemini-flash" : "openai-gpt-oss", capabilities: ["text", "analysis", "code", "tools"], source: "runtime" }), platform: "antigravity", modelVendor: model.vendor, quotaGroup: model.quotaGroup, quotaGroupDisplayName: model.quotaGroupDisplayName } });
+      const storedModel = ledger.getModel(model.id)!;
+      const storedConnection = ledger.listConnections().find((connection) => connection.id === connectionId)!;
+      ledger.recordModelQualification({ modelId: model.id, fixtureVersion: "subscription-worker-v1", role: "worker", passed: true, score: 1, evidence: {}, fingerprint: modelQualificationFingerprint(storedModel, storedConnection, QUALIFICATION_FINGERPRINT_FIXTURE) });
+      ledger.setModelPreference(model.id, { active: true });
+    }
+    const task = { id: "one", title: "Inspect compatibility", description: "Return cited findings", dependencies: [], preferredProvider: "gemini" as const, checks: ["pass"], kind: "diagnostic" as const, permission: "read_only" as const, risk: "low" as const, repositoryScope: ["."], capabilityNeeds: ["analysis"], acceptanceCriteria: ["Cite findings"], expectedArtifacts: [] };
+    const runId = ledger.createRun("Antigravity quota group fallback", root, undefined, "observe");
+    ledger.savePlan(runId, { summary: "quota group fallback", recommendedConcurrency: 1, tasks: [task] });
+    const invoked: string[] = [];
+    const orchestrator = new Orchestrator(ledger);
+    (orchestrator as any).provider = () => ({
+      connection: { id: domainId("ProviderConnection", connectionId), provider: "gemini", transport: "subscription_cli", authentication: "subscription", displayName: "Google Antigravity", capabilities: { structuredOutput: false, streaming: false, providerManagedTools: true, modelSelection: true, modelSettings: [], permissions: ["read_only", "workspace_write"] } },
+      metadata: async () => ({ adapterVersion: "test", runtimeVersion: "test" }),
+      invoke: async (request: { model: { alias: string | null } }) => {
+        invoked.push(String(request.model.alias));
+        if (request.model.alias?.startsWith("Gemini")) {
+          const detail = "Individual quota reached. Resets in 4h15m.";
+          const failure = classifyInvocationFailure({ detail, exitCode: 1, timedOut: false, aborted: false });
+          throw new RuntimeInvocationError(detail, failure.kind, domainId("ProviderConnection", connectionId), 1, failure.retryable);
+        }
+        return { connectionId, provider: "gemini", adapterVersion: "test", runtimeVersion: "test", model: { ...request.model, resolvedModelId: models[1]!.id, resolution: "requested_unverified" }, text: "README.md:7 confirms the compatibility finding and ARCHITECTURE.md:12 documents the relevant runtime boundary. The evidence indicates the change is compatible because both surfaces retain the same contract. No files were modified during this read-only diagnostic run.", stdout: "", stderr: "", exitCode: 0, durationMs: 1, usage: { inputTokens: null, outputTokens: null, costUsd: null }, toolRequests: [] };
+      },
+    });
+    const config = structuredClone(defaultConfig);
+    config.application.retry.maxAttempts = 2;
+    config.application.retry.backoffMs = 1;
+    config.product.workers = ["gemini"];
+    config.repository.validators = { pass: { command: process.execPath, args: ["-e", "process.exit(0)"], timeoutMs: 5_000 } };
+    const outcome = await (orchestrator as any).executeTask({ runId, goal: "Observe", task, constitution: "test", config, providers: ["gemini"], providerCursor: 0, worktrees: { createTask: async () => ({ path: root, branch: "fixture" }), assertPrimaryClean: async () => undefined, commitTask: async () => false, mergeTask: async () => undefined }, signal: new AbortController().signal }).catch((error: unknown) => error);
+    assert.equal(outcome, "passed", JSON.stringify({ invoked, events: ledger.getRun(runId)?.events, models: ledger.listModels(connectionId).map((model) => ({ id: model.id, active: model.active, qualified: model.qualified, stale: model.qualificationStale, health: ledger.getModelHealth(model.id), quota: model.metadata.quotaGroup })) }));
+    assert.deepEqual(invoked, ["Gemini 3.5 Flash (Medium)", "GPT-OSS 120B (Medium)"]);
+    assert.notEqual(ledger.getConnectionHealth(connectionId)?.state, "quota_exhausted");
+    assert.equal(ledger.getQuotaGroupHealth(connectionId, "antigravity:gemini-models")?.state, "quota_exhausted");
+    assert.equal(ledger.isQuotaGroupEligible(connectionId, "antigravity:claude-gpt-models"), true);
+    ledger.recordQuotaGroupOutcome(connectionId, "antigravity:gemini-models", "Gemini Models", { success: true });
+    assert.equal(ledger.getQuotaGroupHealth(connectionId, "antigravity:gemini-models")?.state, "quota_exhausted", "a late success must not clear a newer reset-bound quota signal");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("runProcess terminates a child when its abort signal fires", async () => {
   const sleepScript = "setTimeout(() => {}, 60000);";
   const controller = new AbortController();
@@ -2857,7 +2922,7 @@ test("repository registry migrates remote observations and persists local govern
 
   const ledger = new Ledger(filename);
   try {
-    assert.equal(ledger.getSchemaVersion(), 20);
+    assert.equal(ledger.getSchemaVersion(), LEDGER_SCHEMA_VERSION);
     const migrated = ledger.getRepository("github:civicsuite/civiccore");
     assert.ok(migrated);
     assert.equal(migrated.visibility, "public");
@@ -2941,7 +3006,7 @@ test("workbench persistence advances the ledger schema without creating executio
   version18.exec(`
     DROP TABLE workbench_messages;
     DROP TABLE workbench_sessions;
-    DELETE FROM schema_migrations WHERE version = 19;
+    DELETE FROM schema_migrations WHERE version >= 19;
     PRAGMA user_version = 18;
   `);
   version18.close();

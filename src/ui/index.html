@@ -221,8 +221,34 @@
         <section id="products-view" class="workspace-view hidden" aria-labelledby="products-title">
           <div class="view-heading">
             <div><p class="eyebrow">PRODUCT OPERATIONS</p><h2 id="products-title">Product portfolio</h2></div>
-            <button id="refresh-products" class="secondary" type="button">Refresh portfolio</button>
+            <div class="evidence-actions"><button id="register-product" class="secondary" type="button">Register product</button><button id="add-local-repository" class="secondary" type="button">Add local repository</button><button id="refresh-products" class="secondary" type="button">Refresh portfolio</button></div>
           </div>
+          <form id="product-form" class="panel registry-form hidden">
+            <div class="panel-heading"><div><span class="step">P</span><h2>Register a product</h2></div><span class="muted">A product groups repositories without collapsing them into a monorepo.</span></div>
+            <div class="settings-grid">
+              <label>Product ID<input id="product-id" class="input" required placeholder="civicsuite"></label>
+              <label>Name<input id="product-name" class="input" required placeholder="CivicSuite"></label>
+              <label>Organization URL<input id="product-organization" class="input" required type="url" placeholder="https://github.com/civicsuite"></label>
+              <label>Description<input id="product-description" class="input" placeholder="Civic technology product suite"></label>
+            </div>
+            <div class="composer-actions"><p id="product-form-error" class="error" role="alert"></p><button class="primary" type="submit">Save product</button></div>
+          </form>
+          <form id="repository-form" class="panel registry-form hidden">
+            <div class="panel-heading"><div><span class="step">R</span><h2>Add a local repository</h2></div><span class="muted">DevHarmonics inspects Git state read-only and records compatibility issues.</span></div>
+            <div class="settings-grid">
+              <label>Product<select id="repository-product" class="input" required></select></label>
+              <label>Local folder<input id="repository-path" class="input" required spellcheck="false" placeholder="C:\\Users\\Scott\\Documents\\GitHub\\CivicSuite"></label>
+              <label>Repository role<select id="repository-role" class="input"><option value="umbrella">Umbrella</option><option value="shared_platform">Shared platform</option><option value="module" selected>Module</option><option value="desktop">Desktop</option><option value="installer">Installer</option><option value="documentation">Documentation</option><option value="release_truth">Release truth</option><option value="other">Other</option></select></label>
+              <label>Expected branch <small>Optional</small><input id="repository-branch" class="input" placeholder="main"></label>
+            </div>
+            <div class="objective-grid">
+              <label>Owners <small>One team or person per line</small><textarea id="repository-owners" rows="3"></textarea></label>
+              <label>Dependencies <small>One registered repository ID per line</small><textarea id="repository-dependencies" rows="3"></textarea></label>
+              <label>Governance sources <small>Paths such as AGENTS.md, CLAUDE.md, README.md</small><textarea id="repository-governance" rows="3"></textarea></label>
+              <label>Validator commands <small><code>name = command</code>, one per line</small><textarea id="repository-validators" rows="3" placeholder="test = npm test&#10;build = npm run build"></textarea></label>
+            </div>
+            <div class="composer-actions"><p id="repository-form-error" class="error" role="alert"></p><button class="primary" type="submit">Inspect &amp; register repository</button></div>
+          </form>
           <div id="product-summary" class="metrics"></div>
           <div id="product-list" class="product-list"></div>
           <div id="products-empty" class="panel empty-state product-empty">No products registered yet. An Observe pass can add a product and its repositories without cloning or changing them.</div>

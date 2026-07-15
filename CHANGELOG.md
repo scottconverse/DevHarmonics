@@ -6,6 +6,7 @@ All notable DevHarmonics changes are documented here.
 
 ### Added
 
+- A local product/repository registry that preserves multi-repository boundaries and records repository roles, owners, dependencies, validator commands, governance sources, branch/HEAD/remote identity, dirty state, and compatibility issues through read-only Git inspection.
 - A durable, discussion-only Workbench for project questions and side-by-side consultation of selected qualified models, with exact provider/model/usage attribution and explicit conversion into a linked objective draft without starting a run.
 - Durable structured objective drafts and immutable plan revisions with approval rationale, exact-revision run linkage, and restart-safe persistence.
 - A two-step objective composer that previews task dependencies, repository scope, permissions, checks, proposed model assignments, and capacity before execution.

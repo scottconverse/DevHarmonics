@@ -23,6 +23,8 @@ Normal subscription and local-model use requires no model API keys. Each subscri
 - Serial integration into a dedicated run branch
 - Read-only final review with `READY` or `NOT READY` verdicts
 - Durable run, task, attempt, check, and event records in SQLite
+- Multi-product repository registry with read-only local Git inspection, repository roles, ownership, dependencies, validators, governance sources, and dirty/incompatible-state reporting
+- Durable read-only Workbench with exact selected-model comparison and explicit conversion into an objective draft
 - Transactional ledger migrations with automatic pre-upgrade backups and integrity checks
 - Provider-neutral assignment identities layered over the current subscription CLI providers
 - One runtime contract for subscription CLI, future local, optional API, and ACP transports, with classified invocation failures
@@ -149,6 +151,10 @@ OpenRouter is disconnected and paid routing is disabled by default. OAuth stores
 ## Workbench
 
 Workbench is a durable, read-only project scratchpad for questions, tradeoff analysis, draft planning, and side-by-side consultation of selected qualified models. Every answer retains its provider, requested and resolved model, usage, cost, duration, and failure state. Workbench cannot start a run or change a repository. A useful discussion can be explicitly converted into a linked objective draft; planning and execution still require their normal approval steps.
+
+## Product and repository registry
+
+The **Products** surface groups independent repositories into a product without turning them into a monorepo. Register a product, then add each local Git checkout with its role, expected branch, owners, dependencies, validator commands, and governance sources. DevHarmonics inspects repository identity and status using read-only Git commands and retains the current branch, HEAD, origin, dirty state, and compatibility issues. Registry inspection does not create a run or change the checkout.
 
 ## Run lifecycle
 

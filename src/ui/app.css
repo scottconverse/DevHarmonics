@@ -92,6 +92,7 @@ button { cursor: pointer; }
 .evidence-report { grid-column: 1 / -1; margin-top: 5px; }
 .evidence-report summary { color: var(--amber); cursor: pointer; font-size: 11px; font-weight: 750; }
 .product-list { display: grid; gap: 16px; margin-top: 16px; }
+.registry-form { padding: 22px; margin: 16px 0; }
 .product-card { padding: 22px; }
 .product-head { display: flex; align-items: start; justify-content: space-between; gap: 18px; }
 .product-head h3 { font-size: 24px; margin: 5px 0 7px; }
@@ -102,6 +103,11 @@ button { cursor: pointer; }
 .repository-row:hover { border-color: #4a535e; }
 .repository-row strong, .repository-row small { display: block; overflow: hidden; text-overflow: ellipsis; }
 .repository-row small { color: var(--muted); font-size: 10px; margin-top: 4px; white-space: nowrap; }
+.repository-row.local { align-items: flex-start; }
+.repository-row .repository-facts { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+.repository-facts em { border: 1px solid var(--border); border-radius: 999px; padding: 3px 6px; color: var(--muted); font-size: 9px; font-style: normal; text-transform: uppercase; }
+.repository-facts em.issue { color: var(--amber); border-color: #6d5838; }
+.repository-actions { display: flex; align-items: center; gap: 7px; }
 .product-empty { padding: 22px; margin-top: 16px; }
 .workbench-boundary { display: flex; align-items: center; gap: 12px; margin: 16px 0; padding: 13px 15px; border: 1px solid #3d5428; border-radius: 11px; background: rgba(200,245,96,.055); }
 .workbench-boundary strong { color: var(--lime); white-space: nowrap; }

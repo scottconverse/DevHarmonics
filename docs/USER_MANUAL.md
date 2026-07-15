@@ -90,6 +90,17 @@ devharmonics doctor --project C:\path\to\your\project
 
 Each provider is shown as `READY` or `SETUP`, with its detected version, authentication state, and login command. At least one provider must be ready.
 
+### Register a product and its local repositories
+
+1. Open **Products** and select **Register product**.
+2. Enter a stable product ID, display name, organization URL, and description.
+3. Select **Add local repository**, choose the product, and enter the local Git checkout.
+4. Assign its role, expected branch, owners, dependency repository IDs, governance sources, and optional validator commands in `name = command` form.
+5. Click **Inspect & register repository**. DevHarmonics records the current branch, HEAD, origin, dirty state, and compatibility issues without modifying the checkout.
+6. Use **Rescan** after local Git state changes.
+
+Register CivicSuite repositories independently. Use roles such as **Umbrella**, **Shared platform**, **Module**, **Desktop**, **Installer**, **Documentation**, and **Release truth** so future cross-repository planning can preserve their distinct governance and delivery boundaries.
+
 ## 5. Start a run in the dashboard
 
 1. Confirm the **Project folder** points to the intended Git repository.

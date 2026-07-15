@@ -159,13 +159,64 @@ export const productRegistrationSchema = z.object({
     url: z.string().url().max(500),
     cloneUrl: z.string().url().max(500),
     defaultBranch: z.string().min(1).max(200),
-    visibility: z.enum(["public", "private", "internal"]),
+    visibility: z.enum(["public", "private", "internal", "unknown"]),
     archived: z.boolean(),
     sizeKb: z.number().int().nonnegative(),
     language: z.string().max(100).nullable().default(null),
     description: z.string().max(2_000).nullable().default(null),
     intelligence: z.record(z.string(), z.unknown()).default({}),
   })).max(500),
+});
+
+export const repositoryRoleSchema = z.enum([
+  "umbrella",
+  "shared_platform",
+  "module",
+  "desktop",
+  "installer",
+  "documentation",
+  "release_truth",
+  "other",
+]);
+
+const repositoryValidatorSchema = z.object({
+  command: z.string().min(1).max(1_000),
+  args: z.array(z.string().max(2_000)).max(100),
+  timeoutMs: z.number().int().positive().max(3_600_000),
+  cwd: z.string().min(1).max(2_000).optional(),
+});
+
+export const repositoryUpsertSchema = z.object({
+  id: z.string().regex(/^[a-z0-9][a-z0-9:._\/-]*$/i).max(300),
+  productId: z.string().regex(/^[a-z0-9][a-z0-9:_-]*$/i).max(200),
+  name: z.string().min(1).max(200),
+  fullName: z.string().regex(/^[^/]+\/[^/]+$/).max(300),
+  url: z.string().url().max(500),
+  cloneUrl: z.string().min(1).max(500),
+  defaultBranch: z.string().min(1).max(200),
+  visibility: z.enum(["public", "private", "internal", "unknown"]),
+  archived: z.boolean(),
+  sizeKb: z.number().int().nonnegative(),
+  language: z.string().max(100).nullable().default(null),
+  description: z.string().max(2_000).nullable().default(null),
+  intelligence: z.record(z.string(), z.unknown()).default({}),
+  localPath: z.string().min(1).max(2_000).nullable().default(null),
+  role: repositoryRoleSchema.default("other"),
+  expectedBranch: z.string().min(1).max(200).nullable().default(null),
+  owners: z.array(z.string().min(1).max(200)).max(100).default([]),
+  dependencyRepositoryIds: z.array(z.string().regex(/^[a-z0-9][a-z0-9:._\/-]*$/i).max(300)).max(500).default([]),
+  validators: z.record(z.string().min(1).max(100), repositoryValidatorSchema).default({}),
+  governanceSources: z.array(z.string().min(1).max(2_000)).max(100).default([]),
+  governanceRules: z.array(z.string().min(1).max(2_000)).max(500).default([]),
+});
+
+export const repositoryInspectionSchema = z.object({
+  currentBranch: z.string().min(1).max(500).nullable(),
+  headSha: z.string().regex(/^[a-f0-9]{7,64}$/i).nullable(),
+  remoteUrl: z.string().min(1).max(2_000).nullable(),
+  dirty: z.boolean(),
+  compatibilityIssues: z.array(z.string().min(1).max(2_000)).max(500).default([]),
+  checkedAt: z.string().datetime({ offset: true }).optional(),
 });
 
 const concurrencySchema = z.object({

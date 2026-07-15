@@ -1,16 +1,18 @@
 # DevHarmonics Detailed Implementation Plan
 
 Document status: **Build-ready execution plan**
-Plan version: **1.10**
+Plan version: **1.11**
 Written: **2026-07-14**
 Revised: **2026-07-15**
 Product specification baseline: **DevHarmonics Product Specification v1.6**
 Current implementation baseline: **DevHarmonics v0.4.0**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 
-Revision history: **v1.10 (2026-07-15)** — Implemented the DH-640 Workbench core: durable read-only project scratchpads, exact selected-model comparison, provider/model/usage attribution, visible separation from execution, and explicit provenance-preserving conversion into an objective draft without starting a run.
+Revision history: **v1.11 (2026-07-15)** — Implemented the DH-700 product/repository registry core: local checkout registration without monorepo collapse, typed repository roles/owners/dependencies/validators/governance, non-mutating Git inspection, durable branch/HEAD/remote/dirty state, and compatibility issue reporting.
 
-Prior revision: **v1.9 (2026-07-15)** — Implemented the single-workspace DH-620 core: durable structured objective drafts, immutable plan revisions and rationale, exact-revision approval/run linkage, pre-run task/model/capacity/permission preview, and revise-or-start controls. Product/repository selection remains with the v0.6 multi-repository registry.
+Prior revision: **v1.10 (2026-07-15)** — Implemented the DH-640 Workbench core: durable read-only project scratchpads, exact selected-model comparison, provider/model/usage attribution, visible separation from execution, and explicit provenance-preserving conversion into an objective draft without starting a run.
+
+Earlier revision: **v1.9 (2026-07-15)** — Implemented the single-workspace DH-620 core: durable structured objective drafts, immutable plan revisions and rationale, exact-revision approval/run linkage, pre-run task/model/capacity/permission preview, and revise-or-start controls. Product/repository selection remains with the v0.6 multi-repository registry.
 
 Earlier revision: **v1.8 (2026-07-15)** — Added Mellum2 as the first named local specialist milestone: separate Instruct/Thinking tracks, strict specialist-fidelity benchmark, bounded-tool plus benchmark scheduling gates, hard task-capability matching, a narrow low-risk economy implementation lane, live installed-model proof, and explicit no-download/no-silent-promotion policy.
 
@@ -827,6 +829,8 @@ Acceptance:
 
 #### DH-700: Product and repository registry — L
 
+Status: **Core implemented in the v0.5 development line as the first v0.6 vertical slice.** Products can retain independent remote and local repositories with roles, owners, dependency IDs, validator mappings, governance sources/rules, and expected branches. Read-only Git inspection records branch, HEAD, origin, dirty state, and compatibility issues. CivicSuite's observed remote inventory remains intact while local checkouts can be attached incrementally. Planner consumption and repository selection remain DH-710 work.
+
 Deliverables:
 
 - register multiple products and local repositories;
@@ -1137,6 +1141,8 @@ Exit gate:
 - the Run Reporter cannot mutate results.
 
 ### Increment 5: CivicSuite single- and multi-repository operation — v0.6
+
+Status: **In progress.** DH-700's registry and local Git inspection core are implemented. Objective repository selection, cross-repository impact planning, integration sets, and the bounded CivicSuite pilot remain.
 
 Work:
 

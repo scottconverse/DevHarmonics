@@ -1742,6 +1742,8 @@ test("ledger upgrades a v0.1 database transactionally and preserves a pre-migrat
           { version: 16, name: "typed-tool-policy-receipts" },
           { version: 17, name: "structured-review-quorums" },
           { version: 18, name: "durable-objectives-and-plan-revisions" },
+          { version: 19, name: "read-only-workbench-consultations" },
+          { version: 20, name: "local-repository-configuration-and-inspection" },
         ],
       );
     } finally {
@@ -2674,6 +2676,115 @@ test("ledger retains observed products and repository intelligence without crede
   }
 });
 
+test("repository registry migrates remote observations and persists local governance plus inspection", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-repository-registry-"));
+  const filename = path.join(root, "devharmonics.db");
+  const seed = new Ledger(filename);
+  seed.upsertProduct({
+    id: "github:civicsuite",
+    name: "CivicSuite",
+    organizationUrl: "https://github.com/CivicSuite",
+    description: "Civic technology product suite",
+    repositories: [{
+      id: "github:civicsuite/civiccore",
+      name: "civiccore",
+      fullName: "CivicSuite/civiccore",
+      url: "https://github.com/CivicSuite/civiccore",
+      cloneUrl: "https://github.com/CivicSuite/civiccore.git",
+      defaultBranch: "main",
+      visibility: "public",
+      archived: false,
+      sizeKb: 18891,
+      language: "TypeScript",
+      description: null,
+      intelligence: { source: "github-observe" },
+    }],
+  });
+  seed.close();
+
+  const version19 = new DatabaseSync(filename);
+  version19.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN;
+    CREATE TABLE repositories_v19 (
+      id TEXT PRIMARY KEY,
+      product_id TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      full_name TEXT NOT NULL UNIQUE,
+      url TEXT NOT NULL,
+      clone_url TEXT NOT NULL,
+      default_branch TEXT NOT NULL,
+      visibility TEXT NOT NULL,
+      archived INTEGER NOT NULL,
+      size_kb INTEGER NOT NULL,
+      language TEXT,
+      description TEXT,
+      intelligence_json TEXT NOT NULL,
+      observed_at TEXT NOT NULL
+    );
+    INSERT INTO repositories_v19
+      SELECT id, product_id, name, full_name, url, clone_url, default_branch, visibility,
+        archived, size_kb, language, description, intelligence_json, observed_at
+      FROM repositories;
+    DROP TABLE repositories;
+    ALTER TABLE repositories_v19 RENAME TO repositories;
+    CREATE INDEX repositories_product_id ON repositories(product_id);
+    DELETE FROM schema_migrations WHERE version = 20;
+    PRAGMA user_version = 19;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+  version19.close();
+
+  const ledger = new Ledger(filename);
+  try {
+    assert.equal(ledger.getSchemaVersion(), 20);
+    const migrated = ledger.getRepository("github:civicsuite/civiccore");
+    assert.ok(migrated);
+    assert.equal(migrated.visibility, "public");
+    assert.equal(migrated.localPath, null);
+    assert.equal(migrated.role, "other");
+    assert.equal(migrated.inspection, null);
+
+    const configured = ledger.upsertRepository({
+      ...migrated,
+      productId: "github:civicsuite",
+      localPath: path.join(root, "civiccore"),
+      role: "shared_platform",
+      expectedBranch: "main",
+      owners: ["platform-team"],
+      dependencyRepositoryIds: [],
+      validators: {
+        test: { command: "npm.cmd", args: ["test"], timeoutMs: 120_000 },
+      },
+      governanceSources: ["AGENTS.md", "docs/ARCHITECTURE.md"],
+      governanceRules: ["No direct pushes to main"],
+    });
+    assert.equal(configured.localPath, path.join(root, "civiccore"));
+    assert.equal(configured.validators.test?.command, "npm.cmd");
+
+    const inspected = (ledger as any).recordRepositoryInspection(configured.id, {
+      currentBranch: "feature/dh-700",
+      headSha: "a".repeat(40),
+      remoteUrl: "https://user:secret@github.com/CivicSuite/civiccore.git",
+      dirty: true,
+      compatibilityIssues: ["Expected branch main; found feature/dh-700"],
+      checkedAt: "2026-07-15T18:00:00.000Z",
+    });
+    assert.equal(inspected.inspection.currentBranch, "feature/dh-700");
+    assert.equal(inspected.inspection.dirty, true);
+    assert.equal(inspected.inspection.remoteUrl, "https://github.com/CivicSuite/civiccore.git");
+    assert.deepEqual(ledger.listRepositories("github:civicsuite").map((repository) => repository.id), [configured.id]);
+    assert.throws(
+      () => ledger.recordRepositoryInspection(configured.id, { ...inspected.inspection!, headSha: "not-a-sha" }),
+      /Invalid string/i,
+    );
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("objective drafts persist without creating an execution run", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-objective-draft-"));
   const ledger = new Ledger(path.join(root, "devharmonics.db"));
@@ -2719,7 +2830,7 @@ test("workbench persistence advances the ledger schema without creating executio
   let sessionId = "";
   let objectiveId = "";
   try {
-    assert.equal(ledger.getSchemaVersion(), 19);
+    assert.equal(ledger.getSchemaVersion(), LEDGER_SCHEMA_VERSION);
     const session = ledger.createWorkbenchSession({
       projectPath: root,
       title: "Explore release readiness",

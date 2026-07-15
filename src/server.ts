@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { initializeProject, loadConfig, saveConfig, devHarmonicsDirectory } from "./config.js";
 import { inspectProviders } from "./doctor.js";
 import { Ledger } from "./ledger.js";
@@ -15,6 +15,7 @@ import { PRODUCT_NAME, VERSION } from "./product.js";
 import { redactText } from "./redaction.js";
 import { createRunEvidenceExport, createRunReport } from "./reporter.js";
 import { observeLocalResources } from "./resources.js";
+import { inspectLocalRepository } from "./repository-intelligence.js";
 import { manualModelSchema, objectiveInputSchema, productRegistrationSchema, workbenchSessionInputSchema } from "./schemas.js";
 import type { ProviderName, RunRequest } from "./types.js";
 import { inferModelProfile } from "./model-intelligence.js";
@@ -360,6 +361,107 @@ async function route(
     return;
   }
 
+  const productRepositoriesMatch = url.pathname.match(/^\/api\/products\/([^/]+)\/repositories$/);
+  if (request.method === "POST" && productRepositoriesMatch?.[1]) {
+    requireJsonRequest(request);
+    const productId = decodeURIComponent(productRepositoriesMatch[1]);
+    const product = context.ledger.getProduct(productId);
+    if (!product) {
+      sendJson(response, 404, { error: "Product not found" });
+      return;
+    }
+    const body = await readJson(request) as {
+      localPath?: string;
+      role?: string;
+      expectedBranch?: string | null;
+      owners?: unknown;
+      dependencyRepositoryIds?: unknown;
+      governanceSources?: unknown;
+      governanceRules?: unknown;
+      validators?: unknown;
+    };
+    if (!body.localPath?.trim()) {
+      sendJson(response, 400, { error: "Local repository path is required" });
+      return;
+    }
+    const expectedBranch = body.expectedBranch?.trim() || undefined;
+    const inspection = await inspectLocalRepository(body.localPath, {
+      ...(expectedBranch ? { expectedCurrentBranch: expectedBranch, expectedDefaultBranch: expectedBranch } : {}),
+    });
+    if (!inspection.isGitRepository || !inspection.gitRoot || !inspection.repositoryName) {
+      sendJson(response, 400, { error: "Local path is not a usable Git repository", inspection });
+      return;
+    }
+    const remoteIdentity = repositoryRemoteIdentity(inspection.originRemoteUrl);
+    const fullName = remoteIdentity?.fullName ?? `${product.id}/${inspection.repositoryName}`;
+    const existing = product.repositories.find((repository) => repository.fullName.toLowerCase() === fullName.toLowerCase()
+      || repository.localPath && path.resolve(repository.localPath) === inspection.gitRoot);
+    const repositoryId = existing?.id ?? `local:${product.id}:${slugId(inspection.repositoryName)}`;
+    const knownIds = new Set(product.repositories.map((repository) => repository.id).concat(repositoryId));
+    const dependencyRepositoryIds = stringArray(body.dependencyRepositoryIds);
+    const unknownDependencies = dependencyRepositoryIds.filter((id) => !knownIds.has(id));
+    const repository = context.ledger.upsertRepository({
+      id: repositoryId,
+      productId: product.id,
+      name: inspection.repositoryName,
+      fullName,
+      url: remoteIdentity?.webUrl ?? existing?.url ?? pathToFileURL(inspection.gitRoot).toString(),
+      cloneUrl: inspection.originRemoteUrl ?? existing?.cloneUrl ?? pathToFileURL(inspection.gitRoot).toString(),
+      defaultBranch: inspection.defaultBranch ?? expectedBranch ?? inspection.currentBranch ?? existing?.defaultBranch ?? "main",
+      visibility: existing?.visibility ?? "unknown",
+      archived: existing?.archived ?? false,
+      sizeKb: existing?.sizeKb ?? 0,
+      language: existing?.language ?? null,
+      description: existing?.description ?? null,
+      intelligence: { ...(existing?.intelligence ?? {}), localInspectionStatus: inspection.status },
+      localPath: inspection.gitRoot,
+      role: repositoryRole(body.role),
+      expectedBranch: expectedBranch ?? null,
+      owners: stringArray(body.owners),
+      dependencyRepositoryIds,
+      validators: validatorMap(body.validators),
+      governanceSources: stringArray(body.governanceSources),
+      governanceRules: stringArray(body.governanceRules),
+    });
+    context.ledger.recordRepositoryInspection(repository.id, {
+      currentBranch: inspection.currentBranch,
+      headSha: inspection.headSha,
+      remoteUrl: inspection.originRemoteUrl,
+      dirty: inspection.dirty,
+      compatibilityIssues: [...inspection.issues.map((issue) => issue.message), ...unknownDependencies.map((id) => `Dependency repository '${id}' is not registered in ${product.name}.`)],
+    });
+    sendJson(response, 201, { repository: context.ledger.getRepository(repository.id), inspection });
+    return;
+  }
+
+  const repositoryRefreshMatch = url.pathname.match(/^\/api\/products\/([^/]+)\/repositories\/([^/]+)\/refresh$/);
+  if (request.method === "POST" && repositoryRefreshMatch?.[1] && repositoryRefreshMatch[2]) {
+    requireJsonRequest(request);
+    const productId = decodeURIComponent(repositoryRefreshMatch[1]);
+    const repositoryId = decodeURIComponent(repositoryRefreshMatch[2]);
+    const repository = context.ledger.getRepository(repositoryId);
+    if (!repository || repository.productId !== productId || !repository.localPath) {
+      sendJson(response, 404, { error: "Registered local repository not found" });
+      return;
+    }
+    const inspection = await inspectLocalRepository(repository.localPath, {
+      ...(repository.cloneUrl.startsWith("file:") ? {} : { expectedRemoteUrl: repository.cloneUrl }),
+      ...(repository.expectedBranch ? { expectedCurrentBranch: repository.expectedBranch, expectedDefaultBranch: repository.expectedBranch } : {}),
+    });
+    const product = context.ledger.getProduct(productId)!;
+    const knownIds = new Set(product.repositories.map((item) => item.id));
+    const unknownDependencies = repository.dependencyRepositoryIds.filter((id) => !knownIds.has(id));
+    context.ledger.recordRepositoryInspection(repository.id, {
+      currentBranch: inspection.currentBranch,
+      headSha: inspection.headSha,
+      remoteUrl: inspection.originRemoteUrl,
+      dirty: inspection.dirty,
+      compatibilityIssues: [...inspection.issues.map((issue) => issue.message), ...unknownDependencies.map((id) => `Dependency repository '${id}' is not registered in ${product.name}.`)],
+    });
+    sendJson(response, 200, { repository: context.ledger.getRepository(repository.id), inspection });
+    return;
+  }
+
   if (request.method === "GET" && url.pathname === "/api/workbench") {
     sendJson(response, 200, { sessions: context.ledger.listWorkbenchSessions() });
     return;
@@ -682,6 +784,55 @@ async function route(
   }
 
   sendJson(response, 404, { error: "Not found" });
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? [...new Set(value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean))]
+    : [];
+}
+
+function repositoryRole(value: unknown): "umbrella" | "shared_platform" | "module" | "desktop" | "installer" | "documentation" | "release_truth" | "other" {
+  const roles = ["umbrella", "shared_platform", "module", "desktop", "installer", "documentation", "release_truth", "other"] as const;
+  return roles.includes(value as typeof roles[number]) ? value as typeof roles[number] : "other";
+}
+
+function validatorMap(value: unknown): Record<string, { command: string; args: string[]; timeoutMs: number }> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).flatMap(([name, commandLine]) => {
+    if (typeof commandLine !== "string" || !name.trim() || !commandLine.trim()) return [];
+    const parts = commandLine.match(/"[^"]*"|'[^']*'|\S+/g)?.map((part) => part.replace(/^(?:"|')|(?:"|')$/g, "")) ?? [];
+    const command = parts.shift();
+    return command ? [[name.trim(), { command, args: parts, timeoutMs: 120_000 }]] : [];
+  }));
+}
+
+function repositoryRemoteIdentity(remote: string | null): { fullName: string; webUrl: string } | null {
+  if (!remote) return null;
+  const trimmed = remote.trim().replace(/\.git$/i, "");
+  const scp = trimmed.match(/^(?:[^@]+@)?([^:]+):(.+)$/);
+  let host: string;
+  let pathname: string;
+  if (scp && !trimmed.includes("://")) {
+    host = scp[1]!;
+    pathname = scp[2]!;
+  } else {
+    try {
+      const parsed = new URL(trimmed);
+      host = parsed.hostname;
+      pathname = parsed.pathname;
+    } catch {
+      return null;
+    }
+  }
+  const parts = pathname.replace(/^\/+|\/+$/g, "").split("/").filter(Boolean);
+  if (parts.length < 2) return null;
+  const fullName = parts.slice(-2).join("/");
+  return { fullName, webUrl: `https://${host}/${parts.join("/")}` };
+}
+
+function slugId(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "repository";
 }
 
 function requireJsonRequest(request: IncomingMessage): void {

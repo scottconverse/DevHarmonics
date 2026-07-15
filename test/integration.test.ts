@@ -946,6 +946,50 @@ test("Workbench creates a durable read-only discussion and converts it to an obj
   }
 });
 
+test("product registry inspects and retains a local repository without changing or running it", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-product-registry-api-"));
+  const project = await createRepository(root);
+  await writeFile(path.join(project, "local-note.txt"), "uncommitted\n", "utf8");
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  try {
+    const productResponse = await fetch(`${dashboard.url}/api/products`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "civicsuite", name: "CivicSuite", organizationUrl: "https://github.com/civicsuite", description: "Fixture product", repositories: [] }),
+    });
+    assert.equal(productResponse.status, 201);
+
+    const repositoryResponse = await fetch(`${dashboard.url}/api/products/civicsuite/repositories`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        localPath: project,
+        role: "umbrella",
+        expectedBranch: "main",
+        owners: ["product-platform"],
+        dependencyRepositoryIds: [],
+        governanceSources: ["README.md"],
+        validators: { test: "npm test" },
+      }),
+    });
+    assert.equal(repositoryResponse.status, 201);
+    const registered = await repositoryResponse.json() as { repository: { role: string; localPath: string; inspection: { dirty: boolean; currentBranch: string } } };
+    assert.equal(registered.repository.role, "umbrella");
+    assert.equal(registered.repository.localPath, path.resolve(project));
+    assert.equal(registered.repository.inspection.dirty, true);
+    assert.equal(registered.repository.inspection.currentBranch, "main");
+
+    const portfolio = await fetch(`${dashboard.url}/api/products`).then((response) => response.json()) as { products: Array<{ repositories: Array<{ owners: string[]; validators: Record<string, { command: string }> }> }> };
+    assert.deepEqual(portfolio.products[0]?.repositories[0]?.owners, ["product-platform"]);
+    assert.equal(portfolio.products[0]?.repositories[0]?.validators.test?.command, "npm");
+    const runs = await fetch(`${dashboard.url}/api/runs`).then((response) => response.json()) as { runs: unknown[] };
+    assert.equal(runs.runs.length, 0);
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("cancel during planning does not save a late plan or restart the run", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-cancel-planning-"));
   const project = await createRepository(root);

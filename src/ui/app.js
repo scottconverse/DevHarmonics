@@ -85,11 +85,18 @@ async function refreshProducts() {
   const result = await api("/api/products");
   state.products = result.products;
   const repositories = state.products.flatMap((product) => product.repositories);
+  $("#repository-product").innerHTML = state.products.map((product) => `<option value="${escapeHtml(product.id)}">${escapeHtml(product.name)}</option>`).join("");
+  $("#add-local-repository").disabled = state.products.length === 0;
   $("#product-summary").innerHTML = `<div class="metric"><span>Products</span><strong>${state.products.length}</strong></div><div class="metric"><span>Repositories</span><strong>${repositories.length}</strong></div><div class="metric"><span>Active repositories</span><strong>${repositories.filter((repository) => !repository.archived).length}</strong></div><div class="metric"><span>Private repositories</span><strong>${repositories.filter((repository) => repository.visibility === "private").length}</strong></div>`;
   $("#products-empty").classList.toggle("hidden", state.products.length > 0);
   $("#product-list").innerHTML = state.products.map((product) => `<article class="panel product-card">
-    <div class="product-head"><div><span class="connection-kind">Observed product</span><h3>${escapeHtml(product.name)}</h3><p>${escapeHtml(product.description || "Registered product context")}</p></div><a href="${escapeHtml(product.organizationUrl)}" target="_blank" rel="noreferrer">Open organization</a></div>
-    <div class="repository-list">${product.repositories.map((repository) => `<a class="repository-row" href="${escapeHtml(repository.url)}" target="_blank" rel="noreferrer"><span><strong>${escapeHtml(repository.name)}</strong><small>${escapeHtml(repository.defaultBranch)} · ${escapeHtml(repository.visibility)} · ${Number(repository.sizeKb).toLocaleString()} KB</small></span><span class="lifecycle ${repository.archived ? "retired" : "qualified"}">${repository.archived ? "archived" : "observed"}</span></a>`).join("")}</div>
+    <div class="product-head"><div><span class="connection-kind">Registered product</span><h3>${escapeHtml(product.name)}</h3><p>${escapeHtml(product.description || "Registered product context")}</p></div><a href="${escapeHtml(product.organizationUrl)}" target="_blank" rel="noreferrer">Open organization</a></div>
+    <div class="repository-list">${product.repositories.map((repository) => {
+      const local = repository.inspection || null;
+      const issues = local?.compatibilityIssues || [];
+      const facts = [repository.role ? repository.role.replaceAll("_", " ") : null, local?.currentBranch || repository.defaultBranch, local ? local.dirty ? "dirty" : "clean" : null, ...issues.slice(0, 2)].filter(Boolean);
+      return `<div class="repository-row ${repository.localPath ? "local" : ""}"><span><strong>${escapeHtml(repository.name)}</strong><small>${escapeHtml(repository.localPath || repository.fullName)} · ${escapeHtml(repository.visibility)}${local?.headSha ? ` · ${escapeHtml(local.headSha.slice(0, 10))}` : ""}</small><span class="repository-facts">${facts.map((fact) => `<em class="${issues.includes(fact) ? "issue" : ""}">${escapeHtml(fact)}</em>`).join("")}</span></span><div class="repository-actions"><span class="lifecycle ${issues.length || local?.dirty ? "degraded" : repository.archived ? "retired" : "qualified"}">${issues.length ? `${issues.length} issues` : local?.dirty ? "dirty" : local ? "ready" : "observed"}</span>${repository.localPath ? `<button class="secondary small" type="button" data-refresh-repository="${escapeHtml(repository.id)}" data-product-id="${escapeHtml(product.id)}">Rescan</button>` : ""}</div></div>`;
+    }).join("")}</div>
   </article>`).join("");
 }
 
@@ -621,6 +628,14 @@ function linesFrom(selector) {
   return $(selector).value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
 }
 
+function namedCommandsFrom(selector) {
+  return Object.fromEntries(linesFrom(selector).map((line) => {
+    const separator = line.indexOf("=");
+    if (separator < 1 || !line.slice(separator + 1).trim()) throw new Error(`Validator must use "name = command": ${line}`);
+    return [line.slice(0, separator).trim(), line.slice(separator + 1).trim()];
+  }));
+}
+
 function objectiveInput() {
   const deadline = $("#objective-deadline").value;
   return {
@@ -775,6 +790,89 @@ document.querySelector(".app-nav").addEventListener("click", async (event) => {
   if (button.dataset.view === "workbench") await refreshWorkbench();
 });
 $("#refresh-products").addEventListener("click", refreshProducts);
+$("#register-product").addEventListener("click", () => {
+  $("#product-form").classList.toggle("hidden");
+  if (!$("#product-form").classList.contains("hidden")) $("#product-id").focus();
+});
+$("#add-local-repository").addEventListener("click", () => {
+  $("#repository-form").classList.toggle("hidden");
+  if (!$("#repository-form").classList.contains("hidden")) $("#repository-path").focus();
+});
+$("#product-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = event.currentTarget.querySelector('button[type="submit"]');
+  button.disabled = true;
+  $("#product-form-error").textContent = "";
+  try {
+    const result = await api("/api/products", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: $("#product-id").value.trim(),
+        name: $("#product-name").value.trim(),
+        organizationUrl: $("#product-organization").value.trim(),
+        description: $("#product-description").value.trim(),
+        repositories: [],
+      }),
+    });
+    event.currentTarget.reset();
+    event.currentTarget.classList.add("hidden");
+    await refreshProducts();
+    $("#repository-product").value = result.product.id;
+  } catch (error) {
+    $("#product-form-error").textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+$("#repository-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const productId = $("#repository-product").value;
+  const button = event.currentTarget.querySelector('button[type="submit"]');
+  button.disabled = true;
+  $("#repository-form-error").textContent = "";
+  try {
+    await api(`/api/products/${encodeURIComponent(productId)}/repositories`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        localPath: $("#repository-path").value.trim(),
+        role: $("#repository-role").value,
+        expectedBranch: $("#repository-branch").value.trim() || null,
+        owners: linesFrom("#repository-owners"),
+        dependencyRepositoryIds: linesFrom("#repository-dependencies"),
+        governanceSources: linesFrom("#repository-governance"),
+        validators: namedCommandsFrom("#repository-validators"),
+      }),
+    });
+    event.currentTarget.reset();
+    $("#repository-role").value = "module";
+    event.currentTarget.classList.add("hidden");
+    await refreshProducts();
+  } catch (error) {
+    $("#repository-form-error").textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+$("#product-list").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-refresh-repository]");
+  if (!button) return;
+  button.disabled = true;
+  try {
+    await api(`/api/products/${encodeURIComponent(button.dataset.productId)}/repositories/${encodeURIComponent(button.dataset.refreshRepository)}/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    await refreshProducts();
+  } catch (error) {
+    $("#repository-form-error").textContent = error.message;
+    $("#repository-form").classList.remove("hidden");
+  } finally {
+    button.disabled = false;
+  }
+});
 $("#new-workbench").addEventListener("click", () => {
   $("#workbench-project").value = state.bootstrap.defaultProject;
   $("#workbench-title-input").value = "";

@@ -40,6 +40,7 @@ Read-only architect -> typed task DAG -> dependency scheduler
 - `src/ollama.ts` and `src/openrouter.ts`: qualified read-only local inference and governed opt-in API inference.
 - `src/worktrees.ts`: integration branch and isolated task worktree lifecycle.
 - `src/validators.ts`: execution of user-configured validator allowlists.
+- `src/repository-intelligence.ts`: non-mutating local Git identity, branch, remote, dirty-state, and compatibility inspection.
 - `src/ledger.ts`: SQLite-backed Workbench discussions, objective drafts, immutable plan revisions, approved run linkage, and run/task/attempt/check/event receipts.
 - `src/redaction.ts`: centralized secret scrubbing before data crosses the ledger or UI-error boundary.
 - `src/ui/`: dependency-free browser interface.
@@ -67,6 +68,8 @@ Each target project receives `.devharmonics/config.json`, `.devharmonics/constit
 Objective planning is a durable pre-run control plane. Saving or updating a structured objective creates no run. Each architect proposal is appended as an immutable numbered plan revision with its human or system rationale. Approval marks one exact revision and a linked run copies that plan into its own ledger projection; the orchestrator skips architecture planning and executes the approved graph. This keeps restarts and later evidence tied to what the user actually authorized rather than an in-memory callback or a silently regenerated plan.
 
 Workbench is a separate read-only consultation plane. A durable session contains ordered user questions and attributed model responses, but it has no run or tool-execution linkage. Each assistant response records the provider connection, requested and resolved model, terminal status, error, token usage, cost, and duration. The only transition out of Workbench is an explicit conversion that creates and links an objective draft; it does not create a plan or run. Runtime invocations use exact active, current-qualified models with `read_only` permission, and paid API models remain subject to the project's explicit spending policy.
+
+The product registry preserves repository boundaries rather than treating a product as a monorepo. Each repository can retain a local path, functional role, expected branch, owners, dependency repository IDs, validator definitions, and governance sources/rules. A separate inspection projection records the observed branch, HEAD, origin, dirty flag, compatibility issues, and check time. Inspection uses only read-only Git and filesystem operations; registration and rescan do not create a run, checkout a branch, fetch, reset, stash, or modify files. Remote-only observations migrate forward with neutral defaults until a local checkout is explicitly attached.
 
 The ledger uses ordered, transactional schema migrations tracked by SQLite's `user_version` and a `schema_migrations` table. Before upgrading an existing schema, DevHarmonics creates a consistent SQLite backup beside the ledger using the filename pattern `devharmonics.db.backup-v<from>-to-v<to>-<timestamp>-<id>.sqlite`. It validates the required table shape, SQLite integrity, foreign keys, and migration history before accepting the upgraded database. Failed migrations roll back and retain the pre-migration backup; databases from newer DevHarmonics schema versions are rejected instead of being modified.
 

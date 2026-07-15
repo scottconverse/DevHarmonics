@@ -19,6 +19,8 @@ import { redactText, redactValue } from "./redaction.js";
 import {
   objectiveInputSchema,
   planRevisionInputSchema,
+  repositoryInspectionSchema,
+  repositoryUpsertSchema,
   workbenchMessageInputSchema,
   workbenchSessionInputSchema,
 } from "./schemas.js";
@@ -46,6 +48,7 @@ import type {
   RunObjectiveLink,
   RunSummary,
   TaskStatus,
+  ValidatorConfig,
   WorkbenchMessageInput,
   WorkbenchMessageRecord,
   WorkbenchSessionInput,
@@ -141,7 +144,57 @@ interface CheckRow {
   duration_ms: number;
 }
 
-export const LEDGER_SCHEMA_VERSION = 19;
+export const LEDGER_SCHEMA_VERSION = 20;
+
+export const REPOSITORY_ROLES = [
+  "umbrella",
+  "shared_platform",
+  "module",
+  "desktop",
+  "installer",
+  "documentation",
+  "release_truth",
+  "other",
+] as const;
+
+export type RepositoryRole = (typeof REPOSITORY_ROLES)[number];
+
+export interface RepositoryInspectionInput {
+  currentBranch: string | null;
+  headSha: string | null;
+  remoteUrl: string | null;
+  dirty: boolean;
+  compatibilityIssues: string[];
+  checkedAt?: string;
+}
+
+export interface RepositoryInspectionRecord extends Omit<RepositoryInspectionInput, "checkedAt"> {
+  checkedAt: string;
+}
+
+export interface RepositoryUpsertInput {
+  id: string;
+  productId: string;
+  name: string;
+  fullName: string;
+  url: string;
+  cloneUrl: string;
+  defaultBranch: string;
+  visibility: "public" | "private" | "internal" | "unknown";
+  archived: boolean;
+  sizeKb: number;
+  language: string | null;
+  description: string | null;
+  intelligence: Record<string, unknown>;
+  localPath: string | null;
+  role: RepositoryRole;
+  expectedBranch: string | null;
+  owners: string[];
+  dependencyRepositoryIds: string[];
+  validators: Record<string, ValidatorConfig>;
+  governanceSources: string[];
+  governanceRules: string[];
+}
 
 export interface RepositoryRecord {
   id: string;
@@ -151,12 +204,21 @@ export interface RepositoryRecord {
   url: string;
   cloneUrl: string;
   defaultBranch: string;
-  visibility: "public" | "private" | "internal";
+  visibility: RepositoryUpsertInput["visibility"];
   archived: boolean;
   sizeKb: number;
   language: string | null;
   description: string | null;
   intelligence: Record<string, unknown>;
+  localPath: string | null;
+  role: RepositoryRole;
+  expectedBranch: string | null;
+  owners: string[];
+  dependencyRepositoryIds: string[];
+  validators: Record<string, ValidatorConfig>;
+  governanceSources: string[];
+  governanceRules: string[];
+  inspection: RepositoryInspectionRecord | null;
   observedAt: string;
 }
 
@@ -171,7 +233,58 @@ export interface ProductRecord {
 }
 
 export interface ProductRegistration extends Omit<ProductRecord, "repositories" | "createdAt" | "updatedAt"> {
-  repositories: Array<Omit<RepositoryRecord, "productId" | "observedAt">>;
+  repositories: Array<Pick<RepositoryRecord,
+    "id" | "name" | "fullName" | "url" | "cloneUrl" | "defaultBranch" | "visibility" |
+    "archived" | "sizeKb" | "language" | "description" | "intelligence"
+  >>;
+}
+
+function sanitizedRemoteUrl(value: string | null): string | null {
+  if (value === null) return null;
+  try {
+    const parsed = new URL(value);
+    parsed.username = "";
+    parsed.password = "";
+    return parsed.toString();
+  } catch {
+    return redactText(value);
+  }
+}
+
+function repositoryRecordFromRow(row: Record<string, unknown>): RepositoryRecord {
+  const checkedAt = row.checked_at === null ? null : String(row.checked_at);
+  return {
+    id: String(row.id),
+    productId: String(row.product_id),
+    name: String(row.name),
+    fullName: String(row.full_name),
+    url: String(row.url),
+    cloneUrl: String(row.clone_url),
+    defaultBranch: String(row.default_branch),
+    visibility: String(row.visibility) as RepositoryRecord["visibility"],
+    archived: Boolean(row.archived),
+    sizeKb: Number(row.size_kb),
+    language: row.language === null ? null : String(row.language),
+    description: row.description === null ? null : String(row.description),
+    intelligence: JSON.parse(String(row.intelligence_json)) as Record<string, unknown>,
+    localPath: row.local_path === null ? null : String(row.local_path),
+    role: String(row.repository_role) as RepositoryRole,
+    expectedBranch: row.expected_branch === null ? null : String(row.expected_branch),
+    owners: JSON.parse(String(row.owners_json)) as string[],
+    dependencyRepositoryIds: JSON.parse(String(row.dependency_repository_ids_json)) as string[],
+    validators: JSON.parse(String(row.validators_json)) as Record<string, ValidatorConfig>,
+    governanceSources: JSON.parse(String(row.governance_sources_json)) as string[],
+    governanceRules: JSON.parse(String(row.governance_rules_json)) as string[],
+    inspection: checkedAt === null ? null : {
+      currentBranch: row.current_branch === null ? null : String(row.current_branch),
+      headSha: row.head_sha === null ? null : String(row.head_sha),
+      remoteUrl: row.remote_url === null ? null : String(row.remote_url),
+      dirty: Boolean(row.dirty),
+      compatibilityIssues: JSON.parse(String(row.compatibility_issues_json)) as string[],
+      checkedAt,
+    },
+    observedAt: String(row.observed_at),
+  };
 }
 
 export interface ConnectionHealthRecord {
@@ -859,6 +972,35 @@ const MIGRATIONS: readonly LedgerMigration[] = [
       `);
     },
   },
+  {
+    version: 20,
+    name: "local-repository-configuration-and-inspection",
+    apply(database) {
+      const columns = new Set(
+        (database.prepare("SELECT name FROM pragma_table_info('repositories')").all() as unknown as Array<{ name: string }>).map((column) => column.name),
+      );
+      const additions: Readonly<Record<string, string>> = {
+        local_path: "TEXT",
+        repository_role: "TEXT NOT NULL DEFAULT 'other'",
+        expected_branch: "TEXT",
+        owners_json: "TEXT NOT NULL DEFAULT '[]'",
+        dependency_repository_ids_json: "TEXT NOT NULL DEFAULT '[]'",
+        validators_json: "TEXT NOT NULL DEFAULT '{}'",
+        governance_sources_json: "TEXT NOT NULL DEFAULT '[]'",
+        governance_rules_json: "TEXT NOT NULL DEFAULT '[]'",
+        current_branch: "TEXT",
+        head_sha: "TEXT",
+        remote_url: "TEXT",
+        dirty: "INTEGER",
+        compatibility_issues_json: "TEXT NOT NULL DEFAULT '[]'",
+        checked_at: "TEXT",
+      };
+      for (const [name, definition] of Object.entries(additions)) {
+        if (!columns.has(name)) database.exec(`ALTER TABLE repositories ADD COLUMN ${name} ${definition};`);
+      }
+      database.exec("CREATE INDEX IF NOT EXISTS repositories_local_path ON repositories(local_path) WHERE local_path IS NOT NULL;");
+    },
+  },
 ];
 
 function summarizeGoal(goal: string, maxLength = 180): string {
@@ -969,7 +1111,12 @@ const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
   model_health: ["model_id", "state", "failure_kind", "consecutive_failures", "cooldown_until", "detail", "last_checked_at"],
   blackboard_entries: ["id", "run_id", "task_id", "kind", "content", "source_attempt_id", "created_at"],
   products: ["id", "name", "organization_url", "description", "created_at", "updated_at"],
-  repositories: ["id", "product_id", "name", "full_name", "url", "clone_url", "default_branch", "visibility", "archived", "size_kb", "language", "description", "intelligence_json", "observed_at"],
+  repositories: [
+    "id", "product_id", "name", "full_name", "url", "clone_url", "default_branch", "visibility", "archived", "size_kb",
+    "language", "description", "intelligence_json", "observed_at", "local_path", "repository_role", "expected_branch", "owners_json",
+    "dependency_repository_ids_json", "validators_json", "governance_sources_json", "governance_rules_json", "current_branch",
+    "head_sha", "remote_url", "dirty", "compatibility_issues_json", "checked_at",
+  ],
   catalog_refreshes: ["provider", "status", "source", "model_count", "detail", "refreshed_at"],
   provider_catalog_models: ["id", "provider", "canonical_name", "display_name", "metadata_json", "first_seen_at", "last_seen_at", "missing_observations", "retired"],
   invocation_receipts: ["id", "run_id", "task_id", "role", "provider", "connection_id", "requested_model_id", "resolved_model_id", "input_tokens", "output_tokens", "cost_usd", "duration_ms", "workload_class", "fallback_reason", "created_at"],
@@ -1844,6 +1991,88 @@ export class Ledger {
     return { modelId, ignoredBefore, excluded, updatedAt };
   }
 
+  upsertRepository(input: RepositoryUpsertInput): RepositoryRecord {
+    const repository = repositoryUpsertSchema.parse(input) as RepositoryUpsertInput;
+    const product = this.database.prepare("SELECT 1 AS present FROM products WHERE id = ?").get(repository.productId);
+    if (!product) throw new Error(`Product '${repository.productId}' was not found`);
+    const now = new Date().toISOString();
+    this.database.prepare(`
+      INSERT INTO repositories (
+        id, product_id, name, full_name, url, clone_url, default_branch, visibility,
+        archived, size_kb, language, description, intelligence_json, observed_at,
+        local_path, repository_role, expected_branch, owners_json, dependency_repository_ids_json,
+        validators_json, governance_sources_json, governance_rules_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        product_id = excluded.product_id, name = excluded.name, full_name = excluded.full_name,
+        url = excluded.url, clone_url = excluded.clone_url, default_branch = excluded.default_branch,
+        visibility = excluded.visibility, archived = excluded.archived, size_kb = excluded.size_kb,
+        language = excluded.language, description = excluded.description,
+        intelligence_json = excluded.intelligence_json, observed_at = excluded.observed_at,
+        local_path = excluded.local_path, repository_role = excluded.repository_role,
+        expected_branch = excluded.expected_branch, owners_json = excluded.owners_json,
+        dependency_repository_ids_json = excluded.dependency_repository_ids_json,
+        validators_json = excluded.validators_json, governance_sources_json = excluded.governance_sources_json,
+        governance_rules_json = excluded.governance_rules_json
+    `).run(
+      repository.id,
+      repository.productId,
+      redactText(repository.name),
+      repository.fullName,
+      repository.url,
+      sanitizedRemoteUrl(repository.cloneUrl),
+      repository.defaultBranch,
+      repository.visibility,
+      repository.archived ? 1 : 0,
+      repository.sizeKb,
+      repository.language,
+      repository.description === null ? null : redactText(repository.description),
+      JSON.stringify(redactValue(repository.intelligence)),
+      now,
+      repository.localPath,
+      repository.role,
+      repository.expectedBranch,
+      JSON.stringify(repository.owners.map(redactText)),
+      JSON.stringify(repository.dependencyRepositoryIds),
+      JSON.stringify(redactValue(repository.validators)),
+      JSON.stringify(repository.governanceSources),
+      JSON.stringify(repository.governanceRules.map(redactText)),
+    );
+    return this.getRepository(repository.id)!;
+  }
+
+  getRepository(repositoryId: string): RepositoryRecord | null {
+    const row = this.database.prepare("SELECT * FROM repositories WHERE id = ?").get(repositoryId) as Record<string, unknown> | undefined;
+    return row ? repositoryRecordFromRow(row) : null;
+  }
+
+  listRepositories(productId?: string): RepositoryRecord[] {
+    const rows = (productId
+      ? this.database.prepare("SELECT * FROM repositories WHERE product_id = ? ORDER BY name, id").all(productId)
+      : this.database.prepare("SELECT * FROM repositories ORDER BY product_id, name, id").all()) as unknown as Array<Record<string, unknown>>;
+    return rows.map(repositoryRecordFromRow);
+  }
+
+  recordRepositoryInspection(repositoryId: string, input: RepositoryInspectionInput): RepositoryRecord {
+    const inspection = repositoryInspectionSchema.parse(input) as RepositoryInspectionInput;
+    if (!this.getRepository(repositoryId)) throw new Error(`Repository '${repositoryId}' was not found`);
+    const checkedAt = inspection.checkedAt ?? new Date().toISOString();
+    this.database.prepare(`
+      UPDATE repositories SET current_branch = ?, head_sha = ?, remote_url = ?, dirty = ?,
+        compatibility_issues_json = ?, checked_at = ?
+      WHERE id = ?
+    `).run(
+      inspection.currentBranch,
+      inspection.headSha,
+      sanitizedRemoteUrl(inspection.remoteUrl),
+      inspection.dirty ? 1 : 0,
+      JSON.stringify(inspection.compatibilityIssues.map(redactText)),
+      checkedAt,
+      repositoryId,
+    );
+    return this.getRepository(repositoryId)!;
+  }
+
   upsertProduct(input: ProductRegistration): ProductRecord {
     const now = new Date().toISOString();
     this.database.exec("BEGIN IMMEDIATE");
@@ -1897,22 +2126,7 @@ export class Ledger {
       name: String(product.name),
       organizationUrl: String(product.organization_url),
       description: String(product.description),
-      repositories: repositories.map((item) => ({
-        id: String(item.id),
-        productId: String(item.product_id),
-        name: String(item.name),
-        fullName: String(item.full_name),
-        url: String(item.url),
-        cloneUrl: String(item.clone_url),
-        defaultBranch: String(item.default_branch),
-        visibility: String(item.visibility) as RepositoryRecord["visibility"],
-        archived: Boolean(item.archived),
-        sizeKb: Number(item.size_kb),
-        language: item.language === null ? null : String(item.language),
-        description: item.description === null ? null : String(item.description),
-        intelligence: JSON.parse(String(item.intelligence_json)) as Record<string, unknown>,
-        observedAt: String(item.observed_at),
-      })),
+      repositories: repositories.map(repositoryRecordFromRow),
       createdAt: String(product.created_at),
       updatedAt: String(product.updated_at),
     };

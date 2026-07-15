@@ -10,7 +10,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { initializeProject, loadConfig, devHarmonicsDirectory } from "../src/config.js";
 import { inspectProviders } from "../src/doctor.js";
 import { Ledger } from "../src/ledger.js";
-import { Orchestrator } from "../src/orchestrator.js";
+import { Orchestrator, repositoryTaskIds } from "../src/orchestrator.js";
 import { runProcess } from "../src/process.js";
 import { startDashboard } from "../src/server.js";
 
@@ -736,6 +736,13 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
       }),
     });
     assert.equal(invalidModelResponse.status, 400);
+    const malformedProductResponse = await fetch(`${dashboard.url}/api/products`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{not-json",
+    });
+    assert.equal(malformedProductResponse.status, 400);
+    assert.deepEqual(await malformedProductResponse.json(), { error: "Request body must contain valid JSON" });
     const runsResponse = await fetch(`${dashboard.url}/api/runs`);
     const runsText = await runsResponse.text();
     assert.equal(runsText.includes(serverSecret), false);
@@ -1146,9 +1153,11 @@ test("DH-720 automatically fixes a repository-scoped finding and independently r
       assert.equal(new Set(reviews.slice(2).map((review) => review.provider)).size, 2, "the replacement quorum must use distinct providers");
       assert.notEqual(reviews[0]!.integrationSha256, reviews[2]!.integrationSha256);
       const retained = ledger.getRun(runId);
-      assert.equal(retained?.tasks.find((task) => task.id === "__integration__-repo-core")?.checks.find((check) => check.name === "defect-free")?.passed, false, "the initial repository validator must detect the defect marker");
-      assert.equal(retained?.tasks.find((task) => task.id === "__review_fix_1_repo-core")?.status, "passed");
-      assert.ok(retained?.tasks.find((task) => task.id === "__review_fix_1_repo-core")?.checks.filter((check) => check.name === "defect-free").some((check) => check.passed), "the fixed integration branch must pass the same repository validator");
+      const integrationTaskId = repositoryTaskIds("__integration__", ["repo:core"]).get("repo:core")!;
+      const repairTaskId = repositoryTaskIds("__review_fix_1", ["repo:core"]).get("repo:core")!;
+      assert.equal(retained?.tasks.find((task) => task.id === integrationTaskId)?.checks.find((check) => check.name === "defect-free")?.passed, false, "the initial repository validator must detect the defect marker");
+      assert.equal(retained?.tasks.find((task) => task.id === repairTaskId)?.status, "passed");
+      assert.ok(retained?.tasks.find((task) => task.id === repairTaskId)?.checks.filter((check) => check.name === "defect-free").some((check) => check.passed), "the fixed integration branch must pass the same repository validator");
       assert.ok(retained?.events.some((event) => event.kind === "review.invalidated"));
       assert.ok(retained?.events.some((event) => event.kind === "fixer.completed"));
       assert.ok(retained?.events.some((event) => event.kind === "review.quorum_passed"));

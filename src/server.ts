@@ -24,6 +24,8 @@ import type { ModelRecord } from "./registry.js";
 
 const uiDirectory = fileURLToPath(new URL("./ui/", import.meta.url));
 
+class ClientRequestError extends Error {}
+
 export async function startDashboard(options: {
   projectPath: string;
   port?: number;
@@ -46,7 +48,7 @@ export async function startDashboard(options: {
       await route(request, response, { defaultProject, ledger, orchestrator, catalog, openRouter, eventStreams });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      sendJson(response, 500, { error: redactText(message) });
+      sendJson(response, error instanceof ClientRequestError ? 400 : 500, { error: redactText(message) });
     }
   });
 
@@ -924,7 +926,11 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
     body += chunk;
     if (body.length > 1_000_000) throw new Error("Request body is too large");
   }
-  return JSON.parse(body || "{}");
+  try {
+    return JSON.parse(body || "{}");
+  } catch {
+    throw new ClientRequestError("Request body must contain valid JSON");
+  }
 }
 
 function sendJson(response: ServerResponse, status: number, value: unknown): void {

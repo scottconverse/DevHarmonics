@@ -114,6 +114,21 @@ export async function ensureSchedulerCandidateQualified(input: {
   return { modelId: refreshed.id, connectionId: connection.id, provider: connection.provider, role: qualificationRole, attempted, passed: true, activated, reason };
 }
 
+export async function ensureSchedulerProviderCandidateQualified(input: Parameters<typeof ensureSchedulerCandidateQualified>[0] & {
+  excludedModelIds: Set<string>;
+  onResult?: (result: SchedulerQualificationResult) => void;
+}): Promise<SchedulerQualificationResult | null> {
+  let lastFailure: SchedulerQualificationResult | null = null;
+  while (true) {
+    const result = await ensureSchedulerCandidateQualified(input);
+    if (!result) return lastFailure;
+    input.onResult?.(result);
+    if (result.passed) return result;
+    input.excludedModelIds.add(result.modelId);
+    lastFailure = result;
+  }
+}
+
 export async function ensureReviewerCandidateQualified(input: {
   ledger: Ledger;
   config: DevHarmonicsConfig;

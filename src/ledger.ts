@@ -163,7 +163,7 @@ interface CheckRow {
   duration_ms: number;
 }
 
-export const LEDGER_SCHEMA_VERSION = 23;
+export const LEDGER_SCHEMA_VERSION = 24;
 
 export const REPOSITORY_ROLES = [
   "umbrella",
@@ -442,6 +442,7 @@ export interface ReviewReceiptRecord {
   runId: string;
   round: number;
   integrationSha256: string;
+  evidenceBinding: ReviewEvidenceBinding;
   verdict: StructuredReview["verdict"];
   provider: string;
   modelId: string | null;
@@ -452,6 +453,20 @@ export interface ReviewReceiptRecord {
   invalidatedAt: string | null;
   invalidationReason: string | null;
   createdAt: string;
+}
+
+export interface ReviewEvidenceBinding {
+  version: 1;
+  autonomy: string;
+  planSha256: string;
+  taskReportsSha256: string;
+  diffSha256: string;
+  checksSha256: string;
+  repositories: Array<{
+    repositoryId: string;
+    baseCommit: string;
+    headCommit: string;
+  }>;
 }
 
 export interface RunEvidencePackage {
@@ -1107,6 +1122,16 @@ const MIGRATIONS: readonly LedgerMigration[] = [
       if (!receiptColumns.has("model_resolution")) database.exec("ALTER TABLE invocation_receipts ADD COLUMN model_resolution TEXT;");
     },
   },
+  {
+    version: 24,
+    name: "review-evidence-bindings",
+    apply(database) {
+      const columns = new Set(
+        (database.prepare("SELECT name FROM pragma_table_info('review_receipts')").all() as unknown as Array<{ name: string }>).map((column) => column.name),
+      );
+      if (!columns.has("evidence_binding_json")) database.exec("ALTER TABLE review_receipts ADD COLUMN evidence_binding_json TEXT NOT NULL DEFAULT '{}';");
+    },
+  },
 ];
 
 function summarizeGoal(goal: string, maxLength = 180): string {
@@ -1228,7 +1253,7 @@ const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
   provider_catalog_models: ["id", "provider", "canonical_name", "display_name", "metadata_json", "first_seen_at", "last_seen_at", "missing_observations", "retired"],
   invocation_receipts: ["id", "run_id", "task_id", "role", "provider", "connection_id", "requested_model_id", "resolved_model_id", "model_resolution", "input_tokens", "output_tokens", "cost_usd", "duration_ms", "workload_class", "fallback_reason", "created_at"],
   tool_policy_receipts: ["id", "run_id", "task_id", "attempt_id", "tool_id", "actor_role", "stage", "side_effect", "outcome", "reason", "request_json", "lock_keys_json", "approval_id", "created_at"],
-  review_receipts: ["id", "run_id", "round", "integration_sha256", "verdict", "provider", "model_id", "connection_id", "summary", "raw_text", "invalidated_at", "invalidation_reason", "created_at"],
+  review_receipts: ["id", "run_id", "round", "integration_sha256", "evidence_binding_json", "verdict", "provider", "model_id", "connection_id", "summary", "raw_text", "invalidated_at", "invalidation_reason", "created_at"],
   review_findings: ["id", "review_receipt_id", "finding_id", "severity", "location", "rationale", "suggested_correction", "disposition", "created_at"],
   objectives: ["id", "outcome", "acceptance_criteria_json", "constraints_json", "project_path", "product_id", "repository_ids_json", "risk", "autonomy", "priority", "deadline", "policy_notes_json", "revision", "created_at", "updated_at"],
   plan_revisions: ["objective_id", "revision", "plan_json", "rationale", "approved", "created_at", "approved_at"],
@@ -2908,6 +2933,7 @@ export class Ledger {
     runId: string;
     round: number;
     integrationSha256: string;
+    evidenceBinding: ReviewEvidenceBinding;
     review: StructuredReview;
   }): number {
     const now = new Date().toISOString();
@@ -2915,13 +2941,14 @@ export class Ledger {
     try {
       const result = this.database.prepare(
         `INSERT INTO review_receipts
-         (run_id, round, integration_sha256, verdict, provider, model_id, connection_id,
+         (run_id, round, integration_sha256, evidence_binding_json, verdict, provider, model_id, connection_id,
           summary, raw_text, invalidated_at, invalidation_reason, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
       ).run(
         input.runId,
         input.round,
         input.integrationSha256,
+        JSON.stringify(input.evidenceBinding),
         input.review.verdict,
         input.review.provider,
         input.review.modelId,
@@ -2968,6 +2995,7 @@ export class Ledger {
       runId: String(review.run_id),
       round: Number(review.round),
       integrationSha256: String(review.integration_sha256),
+      evidenceBinding: JSON.parse(String(review.evidence_binding_json)) as ReviewEvidenceBinding,
       verdict: String(review.verdict) as StructuredReview["verdict"],
       provider: String(review.provider),
       modelId: review.model_id === null ? null : String(review.model_id),

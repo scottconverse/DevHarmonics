@@ -1,4 +1,5 @@
-import type { RunEvidencePackage } from "./ledger.js";
+import { createHash } from "node:crypto";
+import type { ReviewEvidenceBinding, RunEvidencePackage } from "./ledger.js";
 
 export type RunReportVerdict = "READY" | "NOT_READY" | "INCONCLUSIVE";
 
@@ -68,6 +69,21 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 
+function sha256(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function isReviewEvidenceBinding(value: unknown): value is ReviewEvidenceBinding {
+  if (!value || typeof value !== "object") return false;
+  const binding = value as Partial<ReviewEvidenceBinding>;
+  return binding.version === 1
+    && typeof binding.planSha256 === "string"
+    && typeof binding.taskReportsSha256 === "string"
+    && typeof binding.diffSha256 === "string"
+    && typeof binding.checksSha256 === "string"
+    && Array.isArray(binding.repositories);
+}
+
 export function createRunReport(evidence: RunEvidencePackage | Record<string, any>): RunReport {
   const run = evidence.run as RunEvidencePackage["run"];
   const attempts = Array.isArray(evidence.attempts) ? evidence.attempts : [];
@@ -107,6 +123,30 @@ export function createRunReport(evidence: RunEvidencePackage | Record<string, an
   }
   const integrationHashes = new Set(currentReviews.map((review) => String((review as { integrationSha256?: unknown }).integrationSha256 ?? "")).filter(Boolean));
   if (integrationHashes.size > 1) inconsistencies.push("Current review receipts refer to different integration evidence hashes");
+  const currentPlanSha256 = sha256(run.plan);
+  const currentChecksSha256 = sha256(tasks.map((task) => ({ id: task.id, checks: task.checks })));
+  for (const review of currentReviews) {
+    const candidate = review as { integrationSha256?: unknown; evidenceBinding?: unknown };
+    if (!isReviewEvidenceBinding(candidate.evidenceBinding)) {
+      inconsistencies.push("A current review receipt is missing its exact evidence binding");
+      continue;
+    }
+    if (sha256(candidate.evidenceBinding) !== candidate.integrationSha256) {
+      inconsistencies.push("A current review receipt hash does not match its retained evidence binding");
+    }
+    if (candidate.evidenceBinding.planSha256 !== currentPlanSha256) {
+      inconsistencies.push("A current review receipt refers to a different run plan");
+    }
+    if (candidate.evidenceBinding.checksSha256 !== currentChecksSha256) {
+      inconsistencies.push("A current review receipt refers to different check evidence");
+    }
+    if (integrationSet) {
+      const currentRepositories = (integrationSet.repositories ?? []).map((repository: any) => ({ repositoryId: String(repository.repositoryId), baseCommit: String(repository.baseCommit), headCommit: String(repository.headCommit) })).sort((left, right) => left.repositoryId.localeCompare(right.repositoryId));
+      if (JSON.stringify(candidate.evidenceBinding.repositories) !== JSON.stringify(currentRepositories)) {
+        inconsistencies.push("A current review receipt refers to a different repository integration set");
+      }
+    }
+  }
   if (run.status === "ready" && integrationSet && integrationSet.status !== "ready") inconsistencies.push("Run status ready conflicts with integration-set status");
 
   let verdict: RunReportVerdict = "INCONCLUSIVE";

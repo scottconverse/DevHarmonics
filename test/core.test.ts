@@ -10,7 +10,7 @@ import { defaultConfig, initializeProject, loadConfig, resolveProviderCommand } 
 import { projectLegacyProvider } from "../src/compatibility.js";
 import { assertRunTransition, assertTaskTransition, domainId } from "../src/domain.js";
 import { LEDGER_SCHEMA_VERSION, Ledger } from "../src/ledger.js";
-import { assignReviewFindings, Orchestrator, parseFirstJsonObject, taskAttemptTimeoutMs } from "../src/orchestrator.js";
+import { assignReviewFindings, createReviewEvidenceBinding, Orchestrator, parseFirstJsonObject, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
 import { discoverOllama, OllamaAdapter, syncOllamaRegistry, syncOllamaRuntimes } from "../src/ollama.js";
 import {
   createProvider,
@@ -40,7 +40,7 @@ import { classifyWorkload, inferModelProfile, profileMetadata, SUBSCRIPTION_COMP
 import { parseCurrentClaudeModels } from "../src/catalog.js";
 import { estimateInvocationCost, estimateQualificationCost, isExactOpenRouterModelId, OpenRouterService } from "../src/openrouter.js";
 import { architectPrompt, localReviewerContextHeader, reviewerPrompt, workerPrompt } from "../src/prompts.js";
-import { QUALIFICATION_FINGERPRINT_FIXTURE, ensureReviewerCandidateQualified, ensureSchedulerCandidateQualified, hasCurrentOperationalQualification, qualifyRuntimeModel, trackedFamilyQualificationRole } from "../src/qualification.js";
+import { QUALIFICATION_FINGERPRINT_FIXTURE, ensureReviewerCandidateQualified, ensureSchedulerCandidateQualified, ensureSchedulerProviderCandidateQualified, hasCurrentOperationalQualification, qualifyRuntimeModel, trackedFamilyQualificationRole } from "../src/qualification.js";
 import { modelQualificationFingerprint } from "../src/model-fingerprint.js";
 import { aggregateModelPerformance } from "../src/model-performance.js";
 import { quotaResetAt } from "../src/antigravity.js";
@@ -317,6 +317,41 @@ test("plan schema rejects missing dependencies", () => {
     ],
   });
   assert.equal(result.success, false);
+});
+
+test("internal repository task identifiers remain distinct when readable slugs collide", () => {
+  const repositoryIds = ["github:org/foo.bar", "github:org/foo-bar"];
+  const taskIds = repositoryTaskIds("__integration__", repositoryIds);
+  assert.notEqual(taskIds.get(repositoryIds[0]!), taskIds.get(repositoryIds[1]!));
+  assert.match(taskIds.get(repositoryIds[0]!)!, /^__integration__-github-org-foo-bar-[a-f0-9]{12}$/);
+});
+
+test("review evidence hashes change with repository heads and check evidence", () => {
+  const base = { autonomy: "bounded" as const, plan: { summary: "bounded", recommendedConcurrency: 1, tasks: [] }, taskReports: "done", diff: [{ path: "a.ts", diff: "+safe" }], checks: [{ id: "one", checks: [{ name: "test", passed: true }] }], repositories: [{ repositoryId: "repo:core", baseCommit: "base", headCommit: "head-1" }] };
+  const original = createReviewEvidenceBinding(base);
+  const changedHead = createReviewEvidenceBinding({ ...base, repositories: [{ ...base.repositories[0]!, headCommit: "head-2" }] });
+  const changedChecks = createReviewEvidenceBinding({ ...base, checks: [{ id: "one", checks: [{ name: "test", passed: false }] }] });
+  assert.notEqual(reviewEvidenceBindingSha256(original), reviewEvidenceBindingSha256(changedHead));
+  assert.notEqual(reviewEvidenceBindingSha256(original), reviewEvidenceBindingSha256(changedChecks));
+});
+
+test("aborted schedulers settle every active attempt before returning", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let resolveFirst!: () => void;
+  let resolveSecond!: () => void;
+  const first = new Promise<void>((resolve) => { resolveFirst = resolve; });
+  const second = new Promise<void>((resolve) => { resolveSecond = resolve; });
+  let returned = false;
+  const settling = settleActiveAttemptsIfAborted(controller.signal, [first, second]).then((value) => {
+    returned = value;
+  });
+  resolveFirst();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(returned, false);
+  resolveSecond();
+  await settling;
+  assert.equal(returned, true);
 });
 
 test("plan schema defaults and validates the cross-repository contract", () => {
@@ -699,6 +734,40 @@ test("scheduler qualifies only the selected provider candidate at first use and 
     assert.equal(Object.values(routed.scoreBreakdown).reduce((sum, value) => sum + value, 0), routed.score);
     assert.ok(routed.scoreBreakdown.tierFit > 0);
     assert.ok(routed.scoreBreakdown.preferredProvider > 0);
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("architect qualification retries another model on the same provider", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-architect-provider-retry-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    ledger.upsertConnection({ id: "subscription-cli:claude", provider: "claude", transport: "subscription_cli", authentication: "subscription", displayName: "Claude", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "unknown", capacity: "unknown", adapterVersion: "test", runtimeVersion: "test", metadata: {} });
+    for (const id of ["a-opus", "z-opus"] as const) {
+      ledger.upsertDiscoveredModel({ id: `subscription-cli:claude:model:${id}`, connectionId: "subscription-cli:claude", canonicalName: `claude-${id}`, displayName: `Claude ${id}`, source: "provider_catalog", lifecycle: "known", visible: true, verified: false, qualified: false, active: false, metadata: profileMetadata({ tier: "premium", family: "claude-opus", capabilities: ["text", "analysis", "code", "tools"], source: "catalog" }) });
+    }
+    const excluded = new Set<string>();
+    const attempted: string[] = [];
+    const result = await ensureSchedulerProviderCandidateQualified({
+      ledger,
+      config: structuredClone(defaultConfig),
+      cwd: root,
+      role: "architect",
+      preferredProvider: "claude",
+      permission: "read_only",
+      excludedModelIds: excluded,
+      qualify: async ({ model, role }) => {
+        attempted.push(model.id);
+        const passed = model.id.endsWith("z-opus");
+        return { fixtureVersion: "subscription-architect-v1", role, passed, score: passed ? 1 : 0, evidence: {} };
+      },
+    });
+    assert.deepEqual(attempted, ["subscription-cli:claude:model:a-opus", "subscription-cli:claude:model:z-opus"]);
+    assert.equal(result?.modelId, "subscription-cli:claude:model:z-opus");
+    assert.equal(result?.passed, true);
+    assert.ok(excluded.has("subscription-cli:claude:model:a-opus"));
   } finally {
     ledger.close();
     await rm(root, { recursive: true, force: true });
@@ -1351,6 +1420,9 @@ test("immutable Run Reporter derives verdicts only from retained evidence", asyn
   };
   assert.equal(typeof reporterModule.createRunReport, "function", "DH-450 requires a pure Run Reporter");
   assert.equal(typeof reporterModule.createRunEvidenceExport, "function", "DH-450 requires a portable deterministic evidence export");
+  const runPlan = { summary: "bounded", recommendedConcurrency: 1, tasks: [] };
+  const runTasks = [{ id: "one", status: "passed", checks: [{ name: "test", passed: true }] }];
+  const evidenceBinding = createReviewEvidenceBinding({ autonomy: "bounded", plan: runPlan, taskReports: "retained", diff: [{ path: "result.txt", diff: "+done" }], checks: runTasks.map((task) => ({ id: task.id, checks: task.checks })), repositories: [{ repositoryId: "C:/fixture", baseCommit: "base", headCommit: "head" }] });
   const evidence = {
     version: 2,
     generatedAt: "2026-07-15T12:00:00.000Z",
@@ -1360,13 +1432,14 @@ test("immutable Run Reporter derives verdicts only from retained evidence", asyn
       goal: "Ship the bounded change",
       status: "ready",
       finalReview: "READY\n\nAll retained gates passed.",
-      tasks: [{ id: "one", status: "passed", checks: [{ name: "test", passed: true }] }],
+      plan: runPlan,
+      tasks: runTasks,
       events: [],
     },
     attempts: [{ id: 1, status: "completed" }],
     blackboard: [],
     toolReceipts: [{ id: 1, outcome: "allow" }],
-    reviews: [{ id: 1, verdict: "READY", integrationSha256: "b".repeat(64), invalidatedAt: null }],
+    reviews: [{ id: 1, verdict: "READY", integrationSha256: reviewEvidenceBindingSha256(evidenceBinding), evidenceBinding, invalidatedAt: null }],
   };
   const report = reporterModule.createRunReport!(evidence);
   assert.deepEqual(report, {
@@ -1408,6 +1481,12 @@ test("immutable Run Reporter derives verdicts only from retained evidence", asyn
   assert.equal(incompleteReport.verdict, "INCONCLUSIVE");
   assert.ok(incompleteReport.missingEvidence.includes("final review"));
   assert.ok(incompleteReport.missingEvidence.includes("attempt receipts"));
+
+  const mismatchedIntegration = structuredClone(evidence) as typeof evidence & { integrationSet: Record<string, unknown> };
+  mismatchedIntegration.integrationSet = { status: "ready", repositories: [{ repositoryId: "C:/fixture", baseCommit: "base", headCommit: "different-head" }] };
+  const mismatchedReport = reporterModule.createRunReport!(mismatchedIntegration);
+  assert.equal(mismatchedReport.verdict, "INCONCLUSIVE");
+  assert.match(mismatchedReport.inconsistencies.join(" "), /different repository integration set/i);
 });
 
 test("risk-based review quorum fails closed on weak independence and open findings", async () => {
@@ -1461,10 +1540,12 @@ test("ledger retains structured reviews and invalidates them when fixer evidence
   const ledger = new Ledger(path.join(root, "devharmonics.db")) as Ledger & Record<string, any>;
   try {
     const runId = ledger.createRun("Repair and re-review", root);
+    const evidenceBinding = createReviewEvidenceBinding({ autonomy: "bounded", plan: { summary: "repair", recommendedConcurrency: 1, tasks: [] }, taskReports: "", diff: [], checks: [], repositories: [{ repositoryId: root, baseCommit: "base", headCommit: "head" }] });
     const reviewId = ledger.recordReviewReceipt({
       runId,
       round: 1,
-      integrationSha256: "a".repeat(64),
+      integrationSha256: reviewEvidenceBindingSha256(evidenceBinding),
+      evidenceBinding,
       review: {
         verdict: "NOT_READY",
         provider: "claude",
@@ -2007,6 +2088,7 @@ test("ledger upgrades a v0.1 database transactionally and preserves a pre-migrat
           { version: 21, name: "multi-repository-integration-sets" },
           { version: 22, name: "source-backed-product-intelligence" },
           { version: 23, name: "provider-quota-groups-and-honest-model-resolution" },
+          { version: 24, name: "review-evidence-bindings" },
         ],
       );
     } finally {

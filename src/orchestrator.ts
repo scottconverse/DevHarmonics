@@ -8,7 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { runPlanSchema } from "./schemas.js";
 import { loadConfig, loadConstitution, resolveProviderCommand, devHarmonicsDirectory } from "./config.js";
 import { inspectProviders } from "./doctor.js";
-import { Ledger } from "./ledger.js";
+import { Ledger, type ReviewEvidenceBinding } from "./ledger.js";
 import { OllamaAdapter, syncOllamaRuntimes } from "./ollama.js";
 import { createRuntimeAdapter } from "./providers.js";
 import {
@@ -41,7 +41,7 @@ import { observeLocalResources } from "./resources.js";
 import { evaluateToolRequest, type ToolStage } from "./policy.js";
 import { adjudicateReviewQuorum, parseReviewerResponse, reviewRequirement, type ReviewFinding, type ReviewQuorumDecision, type ReviewRequirement, type StructuredReview } from "./review.js";
 import { estimateInvocationCost, OpenRouterService } from "./openrouter.js";
-import { ensureSchedulerCandidateQualified, type SchedulerQualificationResult } from "./qualification.js";
+import { ensureSchedulerCandidateQualified, ensureSchedulerProviderCandidateQualified, type SchedulerQualificationResult } from "./qualification.js";
 import { resolveValidatorCwd, runValidator, unknownValidator } from "./validators.js";
 import { analyzeVerificationIntegrity } from "./verification-integrity.js";
 import { runLocalToolLoop } from "./local-tools.js";
@@ -152,7 +152,7 @@ export class Orchestrator {
     let lastArchitectError: Error | null = null;
     for (let candidateIndex = 0; candidateIndex < architectCandidates.length; candidateIndex++) {
       const candidate = architectCandidates[candidateIndex]!;
-      const qualification = await ensureSchedulerCandidateQualified({ ledger: this.ledger, config, cwd: projectPath, role: "architect", preferredProvider: candidate, permission: "read_only", excludedModelIds: excludedArchitectModels, excludedConnectionIds: excludedArchitectConnections });
+      const qualification = await ensureSchedulerProviderCandidateQualified({ ledger: this.ledger, config, cwd: projectPath, role: "architect", preferredProvider: candidate, permission: "read_only", excludedModelIds: excludedArchitectModels, excludedConnectionIds: excludedArchitectConnections });
       if (qualification?.attempted && !qualification.passed) {
         lastArchitectError = new Error(`${qualification.provider} model '${qualification.modelId}' failed architect qualification`);
         continue;
@@ -473,8 +473,7 @@ export class Orchestrator {
     const planningCandidates = plan ? [] : architectCandidates;
     for (let candidateIndex = 0; candidateIndex < planningCandidates.length; candidateIndex++) {
       const candidate = planningCandidates[candidateIndex]!;
-      const qualification = await ensureSchedulerCandidateQualified({ ledger: this.ledger, config, cwd: worktrees.integrationPath, role: "architect", preferredProvider: candidate, permission: "read_only", excludedModelIds: excludedArchitectModels, excludedConnectionIds: excludedArchitectConnections });
-      this.recordSchedulerQualification(runId, qualification, "architect");
+      const qualification = await ensureSchedulerProviderCandidateQualified({ ledger: this.ledger, config, cwd: worktrees.integrationPath, role: "architect", preferredProvider: candidate, permission: "read_only", excludedModelIds: excludedArchitectModels, excludedConnectionIds: excludedArchitectConnections, onResult: (result) => this.recordSchedulerQualification(runId, result, "architect") });
       if (qualification?.attempted && !qualification.passed) {
         lastArchitectError = new Error(`${qualification.provider} model '${qualification.modelId}' failed architect qualification`);
         continue;
@@ -569,7 +568,7 @@ export class Orchestrator {
       // On cancel, stop scheduling. In-flight worker processes are aborted via
       // the shared signal and their tasks return 'cancelled'; ledger.cancelRun
       // owns the run/task status, so return without running integration/review.
-      if (signal.aborted) return;
+      if (await settleActiveAttemptsIfAborted(signal, active.values())) return;
 
       for (const [taskId, task] of pending) {
         if (task.dependencies.some((dependency) => ["failed", "blocked"].includes(statuses.get(dependency) ?? ""))) {
@@ -617,7 +616,7 @@ export class Orchestrator {
 
     // A cancel that lands as the scheduler drains must still skip the final
     // integration + reviewer phase so it cannot overwrite the 'cancelled' run.
-    if (signal.aborted) return;
+    if (await settleActiveAttemptsIfAborted(signal, active.values())) return;
 
     let failed = [...statuses.values()].some((status) => status !== "passed");
     const integrationChecks = autonomy === "observe" ? [] : [...new Set(plan.tasks.flatMap((task) => task.checks))];
@@ -667,12 +666,16 @@ export class Orchestrator {
     }
     const checkSummary = this.checkSummary(runId);
     const taskReports = this.taskReportSummary(runId);
-    const integrationReviewSha256 = this.reviewEvidenceSha256({
+    const integrationStatus = await worktrees.status();
+    const integrationReviewEvidence = this.reviewEvidence({
+      runId,
       autonomy,
       plan,
       taskReports,
       diff: autonomy === "observe" ? [] : await worktrees.integrationDiffFiles(),
+      repositories: [{ repositoryId: integrationStatus.repositoryRoot, baseCommit: integrationStatus.baseCommit, headCommit: integrationStatus.headCommit }],
     });
+    const integrationReviewSha256 = integrationReviewEvidence.sha256;
     const reviewerName = availableProviders.includes(config.product.reviewer)
       ? config.product.reviewer
       : availableProviders[0]!;
@@ -805,6 +808,7 @@ export class Orchestrator {
       runId,
       round: 1,
       integrationSha256: integrationReviewSha256,
+      evidenceBinding: integrationReviewEvidence.binding,
       review: firstReview,
     });
     this.ledger.addEvent(runId, "review.completed", `${firstReview.provider} completed quorum review 1/${reviewPolicy.requiredReviewers}: ${firstReview.verdict.replace("_", " ")}`, { receiptId: firstReceiptId, reviewSlot: 1, provider: firstReview.provider, modelId: firstReview.modelId, connectionId: firstReview.connectionId, verdict: firstReview.verdict, findingCount: firstReview.findings.length, integrationSha256: integrationReviewSha256 });
@@ -836,7 +840,7 @@ export class Orchestrator {
         taskReports,
         autonomy,
       });
-      const receiptId = this.ledger.recordReviewReceipt({ runId, round: 1, integrationSha256: integrationReviewSha256, review: additional });
+      const receiptId = this.ledger.recordReviewReceipt({ runId, round: 1, integrationSha256: integrationReviewSha256, evidenceBinding: integrationReviewEvidence.binding, review: additional });
       structuredReviews.push(additional);
       this.ledger.addEvent(runId, "review.completed", `${additional.provider} completed quorum review ${reviewSlot}/${reviewPolicy.requiredReviewers}: ${additional.verdict.replace("_", " ")}`, { receiptId, reviewSlot, provider: additional.provider, modelId: additional.modelId, connectionId: additional.connectionId, verdict: additional.verdict, findingCount: additional.findings.length, integrationSha256: integrationReviewSha256 });
       excludedReviewerConnections.add(additional.connectionId);
@@ -888,7 +892,9 @@ export class Orchestrator {
       }
       const refreshedTaskReports = this.taskReportSummary(runId);
       const refreshedCheckSummary = this.checkSummary(runId);
-      const refreshedSha256 = this.reviewEvidenceSha256({ autonomy, plan, taskReports: refreshedTaskReports, diff: await worktrees.integrationDiffFiles() });
+      const refreshedStatus = await worktrees.status();
+      const refreshedEvidence = this.reviewEvidence({ runId, autonomy, plan, taskReports: refreshedTaskReports, diff: await worktrees.integrationDiffFiles(), repositories: [{ repositoryId: refreshedStatus.repositoryRoot, baseCommit: refreshedStatus.baseCommit, headCommit: refreshedStatus.headCommit }] });
+      const refreshedSha256 = refreshedEvidence.sha256;
       if (refreshedSha256 === finalReviewSha256) {
         this.ledger.addEvent(runId, "fixer.failed", `Review fixer round ${fixRound} produced no change to the reviewed integration evidence`, { fixRound, taskId: repairTask.id, integrationSha256: refreshedSha256 });
         break;
@@ -897,7 +903,7 @@ export class Orchestrator {
       this.ledger.addEvent(runId, "review.invalidated", `Fixer round ${fixRound} invalidated ${invalidated} prior review receipt(s)`, { fixRound, invalidated, previousIntegrationSha256: finalReviewSha256, integrationSha256: refreshedSha256 });
       this.ledger.addEvent(runId, "fixer.completed", `Review fixer round ${fixRound} passed integration validation; bounded re-review is required`, { fixRound, taskId: repairTask.id, integrationSha256: refreshedSha256 });
       const refreshedImplementors = [...new Set((this.ledger.getRun(runId)?.tasks ?? []).filter((task) => task.id !== "__integration__" && task.provider).map((task) => String(task.provider)))];
-      const rereview = await this.completeReviewRound({ runId, round: fixRound + 1, integrationSha256: refreshedSha256, requirement: reviewPolicy, reviewerName, reviewerProviders, implementationProviders: refreshedImplementors, config, worktrees, signal, goal: request.goal, constitution, plan, checkSummary: refreshedCheckSummary, taskReports: refreshedTaskReports, autonomy });
+      const rereview = await this.completeReviewRound({ runId, round: fixRound + 1, integrationSha256: refreshedSha256, evidenceBinding: refreshedEvidence.binding, requirement: reviewPolicy, reviewerName, reviewerProviders, implementationProviders: refreshedImplementors, config, worktrees, signal, goal: request.goal, constitution, plan, checkSummary: refreshedCheckSummary, taskReports: refreshedTaskReports, autonomy });
       finalQuorum = rereview.decision;
       finalReviews = rereview.reviews;
       finalReviewSha256 = refreshedSha256;
@@ -929,6 +935,7 @@ export class Orchestrator {
     const product = this.ledger.getProduct(productId);
     if (!product) throw new Error(`Product '${productId}' is no longer registered`);
     const affectedIds = (input.plan.repositoryImpact ?? []).filter((impact) => impact.disposition === "affected").map((impact) => impact.repositoryId);
+    const integrationTaskIds = repositoryTaskIds("__integration__", affectedIds);
     const repositories = affectedIds.map((repositoryId) => {
       const repository = product.repositories.find((candidate) => candidate.id === repositoryId);
       if (!repository?.localPath) throw new Error(`Repository '${repositoryId}' does not have a registered local checkout`);
@@ -1004,7 +1011,7 @@ export class Orchestrator {
       const active = new Map<string, Promise<void>>();
       let providerCursor = 0;
       while (pending.size || active.size) {
-        if (input.signal.aborted) return;
+        if (await settleActiveAttemptsIfAborted(input.signal, active.values())) return;
         for (const [taskId, task] of pending) {
           if (task.dependencies.some((dependency) => ["failed", "blocked"].includes(statuses.get(dependency) ?? ""))) {
             statuses.set(taskId, "blocked");
@@ -1044,7 +1051,7 @@ export class Orchestrator {
         if (active.size) await Promise.race(active.values());
         else if (pending.size) throw new Error("The cross-repository task graph cannot make progress; check for cyclic dependencies");
       }
-      if (input.signal.aborted) return;
+      if (await settleActiveAttemptsIfAborted(input.signal, active.values())) return;
 
       let aggregatedDiffs: Array<{ path: string; diff: string }> = [];
       for (const repository of repositories) {
@@ -1055,7 +1062,7 @@ export class Orchestrator {
           .filter((task) => task.repositoryIds?.[0] === repositoryId)
           .some((task) => statuses.get(task.id) !== "passed");
         const checks = input.autonomy === "observe" ? [] : [...new Set(input.plan.tasks.filter((task) => task.repositoryIds?.[0] === repositoryId).flatMap((task) => task.checks))];
-        const integrationTaskId = `__integration__-${repositoryId.replace(/[^a-z0-9_-]/gi, "-")}`;
+        const integrationTaskId = integrationTaskIds.get(repositoryId)!;
         if (checks.length) {
           this.ledger.addIntegrationTask(input.runId, checks, integrationTaskId, `${repository.name} integration suite`);
           this.ledger.setTaskStatus(input.runId, integrationTaskId, "verifying");
@@ -1102,11 +1109,14 @@ export class Orchestrator {
       const implementationProviders = () => [...new Set((this.ledger.getRun(input.runId)?.tasks ?? [])
         .filter((task) => !task.id.startsWith("__integration__") && task.provider)
         .map((task) => String(task.provider)))];
-      let finalReviewSha256 = this.reviewEvidenceSha256({ autonomy: input.autonomy, plan: input.plan, taskReports, diff: aggregatedDiffs });
+      const integrationStatuses = await integration.status();
+      let finalReviewEvidence = this.reviewEvidence({ runId: input.runId, autonomy: input.autonomy, plan: input.plan, taskReports, diff: aggregatedDiffs, repositories: integrationStatuses.map((status) => ({ repositoryId: status.repositoryId, baseCommit: status.baseCommit, headCommit: status.headCommit })) });
+      let finalReviewSha256 = finalReviewEvidence.sha256;
       let reviewRound = await this.completeReviewRound({
         runId: input.runId,
         round: 1,
         integrationSha256: finalReviewSha256,
+        evidenceBinding: finalReviewEvidence.binding,
         requirement,
         reviewerName,
         reviewerProviders: input.availableProviders,
@@ -1142,13 +1152,14 @@ export class Orchestrator {
           break;
         }
 
+        const repairTaskIds = repositoryTaskIds(`__review_fix_${fixRound}`, [...assignments.byRepository.keys()]);
         const repairs = [...assignments.byRepository.entries()].map(([repositoryId, findings], index) => {
           const repository = repositories.find((candidate) => candidate.id === repositoryId)!;
           const context = repositoryContexts.get(repositoryId)!;
           const checks = [...new Set(input.plan.tasks.filter((task) => task.repositoryIds?.[0] === repositoryId).flatMap((task) => task.checks))];
           const repositoryScope = findings.map((finding) => repositoryPathForFinding(finding.location, repositoryId)).filter((value): value is string => Boolean(value));
           const repairTask: PlannedTask = {
-            id: `__review_fix_${fixRound}_${safeTaskPart(repositoryId)}`,
+            id: repairTaskIds.get(repositoryId)!,
             title: `Resolve ${repository.name} review findings (round ${fixRound})`,
             description: `Correct only these retained review findings in repository ${repositoryId}:\n${findings.map((finding) => `- ${finding.severity.toUpperCase()} ${finding.location ?? "location not supplied"}: ${finding.rationale}\n  Suggested correction: ${finding.suggestedCorrection}`).join("\n")}`,
             dependencies: [],
@@ -1216,7 +1227,9 @@ export class Orchestrator {
         }))).flat();
         const refreshedTaskReports = this.taskReportSummary(input.runId);
         const refreshedCheckSummary = this.checkSummary(input.runId);
-        const refreshedSha256 = this.reviewEvidenceSha256({ autonomy: input.autonomy, plan: input.plan, taskReports: refreshedTaskReports, diff: aggregatedDiffs });
+        const refreshedStatuses = await integration.status();
+        const refreshedEvidence = this.reviewEvidence({ runId: input.runId, autonomy: input.autonomy, plan: input.plan, taskReports: refreshedTaskReports, diff: aggregatedDiffs, repositories: refreshedStatuses.map((status) => ({ repositoryId: status.repositoryId, baseCommit: status.baseCommit, headCommit: status.headCommit })) });
+        const refreshedSha256 = refreshedEvidence.sha256;
         if (refreshedSha256 === finalReviewSha256) {
           this.ledger.addEvent(input.runId, "fixer.failed", `Multi-repository fixer round ${fixRound} produced no change to reviewed integration evidence`, { fixRound, integrationSha256: refreshedSha256 });
           break;
@@ -1224,10 +1237,12 @@ export class Orchestrator {
         const invalidated = this.ledger.invalidateReviewReceipts(input.runId, `Multi-repository fixer round ${fixRound} changed integration evidence from ${finalReviewSha256} to ${refreshedSha256}`);
         this.ledger.addEvent(input.runId, "review.invalidated", `Multi-repository fixer round ${fixRound} invalidated ${invalidated} prior review receipt(s)`, { fixRound, invalidated, previousIntegrationSha256: finalReviewSha256, integrationSha256: refreshedSha256, repositoryIds: affectedIds });
         finalReviewSha256 = refreshedSha256;
+        finalReviewEvidence = refreshedEvidence;
         reviewRound = await this.completeReviewRound({
           runId: input.runId,
           round: fixRound + 1,
           integrationSha256: finalReviewSha256,
+          evidenceBinding: finalReviewEvidence.binding,
           requirement,
           reviewerName,
           reviewerProviders: input.availableProviders,
@@ -1408,22 +1423,24 @@ export class Orchestrator {
     throw lastError ?? new Error(`No eligible reviewer completed quorum slot ${input.reviewSlot}`);
   }
 
-  private reviewEvidenceSha256(input: {
+  private reviewEvidence(input: {
+    runId: string;
     autonomy: RunAutonomy;
     plan: RunPlan;
     taskReports: string;
     diff: readonly unknown[];
-  }): string {
-    const exactIntegrationSet = input.autonomy === "observe"
-      ? { autonomy: input.autonomy, plan: input.plan, taskReports: input.taskReports }
-      : { autonomy: input.autonomy, plan: input.plan, diff: input.diff };
-    return createHash("sha256").update(JSON.stringify(exactIntegrationSet)).digest("hex");
+    repositories: ReviewEvidenceBinding["repositories"];
+  }): { binding: ReviewEvidenceBinding; sha256: string } {
+    const checks = (this.ledger.getRun(input.runId)?.tasks ?? []).map((task) => ({ id: task.id, checks: task.checks }));
+    const binding = createReviewEvidenceBinding({ ...input, checks });
+    return { binding, sha256: reviewEvidenceBindingSha256(binding) };
   }
 
   private async completeReviewRound(input: {
     runId: string;
     round: number;
     integrationSha256: string;
+    evidenceBinding: ReviewEvidenceBinding;
     requirement: ReviewRequirement;
     reviewerName: ProviderName;
     reviewerProviders: readonly string[];
@@ -1458,7 +1475,7 @@ export class Orchestrator {
         excludedReviewerModels: excludedModels,
         excludedReviewerConnections: excludedConnections,
       });
-      const receiptId = this.ledger.recordReviewReceipt({ runId: input.runId, round: input.round, integrationSha256: input.integrationSha256, review });
+      const receiptId = this.ledger.recordReviewReceipt({ runId: input.runId, round: input.round, integrationSha256: input.integrationSha256, evidenceBinding: input.evidenceBinding, review });
       reviews.push(review);
       this.ledger.addEvent(input.runId, "review.completed", `${review.provider} completed round ${input.round} review ${reviewSlot}/${input.requirement.requiredReviewers}: ${review.verdict.replace("_", " ")}`, { receiptId, round: input.round, reviewSlot, provider: review.provider, modelId: review.modelId, connectionId: review.connectionId, verdict: review.verdict, findingCount: review.findings.length, integrationSha256: input.integrationSha256 });
       excludedConnections.add(review.connectionId);
@@ -2175,8 +2192,49 @@ function repositoryPathForFinding(location: string | null, repositoryId: string)
   return pathWithinRepository || null;
 }
 
-function safeTaskPart(value: string): string {
-  return value.trim().replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "") || "repository";
+export function repositoryTaskIds(prefix: string, repositoryIds: string[]): Map<string, string> {
+  const ids = new Map(repositoryIds.map((repositoryId) => {
+    const slug = repositoryId.trim().replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "") || "repository";
+    const digest = createHash("sha256").update(repositoryId).digest("hex").slice(0, 12);
+    return [repositoryId, `${prefix}-${slug}-${digest}`] as const;
+  }));
+  if (ids.size !== repositoryIds.length || new Set(ids.values()).size !== repositoryIds.length) {
+    throw new Error("Repository identifiers must produce unique internal task identifiers");
+  }
+  return ids;
+}
+
+export async function settleActiveAttemptsIfAborted(
+  signal: AbortSignal,
+  attempts: Iterable<Promise<unknown>>,
+): Promise<boolean> {
+  if (!signal.aborted) return false;
+  await Promise.allSettled([...attempts]);
+  return true;
+}
+
+export function createReviewEvidenceBinding(input: {
+  autonomy: RunAutonomy;
+  plan: RunPlan;
+  taskReports: string;
+  diff: readonly unknown[];
+  checks: readonly unknown[];
+  repositories: ReviewEvidenceBinding["repositories"];
+}): ReviewEvidenceBinding {
+  const sha256 = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  return {
+    version: 1,
+    autonomy: input.autonomy,
+    planSha256: sha256(input.plan),
+    taskReportsSha256: sha256(input.taskReports),
+    diffSha256: sha256(input.diff),
+    checksSha256: sha256(input.checks),
+    repositories: [...input.repositories].sort((left, right) => left.repositoryId.localeCompare(right.repositoryId)),
+  };
+}
+
+export function reviewEvidenceBindingSha256(binding: ReviewEvidenceBinding): string {
+  return createHash("sha256").update(JSON.stringify(binding)).digest("hex");
 }
 
 export function taskAttemptTimeoutMs(

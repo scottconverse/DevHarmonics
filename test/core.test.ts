@@ -2702,6 +2702,91 @@ test("objective drafts persist without creating an execution run", async () => {
   }
 });
 
+test("workbench persistence advances the ledger schema without creating execution state", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-workbench-schema-"));
+  const filename = path.join(root, "devharmonics.db");
+  const seed = new Ledger(filename);
+  seed.close();
+  const version18 = new DatabaseSync(filename);
+  version18.exec(`
+    DROP TABLE workbench_messages;
+    DROP TABLE workbench_sessions;
+    DELETE FROM schema_migrations WHERE version = 19;
+    PRAGMA user_version = 18;
+  `);
+  version18.close();
+  const ledger = new Ledger(filename);
+  let sessionId = "";
+  let objectiveId = "";
+  try {
+    assert.equal(ledger.getSchemaVersion(), 19);
+    const session = ledger.createWorkbenchSession({
+      projectPath: root,
+      title: "Explore release readiness",
+    });
+    sessionId = session.id;
+    assert.equal(session.mode, "read_only");
+    assert.equal(session.objectiveId, null);
+
+    ledger.appendWorkbenchMessage({
+      sessionId,
+      role: "user",
+      content: "Compare the migration approaches",
+    });
+    const result = ledger.appendWorkbenchMessage({
+      sessionId,
+      role: "assistant",
+      content: "Use the bounded migration",
+      provider: "ollama",
+      connectionId: "ollama:system",
+      requestedModelId: "ollama:mellum2:4b",
+      resolvedModelId: "ollama:mellum2:4b-q4_K_M",
+      status: "complete",
+      inputTokens: 320,
+      outputTokens: 88,
+      costUsd: 0,
+      durationMs: 2400,
+    });
+    assert.equal(result.provider, "ollama");
+    assert.equal(result.resolvedModelId, "ollama:mellum2:4b-q4_K_M");
+    assert.equal(ledger.listWorkbenchMessages(sessionId).length, 2);
+    assert.throws(
+      () => ledger.appendWorkbenchMessage({ sessionId, role: "assistant", content: "Unattributed" }),
+      /require a provider/i,
+    );
+
+    const objective = ledger.createObjective({
+      outcome: "Prepare the release migration",
+      acceptanceCriteria: ["The chosen approach is documented"],
+      constraints: ["No external writes"],
+      projectPath: root,
+      repositoryIds: [],
+      risk: "low",
+      autonomy: "observe",
+      priority: "normal",
+      policyNotes: [],
+    });
+    objectiveId = objective.id;
+    const converted = ledger.linkWorkbenchObjective(sessionId, objectiveId);
+    assert.equal(converted.objectiveId, objectiveId);
+    assert.ok(converted.convertedAt);
+    assert.equal(ledger.listRuns().length, 0);
+  } finally {
+    ledger.close();
+  }
+
+  const reopened = new Ledger(filename);
+  try {
+    assert.equal(reopened.getWorkbenchSession(sessionId)?.objectiveId, objectiveId);
+    assert.equal(reopened.listWorkbenchMessages(sessionId)[1]?.durationMs, 2400);
+    assert.equal(reopened.listWorkbenchSessions()[0]?.mode, "read_only");
+    assert.equal(reopened.listRuns().length, 0);
+  } finally {
+    reopened.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("objective updates use optimistic revisions and redact persisted policy text", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-objective-update-"));
   const ledger = new Ledger(path.join(root, "devharmonics.db"));

@@ -897,6 +897,55 @@ test("objective preview creates no run and exact approved revision executes with
   }
 });
 
+test("Workbench creates a durable read-only discussion and converts it to an objective without starting a run", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-workbench-api-"));
+  const project = await createRepository(root);
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  try {
+    const pageText = await fetch(dashboard.url).then((response) => response.text());
+    assert.match(pageText, /Multi-model Workbench/);
+    assert.match(pageText, /Read-only by design/);
+
+    const createdResponse = await fetch(`${dashboard.url}/api/workbench`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectPath: project, title: "Explore a safe migration" }),
+    });
+    assert.equal(createdResponse.status, 201);
+    const created = await createdResponse.json() as { session: { id: string; mode: string } };
+    assert.equal(created.session.mode, "read_only");
+
+    const detail = await fetch(`${dashboard.url}/api/workbench/${created.session.id}`).then((response) => response.json()) as { messages: unknown[] };
+    assert.deepEqual(detail.messages, []);
+    const beforeRuns = await fetch(`${dashboard.url}/api/runs`).then((response) => response.json()) as { runs: unknown[] };
+    assert.equal(beforeRuns.runs.length, 0);
+
+    const convertedResponse = await fetch(`${dashboard.url}/api/workbench/${created.session.id}/convert`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        outcome: "Prepare the safe migration",
+        acceptanceCriteria: ["Migration plan is reviewable"],
+        constraints: ["Do not change the repository during discovery"],
+        projectPath: project,
+        repositoryIds: [],
+        risk: "medium",
+        autonomy: "supervised",
+        priority: "normal",
+        policyNotes: [],
+      }),
+    });
+    assert.equal(convertedResponse.status, 201);
+    const converted = await convertedResponse.json() as { objective: { id: string }; session: { objectiveId: string } };
+    assert.equal(converted.session.objectiveId, converted.objective.id);
+    const afterRuns = await fetch(`${dashboard.url}/api/runs`).then((response) => response.json()) as { runs: unknown[] };
+    assert.equal(afterRuns.runs.length, 0);
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("cancel during planning does not save a late plan or restart the run", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-cancel-planning-"));
   const project = await createRepository(root);

@@ -17,6 +17,7 @@ import {
   localReviewerContextHeader,
   objectivePromptText,
   reviewerPrompt,
+  workbenchConsultationPrompt,
   workerPrompt,
 } from "./prompts.js";
 import { chunkDiffFiles, runContextOnlyReview, type ReviewChunk } from "./local-review.js";
@@ -198,6 +199,111 @@ export class Orchestrator {
       resources: await observeLocalResources(),
     });
     return { plan, preview: { capacity, assignments } };
+  }
+
+  async consultWorkbench(input: {
+    projectPath: string;
+    question: string;
+    discussionContext: string;
+    modelIds: string[];
+  }): Promise<Array<{
+    requestedModelId: string;
+    provider: string;
+    connectionId: string | null;
+    resolvedModelId: string | null;
+    text: string | null;
+    status: "complete" | "failed";
+    error: string | null;
+    durationMs: number | null;
+    inputTokens: number | null;
+    outputTokens: number | null;
+    costUsd: number | null;
+  }>> {
+    const projectPath = path.resolve(input.projectPath);
+    const config = await loadConfig(projectPath);
+    if (!input.question.trim()) throw new Error("Workbench question is required");
+    if (!input.modelIds.length) throw new Error("Select at least one qualified model to consult");
+
+    return Promise.all([...new Set(input.modelIds)].map(async (modelId) => {
+      const model = this.ledger.getModel(modelId);
+      const connection = model ? this.ledger.listConnections().find((item) => item.id === model.connectionId) : null;
+      const provider = connection?.provider ?? "unknown";
+      const failed = (error: unknown) => ({
+        requestedModelId: modelId,
+        provider,
+        connectionId: connection?.id ?? null,
+        resolvedModelId: null,
+        text: null,
+        status: "failed" as const,
+        error: error instanceof Error ? error.message : String(error),
+        durationMs: null,
+        inputTokens: null,
+        outputTokens: null,
+        costUsd: null,
+      });
+      if (!model || !connection) return failed(new Error("Selected model is no longer in the current fleet"));
+      if (!model.active || model.excluded || model.retired || model.qualificationStale) {
+        return failed(new Error("Selected model is not active and currently qualified"));
+      }
+      if (provider === "openrouter" && !(config.openRouter.enabled && config.openRouter.allowPaidFallback && config.runPolicy.allowPaidApi)) {
+        return failed(new Error("Paid API consultation is disabled by project policy"));
+      }
+
+      const consultationConfig: DevHarmonicsConfig = {
+        ...config,
+        routing: {
+          ...config.routing,
+          mode: "manual",
+          allowFallback: false,
+          reviewer: { ...config.routing.reviewer, modelId: model.id, upgradePolicy: "pinned" },
+        },
+      };
+      try {
+        const decision = new ModelRouter(this.ledger).route({
+          role: "reviewer",
+          config: consultationConfig,
+          fallbackProvider: provider as ProviderName,
+          allowedProviders: [provider],
+          permission: "read_only",
+        });
+        if (String(decision.model.requestedModelId) !== model.id) {
+          throw new Error("Workbench model selection did not resolve to the exact requested model");
+        }
+        const adapter = await this.provider(decision.provider, consultationConfig, decision.connectionId);
+        const result = await adapter.invoke({
+          role: "reviewer",
+          prompt: workbenchConsultationPrompt({
+            projectPath,
+            question: input.question,
+            discussionContext: input.discussionContext,
+          }),
+          cwd: projectPath,
+          permission: "read_only",
+          timeoutMs: null,
+          model: decision.model,
+        });
+        this.recordConnectionOutcome(adapter.connection.id, { success: true });
+        this.recordModelOutcome(model.id, { success: true });
+        return {
+          requestedModelId: model.id,
+          provider: result.provider,
+          connectionId: String(result.connectionId),
+          resolvedModelId: String(result.model.resolvedModelId),
+          text: result.text,
+          status: "complete" as const,
+          error: null,
+          durationMs: result.durationMs,
+          inputTokens: result.usage.inputTokens,
+          outputTokens: result.usage.outputTokens,
+          costUsd: result.usage.costUsd,
+        };
+      } catch (error) {
+        const failureKind = error instanceof RuntimeInvocationError ? error.kind : "incompatible";
+        this.recordConnectionOutcome(connection.id, { success: false, failureKind, detail: error instanceof Error ? error.message : String(error) });
+        this.recordModelOutcome(model.id, { success: false, failureKind, detail: error instanceof Error ? error.message : String(error) });
+        return failed(error);
+      }
+    }));
   }
 
   beginApprovedObjective(input: {

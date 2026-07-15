@@ -70,6 +70,41 @@ export const planRevisionInputSchema = z.object({
   rationale: z.string().trim().min(1).max(10_000),
 });
 
+export const workbenchSessionInputSchema = z.object({
+  projectPath: z.string().trim().min(1).max(4_096),
+  title: z.string().trim().min(1).max(500),
+});
+
+export const workbenchMessageInputSchema = z.object({
+  sessionId: z.string().uuid(),
+  role: z.enum(["user", "assistant", "system"]),
+  content: z.string().trim().max(100_000),
+  provider: z.string().trim().min(1).max(200).nullable().optional(),
+  connectionId: z.string().trim().min(1).max(300).nullable().optional(),
+  requestedModelId: z.string().trim().min(1).max(300).nullable().optional(),
+  resolvedModelId: z.string().trim().min(1).max(300).nullable().optional(),
+  status: z.enum(["complete", "failed"]).nullable().optional(),
+  error: z.string().trim().max(20_000).nullable().optional(),
+  inputTokens: z.number().int().nonnegative().nullable().optional(),
+  outputTokens: z.number().int().nonnegative().nullable().optional(),
+  costUsd: z.number().nonnegative().nullable().optional(),
+  durationMs: z.number().int().nonnegative().nullable().optional(),
+}).superRefine((message, context) => {
+  if (message.role === "assistant") {
+    if (!message.provider) context.addIssue({ code: "custom", path: ["provider"], message: "Assistant consultations require a provider" });
+    if (!message.status) context.addIssue({ code: "custom", path: ["status"], message: "Assistant consultations require a terminal status" });
+    if (message.status === "complete" && !message.resolvedModelId) context.addIssue({ code: "custom", path: ["resolvedModelId"], message: "Completed consultations require the resolved model ID" });
+    if (message.status === "failed" && !message.requestedModelId && !message.resolvedModelId) context.addIssue({ code: "custom", path: ["requestedModelId"], message: "Failed consultations require a requested or resolved model ID" });
+    if (message.status === "failed" && !message.error) context.addIssue({ code: "custom", path: ["error"], message: "Failed consultations require an error" });
+  } else {
+    const attributed = message.provider || message.connectionId || message.requestedModelId || message.resolvedModelId
+      || message.status || message.error || message.inputTokens != null || message.outputTokens != null
+      || message.costUsd != null || message.durationMs != null;
+    if (attributed) context.addIssue({ code: "custom", message: "Only assistant consultations may carry model execution attribution" });
+    if (!message.content) context.addIssue({ code: "custom", path: ["content"], message: "User and system messages require content" });
+  }
+});
+
 export const providerConfigSchema = z.object({
   enabled: z.boolean(),
   command: z.string().min(1),

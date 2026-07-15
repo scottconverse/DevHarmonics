@@ -105,6 +105,18 @@ Each provider is shown as `READY` or `SETUP`, with its detected version, authent
 8. Review every proposed task, dependency, repository scope, permission, check, model assignment, and the capacity estimate.
 9. Enter requested changes and click **Revise plan**, or click **Approve revision & start**. DevHarmonics retains every revision and its rationale, and execution uses the exact revision you approved without asking the architect to silently produce another plan.
 
+### Explore in Workbench first
+
+Use **Workbench** when you want to investigate a project, compare approaches, or ask several qualified models before defining executable work.
+
+1. Open **Workbench** and create a scratchpad with a project folder and title.
+2. Enter a question, select one or more active qualified models, and click **Consult selected models**.
+3. Compare the retained answers. Each response shows the provider/model identity and available duration or cost information.
+4. Open **Convert this discussion into an objective draft**, refine the outcome, acceptance criteria, constraints, risk, priority, and run mode, then create the draft.
+5. Review the objective in **Runs** before building a plan preview.
+
+Workbench is discussion-only. It cannot change the repository, start a run, or treat a model suggestion as approved work. The converted objective retains a durable link back to its source discussion.
+
 Good goals specify the observable result and important verification. Example:
 
 > Add CSV export to the customer report, preserve current filters, add automated coverage, and verify the download behavior.

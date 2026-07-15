@@ -1,16 +1,18 @@
 # DevHarmonics Detailed Implementation Plan
 
 Document status: **Build-ready execution plan**
-Plan version: **1.9**
+Plan version: **1.10**
 Written: **2026-07-14**
 Revised: **2026-07-15**
 Product specification baseline: **DevHarmonics Product Specification v1.6**
 Current implementation baseline: **DevHarmonics v0.4.0**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 
-Revision history: **v1.9 (2026-07-15)** — Implemented the single-workspace DH-620 core: durable structured objective drafts, immutable plan revisions and rationale, exact-revision approval/run linkage, pre-run task/model/capacity/permission preview, and revise-or-start controls. Product/repository selection remains with the v0.6 multi-repository registry.
+Revision history: **v1.10 (2026-07-15)** — Implemented the DH-640 Workbench core: durable read-only project scratchpads, exact selected-model comparison, provider/model/usage attribution, visible separation from execution, and explicit provenance-preserving conversion into an objective draft without starting a run.
 
-Prior revision: **v1.8 (2026-07-15)** — Added Mellum2 as the first named local specialist milestone: separate Instruct/Thinking tracks, strict specialist-fidelity benchmark, bounded-tool plus benchmark scheduling gates, hard task-capability matching, a narrow low-risk economy implementation lane, live installed-model proof, and explicit no-download/no-silent-promotion policy.
+Prior revision: **v1.9 (2026-07-15)** — Implemented the single-workspace DH-620 core: durable structured objective drafts, immutable plan revisions and rationale, exact-revision approval/run linkage, pre-run task/model/capacity/permission preview, and revise-or-start controls. Product/repository selection remains with the v0.6 multi-repository registry.
+
+Earlier revision: **v1.8 (2026-07-15)** — Added Mellum2 as the first named local specialist milestone: separate Instruct/Thinking tracks, strict specialist-fidelity benchmark, bounded-tool plus benchmark scheduling gates, hard task-capability matching, a narrow low-risk economy implementation lane, live installed-model proof, and explicit no-download/no-silent-promotion policy.
 
 Prior revision: **v1.7 (2026-07-15)** — Closed the v0.4 adaptive-workforce release gate with a successful CivicSuite acceptance run, full automated and dependency audits, a Computer Use UI/UX walkthrough, reviewer-invocation empirical observations, explicit manual tier-override evidence, cache-safe dashboard assets, and responsive cockpit fixes.
 
@@ -792,6 +794,8 @@ Acceptance:
 
 #### DH-640: Workbench — M
 
+Status: **Core implemented in the v0.5 development line.** Workbench sessions and attributed consultation results persist across restarts; the user can compare exact active qualified models under read-only runtime permission and explicitly convert the retained discussion into a linked objective draft. Conversion creates no plan or run, and paid API models remain subject to project spending policy.
+
 Deliverables:
 
 - non-mutating project scratchpad for questions, comparison, draft planning, and model consultation;
@@ -1112,7 +1116,7 @@ Exit gate:
 
 ### Increment 4: Verified local implementation — v0.5
 
-Status: **In progress.** DH-440 through DH-470 foundations, DH-510's bounded local tool loop, Mellum2 scheduling, and DH-620's durable single-workspace objective/plan approval core are implemented on the v0.5 development branch. DH-640 Workbench plus the aggregate release gate remain before v0.5 can ship.
+Status: **Feature scope implemented; integration gate pending.** DH-440 through DH-470 foundations, DH-510's bounded local tool loop, Mellum2 scheduling, DH-620's durable single-workspace objective/plan approval core, and DH-640's read-only multi-model Workbench are implemented on the v0.5 development branch. The aggregate release gate remains before v0.5 can ship.
 
 Work:
 

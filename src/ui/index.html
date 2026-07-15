@@ -16,6 +16,7 @@
         <button id="new-run" class="primary full">＋ New run</button>
         <nav class="app-nav" aria-label="Application">
           <button class="nav-link active" data-view="runs">Runs</button>
+          <button class="nav-link" data-view="workbench">Workbench</button>
           <button class="nav-link" data-view="products">Products</button>
           <button class="nav-link" data-view="setup">Setup</button>
           <button class="nav-link" data-view="models">Models</button>
@@ -166,6 +167,53 @@
             <section id="verdict-panel" class="panel verdict-panel">
               <div class="panel-heading"><h3>Final review</h3></div>
               <div id="verdict" class="empty-state">The reviewer’s verdict will appear after integration.</div>
+            </section>
+          </div>
+        </section>
+
+        <section id="workbench-view" class="workspace-view hidden" aria-labelledby="workbench-title">
+          <div class="view-heading">
+            <div><p class="eyebrow">DISCUSSION-ONLY STUDIO</p><h2 id="workbench-title">Multi-model Workbench</h2></div>
+            <button id="new-workbench" class="secondary" type="button">New scratchpad</button>
+          </div>
+          <div class="workbench-boundary" role="note"><strong>Read-only by design.</strong><span>Workbench consultations cannot start a run or change a repository. Convert useful discussion into an objective draft when you are ready.</span></div>
+          <form id="workbench-new-form" class="panel workbench-new hidden">
+            <label for="workbench-project">Project folder</label>
+            <input id="workbench-project" class="input" spellcheck="false">
+            <label for="workbench-title-input">Scratchpad title</label>
+            <input id="workbench-title-input" class="input" placeholder="Release strategy comparison">
+            <div class="composer-actions"><p id="workbench-new-error" class="error" role="alert"></p><button class="primary" type="submit">Create scratchpad</button></div>
+          </form>
+          <div class="workbench-layout">
+            <aside class="panel workbench-sessions" aria-label="Workbench scratchpads"><div class="panel-heading"><h3>Scratchpads</h3><span id="workbench-count" class="muted"></span></div><div id="workbench-session-list" class="workbench-session-list"></div></aside>
+            <section class="panel workbench-main">
+              <div id="workbench-empty" class="empty-state">Create a scratchpad to ask project questions and compare qualified models.</div>
+              <div id="workbench-active" class="hidden">
+                <div class="panel-heading workbench-heading"><div><span class="step">W</span><div><h2 id="workbench-active-title"></h2><p id="workbench-active-project" class="muted"></p></div></div><span class="lifecycle qualified">discussion only</span></div>
+                <div id="workbench-messages" class="workbench-messages" aria-live="polite"></div>
+                <form id="workbench-consult-form" class="workbench-consult">
+                  <label for="workbench-question">Ask the selected models</label>
+                  <textarea id="workbench-question" rows="4" placeholder="Compare two safe approaches to this product decision. Inspect the repository when useful, and distinguish facts from inference."></textarea>
+                  <fieldset><legend>Models to compare</legend><div id="workbench-models" class="workbench-models"></div></fieldset>
+                  <div class="composer-actions"><p id="workbench-error" class="error" role="alert"></p><button id="workbench-consult" class="primary" type="submit">Consult selected models</button></div>
+                </form>
+                <details id="workbench-convert" class="workbench-convert">
+                  <summary>Convert this discussion into an objective draft</summary>
+                  <form id="workbench-convert-form">
+                    <label for="workbench-outcome">Outcome</label><textarea id="workbench-outcome" rows="3" required></textarea>
+                    <div class="objective-grid">
+                      <label for="workbench-criteria">Acceptance criteria <small>One per line</small><textarea id="workbench-criteria" rows="3"></textarea></label>
+                      <label for="workbench-constraints">Constraints <small>One per line</small><textarea id="workbench-constraints" rows="3"></textarea></label>
+                    </div>
+                    <div class="objective-policy-grid">
+                      <label for="workbench-risk">Risk<select id="workbench-risk" class="input"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option></select></label>
+                      <label for="workbench-priority">Priority<select id="workbench-priority" class="input"><option value="low">Low</option><option value="normal" selected>Normal</option><option value="high">High</option><option value="urgent">Urgent</option></select></label>
+                      <label for="workbench-autonomy">Run mode<select id="workbench-autonomy" class="input"><option value="observe">Observe only</option><option value="supervised" selected>Supervised</option><option value="bounded">Bounded autonomy</option></select></label>
+                    </div>
+                    <div class="composer-actions"><p class="muted">Creates a draft only. Planning and execution still require their own approval.</p><button class="primary" type="submit">Create objective draft</button></div>
+                  </form>
+                </details>
+              </div>
             </section>
           </div>
         </section>

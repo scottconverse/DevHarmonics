@@ -16,7 +16,12 @@ import {
   type RunStatus,
 } from "./domain.js";
 import { redactText, redactValue } from "./redaction.js";
-import { objectiveInputSchema, planRevisionInputSchema } from "./schemas.js";
+import {
+  objectiveInputSchema,
+  planRevisionInputSchema,
+  workbenchMessageInputSchema,
+  workbenchSessionInputSchema,
+} from "./schemas.js";
 import type { ReviewFinding, StructuredReview } from "./review.js";
 import { aggregateModelPerformance, type ModelPerformanceObservation, type ModelPerformanceProfile } from "./model-performance.js";
 import { classifyWorkload } from "./model-intelligence.js";
@@ -41,6 +46,10 @@ import type {
   RunObjectiveLink,
   RunSummary,
   TaskStatus,
+  WorkbenchMessageInput,
+  WorkbenchMessageRecord,
+  WorkbenchSessionInput,
+  WorkbenchSessionRecord,
 } from "./types.js";
 
 interface RunRow {
@@ -132,7 +141,7 @@ interface CheckRow {
   duration_ms: number;
 }
 
-export const LEDGER_SCHEMA_VERSION = 18;
+export const LEDGER_SCHEMA_VERSION = 19;
 
 export interface RepositoryRecord {
   id: string;
@@ -811,6 +820,45 @@ const MIGRATIONS: readonly LedgerMigration[] = [
       `);
     },
   },
+  {
+    version: 19,
+    name: "read-only-workbench-consultations",
+    apply(database) {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS workbench_sessions (
+          id TEXT PRIMARY KEY,
+          project_path TEXT NOT NULL,
+          title TEXT NOT NULL,
+          mode TEXT NOT NULL CHECK(mode = 'read_only'),
+          objective_id TEXT REFERENCES objectives(id) ON DELETE SET NULL,
+          converted_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS workbench_messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id TEXT NOT NULL REFERENCES workbench_sessions(id) ON DELETE CASCADE,
+          role TEXT NOT NULL,
+          content TEXT NOT NULL,
+          provider TEXT,
+          connection_id TEXT,
+          requested_model_id TEXT,
+          resolved_model_id TEXT,
+          status TEXT,
+          error TEXT,
+          input_tokens INTEGER,
+          output_tokens INTEGER,
+          cost_usd REAL,
+          duration_ms INTEGER,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS workbench_sessions_updated_at
+          ON workbench_sessions(updated_at DESC);
+        CREATE INDEX IF NOT EXISTS workbench_messages_session
+          ON workbench_messages(session_id, id);
+      `);
+    },
+  },
 ];
 
 function summarizeGoal(goal: string, maxLength = 180): string {
@@ -930,6 +978,8 @@ const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
   review_findings: ["id", "review_receipt_id", "finding_id", "severity", "location", "rationale", "suggested_correction", "disposition", "created_at"],
   objectives: ["id", "outcome", "acceptance_criteria_json", "constraints_json", "project_path", "product_id", "repository_ids_json", "risk", "autonomy", "priority", "deadline", "policy_notes_json", "revision", "created_at", "updated_at"],
   plan_revisions: ["objective_id", "revision", "plan_json", "rationale", "approved", "created_at", "approved_at"],
+  workbench_sessions: ["id", "project_path", "title", "mode", "objective_id", "converted_at", "created_at", "updated_at"],
+  workbench_messages: ["id", "session_id", "role", "content", "provider", "connection_id", "requested_model_id", "resolved_model_id", "status", "error", "input_tokens", "output_tokens", "cost_usd", "duration_ms", "created_at"],
   model_performance_policies: ["model_id", "ignored_before", "excluded", "updated_at"],
   schema_migrations: ["version", "name", "applied_at"],
 };
@@ -966,6 +1016,98 @@ export class Ledger {
 
   getSchemaVersion(): number {
     return this.readSchemaVersion();
+  }
+
+  createWorkbenchSession(input: WorkbenchSessionInput): WorkbenchSessionRecord {
+    const session = workbenchSessionInputSchema.parse(input) as WorkbenchSessionInput;
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    this.database.prepare(`
+      INSERT INTO workbench_sessions (
+        id, project_path, title, mode, objective_id, converted_at, created_at, updated_at
+      ) VALUES (?, ?, ?, 'read_only', NULL, NULL, ?, ?)
+    `).run(id, session.projectPath, redactText(session.title), now, now);
+    return this.getWorkbenchSession(id)!;
+  }
+
+  getWorkbenchSession(id: string): WorkbenchSessionRecord | null {
+    const row = this.database.prepare("SELECT * FROM workbench_sessions WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    return row ? this.mapWorkbenchSession(row) : null;
+  }
+
+  listWorkbenchSessions(): WorkbenchSessionRecord[] {
+    const rows = this.database.prepare("SELECT * FROM workbench_sessions ORDER BY updated_at DESC, id").all() as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => this.mapWorkbenchSession(row));
+  }
+
+  appendWorkbenchMessage(input: WorkbenchMessageInput): WorkbenchMessageRecord {
+    const message = workbenchMessageInputSchema.parse(input) as WorkbenchMessageInput;
+    if (!this.getWorkbenchSession(message.sessionId)) {
+      throw new Error(`Workbench session '${message.sessionId}' was not found`);
+    }
+    const now = new Date().toISOString();
+    const result = this.database.prepare(`
+      INSERT INTO workbench_messages (
+        session_id, role, content, provider, connection_id, requested_model_id,
+        resolved_model_id, status, error, input_tokens, output_tokens, cost_usd,
+        duration_ms, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      message.sessionId,
+      message.role,
+      redactText(message.content),
+      message.provider ?? null,
+      message.connectionId ?? null,
+      message.requestedModelId ?? null,
+      message.resolvedModelId ?? null,
+      message.status ?? null,
+      message.error == null ? null : redactText(message.error),
+      message.inputTokens ?? null,
+      message.outputTokens ?? null,
+      message.costUsd ?? null,
+      message.durationMs ?? null,
+      now,
+    );
+    this.database.prepare("UPDATE workbench_sessions SET updated_at = ? WHERE id = ?").run(now, message.sessionId);
+    const row = this.database.prepare("SELECT * FROM workbench_messages WHERE id = ?").get(Number(result.lastInsertRowid)) as Record<string, unknown>;
+    return this.mapWorkbenchMessage(row);
+  }
+
+  listWorkbenchMessages(sessionId: string): WorkbenchMessageRecord[] {
+    if (!this.getWorkbenchSession(sessionId)) {
+      throw new Error(`Workbench session '${sessionId}' was not found`);
+    }
+    const rows = this.database.prepare("SELECT * FROM workbench_messages WHERE session_id = ? ORDER BY id").all(sessionId) as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => this.mapWorkbenchMessage(row));
+  }
+
+  linkWorkbenchObjective(sessionId: string, objectiveId: string): WorkbenchSessionRecord {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const session = this.getWorkbenchSession(sessionId);
+      if (!session) throw new Error(`Workbench session '${sessionId}' was not found`);
+      const objective = this.getObjective(objectiveId);
+      if (!objective) throw new Error(`Objective '${objectiveId}' was not found`);
+      if (session.objectiveId && session.objectiveId !== objectiveId) {
+        throw new Error(`Workbench session '${sessionId}' is already linked to objective '${session.objectiveId}'`);
+      }
+      if (session.projectPath !== objective.projectPath) {
+        throw new Error("Workbench session and objective must use the same project path");
+      }
+      if (!session.objectiveId) {
+        const now = new Date().toISOString();
+        this.database.prepare(`
+          UPDATE workbench_sessions
+          SET objective_id = ?, converted_at = ?, updated_at = ?
+          WHERE id = ?
+        `).run(objectiveId, now, now, sessionId);
+      }
+      this.database.exec("COMMIT");
+      return this.getWorkbenchSession(sessionId)!;
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   createObjective(input: ObjectiveInput): ObjectiveRecord {
@@ -2439,6 +2581,42 @@ export class Ledger {
       revision: Number(row.revision),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
+    };
+  }
+
+  private mapWorkbenchSession(row: Record<string, unknown>): WorkbenchSessionRecord {
+    if (String(row.mode) !== "read_only") {
+      throw new Error(`Workbench session '${String(row.id)}' has unsupported mode '${String(row.mode)}'`);
+    }
+    return {
+      id: String(row.id),
+      projectPath: String(row.project_path),
+      title: String(row.title),
+      mode: "read_only",
+      objectiveId: row.objective_id === null ? null : String(row.objective_id),
+      convertedAt: row.converted_at === null ? null : String(row.converted_at),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
+  }
+
+  private mapWorkbenchMessage(row: Record<string, unknown>): WorkbenchMessageRecord {
+    return {
+      id: Number(row.id),
+      sessionId: String(row.session_id),
+      role: String(row.role) as WorkbenchMessageRecord["role"],
+      content: String(row.content),
+      provider: row.provider === null ? null : String(row.provider),
+      connectionId: row.connection_id === null ? null : String(row.connection_id),
+      requestedModelId: row.requested_model_id === null ? null : String(row.requested_model_id),
+      resolvedModelId: row.resolved_model_id === null ? null : String(row.resolved_model_id),
+      status: row.status === null ? null : String(row.status) as WorkbenchMessageRecord["status"],
+      error: row.error === null ? null : String(row.error),
+      inputTokens: row.input_tokens === null ? null : Number(row.input_tokens),
+      outputTokens: row.output_tokens === null ? null : Number(row.output_tokens),
+      costUsd: row.cost_usd === null ? null : Number(row.cost_usd),
+      durationMs: row.duration_ms === null ? null : Number(row.duration_ms),
+      createdAt: String(row.created_at),
     };
   }
 

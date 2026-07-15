@@ -22,6 +22,9 @@ const state = {
   objective: null,
   planRevision: null,
   planPreview: null,
+  workbenchSessions: [],
+  workbenchSession: null,
+  workbenchMessages: [],
 };
 const $ = (selector) => document.querySelector(selector);
 
@@ -49,6 +52,7 @@ async function initialize() {
   $("#models-view").insertBefore($("#openrouter-panel"), $("#model-filter-bar"));
   state.bootstrap = await api("/api/bootstrap");
   $("#project-path").value = state.bootstrap.defaultProject;
+  $("#workbench-project").value = state.bootstrap.defaultProject;
   renderProviders();
   await refreshFleet();
   renderSettings();
@@ -284,6 +288,69 @@ function renderModels() {
   $("#model-connection").innerHTML = state.connections.map((connection) => `<option value="${escapeHtml(connection.id)}">${escapeHtml(connection.displayName)}</option>`).join("");
 }
 
+function workbenchEligibleModels() {
+  return state.models.filter((model) => isModelSchedulable(model) && hasCurrentQualificationForUiRole(model, "reviewer"));
+}
+
+async function refreshWorkbench(preferredSessionId = state.workbenchSession?.id) {
+  const result = await api("/api/workbench");
+  state.workbenchSessions = result.sessions;
+  const selectedId = preferredSessionId && state.workbenchSessions.some((item) => item.id === preferredSessionId)
+    ? preferredSessionId
+    : state.workbenchSessions[0]?.id;
+  if (selectedId) {
+    const detail = await api(`/api/workbench/${selectedId}`);
+    state.workbenchSession = detail.session;
+    state.workbenchMessages = detail.messages;
+  } else {
+    state.workbenchSession = null;
+    state.workbenchMessages = [];
+    $("#workbench-new-form").classList.remove("hidden");
+  }
+  renderWorkbench();
+}
+
+function renderWorkbench() {
+  $("#workbench-count").textContent = `${state.workbenchSessions.length} saved`;
+  $("#workbench-session-list").innerHTML = state.workbenchSessions.length
+    ? state.workbenchSessions.map((session) => `<button class="workbench-session ${session.id === state.workbenchSession?.id ? "active" : ""}" type="button" data-workbench-session="${escapeHtml(session.id)}"><strong>${escapeHtml(session.title)}</strong><span>${escapeHtml(session.projectPath)}</span></button>`).join("")
+    : '<div class="empty-state">No scratchpads yet.</div>';
+  $("#workbench-empty").classList.toggle("hidden", Boolean(state.workbenchSession));
+  $("#workbench-active").classList.toggle("hidden", !state.workbenchSession);
+  if (!state.workbenchSession) return;
+  $("#workbench-active-title").textContent = state.workbenchSession.title;
+  $("#workbench-active-project").textContent = state.workbenchSession.projectPath;
+  $("#workbench-messages").innerHTML = state.workbenchMessages.length
+    ? state.workbenchMessages.map((message) => {
+      const isUser = message.role === "user";
+      const model = message.requestedModelId ? state.models.find((item) => item.id === message.requestedModelId) : null;
+      const identity = isUser ? "You" : `${message.provider || "model"} / ${model?.displayName || message.resolvedModelId || message.requestedModelId || "consultation"}`;
+      const detail = [message.status, message.durationMs ? formatDuration(message.durationMs) : null, message.costUsd != null ? `$${Number(message.costUsd).toFixed(4)}` : null].filter(Boolean).join(" · ");
+      const body = message.status === "failed" ? message.error || "Consultation failed" : message.content;
+      return `<article class="workbench-message ${isUser ? "user" : message.status === "failed" ? "failed" : "assistant"}"><div class="workbench-message-head"><strong>${escapeHtml(identity)}</strong><span>${escapeHtml(detail || new Date(message.createdAt).toLocaleString())}</span></div><p>${escapeHtml(body || "")}</p></article>`;
+    }).join("")
+    : '<div class="empty-state">This discussion is empty. Ask one or more models the first question.</div>';
+  const eligible = workbenchEligibleModels();
+  $("#workbench-models").innerHTML = eligible.length
+    ? eligible.map((model, index) => {
+      const connection = state.connections.find((item) => item.id === model.connectionId);
+      return `<label class="workbench-model"><input type="checkbox" name="workbench-model" value="${escapeHtml(model.id)}" ${index < Math.min(2, eligible.length) ? "checked" : ""}><span><strong>${escapeHtml(model.displayName)}</strong><small>${escapeHtml(connection?.displayName || model.connectionId)} · ${escapeHtml(model.canonicalName)}</small></span></label>`;
+    }).join("")
+    : '<div class="empty-state">Activate and qualify at least one analysis-capable model in Models before consulting.</div>';
+  $("#workbench-consult").disabled = eligible.length === 0;
+  if (!$("#workbench-outcome").value && state.workbenchMessages.length) {
+    const lastQuestion = [...state.workbenchMessages].reverse().find((message) => message.role === "user");
+    $("#workbench-outcome").value = lastQuestion?.content || state.workbenchSession.title;
+  }
+}
+
+async function selectWorkbench(sessionId) {
+  const detail = await api(`/api/workbench/${sessionId}`);
+  state.workbenchSession = detail.session;
+  state.workbenchMessages = detail.messages;
+  renderWorkbench();
+}
+
 function showView(view) {
   closeTask();
   window.scrollTo({ top: 0, left: 0, behavior: "auto" });
@@ -293,6 +360,7 @@ function showView(view) {
   $("#models-view").classList.toggle("hidden", view !== "models");
   $("#evidence-view").classList.toggle("hidden", view !== "evidence");
   $("#products-view").classList.toggle("hidden", view !== "products");
+  $("#workbench-view").classList.toggle("hidden", view !== "workbench");
   if (view === "runs") {
     $("#composer").classList.toggle("hidden", Boolean(state.selectedRunId) && !state.composing);
     $("#run-view").classList.toggle("hidden", !state.selectedRunId || state.composing);
@@ -300,7 +368,7 @@ function showView(view) {
   } else {
     $("#composer").classList.add("hidden");
     $("#run-view").classList.add("hidden");
-    $("#page-title").textContent = view === "setup" ? "Configure the control plane" : view === "models" ? "Manage the model fleet" : view === "products" ? "Operate across real products" : "Inspect retained evidence";
+    $("#page-title").textContent = view === "setup" ? "Configure the control plane" : view === "models" ? "Manage the model fleet" : view === "products" ? "Operate across real products" : view === "workbench" ? "Explore before you execute" : "Inspect retained evidence";
   }
 }
 
@@ -704,8 +772,104 @@ document.querySelector(".app-nav").addEventListener("click", async (event) => {
   if (button.dataset.view === "setup" || button.dataset.view === "models") await refreshFleet();
   if (button.dataset.view === "evidence") await refreshEvidence();
   if (button.dataset.view === "products") await refreshProducts();
+  if (button.dataset.view === "workbench") await refreshWorkbench();
 });
 $("#refresh-products").addEventListener("click", refreshProducts);
+$("#new-workbench").addEventListener("click", () => {
+  $("#workbench-project").value = state.bootstrap.defaultProject;
+  $("#workbench-title-input").value = "";
+  $("#workbench-new-error").textContent = "";
+  $("#workbench-new-form").classList.toggle("hidden");
+  if (!$("#workbench-new-form").classList.contains("hidden")) $("#workbench-title-input").focus();
+});
+$("#workbench-new-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = event.currentTarget.querySelector('button[type="submit"]');
+  button.disabled = true;
+  $("#workbench-new-error").textContent = "";
+  try {
+    const result = await api("/api/workbench", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectPath: $("#workbench-project").value, title: $("#workbench-title-input").value.trim() || "Untitled scratchpad" }),
+    });
+    $("#workbench-new-form").classList.add("hidden");
+    await refreshWorkbench(result.session.id);
+  } catch (error) {
+    $("#workbench-new-error").textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+$("#workbench-session-list").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-workbench-session]");
+  if (button) await selectWorkbench(button.dataset.workbenchSession);
+});
+$("#workbench-consult-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state.workbenchSession) return;
+  const question = $("#workbench-question").value.trim();
+  const modelIds = [...document.querySelectorAll('input[name="workbench-model"]:checked')].map((input) => input.value);
+  if (!question) return $("#workbench-error").textContent = "Ask a question first.";
+  if (!modelIds.length) return $("#workbench-error").textContent = "Select at least one model.";
+  const button = $("#workbench-consult");
+  button.disabled = true;
+  button.textContent = `Consulting ${modelIds.length} model${modelIds.length === 1 ? "" : "s"}…`;
+  $("#workbench-error").textContent = "";
+  try {
+    await api(`/api/workbench/${state.workbenchSession.id}/consult`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, modelIds }),
+    });
+    $("#workbench-question").value = "";
+    await refreshWorkbench(state.workbenchSession.id);
+  } catch (error) {
+    $("#workbench-error").textContent = error.message;
+  } finally {
+    button.disabled = false;
+    button.textContent = "Consult selected models";
+  }
+});
+$("#workbench-convert-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state.workbenchSession) return;
+  const input = {
+    outcome: $("#workbench-outcome").value.trim(),
+    acceptanceCriteria: linesFrom("#workbench-criteria"),
+    constraints: linesFrom("#workbench-constraints"),
+    projectPath: state.workbenchSession.projectPath,
+    repositoryIds: [],
+    risk: $("#workbench-risk").value,
+    autonomy: $("#workbench-autonomy").value,
+    priority: $("#workbench-priority").value,
+    policyNotes: [`Source Workbench discussion: ${state.workbenchSession.id}`],
+  };
+  const button = event.currentTarget.querySelector('button[type="submit"]');
+  button.disabled = true;
+  try {
+    const result = await api(`/api/workbench/${state.workbenchSession.id}/convert`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    showComposer();
+    state.objective = result.objective;
+    $("#project-path").value = result.objective.projectPath;
+    $("#goal").value = result.objective.outcome;
+    $("#acceptance-criteria").value = result.objective.acceptanceCriteria.join("\n");
+    $("#constraints").value = result.objective.constraints.join("\n");
+    $("#objective-risk").value = result.objective.risk;
+    $("#objective-priority").value = result.objective.priority;
+    $("#run-autonomy").value = result.objective.autonomy;
+    $("#policy-notes").value = result.objective.policyNotes.join("\n");
+    renderRunAutonomyHelp();
+  } catch (error) {
+    $("#workbench-error").textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
 $("#refresh-evidence").addEventListener("click", refreshEvidence);
 $("#export-evidence").addEventListener("click", () => {
   const runId = state.selectedRunId || state.runs[0]?.id;

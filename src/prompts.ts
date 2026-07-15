@@ -200,6 +200,26 @@ export function formatFailures(results: CheckResult[]): string {
     .join("\n\n");
 }
 
+export function workbenchConsultationPrompt(input: {
+  projectPath: string;
+  question: string;
+  discussionContext: string;
+}): string {
+  return `You are consulting inside the DevHarmonics Workbench, a discussion-only project scratchpad.
+
+Project root: ${input.projectPath}
+
+Hard boundary: this is not an execution run. Work read-only. Do not modify files, create commits or branches, install dependencies, invoke write-capable tools, or write to external systems. You may inspect the project when the runtime supports read-only tools. Clearly distinguish observed repository facts from inference.
+
+Prior discussion:
+${bounded(input.discussionContext || "No prior discussion.", 12_000)}
+
+Current question:
+${bounded(input.question, 6_000)}
+
+Give a direct, useful answer for a product manager. Include concrete repository evidence when available, material tradeoffs, and unresolved questions. Do not produce an execution claim or imply that any proposed action has been approved.`;
+}
+
 function bounded(value: string, limit: number): string {
   const trimmed = value.trim();
   return trimmed.length <= limit ? trimmed : `${trimmed.slice(0, limit)}\n[truncated by DevHarmonics]`;

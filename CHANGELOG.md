@@ -6,6 +6,7 @@ All notable DevHarmonics changes are documented here.
 
 ### Added
 
+- A durable, discussion-only Workbench for project questions and side-by-side consultation of selected qualified models, with exact provider/model/usage attribution and explicit conversion into a linked objective draft without starting a run.
 - Durable structured objective drafts and immutable plan revisions with approval rationale, exact-revision run linkage, and restart-safe persistence.
 - A two-step objective composer that previews task dependencies, repository scope, permissions, checks, proposed model assignments, and capacity before execution.
 - Bounded Ollama implementation through scoped `file.read`, `file.search`, and hash-checked `file.patch` tools inside the assigned worktree, with typed policy and execution receipts.

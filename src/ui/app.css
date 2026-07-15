@@ -103,6 +103,39 @@ button { cursor: pointer; }
 .repository-row strong, .repository-row small { display: block; overflow: hidden; text-overflow: ellipsis; }
 .repository-row small { color: var(--muted); font-size: 10px; margin-top: 4px; white-space: nowrap; }
 .product-empty { padding: 22px; margin-top: 16px; }
+.workbench-boundary { display: flex; align-items: center; gap: 12px; margin: 16px 0; padding: 13px 15px; border: 1px solid #3d5428; border-radius: 11px; background: rgba(200,245,96,.055); }
+.workbench-boundary strong { color: var(--lime); white-space: nowrap; }
+.workbench-boundary span { color: var(--muted); font-size: 12px; line-height: 1.45; }
+.workbench-new { max-width: 720px; padding: 20px; margin: 16px 0; }
+.workbench-new label { margin-top: 10px; }
+.workbench-layout { display: grid; grid-template-columns: minmax(220px, 290px) minmax(0, 1fr); gap: 16px; align-items: start; }
+.workbench-sessions, .workbench-main { padding: 20px; min-height: 420px; }
+.workbench-session-list { display: grid; gap: 8px; }
+.workbench-session { width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: #0d1014; color: var(--text); text-align: left; }
+.workbench-session.active { border-color: #59663e; background: var(--lime-dark); }
+.workbench-session strong, .workbench-session span { display: block; overflow: hidden; text-overflow: ellipsis; }
+.workbench-session span { color: var(--muted); font-size: 10px; margin-top: 5px; white-space: nowrap; }
+.workbench-heading { align-items: flex-start; }
+.workbench-heading h2 { font-size: 22px; }
+.workbench-heading p { margin: 5px 0 0; overflow-wrap: anywhere; }
+.workbench-messages { display: grid; gap: 12px; margin: 20px 0; }
+.workbench-message { padding: 15px; border: 1px solid var(--border); border-radius: 11px; background: #0d1014; }
+.workbench-message.user { border-color: #4b5160; }
+.workbench-message.failed { border-color: #663b3b; }
+.workbench-message-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 9px; }
+.workbench-message-head strong { font-size: 12px; }
+.workbench-message-head span { color: var(--muted); font-size: 10px; }
+.workbench-message p { margin: 0; color: #c7cbd1; font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.workbench-answers { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 10px; }
+.workbench-consult { border-top: 1px solid var(--border); padding-top: 6px; }
+.workbench-models { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px; }
+.workbench-model { display: flex; gap: 9px; align-items: flex-start; margin: 0; padding: 11px; border: 1px solid var(--border); border-radius: 9px; background: #0d1014; }
+.workbench-model input { margin-top: 2px; }
+.workbench-model strong, .workbench-model small { display: block; }
+.workbench-model small { color: var(--muted); margin-top: 3px; }
+.workbench-convert { margin-top: 22px; border-top: 1px solid var(--border); padding-top: 18px; }
+.workbench-convert > summary { cursor: pointer; color: var(--amber); font-weight: 800; }
+.workbench-convert form { margin-top: 12px; }
 
 main { width: min(1500px, 100%); min-width: 0; padding: 28px 36px 60px; margin: 0 auto; }
 .topbar { display: flex; justify-content: space-between; align-items: center; gap: 24px; margin-bottom: 26px; }
@@ -266,6 +299,8 @@ pre { margin: 0; padding: 12px; overflow: auto; max-height: 280px; background: #
   .connection-grid, .model-grid { grid-template-columns: 1fr 1fr; }
   .settings-grid { grid-template-columns: 1fr 1fr; }
   .repository-list { grid-template-columns: 1fr; }
+  .workbench-layout { grid-template-columns: 1fr; }
+  .workbench-sessions { min-height: 0; }
 }
 
 @media (max-width: 650px) {
@@ -279,5 +314,6 @@ pre { margin: 0; padding: 12px; overflow: auto; max-height: 280px; background: #
   .view-heading { align-items: flex-start; flex-direction: column; }
   .connection-grid, .model-grid, .settings-grid { grid-template-columns: 1fr; }
   .product-head { flex-direction: column; }
+  .workbench-boundary { align-items: flex-start; flex-direction: column; }
   .board { grid-template-columns: 1fr; }
 }

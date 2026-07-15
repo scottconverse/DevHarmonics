@@ -146,6 +146,10 @@ Models can be pinned to an exact identifier or configured to track a Sol/Terra/L
 
 OpenRouter is disconnected and paid routing is disabled by default. OAuth stores its generated credential under Windows current-user protection; DevHarmonics never asks the user to paste an API key. Connecting does not authorize spending. Paid fallback additionally requires the project paid-API gate, the OpenRouter fallback gate, positive per-run and monthly limits, an activated and qualified exact model, and a live key-limit check. DevHarmonics disables OpenRouter's own model fallback and records the exact provider, model, tokens, cost, and fallback reason itself.
 
+## Workbench
+
+Workbench is a durable, read-only project scratchpad for questions, tradeoff analysis, draft planning, and side-by-side consultation of selected qualified models. Every answer retains its provider, requested and resolved model, usage, cost, duration, and failure state. Workbench cannot start a run or change a repository. A useful discussion can be explicitly converted into a linked objective draft; planning and execution still require their normal approval steps.
+
 ## Run lifecycle
 
 1. Save a structured objective draft containing the outcome, acceptance criteria, constraints, risk, priority, deadline, policy, and run mode. Saving or refining a draft starts no run.

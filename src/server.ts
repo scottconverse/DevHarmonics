@@ -15,7 +15,7 @@ import { PRODUCT_NAME, VERSION } from "./product.js";
 import { redactText } from "./redaction.js";
 import { createRunEvidenceExport, createRunReport } from "./reporter.js";
 import { observeLocalResources } from "./resources.js";
-import { manualModelSchema, objectiveInputSchema, productRegistrationSchema } from "./schemas.js";
+import { manualModelSchema, objectiveInputSchema, productRegistrationSchema, workbenchSessionInputSchema } from "./schemas.js";
 import type { ProviderName, RunRequest } from "./types.js";
 import { inferModelProfile } from "./model-intelligence.js";
 import type { ModelRecord } from "./registry.js";
@@ -357,6 +357,119 @@ async function route(
 
   if (request.method === "GET" && url.pathname === "/api/objectives") {
     sendJson(response, 200, { objectives: context.ledger.listObjectives() });
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/workbench") {
+    sendJson(response, 200, { sessions: context.ledger.listWorkbenchSessions() });
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/workbench") {
+    requireJsonRequest(request);
+    const raw = await readJson(request) as Record<string, unknown>;
+    const parsed = workbenchSessionInputSchema.safeParse({
+      projectPath: path.resolve(String(raw.projectPath || context.defaultProject)),
+      title: raw.title,
+    });
+    if (!parsed.success) {
+      sendJson(response, 400, { error: "Workbench scratchpad is invalid", issues: parsed.error.issues });
+      return;
+    }
+    const details = await stat(parsed.data.projectPath);
+    if (!details.isDirectory()) throw new Error("Workbench project path must be a directory");
+    await initializeProject(parsed.data.projectPath);
+    sendJson(response, 201, { session: context.ledger.createWorkbenchSession(parsed.data) });
+    return;
+  }
+
+  const workbenchMatch = url.pathname.match(/^\/api\/workbench\/([a-f0-9-]+)$/i);
+  if (request.method === "GET" && workbenchMatch?.[1]) {
+    const session = context.ledger.getWorkbenchSession(workbenchMatch[1]);
+    sendJson(response, session ? 200 : 404, session ? { session, messages: context.ledger.listWorkbenchMessages(session.id) } : { error: "Workbench scratchpad not found" });
+    return;
+  }
+
+  const workbenchConsultMatch = url.pathname.match(/^\/api\/workbench\/([a-f0-9-]+)\/consult$/i);
+  if (request.method === "POST" && workbenchConsultMatch?.[1]) {
+    requireJsonRequest(request);
+    const session = context.ledger.getWorkbenchSession(workbenchConsultMatch[1]);
+    if (!session) {
+      sendJson(response, 404, { error: "Workbench scratchpad not found" });
+      return;
+    }
+    const body = await readJson(request) as { question?: string; modelIds?: unknown };
+    const question = body.question?.trim() ?? "";
+    const modelIds = Array.isArray(body.modelIds)
+      ? [...new Set(body.modelIds.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim()))]
+      : [];
+    if (!question) {
+      sendJson(response, 400, { error: "Workbench question is required" });
+      return;
+    }
+    if (!modelIds.length) {
+      sendJson(response, 400, { error: "Select at least one qualified model" });
+      return;
+    }
+    const prior = context.ledger.listWorkbenchMessages(session.id);
+    const discussionContext = prior.map((message) => {
+      const identity = message.role === "user" ? "User" : message.provider || message.role;
+      const bodyText = message.status === "failed" ? `[failed: ${message.error}]` : message.content;
+      return `${identity}: ${bodyText}`;
+    }).join("\n\n");
+    const userMessage = context.ledger.appendWorkbenchMessage({ sessionId: session.id, role: "user", content: question });
+    const consultations = await context.orchestrator.consultWorkbench({
+      projectPath: session.projectPath,
+      question,
+      discussionContext,
+      modelIds,
+    });
+    const responses = consultations.map((consultation) => context.ledger.appendWorkbenchMessage({
+      sessionId: session.id,
+      role: "assistant",
+      content: consultation.text ?? "",
+      provider: consultation.provider,
+      connectionId: consultation.connectionId,
+      requestedModelId: consultation.requestedModelId,
+      resolvedModelId: consultation.resolvedModelId,
+      status: consultation.status,
+      error: consultation.error,
+      inputTokens: consultation.inputTokens,
+      outputTokens: consultation.outputTokens,
+      costUsd: consultation.costUsd,
+      durationMs: consultation.durationMs,
+    }));
+    sendJson(response, 201, { userMessage, responses });
+    return;
+  }
+
+  const workbenchConvertMatch = url.pathname.match(/^\/api\/workbench\/([a-f0-9-]+)\/convert$/i);
+  if (request.method === "POST" && workbenchConvertMatch?.[1]) {
+    requireJsonRequest(request);
+    const session = context.ledger.getWorkbenchSession(workbenchConvertMatch[1]);
+    if (!session) {
+      sendJson(response, 404, { error: "Workbench scratchpad not found" });
+      return;
+    }
+    if (session.objectiveId) {
+      const objective = context.ledger.getObjective(session.objectiveId);
+      sendJson(response, 409, { error: "This Workbench discussion is already linked to an objective", objective });
+      return;
+    }
+    const raw = await readJson(request) as Record<string, unknown>;
+    const policyNotes = Array.isArray(raw.policyNotes) ? raw.policyNotes : [];
+    const parsed = objectiveInputSchema.safeParse({
+      ...raw,
+      projectPath: session.projectPath,
+      policyNotes: [...policyNotes, `Workbench source: ${session.id}`],
+    });
+    if (!parsed.success) {
+      sendJson(response, 400, { error: "Objective draft is invalid", issues: parsed.error.issues });
+      return;
+    }
+    const objective = context.ledger.createObjective(parsed.data);
+    const updatedSession = context.ledger.linkWorkbenchObjective(session.id, objective.id);
+    sendJson(response, 201, { objective, session: updatedSession });
     return;
   }
 

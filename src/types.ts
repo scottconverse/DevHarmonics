@@ -188,6 +188,57 @@ export interface RunObjectiveLink {
   approvedPlanRevision: number;
 }
 
+export type WorkbenchMessageRole = "user" | "assistant" | "system";
+export type WorkbenchMessageStatus = "complete" | "failed";
+
+export interface WorkbenchSessionInput {
+  projectPath: string;
+  title: string;
+}
+
+export interface WorkbenchSessionRecord extends WorkbenchSessionInput {
+  id: string;
+  mode: "read_only";
+  objectiveId: string | null;
+  convertedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkbenchMessageInput {
+  sessionId: string;
+  role: WorkbenchMessageRole;
+  content: string;
+  provider?: string | null | undefined;
+  connectionId?: string | null | undefined;
+  requestedModelId?: string | null | undefined;
+  resolvedModelId?: string | null | undefined;
+  status?: WorkbenchMessageStatus | null | undefined;
+  error?: string | null | undefined;
+  inputTokens?: number | null | undefined;
+  outputTokens?: number | null | undefined;
+  costUsd?: number | null | undefined;
+  durationMs?: number | null | undefined;
+}
+
+export interface WorkbenchMessageRecord {
+  id: number;
+  sessionId: string;
+  role: WorkbenchMessageRole;
+  content: string;
+  provider: string | null;
+  connectionId: string | null;
+  requestedModelId: string | null;
+  resolvedModelId: string | null;
+  status: WorkbenchMessageStatus | null;
+  error: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: number | null;
+  durationMs: number | null;
+  createdAt: string;
+}
+
 export interface RunSummary {
   id: string;
   goal: string;

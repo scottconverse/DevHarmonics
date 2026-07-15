@@ -1,14 +1,16 @@
 # DevHarmonics Detailed Implementation Plan
 
 Document status: **Build-ready execution plan**
-Plan version: **1.16**
+Plan version: **1.17**
 Written: **2026-07-14**
 Revised: **2026-07-15**
 Product specification baseline: **DevHarmonics Product Specification v1.8**
 Current implementation baseline: **DevHarmonics v0.4.0**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 
-Revision history: **v1.16 (2026-07-15)** — Reconciled the plan with Product Specification v1.8 and its canonical positioning of DevHarmonics as a local-first, provider-neutral software factory for product owners managing AI agents as development teams. Corrected the immediate recommendation to reflect that Increment 4 feature scope is implemented and Increment 5 multi-repository operation is now in progress; this does not change release numbering.
+Revision history: **v1.17 (2026-07-15)** — Implemented DH-720's automatic multi-repository correction loop: risk-configured independent review quorums, exact repository-scoped finding assignment, per-repository fixer tasks, repository-local revalidation, changed-evidence hashing and receipt invalidation, and mandatory independent re-review. Unscoped or ambiguous findings fail closed. Product release numbering remains unchanged.
+
+Prior revision: **v1.16 (2026-07-15)** — Reconciled the plan with Product Specification v1.8 and its canonical positioning of DevHarmonics as a local-first, provider-neutral software factory for product owners managing AI agents as development teams. Corrected the immediate recommendation to reflect that Increment 4 feature scope is implemented and Increment 5 multi-repository operation is now in progress; this does not change release numbering.
 
 Prior revision: **v1.15 (2026-07-15)** — Corrected the Antigravity scheduler boundary: one authenticated Antigravity connection can expose Google, Anthropic, and OpenAI model vendors; Gemini and Claude/GPT quota groups retain independent cooldowns and reset windows; exhausting one group leaves the other eligible; and run receipts distinguish requested model identity from runtime-verified actual identity. The legacy `gemini` configuration key remains an internal compatibility alias only.
 
@@ -877,9 +879,9 @@ Acceptance:
 
 #### DH-720: Integration sets — XL
 
-Status: **First vertical slice implemented in the v0.5 development line; milestone remains in progress.** A supported approved plan creates an exact integration set across compatible local repositories. Each repository receives its own run integration branch and worktree pinned to a retained base commit; each task targets one repository and receives its own branch/worktree. Tasks in different repositories may run concurrently, while merges targeting the same repository use that repository's serialized merge queue. Repository-local validators and verification-integrity checks run against each integration branch. Final review is read-only and context-only across the aggregate, repository-prefixed diff evidence. The scheduler now qualifies an eligible premium reviewer before multi-repository review routing, rather than allowing an architect-only qualification to block an otherwise available reviewer. The ledger, evidence export, API, and run-board card retain every repository's base commit, integration HEAD, branch, worktree, status, error, and integration conditions. The registered primary checkouts are not checked out, merged, reset, or otherwise changed.
+Status: **Automatic fixer/re-review and configured review quorums implemented in the v0.5 development line; milestone remains in progress.** A supported approved plan creates an exact integration set across compatible local repositories. Each repository receives its own run integration branch and worktree pinned to a retained base commit; each task targets one repository and receives its own branch/worktree. Tasks in different repositories may run concurrently, while merges targeting the same repository use that repository's serialized merge queue. Repository-local validators and verification-integrity checks run against each integration branch. Final review is read-only and context-only across aggregate, repository-prefixed diff evidence and must satisfy the risk-configured reviewer count, distinct-provider, and implementor-independence rules. Blocking findings are assigned only by an exact repository-ID path prefix. DevHarmonics creates repository-scoped fixer tasks, revalidates the affected integration branches, requires the reviewed evidence hash to change, invalidates superseded review receipts while retaining their history, and runs a fresh independent quorum. Unscoped or ambiguous findings fail closed. The ledger, evidence export, API, and run-board card retain every repository's base commit, integration HEAD, branch, worktree, status, error, integration conditions, fixer tasks, and review receipts. The registered primary checkouts are not checked out, merged, reset, or otherwise changed.
 
-Deferred from this first slice: automatic multi-repository fixer/re-review and review quorums greater than one; runs remain `NOT READY` when review policy requires more than the single supported reviewer. Restart/resume reconstruction, automatic worktree cleanup, pushing branches or opening pull requests, and a single task mutating more than one repository also remain unimplemented.
+Still deferred: restart/resume reconstruction, automatic worktree cleanup, pushing branches or opening pull requests, and a single task mutating more than one repository.
 
 Deliverables:
 
@@ -1170,7 +1172,7 @@ Exit gate:
 
 ### Increment 5: CivicSuite single- and multi-repository operation — v0.6
 
-Status: **In progress.** DH-700's registry/local Git inspection, DH-710's product-aware repository selection and impact planning, and the first DH-720 exact multi-repository execution slice are implemented. DH-720 still needs automatic multi-repository fixing/quorum support, restart reconstruction, cleanup, and delivery automation; the bounded CivicSuite pilot also remains.
+Status: **In progress.** DH-700's registry/local Git inspection, DH-710's product-aware repository selection and impact planning, and DH-720's exact multi-repository execution plus automatic fixer/re-review quorum loop are implemented. DH-720 still needs restart reconstruction, cleanup, and delivery automation; the bounded CivicSuite pilot also remains.
 
 Work:
 
@@ -1478,7 +1480,7 @@ Increment 4 feature scope is implemented on the v0.5 development line, with its 
 
 > Complete a real, bounded CivicSuite objective through multi-repository implementation, automatic fix/re-review, restart-safe recovery, and a reviewable delivery handoff without modifying registered primary checkouts.
 
-The existing DH-700, DH-710, DH-720, and DH-730 slices already provide the product registry, repository-aware planning, exact multi-repository integration sets, and source-backed product intelligence. The next build slice should add automatic multi-repository fixer disposition and configured review quorum support, then reconstruct interrupted integration sets and clean completed temporary worktrees safely.
+The existing DH-700, DH-710, DH-720, and DH-730 slices already provide the product registry, repository-aware planning, exact multi-repository integration sets, source-backed product intelligence, and automatic repository-scoped fix/revalidation/re-review under configured quorums. The next build slice should reconstruct interrupted integration sets and clean completed temporary worktrees safely.
 
 Once that vertical slice works, run the first bounded CivicSuite implementation objective through the product and retain its plan, model routing, worktree, validation, review, recovery, and delivery evidence. Draft pull-request or branch-delivery automation follows under explicit human approval. Campaign-scale orchestration remains after this proven product workflow rather than ahead of it.
 

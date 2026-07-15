@@ -10,7 +10,7 @@ import { defaultConfig, initializeProject, loadConfig, resolveProviderCommand } 
 import { projectLegacyProvider } from "../src/compatibility.js";
 import { assertRunTransition, assertTaskTransition, domainId } from "../src/domain.js";
 import { LEDGER_SCHEMA_VERSION, Ledger } from "../src/ledger.js";
-import { Orchestrator, parseFirstJsonObject, taskAttemptTimeoutMs } from "../src/orchestrator.js";
+import { assignReviewFindings, Orchestrator, parseFirstJsonObject, taskAttemptTimeoutMs } from "../src/orchestrator.js";
 import { discoverOllama, OllamaAdapter, syncOllamaRegistry, syncOllamaRuntimes } from "../src/ollama.js";
 import {
   createProvider,
@@ -1321,6 +1321,14 @@ test("risk-based review quorum fails closed on weak independence and open findin
   assert.equal(rejected.passed, false);
   assert.equal(rejected.openFindings.length, 1);
   assert.match(rejected.reasons.join(" "), /open reviewer finding/i);
+});
+
+test("multi-repository review findings are assigned only by an exact repository path prefix", () => {
+  const scoped = { id: "core-defect", severity: "high" as const, location: "repo:core\\src\\service.ts:7", rationale: "Defect remains.", suggestedCorrection: "Repair it.", disposition: "open" as const };
+  const unscoped = { ...scoped, id: "unknown-defect", location: "src/service.ts:7" };
+  const assignment = assignReviewFindings([scoped, unscoped], ["repo:core", "repo:docs"]);
+  assert.deepEqual(assignment.byRepository.get("repo:core")?.map((finding) => finding.id), ["core-defect"]);
+  assert.deepEqual(assignment.unassigned.map((finding) => finding.id), ["unknown-defect"]);
 });
 
 test("ledger retains structured reviews and invalidates them when fixer evidence changes", async () => {

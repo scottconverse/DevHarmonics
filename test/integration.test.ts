@@ -84,14 +84,16 @@ if (process.argv.includes("--version")) {
         ],
         integrationConditions:["The documentation must describe the behavior implemented in the core repository."],
         tasks:[
-          {id:"core",title:"Implement the product change",description:"Update the core repository",dependencies:[],preferredProvider:"codex",checks:["diff-check"],repositoryIds:["repo:core"]},
+          {id:"core",title:"Implement the product change",description:"Update the core repository",dependencies:[],preferredProvider:"codex",checks:input.includes("automatic fixer")?["diff-check","defect-free"]:["diff-check"],repositoryIds:["repo:core"]},
           {id:"docs",title:"Document the product change",description:"Update the documentation repository",dependencies:["core"],preferredProvider:"codex",checks:["diff-check"],repositoryIds:["repo:docs"]}
         ]
       }
     : {summary:"fixture plan",recommendedConcurrency:1,tasks:[task]};
   console.log(JSON.stringify({result:JSON.stringify(plan)}));
 } else if (input.includes("You are reviewing bounded") || (args.includes("--new-project") && process.cwd().includes("integration"))) {
-  const review = "READY\\n\\nThe supplied repository diff chunk matches the approved task scope.";
+  const review = input.includes("repo:core/needs-fix.txt")
+    ? "NOT READY\\n\\nA retained defect marker remains.\\n" + JSON.stringify({findings:[{id:"remove-core-defect-marker",severity:"high",location:"repo:core/needs-fix.txt:1",rationale:"The core repository still contains the defect marker.",suggestedCorrection:"Remove needs-fix.txt and create the corrected result.txt in repo:core.",disposition:"open"}]})
+    : "READY\\n\\nThe supplied repository diff chunk matches the approved task scope.";
   if (process.argv.includes("--json")) console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:review}}));
   else if (process.argv.includes("--output-format")) console.log(JSON.stringify({result:review}));
   else console.log(review);
@@ -106,13 +108,16 @@ if (process.argv.includes("--version")) {
   else console.log(review);
 } else if (input.includes("diagnostic investigator")) {
   console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"README.md:1 contains the heading Fixture. This directly satisfies the assigned diagnostic criterion, and the read-only inspection identified no contradictory heading elsewhere. No files were changed."}}));
-} else if (input.includes("Resolve review findings")) {
+} else if (input.includes("Correct only these retained review findings")) {
   if (existsSync("needs-fix.txt")) unlinkSync("needs-fix.txt");
   writeFileSync("result.txt", "corrected by independent fixer\\n", "utf8");
   console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"Removed needs-fix.txt and created corrected result.txt"}}));
 } else if (input.includes("Fixer fixture")) {
   writeFileSync("needs-fix.txt", "defect marker\\n", "utf8");
   console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"Created needs-fix.txt for review"}}));
+} else if (input.includes("Cross repository fixture with automatic fixer") && input.includes("Implement the product change")) {
+  writeFileSync("needs-fix.txt", "cross-repository defect marker\\n", "utf8");
+  console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"Created the repository-scoped defect marker for review"}}));
 } else if (input.includes("Shortcut fixture")) {
   mkdirSync("test", {recursive:true});
   writeFileSync("test/shortcut.test.ts", "test.skip('important behavior', () => {});\\n", "utf8");
@@ -1022,7 +1027,7 @@ test("cross-repository objective planning maps impact without starting an unsupp
   }
 });
 
-test("DH-720 executes an exact two-repository integration set without changing the primary checkouts", async () => {
+test("DH-720 automatically fixes a repository-scoped finding and independently re-reviews the exact integration set", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-integration-set-"));
   const core = await createRepository(path.join(root, "core"));
   const docs = await createRepository(path.join(root, "docs"));
@@ -1036,9 +1041,10 @@ test("DH-720 executes an exact two-repository integration set without changing t
   config.product.architect = "claude";
   config.product.reviewer = "gemini";
   config.product.workers = ["codex"];
-  config.reviewPolicy.reviewerCountByRisk.medium = 1;
-  config.reviewPolicy.minimumDistinctProvidersByRisk.medium = 1;
+  config.reviewPolicy.reviewerCountByRisk.medium = 2;
+  config.reviewPolicy.minimumDistinctProvidersByRisk.medium = 2;
   config.reviewPolicy.requireImplementorIndependenceByRisk.medium = true;
+  config.repository.validators["defect-free"] = { command: "node", args: ["-e", "const p=require('path');process.exit(!process.cwd().includes(p.sep+'tasks'+p.sep)&&require('fs').existsSync('needs-fix.txt')?1:0)"], timeoutMs: 60_000 };
   for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
   await writeFile(path.join(devHarmonicsDirectory(core), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
 
@@ -1066,7 +1072,7 @@ test("DH-720 executes an exact two-repository integration set without changing t
       const response = await fetch(`${dashboard.url}/api/products/fixture-product/repositories`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ localPath, role, expectedBranch: "main", owners: ["fixture"], dependencyRepositoryIds: [], governanceSources: ["README.md"], validators: { "diff-check": "git diff --check" } }),
+        body: JSON.stringify({ localPath, role, expectedBranch: "main", owners: ["fixture"], dependencyRepositoryIds: [], governanceSources: ["README.md"], validators: role === "module" ? { "diff-check": "git diff --check", "defect-free": `node -e "const p=require('path');process.exit(!process.cwd().includes(p.sep+'tasks'+p.sep)&&require('fs').existsSync('needs-fix.txt')?1:0)"` } : { "diff-check": "git diff --check" } }),
       });
       assert.equal(response.status, 201, await response.clone().text());
     }
@@ -1075,7 +1081,7 @@ test("DH-720 executes an exact two-repository integration set without changing t
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        outcome: "Cross repository fixture: implement and document the product change",
+        outcome: "Cross repository fixture with automatic fixer: implement and document the product change",
         acceptanceCriteria: ["Both repositories contain the approved result"],
         constraints: ["Keep the primary checkouts unchanged"],
         projectPath: core,
@@ -1123,12 +1129,32 @@ test("DH-720 executes an exact two-repository integration set without changing t
     assert.equal(byId.get("repo:docs")?.baseCommit, docsBase);
     assert.notEqual(byId.get("repo:core")?.headCommit, coreBase);
     assert.notEqual(byId.get("repo:docs")?.headCommit, docsBase);
-    assert.equal((await readFile(path.join(byId.get("repo:core")!.integrationWorktreePath, "result.txt"), "utf8")).replace(/\r\n/g, "\n"), "created by worker\n");
+    assert.equal((await readFile(path.join(byId.get("repo:core")!.integrationWorktreePath, "result.txt"), "utf8")).replace(/\r\n/g, "\n"), "corrected by independent fixer\n");
     assert.equal((await readFile(path.join(byId.get("repo:docs")!.integrationWorktreePath, "result.txt"), "utf8")).replace(/\r\n/g, "\n"), "created by worker\n");
+    await assert.rejects(readFile(path.join(byId.get("repo:core")!.integrationWorktreePath, "needs-fix.txt"), "utf8"));
     await assert.rejects(readFile(path.join(core, "result.txt"), "utf8"));
     await assert.rejects(readFile(path.join(docs, "result.txt"), "utf8"));
     assert.equal((await git(core, ["status", "--porcelain"])).stdout.trim(), "");
     assert.equal((await git(docs, ["status", "--porcelain"])).stdout.trim(), "");
+    const ledger = new Ledger(path.join(devHarmonicsDirectory(core), "devharmonics.db"));
+    try {
+      const reviews = ledger.listReviewReceipts(runId);
+      assert.equal(reviews.length, 4);
+      assert.ok(reviews.slice(0, 2).every((review) => review.invalidatedAt), "every receipt from the rejected multi-repository quorum must be retained but invalidated");
+      assert.ok(reviews.slice(0, 2).some((review) => review.verdict === "NOT_READY"), "the rejected quorum must retain its blocking review");
+      assert.ok(reviews.slice(2).every((review) => review.verdict === "READY" && review.invalidatedAt === null));
+      assert.equal(new Set(reviews.slice(2).map((review) => review.provider)).size, 2, "the replacement quorum must use distinct providers");
+      assert.notEqual(reviews[0]!.integrationSha256, reviews[2]!.integrationSha256);
+      const retained = ledger.getRun(runId);
+      assert.equal(retained?.tasks.find((task) => task.id === "__integration__-repo-core")?.checks.find((check) => check.name === "defect-free")?.passed, false, "the initial repository validator must detect the defect marker");
+      assert.equal(retained?.tasks.find((task) => task.id === "__review_fix_1_repo-core")?.status, "passed");
+      assert.ok(retained?.tasks.find((task) => task.id === "__review_fix_1_repo-core")?.checks.filter((check) => check.name === "defect-free").some((check) => check.passed), "the fixed integration branch must pass the same repository validator");
+      assert.ok(retained?.events.some((event) => event.kind === "review.invalidated"));
+      assert.ok(retained?.events.some((event) => event.kind === "fixer.completed"));
+      assert.ok(retained?.events.some((event) => event.kind === "review.quorum_passed"));
+    } finally {
+      ledger.close();
+    }
     const evidenceExport = await fetch(`${dashboard.url}/api/runs/${runId}/evidence/export`).then((response) => response.json()) as { evidence: { integrationSet: IntegrationSetFixture } };
     assert.deepEqual(evidenceExport.evidence.integrationSet.repositories.map((repository) => repository.repositoryId), ["repo:core", "repo:docs"]);
   } finally {
@@ -1138,6 +1164,7 @@ test("DH-720 executes an exact two-repository integration set without changing t
         const taskId = repository.repositoryId === "repo:core" ? "core" : "docs";
         const repositoryRoot = repository.repositoryId === "repo:core" ? core : docs;
         await runProcess({ command: "git", args: ["worktree", "remove", "--force", path.join(path.dirname(repository.integrationWorktreePath), "tasks", taskId)], cwd: repositoryRoot, timeoutMs: 30_000 });
+        if (repository.repositoryId === "repo:core") await runProcess({ command: "git", args: ["worktree", "remove", "--force", path.join(path.dirname(repository.integrationWorktreePath), "tasks", "__review_fix_1_repo-core")], cwd: repositoryRoot, timeoutMs: 30_000 });
         await runProcess({ command: "git", args: ["worktree", "remove", "--force", repository.integrationWorktreePath], cwd: repositoryRoot, timeoutMs: 30_000 });
       }
     }

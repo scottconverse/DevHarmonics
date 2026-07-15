@@ -39,9 +39,9 @@ import { syncSubscriptionConnections } from "./registry.js";
 import { ModelRouter } from "./routing.js";
 import { observeLocalResources } from "./resources.js";
 import { evaluateToolRequest, type ToolStage } from "./policy.js";
-import { adjudicateReviewQuorum, parseReviewerResponse, reviewRequirement, type ReviewQuorumDecision, type ReviewRequirement, type StructuredReview } from "./review.js";
+import { adjudicateReviewQuorum, parseReviewerResponse, reviewRequirement, type ReviewFinding, type ReviewQuorumDecision, type ReviewRequirement, type StructuredReview } from "./review.js";
 import { estimateInvocationCost, OpenRouterService } from "./openrouter.js";
-import { ensureReviewerCandidateQualified, ensureSchedulerCandidateQualified, type SchedulerQualificationResult } from "./qualification.js";
+import { ensureSchedulerCandidateQualified, type SchedulerQualificationResult } from "./qualification.js";
 import { runValidator, unknownValidator } from "./validators.js";
 import { analyzeVerificationIntegrity } from "./verification-integrity.js";
 import { runLocalToolLoop } from "./local-tools.js";
@@ -1027,8 +1027,7 @@ export class Orchestrator {
       }
       if (input.signal.aborted) return;
 
-      let failed = false;
-      const aggregatedDiffs: Array<{ path: string; diff: string }> = [];
+      let aggregatedDiffs: Array<{ path: string; diff: string }> = [];
       for (const repository of repositories) {
         const repositoryId = repository.id;
         const context = repositoryContexts.get(repositoryId)!;
@@ -1072,69 +1071,173 @@ export class Orchestrator {
           repositoryFailed ||= !integrity.passed;
         }
         const headCommit = await manager.resolveIntegrationHead();
-        failed ||= repositoryFailed;
         this.ledger.updateIntegrationSetRepository(input.runId, repositoryId, { status: repositoryFailed ? "failed" : "ready", headCommit });
       }
 
       const checkSummary = this.checkSummary(input.runId);
       const taskReports = this.taskReportSummary(input.runId);
       const constitution = [...repositoryContexts.entries()].map(([repositoryId, context]) => `Repository ${repositoryId}:\n${context.constitution}`).join("\n\n");
-      const integrationSha256 = this.reviewEvidenceSha256({ autonomy: input.autonomy, plan: input.plan, taskReports, diff: aggregatedDiffs });
-      const reviewerName = input.availableProviders.includes(input.config.product.reviewer) ? input.config.product.reviewer : input.availableProviders[0]!;
-      const implementationProviders = [...new Set((this.ledger.getRun(input.runId)?.tasks ?? []).filter((task) => !task.id.startsWith("__integration__") && task.provider).map((task) => String(task.provider)))];
-      const reviewerStart = input.availableProviders.indexOf(reviewerName);
-      const qualificationProviders = input.availableProviders.map((_, index) => input.availableProviders[(Math.max(0, reviewerStart) + index) % input.availableProviders.length]!);
-      const qualification = await ensureReviewerCandidateQualified({
-        ledger: this.ledger,
-        config: input.config,
-        cwd: integration.manager(affectedIds[0]!).integrationPath,
-        providers: qualificationProviders,
-        onResult: (result) => this.recordSchedulerQualification(input.runId, result, "reviewer"),
-      });
-      if (!qualification) throw new Error("No premium multi-repository reviewer candidate is available for first-use qualification");
-      const reviewerDecision = new ModelRouter(this.ledger).route({
-        role: "reviewer",
-        config: input.config,
-        fallbackProvider: qualification.provider as ProviderName,
-        allowedProviders: input.availableProviders,
-        permission: "read_only",
-        avoidProviders: implementationProviders,
-      });
-      const reviewer = await this.provider(reviewerDecision.provider, input.config, reviewerDecision.connectionId);
-      this.ledger.addEvent(input.runId, "review.started", `${reviewerDecision.provider} is reviewing the exact multi-repository integration set`, { routing: reviewerDecision, repositoryIds: affectedIds });
-      const chunks = input.autonomy === "observe" ? this.diagnosticReportChunks(input.runId) : chunkDiffFiles(aggregatedDiffs);
-      if (!chunks.length) throw new Error("Multi-repository review has no accepted evidence chunks");
-      const review = await runContextOnlyReview({
-        adapter: reviewer,
-        model: reviewerDecision.model,
-        cwd: integration.manager(affectedIds[0]!).integrationPath,
-        contextHeader: localReviewerContextHeader({ goal: input.request.goal, constitution, plan: input.plan, checkSummary, taskReports, autonomy: input.autonomy }),
-        chunks,
-        evidenceLabel: input.autonomy === "observe" ? "diagnostic report" : "repository diff chunk",
-        signal: input.signal,
-        onChunk: (receipt, index, total) => {
-          this.ledger.addEvent(input.runId, "review.chunk_completed", `${reviewerDecision.provider} reviewed chunk ${index + 1}/${total}: ${receipt.label} — ${receipt.verdict}`, { label: receipt.label, verdict: receipt.verdict, repositoryIds: affectedIds });
-          this.ledger.recordInvocationReceipt({ runId: input.runId, role: "reviewer", provider: receipt.provider, connectionId: receipt.connectionId, requestedModelId: reviewerDecision.model.requestedModelId ? String(reviewerDecision.model.requestedModelId) : null, resolvedModelId: receipt.resolvedModelId, inputTokens: receipt.inputTokens, outputTokens: receipt.outputTokens, costUsd: receipt.costUsd, durationMs: receipt.durationMs, workloadClass: "complex:premium", fallbackReason: reviewerDecision.fallback ? reviewerDecision.factors.join("; ") : null });
-        },
-      });
-      const structured = parseReviewerResponse(review.text, {
-        provider: reviewerDecision.provider,
-        modelId: reviewerDecision.model.requestedModelId ? String(reviewerDecision.model.requestedModelId) : null,
-        connectionId: String(reviewer.connection.id),
-      });
-      const receiptId = this.ledger.recordReviewReceipt({ runId: input.runId, round: 1, integrationSha256, review: structured });
-      this.ledger.addEvent(input.runId, "review.completed", `${structured.provider} completed multi-repository review: ${structured.verdict.replace("_", " ")}`, { receiptId, repositoryIds: affectedIds, integrationSha256 });
       const requirement = reviewRequirement(input.plan.tasks, input.config.reviewPolicy);
-      const independent = !requirement.requireImplementorIndependence || !implementationProviders.includes(structured.provider);
-      const reviewComplete = requirement.requiredReviewers === 1 && requirement.minimumDistinctProviders === 1;
-      const ready = !failed && structured.verdict === "READY" && independent && reviewComplete;
+      const reviewerName = input.availableProviders.includes(input.config.product.reviewer) ? input.config.product.reviewer : input.availableProviders[0]!;
+      const reviewCwd = integration.manager(affectedIds[0]!).integrationPath;
+      const implementationProviders = () => [...new Set((this.ledger.getRun(input.runId)?.tasks ?? [])
+        .filter((task) => !task.id.startsWith("__integration__") && task.provider)
+        .map((task) => String(task.provider)))];
+      let finalReviewSha256 = this.reviewEvidenceSha256({ autonomy: input.autonomy, plan: input.plan, taskReports, diff: aggregatedDiffs });
+      let reviewRound = await this.completeReviewRound({
+        runId: input.runId,
+        round: 1,
+        integrationSha256: finalReviewSha256,
+        requirement,
+        reviewerName,
+        reviewerProviders: input.availableProviders,
+        implementationProviders: implementationProviders(),
+        config: input.config,
+        reviewCwd,
+        reviewChunks: input.autonomy === "observe" ? this.diagnosticReportChunks(input.runId) : chunkDiffFiles(aggregatedDiffs),
+        reviewEvidenceLabel: input.autonomy === "observe" ? "diagnostic report" : "repository diff chunk",
+        eventContext: { repositoryIds: affectedIds },
+        signal: input.signal,
+        goal: input.request.goal,
+        constitution,
+        plan: input.plan,
+        checkSummary,
+        taskReports,
+        autonomy: input.autonomy,
+      });
+
+      for (let fixRound = 1; !reviewRound.decision.passed && reviewRound.decision.openFindings.length && input.autonomy !== "observe" && fixRound <= input.config.reviewPolicy.maxFixRounds; fixRound++) {
+        const assignments = assignReviewFindings(reviewRound.decision.openFindings, affectedIds);
+        if (assignments.unassigned.length) {
+          this.ledger.addEvent(input.runId, "fixer.failed", `${assignments.unassigned.length} review finding(s) could not be assigned to exactly one repository`, {
+            fixRound,
+            findingIds: assignments.unassigned.map((finding) => finding.id),
+            repositoryIds: affectedIds,
+          });
+          break;
+        }
+        const reviewerProviders = new Set(reviewRound.reviews.map((review) => review.provider));
+        const fixerProviders = input.workerProviders.filter((provider) => !reviewerProviders.has(provider));
+        if (!fixerProviders.length) {
+          this.ledger.addEvent(input.runId, "fixer.failed", "No implementor provider independent from the multi-repository review quorum is available", { fixRound, reviewerProviders: [...reviewerProviders] });
+          break;
+        }
+
+        const repairs = [...assignments.byRepository.entries()].map(([repositoryId, findings], index) => {
+          const repository = repositories.find((candidate) => candidate.id === repositoryId)!;
+          const context = repositoryContexts.get(repositoryId)!;
+          const checks = [...new Set(input.plan.tasks.filter((task) => task.repositoryIds?.[0] === repositoryId).flatMap((task) => task.checks))];
+          const repositoryScope = findings.map((finding) => repositoryPathForFinding(finding.location, repositoryId)).filter((value): value is string => Boolean(value));
+          const repairTask: PlannedTask = {
+            id: `__review_fix_${fixRound}_${safeTaskPart(repositoryId)}`,
+            title: `Resolve ${repository.name} review findings (round ${fixRound})`,
+            description: `Correct only these retained review findings in repository ${repositoryId}:\n${findings.map((finding) => `- ${finding.severity.toUpperCase()} ${finding.location ?? "location not supplied"}: ${finding.rationale}\n  Suggested correction: ${finding.suggestedCorrection}`).join("\n")}`,
+            dependencies: [],
+            repositoryIds: [repositoryId],
+            preferredProvider: fixerProviders[index % fixerProviders.length] ?? fixerProviders[0]!,
+            checks: checks.length ? checks : ["diff-check"],
+            kind: "repair",
+            repositoryScope: repositoryScope.length ? repositoryScope : ["."],
+            permission: "workspace_write",
+            risk: requirement.risk,
+            capabilityNeeds: ["implementation", "repair"],
+            acceptanceCriteria: findings.map((finding) => finding.suggestedCorrection),
+            expectedArtifacts: ["committed repair diff", "passing validator receipts"],
+          };
+          return { repositoryId, context, manager: integration.manager(repositoryId), repairTask };
+        });
+        for (const repair of repairs) {
+          this.ledger.addTask(input.runId, repair.repairTask);
+          this.ledger.addEvent(input.runId, "fixer.started", `${repair.repairTask.preferredProvider} is addressing ${assignments.byRepository.get(repair.repositoryId)!.length} finding(s) in ${repair.repositoryId}`, { fixRound, taskId: repair.repairTask.id, repositoryId: repair.repositoryId });
+        }
+        const repairStatuses = await Promise.all(repairs.map(async (repair, index) => ({
+          repair,
+          status: await this.executeTask({
+            runId: input.runId,
+            goal: input.request.goal,
+            task: repair.repairTask,
+            constitution: repair.context.constitution,
+            config: repair.context.config,
+            providers: fixerProviders,
+            providerCursor: providerCursor + fixRound + index,
+            worktrees: repair.manager,
+            signal: input.signal,
+          }),
+        })));
+        if (repairStatuses.some(({ status }) => status !== "passed")) {
+          for (const { repair, status } of repairStatuses.filter(({ status }) => status !== "passed")) {
+            this.ledger.addEvent(input.runId, "fixer.failed", `${repair.repositoryId} fixer ended ${status}`, { fixRound, taskId: repair.repairTask.id, repositoryId: repair.repositoryId, status });
+          }
+          break;
+        }
+
+        let repairsPassed = true;
+        for (const { repair } of repairStatuses) {
+          const postFixChecks = await this.verifyTask({ runId: input.runId, task: repair.repairTask, config: repair.context.config }, repair.manager.integrationPath);
+          const integrity = analyzeVerificationIntegrity(await repair.manager.integrationDiffFiles());
+          this.ledger.recordCheck(input.runId, repair.repairTask.id, {
+            name: "verification-integrity",
+            passed: integrity.passed,
+            exitCode: integrity.passed ? 0 : 1,
+            stdout: JSON.stringify({ repositoryId: repair.repositoryId, summary: integrity.summary, census: integrity.census, findings: integrity.findings }, null, 2),
+            stderr: "",
+            durationMs: 0,
+          });
+          const passed = postFixChecks.every((check) => check.passed) && integrity.passed;
+          repairsPassed &&= passed;
+          const headCommit = await repair.manager.resolveIntegrationHead();
+          this.ledger.updateIntegrationSetRepository(input.runId, repair.repositoryId, { status: passed ? "ready" : "failed", headCommit, ...(passed ? {} : { error: `Fixer round ${fixRound} failed validation` }) });
+          this.ledger.addEvent(input.runId, passed ? "fixer.completed" : "fixer.failed", passed ? `${repair.repositoryId} fixer passed integration validation; re-review is required` : `${repair.repositoryId} fixer failed integration validation`, { fixRound, taskId: repair.repairTask.id, repositoryId: repair.repositoryId, headCommit });
+        }
+        if (!repairsPassed) break;
+
+        aggregatedDiffs = (await Promise.all(repositories.map(async (repository) => {
+          const diffs = await integration.manager(repository.id).integrationDiffFiles();
+          return diffs.map((diff) => ({ path: `${repository.id}/${diff.path}`, diff: diff.diff }));
+        }))).flat();
+        const refreshedTaskReports = this.taskReportSummary(input.runId);
+        const refreshedCheckSummary = this.checkSummary(input.runId);
+        const refreshedSha256 = this.reviewEvidenceSha256({ autonomy: input.autonomy, plan: input.plan, taskReports: refreshedTaskReports, diff: aggregatedDiffs });
+        if (refreshedSha256 === finalReviewSha256) {
+          this.ledger.addEvent(input.runId, "fixer.failed", `Multi-repository fixer round ${fixRound} produced no change to reviewed integration evidence`, { fixRound, integrationSha256: refreshedSha256 });
+          break;
+        }
+        const invalidated = this.ledger.invalidateReviewReceipts(input.runId, `Multi-repository fixer round ${fixRound} changed integration evidence from ${finalReviewSha256} to ${refreshedSha256}`);
+        this.ledger.addEvent(input.runId, "review.invalidated", `Multi-repository fixer round ${fixRound} invalidated ${invalidated} prior review receipt(s)`, { fixRound, invalidated, previousIntegrationSha256: finalReviewSha256, integrationSha256: refreshedSha256, repositoryIds: affectedIds });
+        finalReviewSha256 = refreshedSha256;
+        reviewRound = await this.completeReviewRound({
+          runId: input.runId,
+          round: fixRound + 1,
+          integrationSha256: finalReviewSha256,
+          requirement,
+          reviewerName,
+          reviewerProviders: input.availableProviders,
+          implementationProviders: implementationProviders(),
+          config: input.config,
+          reviewCwd,
+          reviewChunks: chunkDiffFiles(aggregatedDiffs),
+          reviewEvidenceLabel: "repository diff chunk",
+          eventContext: { repositoryIds: affectedIds },
+          signal: input.signal,
+          goal: input.request.goal,
+          constitution,
+          plan: input.plan,
+          checkSummary: refreshedCheckSummary,
+          taskReports: refreshedTaskReports,
+          autonomy: input.autonomy,
+        });
+      }
+
+      const repositoriesReady = this.ledger.getIntegrationSet(input.runId)?.repositories.every((repository) => repository.status === "ready") ?? false;
+      const ready = repositoriesReady && reviewRound.decision.passed;
       const finalReview = `${ready ? "READY" : "NOT READY"}\n\nExact integration set: ${affectedIds.map((repositoryId) => {
         const repository = this.ledger.getIntegrationSet(input.runId)?.repositories.find((item) => item.repositoryId === repositoryId);
         return `${repositoryId} ${repository?.baseCommit ?? "unknown"} -> ${repository?.headCommit ?? "unknown"}`;
-      }).join("; ")}\n\nReviewer (${structured.provider}): ${structured.summary}${reviewComplete ? "" : `\nThis initial DH-720 slice supports one required reviewer; policy requires ${requirement.requiredReviewers}.`}${independent ? "" : "\nReviewer independence policy was not satisfied."}`;
+      }).join("; ")}\n\nReview quorum: ${reviewRound.decision.completedReviews}/${reviewRound.decision.requiredReviewers} completed across ${reviewRound.decision.distinctProviders} provider(s).${reviewRound.decision.reasons.length ? `\n${reviewRound.decision.reasons.join("\n")}` : "\nAll configured review gates passed."}\n\n${reviewRound.reviews.map((review, index) => `Reviewer ${index + 1} (${review.provider}${review.modelId ? ` / ${review.modelId}` : ""}): ${review.verdict.replace("_", " ")}\n${review.summary}`).join("\n\n")}`;
+      this.ledger.addEvent(input.runId, reviewRound.decision.passed ? "review.quorum_passed" : "review.quorum_failed", reviewRound.decision.passed ? "Multi-repository review quorum passed" : "Multi-repository review quorum requires follow-up", { requirement, decision: reviewRound.decision, integrationSha256: finalReviewSha256, repositoryIds: affectedIds });
       this.ledger.setIntegrationSetStatus(input.runId, ready ? "ready" : "not_ready");
       this.ledger.setRunStatus(input.runId, ready ? "ready" : "not_ready", finalReview);
-      this.ledger.addEvent(input.runId, ready ? "run.ready" : "run.not_ready", ready ? "Multi-repository integration set passed final review" : "Multi-repository integration set requires follow-up", { repositoryIds: affectedIds, integrationSha256 });
+      this.ledger.addEvent(input.runId, ready ? "run.ready" : "run.not_ready", ready ? "Multi-repository integration set passed final review" : "Multi-repository integration set requires follow-up", { repositoryIds: affectedIds, integrationSha256: finalReviewSha256 });
     } catch (error) {
       if (this.ledger.getIntegrationSet(input.runId)) this.ledger.setIntegrationSetStatus(input.runId, "failed");
       throw error;
@@ -1151,7 +1254,11 @@ export class Orchestrator {
     excludedReviewerModels: Set<string>;
     excludedReviewerConnections: Set<string>;
     config: DevHarmonicsConfig;
-    worktrees: WorktreeManager;
+    worktrees?: WorktreeManager;
+    reviewCwd?: string;
+    reviewChunks?: readonly ReviewChunk[];
+    reviewEvidenceLabel?: string;
+    eventContext?: Record<string, unknown>;
     signal: AbortSignal;
     goal: string;
     constitution: string;
@@ -1160,6 +1267,8 @@ export class Orchestrator {
     taskReports: string;
     autonomy: RunAutonomy;
   }): Promise<StructuredReview> {
+    const reviewCwd = input.reviewCwd ?? input.worktrees?.integrationPath;
+    if (!reviewCwd) throw new Error("Review execution requires a working directory");
     const router = new ModelRouter(this.ledger);
     let lastError: Error | null = null;
     let fallbackReason: string | null = null;
@@ -1171,7 +1280,7 @@ export class Orchestrator {
         const qualification = await ensureSchedulerCandidateQualified({
           ledger: this.ledger,
           config: input.config,
-          cwd: input.worktrees.integrationPath,
+          cwd: reviewCwd,
           role: "reviewer",
           preferredProvider: provider,
           permission: "read_only",
@@ -1212,11 +1321,11 @@ export class Orchestrator {
       this.ledger.addEvent(input.runId, "review.started", `${decision.provider} is completing quorum review ${input.reviewSlot}/${input.requiredReviewers}${reviewAttempt > 1 ? ` (fallback ${reviewAttempt})` : ""}`, { routing: decision, reviewSlot: input.reviewSlot, requiredReviewers: input.requiredReviewers, reviewAttempt, fallbackReason });
       try {
         let text: string;
-        if (reviewer.connection.capabilities.providerManagedTools) {
+        if (!input.reviewChunks && reviewer.connection.capabilities.providerManagedTools) {
           const review = await reviewer.invoke({
             role: "reviewer",
-            prompt: reviewerPrompt({ goal: input.goal, constitution: input.constitution, plan: input.plan, checkSummary: input.checkSummary, taskReports: input.taskReports, workspacePath: input.worktrees.integrationPath, autonomy: input.autonomy }),
-            cwd: input.worktrees.integrationPath,
+            prompt: reviewerPrompt({ goal: input.goal, constitution: input.constitution, plan: input.plan, checkSummary: input.checkSummary, taskReports: input.taskReports, workspacePath: reviewCwd, autonomy: input.autonomy }),
+            cwd: reviewCwd,
             permission: "read_only",
             timeoutMs: null,
             model: decision.model,
@@ -1224,9 +1333,9 @@ export class Orchestrator {
           this.recordInvocation(input.runId, null, "reviewer", decision, review, fallbackReason);
           text = review.text;
         } else {
-          const chunks = input.autonomy === "observe"
+          const chunks = input.reviewChunks ?? (input.autonomy === "observe"
             ? this.diagnosticReportChunks(input.runId)
-            : chunkDiffFiles(await input.worktrees.integrationDiffFiles());
+            : chunkDiffFiles(await input.worktrees!.integrationDiffFiles()));
           if (decision.provider === "openrouter") {
             const selected = decision.model.requestedModelId ? this.ledger.getModel(String(decision.model.requestedModelId)) : null;
             const estimated = selected ? estimateInvocationCost(selected, chunks.map((chunk) => chunk.content).join("\n"), Math.max(500, chunks.length * 192)) ?? 0 : 0;
@@ -1236,13 +1345,13 @@ export class Orchestrator {
           const review = await runContextOnlyReview({
             adapter: reviewer,
             model: decision.model,
-            cwd: input.worktrees.integrationPath,
+            cwd: reviewCwd,
             contextHeader: localReviewerContextHeader({ goal: input.goal, constitution: input.constitution, plan: input.plan, checkSummary: input.checkSummary, taskReports: localTaskReports, autonomy: input.autonomy }),
             chunks,
-            evidenceLabel: input.autonomy === "observe" ? "diagnostic report" : "diff chunk",
+            evidenceLabel: input.reviewEvidenceLabel ?? (input.autonomy === "observe" ? "diagnostic report" : "diff chunk"),
             signal: input.signal,
             onChunk: (receipt, index, total) => {
-              this.ledger.addEvent(input.runId, "review.chunk_completed", `${decision.provider} reviewed chunk ${index + 1}/${total}: ${receipt.label} â€” ${receipt.verdict}`, { reviewSlot: input.reviewSlot, label: receipt.label, verdict: receipt.verdict, durationMs: receipt.durationMs, inputTokens: receipt.inputTokens, outputTokens: receipt.outputTokens, costUsd: receipt.costUsd });
+              this.ledger.addEvent(input.runId, "review.chunk_completed", `${decision.provider} reviewed chunk ${index + 1}/${total}: ${receipt.label} - ${receipt.verdict}`, { ...input.eventContext, reviewSlot: input.reviewSlot, label: receipt.label, verdict: receipt.verdict, durationMs: receipt.durationMs, inputTokens: receipt.inputTokens, outputTokens: receipt.outputTokens, costUsd: receipt.costUsd });
               this.ledger.recordInvocationReceipt({ runId: input.runId, role: "reviewer", provider: receipt.provider, connectionId: receipt.connectionId, requestedModelId: decision.model.requestedModelId ? String(decision.model.requestedModelId) : null, resolvedModelId: receipt.resolvedModelId, inputTokens: receipt.inputTokens, outputTokens: receipt.outputTokens, costUsd: receipt.costUsd, durationMs: receipt.durationMs, workloadClass: "complex:premium", fallbackReason: fallbackReason ?? (decision.fallback ? decision.factors.join("; ") : null) });
             },
           });
@@ -1301,7 +1410,11 @@ export class Orchestrator {
     reviewerProviders: readonly string[];
     implementationProviders: readonly string[];
     config: DevHarmonicsConfig;
-    worktrees: WorktreeManager;
+    worktrees?: WorktreeManager;
+    reviewCwd?: string;
+    reviewChunks?: readonly ReviewChunk[];
+    reviewEvidenceLabel?: string;
+    eventContext?: Record<string, unknown>;
     signal: AbortSignal;
     goal: string;
     constitution: string;
@@ -2009,6 +2122,39 @@ export class Orchestrator {
       return !quotaGroup || this.ledger.isQuotaGroupEligible(connectionId, quotaGroup.id);
     });
   }
+}
+
+export function assignReviewFindings(
+  findings: readonly ReviewFinding[],
+  repositoryIds: readonly string[],
+): { byRepository: Map<string, ReviewFinding[]>; unassigned: ReviewFinding[] } {
+  const byRepository = new Map<string, ReviewFinding[]>();
+  const unassigned: ReviewFinding[] = [];
+  for (const finding of findings) {
+    const location = finding.location?.replace(/\\/g, "/").trim() ?? "";
+    const matches = repositoryIds.filter((repositoryId) => location === repositoryId || location.startsWith(`${repositoryId}/`));
+    if (matches.length !== 1) {
+      unassigned.push(finding);
+      continue;
+    }
+    const repositoryId = matches[0]!;
+    const retained = byRepository.get(repositoryId) ?? [];
+    retained.push(finding);
+    byRepository.set(repositoryId, retained);
+  }
+  return { byRepository, unassigned };
+}
+
+function repositoryPathForFinding(location: string | null, repositoryId: string): string | null {
+  if (!location) return null;
+  const normalized = location.replace(/\\/g, "/").trim();
+  if (!(normalized === repositoryId || normalized.startsWith(`${repositoryId}/`))) return null;
+  const pathWithinRepository = normalized.slice(repositoryId.length).replace(/^\/+/, "").replace(/:\d+(?::\d+)?$/, "");
+  return pathWithinRepository || null;
+}
+
+function safeTaskPart(value: string): string {
+  return value.trim().replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "") || "repository";
 }
 
 export function taskAttemptTimeoutMs(

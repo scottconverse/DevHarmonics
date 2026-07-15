@@ -93,6 +93,7 @@ export interface PlannedTask {
   title: string;
   description: string;
   dependencies: string[];
+  repositoryIds?: string[];
   preferredProvider: ProviderName | null;
   checks: string[];
   kind?: "diagnostic" | "implementation" | "repair" | "review" | "release";
@@ -104,11 +105,19 @@ export interface PlannedTask {
   expectedArtifacts?: string[];
 }
 
+export interface RepositoryImpact {
+  repositoryId: string;
+  disposition: "affected" | "excluded";
+  rationale: string;
+}
+
 export interface RunPlan {
   summary: string;
   recommendedConcurrency: number;
   revision?: number;
   previousRevision?: number | null;
+  repositoryImpact?: RepositoryImpact[];
+  integrationConditions?: string[];
   tasks: PlannedTask[];
 }
 

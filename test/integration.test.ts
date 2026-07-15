@@ -74,7 +74,21 @@ if (process.argv.includes("--version")) {
       : input.includes("Local orchestrator fixture")
         ? {id:"one",title:"Create local result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"],kind:"implementation",repositoryScope:["result.txt"],permission:"workspace_write",risk:"medium",capabilityNeeds:["implementation"],acceptanceCriteria:["Create result.txt"],expectedArtifacts:["result.txt"]}
       : {id:"one",title:"Create result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"]};
-  const plan = {summary:"fixture plan",recommendedConcurrency:1,tasks:[task]};
+  const plan = input.includes("Cross repository fixture")
+    ? {
+        summary:"cross-repository fixture plan",
+        recommendedConcurrency:2,
+        repositoryImpact:[
+          {repositoryId:"repo:core",disposition:"affected",rationale:"The product implementation changes here."},
+          {repositoryId:"repo:docs",disposition:"affected",rationale:"The user documentation must describe the change."}
+        ],
+        integrationConditions:["The documentation must describe the behavior implemented in the core repository."],
+        tasks:[
+          {id:"core",title:"Implement the product change",description:"Update the core repository",dependencies:[],preferredProvider:"codex",checks:["diff-check"],repositoryIds:["repo:core"]},
+          {id:"docs",title:"Document the product change",description:"Update the documentation repository",dependencies:["core"],preferredProvider:"codex",checks:["diff-check"],repositoryIds:["repo:docs"]}
+        ]
+      }
+    : {summary:"fixture plan",recommendedConcurrency:1,tasks:[task]};
   console.log(JSON.stringify({result:JSON.stringify(plan)}));
 } else if (input.includes("You are the final reviewer")) {
   const review = input.includes("Audit fixture") && !input.includes("README.md:1 contains the heading Fixture")
@@ -893,6 +907,112 @@ test("objective preview creates no run and exact approved revision executes with
       }
       await rm(runRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("cross-repository objective planning maps impact without starting an unsupported multi-repository run", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-cross-repository-plan-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  try {
+    const productResponse = await fetch(`${dashboard.url}/api/products`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "fixture-product",
+        name: "Fixture Product",
+        organizationUrl: "https://github.com/fixture-product",
+        description: "Cross-repository planning fixture",
+        repositories: [
+          {
+            id: "repo:core",
+            name: "core",
+            fullName: "fixture-product/core",
+            url: "https://github.com/fixture-product/core",
+            cloneUrl: "https://github.com/fixture-product/core.git",
+            defaultBranch: "main",
+            visibility: "public",
+            archived: false,
+            sizeKb: 100,
+            language: "TypeScript",
+            description: "Core product",
+            intelligence: { role: "module" },
+          },
+          {
+            id: "repo:docs",
+            name: "docs",
+            fullName: "fixture-product/docs",
+            url: "https://github.com/fixture-product/docs",
+            cloneUrl: "https://github.com/fixture-product/docs.git",
+            defaultBranch: "main",
+            visibility: "public",
+            archived: false,
+            sizeKb: 50,
+            language: null,
+            description: "Product documentation",
+            intelligence: { role: "documentation" },
+          },
+        ],
+      }),
+    });
+    assert.equal(productResponse.status, 201, await productResponse.clone().text());
+
+    const objectiveResponse = await fetch(`${dashboard.url}/api/objectives`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        outcome: "Cross repository fixture: implement and document the product change",
+        acceptanceCriteria: ["Implementation and documentation remain aligned"],
+        constraints: ["Plan before changing either repository"],
+        projectPath: project,
+        productId: "fixture-product",
+        repositoryIds: ["repo:core", "repo:docs"],
+        risk: "medium",
+        autonomy: "supervised",
+        priority: "normal",
+        policyNotes: [],
+      }),
+    });
+    assert.equal(objectiveResponse.status, 201, await objectiveResponse.clone().text());
+    const objective = await objectiveResponse.json() as { objective: { id: string } };
+
+    const planResponse = await fetch(`${dashboard.url}/api/objectives/${objective.objective.id}/plans`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabledProviders: ["codex", "claude", "gemini"] }),
+    });
+    assert.equal(planResponse.status, 201, await planResponse.clone().text());
+    const proposal = await planResponse.json() as {
+      revision: { revision: number; plan: { repositoryImpact: Array<{ repositoryId: string; disposition: string }>; integrationConditions: string[]; tasks: Array<{ repositoryIds: string[] }> } };
+      preview: { execution: { supported: boolean; reason: string } };
+    };
+    assert.deepEqual(
+      proposal.revision.plan.repositoryImpact.map((impact) => [impact.repositoryId, impact.disposition]),
+      [["repo:core", "affected"], ["repo:docs", "affected"]],
+    );
+    assert.deepEqual(proposal.revision.plan.tasks.flatMap((task) => task.repositoryIds).sort(), ["repo:core", "repo:docs"]);
+    assert.equal(proposal.revision.plan.integrationConditions.length, 1);
+    assert.equal(proposal.preview.execution.supported, false);
+    assert.match(proposal.preview.execution.reason, /DH-720|multi-repository/i);
+
+    const startResponse = await fetch(`${dashboard.url}/api/objectives/${objective.objective.id}/plans/1/start`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agents: 2, enabledProviders: ["codex", "claude", "gemini"] }),
+    });
+    assert.equal(startResponse.status, 409, await startResponse.clone().text());
+    const runs = await fetch(`${dashboard.url}/api/runs`).then((response) => response.json()) as { runs: unknown[] };
+    assert.equal(runs.runs.length, 0, "planning must not start a run before multi-repository execution exists");
+  } finally {
+    await dashboard.close();
     await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });

@@ -22,6 +22,8 @@ export function architectPrompt(input: {
   providers: ProviderName[];
   workspacePath: string;
   autonomy: RunAutonomy;
+  repositoryContext?: string;
+  selectedRepositoryIds?: string[];
   previousPlan?: RunPlan | null;
   revisionFeedback?: string;
 }): string {
@@ -34,8 +36,8 @@ export function architectPrompt(input: {
     : { description: "complete, bounded implementation instructions", kind: "implementation", permission: "workspace_write", risk: '"low" | "medium" | "high"', capabilities: "code", artifacts: "expected file, commit, or report" };
   return `You are the architect for a local software-development agent team.
 
-Exact isolated workspace root: ${input.workspacePath}
-Operate only inside that directory. Do not search for, inspect, or modify another checkout of this repository.
+Exact planning workspace root: ${input.workspacePath}
+Operate read-only inside that directory. Do not inspect another checkout unless it is explicitly listed in the repository registry context below. Registry metadata is authoritative for repositories that are not locally available.
 
 Goal:
 ${input.goal}
@@ -44,6 +46,12 @@ ${input.previousPlan ? `This is a revision of plan ${input.previousPlan.revision
 
 Constitution:
 ${input.constitution}
+
+${input.repositoryContext ? `Repository registry context:
+${input.repositoryContext}
+
+For every repository listed as requiring an impact decision, include exactly one repositoryImpact entry with an affected or excluded disposition and concrete rationale. Every affected repository must have at least one task whose repositoryIds includes it. Do not silently expand the selected scope. When shared-platform work can affect modules, or documentation, installer, version, or release-truth work may be required, represent that impact explicitly rather than burying it in another task. Multi-repository plans must list their cross-repository integration conditions.
+` : ""}
 
 Available worker providers: ${input.providers.join(", ")}
 Allowlisted validators: ${input.validators.length ? input.validators.join(", ") : "none"}
@@ -56,6 +64,10 @@ Return only a JSON object with this exact shape:
   "recommendedConcurrency": 4,
       "revision": ${input.previousPlan ? (input.previousPlan.revision ?? 1) + 1 : 1},
       "previousRevision": ${input.previousPlan ? input.previousPlan.revision ?? 1 : null},
+  "repositoryImpact": [
+    { "repositoryId": "registered-repository-id", "disposition": "affected" | "excluded", "rationale": "why this repository is or is not part of the change" }
+  ],
+  "integrationConditions": ["condition required before the affected repositories are ready together"],
   "tasks": [
     {
       "id": "short-lowercase-id",
@@ -65,6 +77,7 @@ Return only a JSON object with this exact shape:
       "preferredProvider": "codex" | "claude" | "gemini" | null,
       "checks": ["validator-name"],
       "kind": "${example.kind}",
+      "repositoryIds": ${JSON.stringify(input.selectedRepositoryIds ?? [])},
       "repositoryScope": ["."],
       "permission": "${example.permission}",
       "risk": ${example.risk},

@@ -173,6 +173,13 @@ textarea { resize: vertical; min-height: 122px; line-height: 1.55; }
 .objective-grid small, .objective-policy-grid small, label small { display: block; color: var(--muted); font-weight: 500; margin-top: 3px; }
 .objective-grid textarea { min-height: 105px; margin-top: 8px; }
 .objective-policy-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+.objective-repository-picker { margin-top: 18px; padding: 16px; border: 1px solid var(--border); border-radius: 12px; background: rgba(255,255,255,.012); }
+.objective-repository-picker > label { margin-top: 0; }
+.repository-picker-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 8px; margin-top: 10px; }
+.repository-picker { display: flex; gap: 9px; align-items: flex-start; margin: 0; padding: 11px; border: 1px solid var(--border); border-radius: 9px; background: #0d1014; }
+.repository-picker input { margin-top: 2px; }
+.repository-picker strong, .repository-picker small { display: block; }
+.repository-picker small { color: var(--muted); margin-top: 3px; }
 .joined { display: flex; gap: 8px; }
 .field-help { display: block; color: var(--muted); line-height: 1.4; margin-top: 7px; }
 .count { width: 90px; }
@@ -187,6 +194,12 @@ textarea { resize: vertical; min-height: 122px; line-height: 1.55; }
 .plan-preview-head h2 { margin: 2px 0 0; }
 .plan-summary { color: var(--muted); line-height: 1.55; margin: 18px 0; }
 .plan-task-list { display: grid; gap: 10px; margin: 16px 0 22px; }
+.plan-repository-impact { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 8px; margin: 16px 0; }
+.repository-impact { padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: #0d1014; }
+.repository-impact strong, .repository-impact span { display: block; }
+.repository-impact span { color: var(--muted); font-size: 11px; margin-top: 6px; line-height: 1.45; }
+.repository-impact.affected { border-color: #59663e; }
+.repository-impact.excluded { opacity: .72; }
 .plan-task { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 18px; padding: 15px; border: 1px solid var(--border); border-radius: 11px; background: #0d1014; }
 .plan-task h3 { margin: 0; font-size: 14px; }
 .plan-task p { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }

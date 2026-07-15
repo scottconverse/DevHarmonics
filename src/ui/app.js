@@ -56,6 +56,7 @@ async function initialize() {
   renderProviders();
   await refreshFleet();
   renderSettings();
+  await refreshProducts();
   await refreshRuns();
   connectEventStream();
 }
@@ -98,6 +99,26 @@ async function refreshProducts() {
       return `<div class="repository-row ${repository.localPath ? "local" : ""}"><span><strong>${escapeHtml(repository.name)}</strong><small>${escapeHtml(repository.localPath || repository.fullName)} · ${escapeHtml(repository.visibility)}${local?.headSha ? ` · ${escapeHtml(local.headSha.slice(0, 10))}` : ""}</small><span class="repository-facts">${facts.map((fact) => `<em class="${issues.includes(fact) ? "issue" : ""}">${escapeHtml(fact)}</em>`).join("")}</span></span><div class="repository-actions"><span class="lifecycle ${issues.length || local?.dirty ? "degraded" : repository.archived ? "retired" : "qualified"}">${issues.length ? `${issues.length} issues` : local?.dirty ? "dirty" : local ? "ready" : "observed"}</span>${repository.localPath ? `<button class="secondary small" type="button" data-refresh-repository="${escapeHtml(repository.id)}" data-product-id="${escapeHtml(product.id)}">Rescan</button>` : ""}</div></div>`;
     }).join("")}</div>
   </article>`).join("");
+  renderObjectiveRepositoryPicker();
+}
+
+function renderObjectiveRepositoryPicker() {
+  const currentProductId = $("#objective-product").value;
+  const selectedRepositoryIds = new Set([...document.querySelectorAll('input[name="objective-repository"]:checked')].map((input) => input.value));
+  $("#objective-product").innerHTML = ['<option value="">Standalone repository</option>', ...state.products.map((product) => `<option value="${escapeHtml(product.id)}">${escapeHtml(product.name)}</option>`)].join("");
+  if (state.products.some((product) => product.id === currentProductId)) $("#objective-product").value = currentProductId;
+  const product = state.products.find((item) => item.id === $("#objective-product").value);
+  $("#objective-repositories-field").classList.toggle("hidden", !product);
+  $("#objective-repositories").innerHTML = product ? product.repositories.map((repository) => {
+    const localState = repository.localPath ? repository.inspection ? repository.inspection.dirty ? "local · dirty" : "local · ready" : "local · not scanned" : "remote metadata only";
+    return `<label class="repository-picker"><input type="checkbox" name="objective-repository" value="${escapeHtml(repository.id)}" ${selectedRepositoryIds.has(repository.id) ? "checked" : ""} ${repository.archived ? "disabled" : ""}><span><strong>${escapeHtml(repository.name)}</strong><small>${escapeHtml((repository.role || "other").replaceAll("_", " "))} · ${escapeHtml(localState)}</small></span></label>`;
+  }).join("") : "";
+}
+
+function syncProjectPathFromRepositorySelection() {
+  const product = state.products.find((item) => item.id === $("#objective-product").value);
+  const selected = [...document.querySelectorAll('input[name="objective-repository"]:checked')].map((input) => product?.repositories.find((repository) => repository.id === input.value)).filter(Boolean);
+  if (selected.length === 1 && selected[0].localPath) $("#project-path").value = selected[0].localPath;
 }
 
 function renderConnections() {
@@ -638,12 +659,14 @@ function namedCommandsFrom(selector) {
 
 function objectiveInput() {
   const deadline = $("#objective-deadline").value;
+  const productId = $("#objective-product").value;
   return {
     outcome: $("#goal").value.trim(),
     acceptanceCriteria: linesFrom("#acceptance-criteria"),
     constraints: linesFrom("#constraints"),
     projectPath: $("#project-path").value,
-    repositoryIds: [],
+    ...(productId ? { productId } : {}),
+    repositoryIds: productId ? [...document.querySelectorAll('input[name="objective-repository"]:checked')].map((input) => input.value) : [],
     risk: $("#objective-risk").value,
     autonomy: $("#run-autonomy").value,
     priority: $("#objective-priority").value,
@@ -655,6 +678,7 @@ function objectiveInput() {
 async function saveObjectiveDraft() {
   const input = objectiveInput();
   if (!input.outcome) throw new Error("Describe the outcome first.");
+  if (input.productId && !input.repositoryIds.length) throw new Error("Select at least one repository for this product objective.");
   const result = state.objective
     ? await api(`/api/objectives/${state.objective.id}`, {
       method: "PUT",
@@ -704,17 +728,24 @@ function renderPlanPreview() {
   $("#plan-summary").textContent = plan.summary;
   const writeTasks = plan.tasks.filter((task) => task.permission === "workspace_write").length;
   const highRisk = plan.tasks.filter((task) => task.risk === "high").length;
-  $("#plan-metrics").innerHTML = `<div class="metric"><span>Tasks</span><strong>${plan.tasks.length}</strong></div><div class="metric"><span>Workspace writes</span><strong>${writeTasks}</strong></div><div class="metric"><span>High risk</span><strong>${highRisk}</strong></div><div class="metric"><span>Planned agents</span><strong>${state.planPreview.capacity.effectiveConcurrency}</strong></div>`;
+  const impacts = plan.repositoryImpact || [];
+  const affectedRepositories = impacts.filter((impact) => impact.disposition === "affected").length;
+  $("#plan-metrics").innerHTML = `<div class="metric"><span>Tasks</span><strong>${plan.tasks.length}</strong></div><div class="metric"><span>Affected repositories</span><strong>${affectedRepositories}</strong></div><div class="metric"><span>Workspace writes</span><strong>${writeTasks}</strong></div><div class="metric"><span>High risk</span><strong>${highRisk}</strong></div><div class="metric"><span>Planned agents</span><strong>${state.planPreview.capacity.effectiveConcurrency}</strong></div>`;
+  $("#plan-repository-impact").innerHTML = impacts.map((impact) => `<article class="repository-impact ${escapeHtml(impact.disposition)}"><strong>${escapeHtml(impact.repositoryId)} · ${escapeHtml(impact.disposition)}</strong><span>${escapeHtml(impact.rationale)}</span></article>`).join("");
   $("#plan-task-list").innerHTML = plan.tasks.map((task) => {
     const assignment = state.planPreview.assignments.find((item) => item.taskId === task.id);
     const dependencyText = task.dependencies.length ? `After ${task.dependencies.join(", ")}` : "No dependencies";
-    return `<article class="plan-task"><h3>${escapeHtml(task.title)}</h3><div class="plan-task-meta"><span>${escapeHtml(task.permission.replaceAll("_", " "))}</span><span>${escapeHtml(task.risk)} risk</span><span>${escapeHtml(assignment?.tier || "unassigned")}</span></div><p>${escapeHtml(task.description)}</p><details><summary>${escapeHtml(dependencyText)} · ${escapeHtml(assignment?.provider || "unassigned")} / ${escapeHtml(assignment?.modelId || "provider default")} · ${task.checks.length} checks</summary><p>Scope: ${task.repositoryScope.map(escapeHtml).join(", ")}<br>Acceptance: ${task.acceptanceCriteria.map(escapeHtml).join("; ") || "Not supplied"}<br>Capabilities: ${task.capabilityNeeds.map(escapeHtml).join(", ")}</p></details></article>`;
+    return `<article class="plan-task"><h3>${escapeHtml(task.title)}</h3><div class="plan-task-meta"><span>${escapeHtml(task.permission.replaceAll("_", " "))}</span><span>${escapeHtml(task.risk)} risk</span><span>${escapeHtml(assignment?.tier || "unassigned")}</span></div><p>${escapeHtml(task.description)}</p><details><summary>${escapeHtml(dependencyText)} · ${escapeHtml(assignment?.provider || "unassigned")} / ${escapeHtml(assignment?.modelId || "provider default")} · ${task.checks.length} checks</summary><p>Repositories: ${(task.repositoryIds || []).map(escapeHtml).join(", ") || "Current workspace"}<br>Scope: ${task.repositoryScope.map(escapeHtml).join(", ")}<br>Acceptance: ${task.acceptanceCriteria.map(escapeHtml).join("; ") || "Not supplied"}<br>Capabilities: ${task.capabilityNeeds.map(escapeHtml).join(", ")}</p></details></article>`;
   }).join("");
+  const execution = state.planPreview.execution || { supported: true, reason: "Single workspace execution is available." };
+  $("#plan-execution-note").textContent = execution.supported ? `Execution available: ${execution.reason}` : `Planning only: ${execution.reason}`;
+  $("#approve-plan-start").disabled = !execution.supported;
   $("#plan-preview").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 async function approvePlanAndStart() {
   if (!state.objective || !state.planRevision) return showError("Build a plan preview first.");
+  if (state.planPreview?.execution && !state.planPreview.execution.supported) return showError(state.planPreview.execution.reason);
   const enabledProviders = [...document.querySelectorAll('input[name="provider"]:checked')].map((input) => input.value);
   const mode = $("#agent-mode").value;
   const agents = mode === "auto" ? "auto" : Number($("#agent-count").value);
@@ -746,6 +777,8 @@ function showComposer() {
   state.objective = null;
   state.planRevision = null;
   state.planPreview = null;
+  $("#objective-product").value = "";
+  renderObjectiveRepositoryPicker();
   $("#plan-preview").classList.add("hidden");
   $("#composer").classList.remove("hidden");
   $("#run-view").classList.add("hidden");
@@ -756,6 +789,10 @@ function showComposer() {
 
 $("#agent-mode").addEventListener("change", (event) => { $("#agent-count").disabled = event.target.value === "auto"; });
 $("#run-autonomy").addEventListener("change", renderRunAutonomyHelp);
+$("#objective-product").addEventListener("change", () => {
+  renderObjectiveRepositoryPicker();
+});
+$("#objective-repositories").addEventListener("change", syncProjectPathFromRepositorySelection);
 $("#preview-plan").addEventListener("click", () => previewPlan());
 $("#revise-plan").addEventListener("click", () => previewPlan({ revise: true }));
 $("#approve-plan-start").addEventListener("click", approvePlanAndStart);

@@ -315,6 +315,96 @@ test("plan schema rejects missing dependencies", () => {
   assert.equal(result.success, false);
 });
 
+test("plan schema defaults and validates the cross-repository contract", () => {
+  const legacy = runPlanSchema.parse({
+    summary: "legacy plan",
+    recommendedConcurrency: 1,
+    tasks: [{
+      id: "one",
+      title: "One",
+      description: "Do one",
+      dependencies: [],
+      preferredProvider: null,
+      checks: ["diff-check"],
+    }],
+  });
+  assert.deepEqual(legacy.tasks[0]?.repositoryIds, []);
+  assert.deepEqual(legacy.repositoryImpact, []);
+  assert.deepEqual(legacy.integrationConditions, []);
+
+  const valid = runPlanSchema.safeParse({
+    summary: "cross-repository plan",
+    recommendedConcurrency: 2,
+    repositoryImpact: [
+      { repositoryId: "github:civicsuite/core", disposition: "affected", rationale: "Owns the contract" },
+      { repositoryId: "github:civicsuite/docs", disposition: "excluded", rationale: "No public behavior changes" },
+    ],
+    integrationConditions: ["Core contract tests pass before dependent work starts"],
+    tasks: [{
+      id: "core",
+      title: "Update core",
+      description: "Change the shared contract",
+      dependencies: [],
+      preferredProvider: null,
+      checks: ["contract tests"],
+      repositoryIds: ["github:civicsuite/core"],
+    }],
+  });
+  assert.equal(valid.success, true);
+
+  const duplicateImpact = runPlanSchema.safeParse({
+    summary: "duplicate impact",
+    recommendedConcurrency: 1,
+    repositoryImpact: [
+      { repositoryId: "github:civicsuite/core", disposition: "affected", rationale: "First" },
+      { repositoryId: "github:civicsuite/core", disposition: "excluded", rationale: "Second" },
+    ],
+    tasks: [{
+      id: "one",
+      title: "One",
+      description: "Do one",
+      dependencies: [],
+      preferredProvider: null,
+      checks: ["diff-check"],
+    }],
+  });
+  assert.equal(duplicateImpact.success, false);
+
+  const explicitEmptyImpact = runPlanSchema.safeParse({
+    summary: "empty impact map",
+    recommendedConcurrency: 1,
+    repositoryImpact: [],
+    tasks: [{
+      id: "core",
+      title: "Update core",
+      description: "Change core",
+      dependencies: [],
+      preferredProvider: null,
+      checks: ["contract tests"],
+      repositoryIds: ["github:civicsuite/core"],
+    }],
+  });
+  assert.equal(explicitEmptyImpact.success, false);
+
+  const missingAffectedImpact = runPlanSchema.safeParse({
+    summary: "incomplete impact",
+    recommendedConcurrency: 1,
+    repositoryImpact: [
+      { repositoryId: "github:civicsuite/core", disposition: "excluded", rationale: "Incorrectly excluded" },
+    ],
+    tasks: [{
+      id: "core",
+      title: "Update core",
+      description: "Change core",
+      dependencies: [],
+      preferredProvider: null,
+      checks: ["contract tests"],
+      repositoryIds: ["github:civicsuite/core"],
+    }],
+  });
+  assert.equal(missingAffectedImpact.success, false);
+});
+
 test("Claude official catalog watcher selects the newest exact model in each tracked family", () => {
   const models = parseCurrentClaudeModels(`claude-opus-47 claude-opus-4-7 claude-opus-4-8 claude-fable-5 claude-sonnet-5 claude-haiku-4-5-20251001`);
   assert.deepEqual(models, ["claude-fable-5", "claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5-20251001"]);

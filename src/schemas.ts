@@ -15,6 +15,7 @@ export const runPlanSchema = z
           title: z.string().min(1),
           description: z.string().min(1),
           dependencies: z.array(z.string()),
+          repositoryIds: z.array(z.string().trim().min(1).max(300)).default([]),
           preferredProvider: providerSchema.nullable(),
           checks: z.array(z.string()).min(1),
           kind: z.enum(["diagnostic", "implementation", "repair", "review", "release"]).default("implementation"),
@@ -27,6 +28,12 @@ export const runPlanSchema = z
         }),
       )
       .min(1),
+    repositoryImpact: z.array(z.object({
+      repositoryId: z.string().trim().min(1).max(300),
+      disposition: z.enum(["affected", "excluded"]),
+      rationale: z.string().trim().min(1).max(2_000),
+    })).max(500).optional(),
+    integrationConditions: z.array(z.string().trim().min(1).max(2_000)).max(200).default([]),
   })
   .superRefine((plan, context) => {
     const ids = new Set(plan.tasks.map((task) => task.id));
@@ -49,7 +56,34 @@ export const runPlanSchema = z
         }
       }
     }
-  });
+    const impactIds = new Set<string>();
+    const affectedIds = new Set<string>();
+    for (const impact of plan.repositoryImpact ?? []) {
+      if (impactIds.has(impact.repositoryId)) {
+        context.addIssue({
+          code: "custom",
+          path: ["repositoryImpact"],
+          message: `Repository impact IDs must be unique; found ${impact.repositoryId} more than once`,
+        });
+      }
+      impactIds.add(impact.repositoryId);
+      if (impact.disposition === "affected") affectedIds.add(impact.repositoryId);
+    }
+    if (plan.repositoryImpact !== undefined) {
+      for (const [taskIndex, task] of plan.tasks.entries()) {
+        for (const repositoryId of task.repositoryIds) {
+          if (!affectedIds.has(repositoryId)) {
+            context.addIssue({
+              code: "custom",
+              path: ["tasks", taskIndex, "repositoryIds"],
+              message: `Task ${task.id} repository ${repositoryId} must be represented as affected in repositoryImpact`,
+            });
+          }
+        }
+      }
+    }
+  })
+  .transform((plan) => ({ ...plan, repositoryImpact: plan.repositoryImpact ?? [] }));
 
 export const objectiveInputSchema = z.object({
   outcome: z.string().trim().min(1).max(20_000),

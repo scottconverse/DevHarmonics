@@ -99,22 +99,25 @@ Each provider is shown as `READY` or `SETUP`, with its detected version, authent
 5. Click **Inspect & register repository**. DevHarmonics records the current branch, HEAD, origin, dirty state, and compatibility issues without modifying the checkout.
 6. Use **Rescan** after local Git state changes.
 
-Register CivicSuite repositories independently. Use roles such as **Umbrella**, **Shared platform**, **Module**, **Desktop**, **Installer**, **Documentation**, and **Release truth** so future cross-repository planning can preserve their distinct governance and delivery boundaries.
+Register CivicSuite repositories independently. Use roles such as **Umbrella**, **Shared platform**, **Module**, **Desktop**, **Installer**, **Documentation**, and **Release truth** so cross-repository planning can preserve their distinct governance and delivery boundaries.
 
 ## 5. Start a run in the dashboard
 
 1. Confirm the **Project folder** points to the intended Git repository.
-2. Describe a concrete, testable result in **What should the team accomplish?**
-3. Choose a **Run mode**:
+2. Optionally choose a registered product and select one or more **Repositories in scope**. Selecting a single local repository also aligns the project folder with that checkout.
+3. Describe a concrete, testable result in **What should the team accomplish?**
+4. Choose a **Run mode**:
    - **Observe only** permits diagnostic, read-only, low-risk tasks and rejects plans or results that attempt implementation.
    - **Supervised** prepares repository changes after the configured plan-approval gate.
    - **Bounded autonomy** executes within the configured repository, tool, spending, and external-write policies.
-4. Choose **Architect decides** or enter a manual concurrency count.
-5. Enable the authenticated providers you want in the worker pool.
-6. Add acceptance criteria, constraints, risk, priority, an optional deadline, and any policy notes.
-7. Click **Build plan preview**. This saves a durable objective draft but starts no run.
-8. Review every proposed task, dependency, repository scope, permission, check, model assignment, and the capacity estimate.
-9. Enter requested changes and click **Revise plan**, or click **Approve revision & start**. DevHarmonics retains every revision and its rationale, and execution uses the exact revision you approved without asking the architect to silently produce another plan.
+5. Choose **Architect decides** or enter a manual concurrency count.
+6. Enable the authenticated providers you want in the worker pool.
+7. Add acceptance criteria, constraints, risk, priority, an optional deadline, and any policy notes.
+8. Click **Build plan preview**. This saves a durable objective draft but starts no run.
+9. Review every proposed task and dependency plus the affected/excluded repository impact map, repository rationale, integration conditions, permissions, checks, model assignments, and capacity estimate.
+10. Enter requested changes and click **Revise plan**, or click **Approve revision & start**. DevHarmonics retains every revision and its rationale, and execution uses the exact revision you approved without asking the architect to silently produce another plan.
+
+Multi-repository planning is available before multi-repository execution. If more than one repository is affected, the preview explains that execution is blocked until DH-720 provides exact per-repository worktrees, commits, and integration-set validation. This is an intentional safety gate: revise the objective to one affected local repository for a current executable run, or retain the multi-repository plan for later execution.
 
 ### Explore in Workbench first
 

@@ -17,7 +17,7 @@ import { createRunEvidenceExport, createRunReport } from "./reporter.js";
 import { observeLocalResources } from "./resources.js";
 import { inspectLocalRepository } from "./repository-intelligence.js";
 import { manualModelSchema, objectiveInputSchema, productRegistrationSchema, workbenchSessionInputSchema } from "./schemas.js";
-import type { ProviderName, RunRequest } from "./types.js";
+import type { ObjectiveInput, ProviderName, RunRequest } from "./types.js";
 import { inferModelProfile } from "./model-intelligence.js";
 import type { ModelRecord } from "./registry.js";
 
@@ -583,6 +583,11 @@ async function route(
       sendJson(response, 400, { error: "Objective is invalid", issues: parsed.error.issues });
       return;
     }
+    const selectionError = objectiveRepositorySelectionError(context.ledger, parsed.data);
+    if (selectionError) {
+      sendJson(response, 400, { error: selectionError });
+      return;
+    }
     const details = await stat(parsed.data.projectPath);
     if (!details.isDirectory()) throw new Error("Project path must be a directory");
     await initializeProject(parsed.data.projectPath);
@@ -607,6 +612,11 @@ async function route(
     }
     if (!parsed.success) {
       sendJson(response, 400, { error: "Objective is invalid", issues: parsed.error.issues });
+      return;
+    }
+    const selectionError = objectiveRepositorySelectionError(context.ledger, parsed.data);
+    if (selectionError) {
+      sendJson(response, 400, { error: selectionError });
       return;
     }
     sendJson(response, 200, { objective: context.ledger.updateObjective(objectiveMatch[1], parsed.data, expectedRevision) });
@@ -645,8 +655,14 @@ async function route(
     requireJsonRequest(request);
     const objective = context.ledger.getObjective(objectiveStartMatch[1]);
     const revisionNumber = Number(objectiveStartMatch[2]);
-    if (!objective || !context.ledger.getPlanRevision(objective.id, revisionNumber)) {
+    const storedRevision = objective ? context.ledger.getPlanRevision(objective.id, revisionNumber) : null;
+    if (!objective || !storedRevision) {
       sendJson(response, 404, { error: "Objective or plan revision not found" });
+      return;
+    }
+    const execution = context.orchestrator.objectiveExecutionReadiness(objective, storedRevision.plan);
+    if (!execution.supported) {
+      sendJson(response, 409, { error: execution.reason, execution });
       return;
     }
     const body = await readJson(request) as { agents?: number | "auto"; enabledProviders?: ProviderName[] };
@@ -790,6 +806,17 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value)
     ? [...new Set(value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean))]
     : [];
+}
+
+function objectiveRepositorySelectionError(ledger: Ledger, input: ObjectiveInput): string | null {
+  if (!input.productId) return input.repositoryIds.length ? "Repository selection requires a product" : null;
+  const product = ledger.getProduct(input.productId);
+  if (!product) return `Product '${input.productId}' is not registered`;
+  if (!input.repositoryIds.length) return "Select at least one repository for a product objective";
+  if (new Set(input.repositoryIds).size !== input.repositoryIds.length) return "Objective repository selection contains duplicates";
+  const known = new Set(product.repositories.map((repository) => repository.id));
+  const unknown = input.repositoryIds.filter((repositoryId) => !known.has(repositoryId));
+  return unknown.length ? `Repositories are not registered in ${product.name}: ${unknown.join(", ")}` : null;
 }
 
 function repositoryRole(value: unknown): "umbrella" | "shared_platform" | "module" | "desktop" | "installer" | "documentation" | "release_truth" | "other" {

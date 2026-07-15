@@ -24,6 +24,7 @@ Normal subscription and local-model use requires no model API keys. Each subscri
 - Read-only final review with `READY` or `NOT READY` verdicts
 - Durable run, task, attempt, check, and event records in SQLite
 - Multi-product repository registry with read-only local Git inspection, repository roles, ownership, dependencies, validators, governance sources, and dirty/incompatible-state reporting
+- Product-aware objective planning with selected repository scope, affected/excluded impact rationale, repository-scoped tasks, and explicit cross-repository integration conditions
 - Durable read-only Workbench with exact selected-model comparison and explicit conversion into an objective draft
 - Transactional ledger migrations with automatic pre-upgrade backups and integrity checks
 - Provider-neutral assignment identities layered over the current subscription CLI providers
@@ -156,10 +157,12 @@ Workbench is a durable, read-only project scratchpad for questions, tradeoff ana
 
 The **Products** surface groups independent repositories into a product without turning them into a monorepo. Register a product, then add each local Git checkout with its role, expected branch, owners, dependencies, validator commands, and governance sources. DevHarmonics inspects repository identity and status using read-only Git commands and retains the current branch, HEAD, origin, dirty state, and compatibility issues. Registry inspection does not create a run or change the checkout.
 
+In the objective composer, optionally select a registered product and one or more repositories. The read-only planner uses their registry roles and dependencies to produce an affected/excluded repository impact map, repository-scoped tasks, and any required cross-repository integration conditions. A plan can cover several repositories today, but starting that plan is intentionally blocked until DH-720 can create and validate exact multi-repository integration sets. Single-repository plans continue through the normal approval flow when the selected checkout matches the objective project folder and has no compatibility issues.
+
 ## Run lifecycle
 
-1. Save a structured objective draft containing the outcome, acceptance criteria, constraints, risk, priority, deadline, policy, and run mode. Saving or refining a draft starts no run.
-2. Ask a read-only architect for an immutable plan revision and preview its dependency graph, scopes, permissions, checks, proposed model assignments, and capacity.
+1. Save a structured objective draft containing the outcome, acceptance criteria, constraints, risk, priority, deadline, policy, run mode, and optional product/repository scope. Saving or refining a draft starts no run.
+2. Ask a read-only architect for an immutable plan revision and preview its dependency graph, affected/excluded repository map, repository-scoped tasks, integration conditions, permissions, checks, proposed model assignments, and capacity.
 3. Revise the plan or approve an exact revision. Execution uses that stored revision without silently replanning it.
 4. Require a clean Git working tree and authenticated providers, then create `devharmonics/<run-prefix>` as the integration branch.
 5. Assign each ready task a `devharmonics/<run-prefix>-task-<task>` branch and temporary worktree.

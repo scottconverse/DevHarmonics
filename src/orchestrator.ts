@@ -117,6 +117,7 @@ export class Orchestrator {
     preview: {
       capacity: ReturnType<CapacityBroker["decide"]>;
       assignments: Array<{ taskId: string; provider: string; modelId: string | null; tier: string; factors: string[] }>;
+      execution: { supported: boolean; reason: string };
     };
   }> {
     const projectPath = path.resolve(input.objective.projectPath);
@@ -142,6 +143,7 @@ export class Orchestrator {
       ? [architectName, ...availableProviders.filter((provider) => provider !== architectName)]
       : [architectName];
     const router = new ModelRouter(this.ledger);
+    const repositoryContext = this.objectiveRepositoryContext(input.objective);
     let plan: RunPlan | null = null;
     let lastArchitectError: Error | null = null;
     for (const candidate of architectCandidates) {
@@ -162,6 +164,8 @@ export class Orchestrator {
             providers: workerProviders,
             workspacePath: projectPath,
             autonomy: input.objective.autonomy,
+            ...(repositoryContext ? { repositoryContext: repositoryContext.text } : {}),
+            selectedRepositoryIds: input.objective.repositoryIds,
             previousPlan: input.previous?.plan ?? null,
             ...(input.revisionFeedback ? { revisionFeedback: input.revisionFeedback } : {}),
           }),
@@ -171,6 +175,7 @@ export class Orchestrator {
           model: decision.model,
         });
         const parsed = this.parsePlan(result.text, config, input.objective.autonomy);
+        this.validateObjectiveRepositoryPlan(input.objective, parsed, repositoryContext?.requiredImpactIds ?? []);
         const previousRevision = input.previous?.revision ?? null;
         plan = { ...parsed, revision: previousRevision === null ? 1 : previousRevision + 1, previousRevision };
         this.recordConnectionOutcome(architect.connection.id, { success: true });
@@ -198,7 +203,28 @@ export class Orchestrator {
       userCeiling: config.application.concurrency.ceiling,
       resources: await observeLocalResources(),
     });
-    return { plan, preview: { capacity, assignments } };
+    return { plan, preview: { capacity, assignments, execution: this.objectiveExecutionReadiness(input.objective, plan) } };
+  }
+
+  objectiveExecutionReadiness(objective: ObjectiveRecord, plan: RunPlan): { supported: boolean; reason: string } {
+    if (!objective.productId || !objective.repositoryIds.length) {
+      return { supported: true, reason: "Single workspace execution is available." };
+    }
+    const product = this.ledger.getProduct(objective.productId);
+    if (!product) return { supported: false, reason: "The selected product is no longer registered." };
+    const affectedIds = (plan.repositoryImpact ?? []).filter((impact) => impact.disposition === "affected").map((impact) => impact.repositoryId);
+    if (affectedIds.length !== 1) {
+      return { supported: false, reason: "Multi-repository execution remains gated until DH-720 integration sets are implemented." };
+    }
+    const repository = product.repositories.find((item) => item.id === affectedIds[0]);
+    if (!repository?.localPath) return { supported: false, reason: "The single affected repository does not have a registered local checkout." };
+    if (path.resolve(repository.localPath) !== path.resolve(objective.projectPath)) {
+      return { supported: false, reason: "Set the objective project folder to the affected repository's registered local checkout before execution." };
+    }
+    if (repository.inspection?.compatibilityIssues.length) {
+      return { supported: false, reason: `Resolve repository compatibility issues before execution: ${repository.inspection.compatibilityIssues.join("; ")}` };
+    }
+    return { supported: true, reason: "The plan affects one compatible registered local repository." };
   }
 
   async consultWorkbench(input: {
@@ -315,6 +341,8 @@ export class Orchestrator {
     if (!input.revision.approved || input.revision.objectiveId !== input.objective.id) {
       throw new Error("Only the exact approved plan revision can start execution");
     }
+    const readiness = this.objectiveExecutionReadiness(input.objective, input.revision.plan);
+    if (!readiness.supported) throw new Error(readiness.reason);
     return this.begin({
       goal: objectivePromptText(input.objective),
       projectPath: input.objective.projectPath,
@@ -1391,6 +1419,83 @@ export class Orchestrator {
       (name, index, values) =>
         values.indexOf(name) === index && config.connections[name].enabled && (!allowed || allowed.has(name)),
     );
+  }
+
+  private objectiveRepositoryContext(objective: ObjectiveRecord): { text: string; requiredImpactIds: string[] } | null {
+    if (!objective.productId || !objective.repositoryIds.length) return null;
+    const product = this.ledger.getProduct(objective.productId);
+    if (!product) throw new Error(`Product '${objective.productId}' is no longer registered`);
+    const byId = new Map(product.repositories.map((repository) => [repository.id, repository]));
+    const selected = objective.repositoryIds.map((id) => byId.get(id)).filter((repository) => repository !== undefined);
+    if (selected.length !== objective.repositoryIds.length) {
+      const found = new Set(selected.map((repository) => repository.id));
+      throw new Error(`Objective references repositories no longer registered in ${product.name}: ${objective.repositoryIds.filter((id) => !found.has(id)).join(", ")}`);
+    }
+    const required = new Set(objective.repositoryIds);
+    for (const repository of selected) {
+      repository.dependencyRepositoryIds.forEach((id) => { if (byId.has(id)) required.add(id); });
+      for (const candidate of product.repositories) {
+        if (candidate.dependencyRepositoryIds.includes(repository.id)) required.add(candidate.id);
+      }
+    }
+    if (selected.some((repository) => ["umbrella", "shared_platform"].includes(repository.role))) {
+      for (const candidate of product.repositories) {
+        if (["documentation", "installer", "release_truth"].includes(candidate.role)) required.add(candidate.id);
+      }
+    }
+    const requiredImpactIds = [...required];
+    const lines = requiredImpactIds.map((id) => {
+      const repository = byId.get(id)!;
+      const relationships = [
+        objective.repositoryIds.includes(id) ? "selected" : null,
+        selected.some((item) => item.dependencyRepositoryIds.includes(id)) ? "dependency of selected repository" : null,
+        selected.some((item) => repository.dependencyRepositoryIds.includes(item.id)) ? "depends on selected repository" : null,
+        ["documentation", "installer", "release_truth"].includes(repository.role) && !objective.repositoryIds.includes(id) ? "delivery impact candidate" : null,
+      ].filter(Boolean).join(", ");
+      const inspection = repository.inspection;
+      return [
+        `Repository ${repository.id} (${repository.name})`,
+        `role=${repository.role}`,
+        `relationship=${relationships || "related"}`,
+        `localPath=${repository.localPath ?? "not registered locally"}`,
+        `branch=${inspection?.currentBranch ?? repository.defaultBranch}`,
+        `dirty=${inspection?.dirty ?? "unknown"}`,
+        `dependencies=${repository.dependencyRepositoryIds.join(",") || "none"}`,
+        `owners=${repository.owners.join(",") || "unspecified"}`,
+        `validators=${Object.keys(repository.validators).join(",") || "none mapped"}`,
+        `governanceSources=${repository.governanceSources.join(",") || "none mapped"}`,
+        `compatibilityIssues=${inspection?.compatibilityIssues.join(" | ") || "none observed"}`,
+      ].join("; ");
+    });
+    return {
+      requiredImpactIds,
+      text: `Product ${product.name} (${product.id}). Repositories requiring an explicit impact decision:\n${lines.map((line) => `- ${line}`).join("\n")}`,
+    };
+  }
+
+  private validateObjectiveRepositoryPlan(objective: ObjectiveRecord, plan: RunPlan, requiredImpactIds: string[]): void {
+    if (!objective.productId || !objective.repositoryIds.length) return;
+    const impacts = new Map((plan.repositoryImpact ?? []).map((impact) => [impact.repositoryId, impact]));
+    const missing = requiredImpactIds.filter((id) => !impacts.has(id));
+    if (missing.length) throw new Error(`Architect plan omitted repository impact decisions for: ${missing.join(", ")}`);
+    const product = this.ledger.getProduct(objective.productId)!;
+    const known = new Set(product.repositories.map((repository) => repository.id));
+    const unknown = (plan.repositoryImpact ?? []).map((impact) => impact.repositoryId).filter((id) => !known.has(id));
+    if (unknown.length) throw new Error(`Architect plan referenced repositories outside ${product.name}: ${unknown.join(", ")}`);
+    const affected = new Set((plan.repositoryImpact ?? []).filter((impact) => impact.disposition === "affected").map((impact) => impact.repositoryId));
+    if (![...affected].some((id) => objective.repositoryIds.includes(id))) {
+      throw new Error("Architect plan excluded every repository explicitly selected by the user");
+    }
+    for (const task of plan.tasks) {
+      if (!(task.repositoryIds ?? []).length) throw new Error(`Task '${task.id}' does not identify its repository IDs`);
+      const invalid = (task.repositoryIds ?? []).filter((id) => !affected.has(id));
+      if (invalid.length) throw new Error(`Task '${task.id}' targets repositories not marked affected: ${invalid.join(", ")}`);
+    }
+    const uncovered = [...affected].filter((id) => !plan.tasks.some((task) => (task.repositoryIds ?? []).includes(id)));
+    if (uncovered.length) throw new Error(`Affected repositories have no planned task: ${uncovered.join(", ")}`);
+    if (affected.size > 1 && !(plan.integrationConditions ?? []).length) {
+      throw new Error("Multi-repository plans require explicit integration conditions");
+    }
   }
 
   private async provider(name: string, config: DevHarmonicsConfig, connectionId?: string): Promise<RuntimeAdapter> {

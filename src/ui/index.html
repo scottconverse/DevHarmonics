@@ -51,6 +51,12 @@
           <label for="project-path">Project folder</label>
           <input id="project-path" class="input" spellcheck="false" />
 
+          <div class="objective-repository-picker">
+            <label for="objective-product">Product context <small>Optional</small></label>
+            <select id="objective-product" class="input"><option value="">Standalone repository</option></select>
+            <fieldset id="objective-repositories-field" class="hidden"><legend>Repositories in scope</legend><p class="field-help">Select every repository the architect must assess. Planning can span repositories; execution remains disabled until the affected set has a supported integration topology.</p><div id="objective-repositories" class="repository-picker-list"></div></fieldset>
+          </div>
+
           <label for="goal">What should the team accomplish?</label>
           <textarea
             id="goal"
@@ -122,11 +128,12 @@
             </div>
             <p id="plan-summary" class="plan-summary"></p>
             <div id="plan-metrics" class="metrics"></div>
+            <div id="plan-repository-impact" class="plan-repository-impact"></div>
             <div id="plan-task-list" class="plan-task-list"></div>
             <label for="revision-feedback">What should change?</label>
             <textarea id="revision-feedback" rows="3" placeholder="Keep the first task, split browser verification from implementation, and restrict changes to src/reports."></textarea>
             <div class="plan-actions">
-              <p class="muted">No repository write begins until you approve this exact revision.</p>
+              <p id="plan-execution-note" class="muted">No repository write begins until you approve this exact revision.</p>
               <button id="revise-plan" class="secondary" type="button">Revise plan</button>
               <button id="approve-plan-start" class="primary" type="button">Approve revision &amp; start</button>
             </div>

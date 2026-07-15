@@ -1,14 +1,16 @@
 # DevHarmonics Detailed Implementation Plan
 
 Document status: **Build-ready execution plan**
-Plan version: **1.8**
+Plan version: **1.9**
 Written: **2026-07-14**
 Revised: **2026-07-15**
 Product specification baseline: **DevHarmonics Product Specification v1.6**
 Current implementation baseline: **DevHarmonics v0.4.0**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 
-Revision history: **v1.8 (2026-07-15)** — Added Mellum2 as the first named local specialist milestone: separate Instruct/Thinking tracks, strict specialist-fidelity benchmark, bounded-tool plus benchmark scheduling gates, hard task-capability matching, a narrow low-risk economy implementation lane, live installed-model proof, and explicit no-download/no-silent-promotion policy.
+Revision history: **v1.9 (2026-07-15)** — Implemented the single-workspace DH-620 core: durable structured objective drafts, immutable plan revisions and rationale, exact-revision approval/run linkage, pre-run task/model/capacity/permission preview, and revise-or-start controls. Product/repository selection remains with the v0.6 multi-repository registry.
+
+Prior revision: **v1.8 (2026-07-15)** — Added Mellum2 as the first named local specialist milestone: separate Instruct/Thinking tracks, strict specialist-fidelity benchmark, bounded-tool plus benchmark scheduling gates, hard task-capability matching, a narrow low-risk economy implementation lane, live installed-model proof, and explicit no-download/no-silent-promotion policy.
 
 Prior revision: **v1.7 (2026-07-15)** — Closed the v0.4 adaptive-workforce release gate with a successful CivicSuite acceptance run, full automated and dependency audits, a Computer Use UI/UX walkthrough, reviewer-invocation empirical observations, explicit manual tier-override evidence, cache-safe dashboard assets, and responsive cockpit fixes.
 
@@ -758,6 +760,8 @@ Acceptance:
 
 #### DH-620: Objective composer and plan approval — M
 
+Status: **Single-workspace core implemented in the v0.5 development line.** Structured drafts are saved without starting a run; planning produces immutable revisions with rationale and previews task scope, permissions, checks, proposed assignments, and capacity. Execution links to and uses the exact approved revision without replanning. Product/repository pickers remain dependent on DH-700 in v0.6.
+
 Deliverables:
 
 - select product/workspace and repositories;
@@ -1108,7 +1112,7 @@ Exit gate:
 
 ### Increment 4: Verified local implementation — v0.5
 
-Status: **In progress.** DH-440 through DH-470 foundations and DH-510's bounded local tool loop are implemented on the v0.5 development branch. Mellum2 Instruct is the first named live specialist candidate; exact-machine qualification, UI walkthrough, adversarial review, and the aggregate release gate remain before v0.5 can ship.
+Status: **In progress.** DH-440 through DH-470 foundations, DH-510's bounded local tool loop, Mellum2 scheduling, and DH-620's durable single-workspace objective/plan approval core are implemented on the v0.5 development branch. DH-640 Workbench plus the aggregate release gate remain before v0.5 can ship.
 
 Work:
 

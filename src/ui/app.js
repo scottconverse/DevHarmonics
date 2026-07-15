@@ -19,6 +19,9 @@ const state = {
   performanceProfiles: [],
   performancePolicies: [],
   openRouter: { connected: false, key: null },
+  objective: null,
+  planRevision: null,
+  planPreview: null,
 };
 const $ = (selector) => document.querySelector(selector);
 
@@ -546,20 +549,100 @@ function closeTask() {
   $("#task-drawer").setAttribute("inert", "");
 }
 
-async function startRun() {
-  const goal = $("#goal").value.trim();
-  const enabledProviders = [...document.querySelectorAll('input[name="provider"]:checked')].map((input) => input.value);
-  if (!goal) return showError("Describe the outcome first.");
-  if (!enabledProviders.length) return showError("Sign in to and enable at least one provider.");
-  const mode = $("#agent-mode").value;
-  const agents = mode === "auto" ? "auto" : Number($("#agent-count").value);
-  $("#start-run").disabled = true;
-  showError("");
-  try {
-    const result = await api("/api/runs", {
+function linesFrom(selector) {
+  return $(selector).value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+}
+
+function objectiveInput() {
+  const deadline = $("#objective-deadline").value;
+  return {
+    outcome: $("#goal").value.trim(),
+    acceptanceCriteria: linesFrom("#acceptance-criteria"),
+    constraints: linesFrom("#constraints"),
+    projectPath: $("#project-path").value,
+    repositoryIds: [],
+    risk: $("#objective-risk").value,
+    autonomy: $("#run-autonomy").value,
+    priority: $("#objective-priority").value,
+    ...(deadline ? { deadline: new Date(deadline).toISOString() } : {}),
+    policyNotes: linesFrom("#policy-notes"),
+  };
+}
+
+async function saveObjectiveDraft() {
+  const input = objectiveInput();
+  if (!input.outcome) throw new Error("Describe the outcome first.");
+  const result = state.objective
+    ? await api(`/api/objectives/${state.objective.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...input, expectedRevision: state.objective.revision }),
+    })
+    : await api("/api/objectives", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ goal, projectPath: $("#project-path").value, autonomy: $("#run-autonomy").value, agents, enabledProviders }),
+      body: JSON.stringify(input),
+    });
+  state.objective = result.objective;
+  return result.objective;
+}
+
+async function previewPlan({ revise = false } = {}) {
+  const enabledProviders = [...document.querySelectorAll('input[name="provider"]:checked')].map((input) => input.value);
+  if (!enabledProviders.length) return showError("Sign in to and enable at least one provider.");
+  const feedback = $("#revision-feedback").value.trim();
+  if (revise && !feedback) return showError("Describe what should change before requesting another revision.");
+  const button = revise ? $("#revise-plan") : $("#preview-plan");
+  button.disabled = true;
+  showError("");
+  try {
+    const objective = await saveObjectiveDraft();
+    const result = await api(`/api/objectives/${objective.id}/plans`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabledProviders, ...(feedback ? { revisionFeedback: feedback, rationale: feedback } : {}) }),
+    });
+    state.planRevision = result.revision;
+    state.planPreview = result.preview;
+    renderPlanPreview();
+    $("#revision-feedback").value = "";
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderPlanPreview() {
+  if (!state.planRevision || !state.planPreview) return;
+  const plan = state.planRevision.plan;
+  $("#plan-preview").classList.remove("hidden");
+  $("#plan-revision").textContent = `Revision ${state.planRevision.revision}`;
+  $("#plan-summary").textContent = plan.summary;
+  const writeTasks = plan.tasks.filter((task) => task.permission === "workspace_write").length;
+  const highRisk = plan.tasks.filter((task) => task.risk === "high").length;
+  $("#plan-metrics").innerHTML = `<div class="metric"><span>Tasks</span><strong>${plan.tasks.length}</strong></div><div class="metric"><span>Workspace writes</span><strong>${writeTasks}</strong></div><div class="metric"><span>High risk</span><strong>${highRisk}</strong></div><div class="metric"><span>Planned agents</span><strong>${state.planPreview.capacity.effectiveConcurrency}</strong></div>`;
+  $("#plan-task-list").innerHTML = plan.tasks.map((task) => {
+    const assignment = state.planPreview.assignments.find((item) => item.taskId === task.id);
+    const dependencyText = task.dependencies.length ? `After ${task.dependencies.join(", ")}` : "No dependencies";
+    return `<article class="plan-task"><h3>${escapeHtml(task.title)}</h3><div class="plan-task-meta"><span>${escapeHtml(task.permission.replaceAll("_", " "))}</span><span>${escapeHtml(task.risk)} risk</span><span>${escapeHtml(assignment?.tier || "unassigned")}</span></div><p>${escapeHtml(task.description)}</p><details><summary>${escapeHtml(dependencyText)} · ${escapeHtml(assignment?.provider || "unassigned")} / ${escapeHtml(assignment?.modelId || "provider default")} · ${task.checks.length} checks</summary><p>Scope: ${task.repositoryScope.map(escapeHtml).join(", ")}<br>Acceptance: ${task.acceptanceCriteria.map(escapeHtml).join("; ") || "Not supplied"}<br>Capabilities: ${task.capabilityNeeds.map(escapeHtml).join(", ")}</p></details></article>`;
+  }).join("");
+  $("#plan-preview").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function approvePlanAndStart() {
+  if (!state.objective || !state.planRevision) return showError("Build a plan preview first.");
+  const enabledProviders = [...document.querySelectorAll('input[name="provider"]:checked')].map((input) => input.value);
+  const mode = $("#agent-mode").value;
+  const agents = mode === "auto" ? "auto" : Number($("#agent-count").value);
+  const button = $("#approve-plan-start");
+  button.disabled = true;
+  showError("");
+  try {
+    const result = await api(`/api/objectives/${state.objective.id}/plans/${state.planRevision.revision}/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agents, enabledProviders }),
     });
     state.composing = false;
     state.selectedRunId = result.runId;
@@ -567,7 +650,7 @@ async function startRun() {
   } catch (error) {
     showError(error.message);
   } finally {
-    $("#start-run").disabled = false;
+    button.disabled = false;
   }
 }
 
@@ -577,6 +660,10 @@ function showComposer() {
   showView("runs");
   state.composing = true;
   state.selectedRunId = null;
+  state.objective = null;
+  state.planRevision = null;
+  state.planPreview = null;
+  $("#plan-preview").classList.add("hidden");
   $("#composer").classList.remove("hidden");
   $("#run-view").classList.add("hidden");
   $("#page-title").textContent = "Assemble a verified agent team";
@@ -586,7 +673,9 @@ function showComposer() {
 
 $("#agent-mode").addEventListener("change", (event) => { $("#agent-count").disabled = event.target.value === "auto"; });
 $("#run-autonomy").addEventListener("change", renderRunAutonomyHelp);
-$("#start-run").addEventListener("click", startRun);
+$("#preview-plan").addEventListener("click", () => previewPlan());
+$("#revise-plan").addEventListener("click", () => previewPlan({ revise: true }));
+$("#approve-plan-start").addEventListener("click", approvePlanAndStart);
 $("#refresh-provider-status").addEventListener("click", refreshProviderStatus);
 $("#cancel-run").addEventListener("click", async () => {
   const runId = state.selectedRunId;

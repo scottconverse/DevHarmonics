@@ -16,6 +16,7 @@ import {
   type RunStatus,
 } from "./domain.js";
 import { redactText, redactValue } from "./redaction.js";
+import { objectiveInputSchema, planRevisionInputSchema } from "./schemas.js";
 import type { ReviewFinding, StructuredReview } from "./review.js";
 import { aggregateModelPerformance, type ModelPerformanceObservation, type ModelPerformanceProfile } from "./model-performance.js";
 import { classifyWorkload } from "./model-intelligence.js";
@@ -30,10 +31,14 @@ import {
 } from "./registry.js";
 import type {
   CheckResult,
+  ObjectiveInput,
+  ObjectiveRecord,
+  PlanRevisionRecord,
   PlannedTask,
   ProviderName,
   RunAutonomy,
   RunPlan,
+  RunObjectiveLink,
   RunSummary,
   TaskStatus,
 } from "./types.js";
@@ -48,6 +53,9 @@ interface RunRow {
   final_review: string | null;
   resumed_from: string | null;
   autonomy: string;
+  objective_id: string | null;
+  approved_plan_revision: number | null;
+  plan_json: string | null;
 }
 
 interface TaskRow {
@@ -124,7 +132,7 @@ interface CheckRow {
   duration_ms: number;
 }
 
-export const LEDGER_SCHEMA_VERSION = 17;
+export const LEDGER_SCHEMA_VERSION = 18;
 
 export interface RepositoryRecord {
   id: string;
@@ -760,6 +768,49 @@ const MIGRATIONS: readonly LedgerMigration[] = [
       `);
     },
   },
+  {
+    version: 18,
+    name: "durable-objectives-and-plan-revisions",
+    apply(database) {
+      const runColumns = new Set(
+        (database.prepare("SELECT name FROM pragma_table_info('runs')").all() as unknown as Array<{ name: string }>).map((column) => column.name),
+      );
+      if (!runColumns.has("objective_id")) database.exec("ALTER TABLE runs ADD COLUMN objective_id TEXT REFERENCES objectives(id) ON DELETE SET NULL;");
+      if (!runColumns.has("approved_plan_revision")) database.exec("ALTER TABLE runs ADD COLUMN approved_plan_revision INTEGER;");
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS objectives (
+          id TEXT PRIMARY KEY,
+          outcome TEXT NOT NULL,
+          acceptance_criteria_json TEXT NOT NULL,
+          constraints_json TEXT NOT NULL,
+          project_path TEXT NOT NULL,
+          product_id TEXT,
+          repository_ids_json TEXT NOT NULL,
+          risk TEXT NOT NULL,
+          autonomy TEXT NOT NULL,
+          priority TEXT NOT NULL,
+          deadline TEXT,
+          policy_notes_json TEXT NOT NULL,
+          revision INTEGER NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS plan_revisions (
+          objective_id TEXT NOT NULL REFERENCES objectives(id) ON DELETE CASCADE,
+          revision INTEGER NOT NULL,
+          plan_json TEXT NOT NULL,
+          rationale TEXT NOT NULL,
+          approved INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          approved_at TEXT,
+          PRIMARY KEY (objective_id, revision)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS plan_revisions_one_approved
+          ON plan_revisions(objective_id) WHERE approved = 1;
+        CREATE INDEX IF NOT EXISTS objectives_updated_at ON objectives(updated_at DESC);
+      `);
+    },
+  },
 ];
 
 function summarizeGoal(goal: string, maxLength = 180): string {
@@ -769,7 +820,7 @@ function summarizeGoal(goal: string, maxLength = 180): string {
 }
 
 const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
-  runs: ["id", "goal", "project_path", "status", "plan_json", "final_review", "resumed_from", "autonomy", "created_at", "updated_at"],
+  runs: ["id", "goal", "project_path", "status", "plan_json", "final_review", "resumed_from", "autonomy", "objective_id", "approved_plan_revision", "created_at", "updated_at"],
   tasks: [
     "run_id",
     "task_id",
@@ -877,6 +928,8 @@ const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
   tool_policy_receipts: ["id", "run_id", "task_id", "attempt_id", "tool_id", "actor_role", "stage", "side_effect", "outcome", "reason", "request_json", "lock_keys_json", "approval_id", "created_at"],
   review_receipts: ["id", "run_id", "round", "integration_sha256", "verdict", "provider", "model_id", "connection_id", "summary", "raw_text", "invalidated_at", "invalidation_reason", "created_at"],
   review_findings: ["id", "review_receipt_id", "finding_id", "severity", "location", "rationale", "suggested_correction", "disposition", "created_at"],
+  objectives: ["id", "outcome", "acceptance_criteria_json", "constraints_json", "project_path", "product_id", "repository_ids_json", "risk", "autonomy", "priority", "deadline", "policy_notes_json", "revision", "created_at", "updated_at"],
+  plan_revisions: ["objective_id", "revision", "plan_json", "rationale", "approved", "created_at", "approved_at"],
   model_performance_policies: ["model_id", "ignored_before", "excluded", "updated_at"],
   schema_migrations: ["version", "name", "applied_at"],
 };
@@ -915,15 +968,159 @@ export class Ledger {
     return this.readSchemaVersion();
   }
 
-  createRun(goal: string, projectPath: string, resumedFrom: string | null = null, autonomy: RunAutonomy = "supervised"): string {
+  createObjective(input: ObjectiveInput): ObjectiveRecord {
+    const objective = objectiveInputSchema.parse(input) as ObjectiveInput;
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
+    this.database.prepare(`
+      INSERT INTO objectives (
+        id, outcome, acceptance_criteria_json, constraints_json, project_path, product_id,
+        repository_ids_json, risk, autonomy, priority, deadline, policy_notes_json,
+        revision, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+    `).run(
+      id,
+      redactText(objective.outcome),
+      JSON.stringify(objective.acceptanceCriteria.map(redactText)),
+      JSON.stringify(objective.constraints.map(redactText)),
+      objective.projectPath,
+      objective.productId ?? null,
+      JSON.stringify(objective.repositoryIds),
+      objective.risk,
+      objective.autonomy,
+      objective.priority,
+      objective.deadline ?? null,
+      JSON.stringify(objective.policyNotes.map(redactText)),
+      now,
+      now,
+    );
+    return this.getObjective(id)!;
+  }
+
+  updateObjective(id: string, input: ObjectiveInput, expectedRevision: number): ObjectiveRecord {
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+      throw new Error("Expected objective revision must be a positive integer");
+    }
+    const objective = objectiveInputSchema.parse(input) as ObjectiveInput;
+    const result = this.database.prepare(`
+      UPDATE objectives SET
+        outcome = ?, acceptance_criteria_json = ?, constraints_json = ?, project_path = ?,
+        product_id = ?, repository_ids_json = ?, risk = ?, autonomy = ?, priority = ?,
+        deadline = ?, policy_notes_json = ?, revision = revision + 1, updated_at = ?
+      WHERE id = ? AND revision = ?
+    `).run(
+      redactText(objective.outcome),
+      JSON.stringify(objective.acceptanceCriteria.map(redactText)),
+      JSON.stringify(objective.constraints.map(redactText)),
+      objective.projectPath,
+      objective.productId ?? null,
+      JSON.stringify(objective.repositoryIds),
+      objective.risk,
+      objective.autonomy,
+      objective.priority,
+      objective.deadline ?? null,
+      JSON.stringify(objective.policyNotes.map(redactText)),
+      new Date().toISOString(),
+      id,
+      expectedRevision,
+    );
+    if (result.changes === 0) {
+      if (!this.getObjective(id)) throw new Error(`Objective '${id}' was not found`);
+      throw new Error(`Objective '${id}' revision conflict: expected revision ${expectedRevision}`);
+    }
+    return this.getObjective(id)!;
+  }
+
+  getObjective(id: string): ObjectiveRecord | null {
+    const row = this.database.prepare("SELECT * FROM objectives WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    return row ? this.mapObjective(row) : null;
+  }
+
+  listObjectives(): ObjectiveRecord[] {
+    const rows = this.database.prepare("SELECT * FROM objectives ORDER BY updated_at DESC, id").all() as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => this.mapObjective(row));
+  }
+
+  appendPlanRevision(objectiveId: string, plan: RunPlan, rationale: string): PlanRevisionRecord {
+    const parsed = planRevisionInputSchema.parse({ plan, rationale }) as { plan: RunPlan; rationale: string };
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      if (!this.getObjective(objectiveId)) throw new Error(`Objective '${objectiveId}' was not found`);
+      const row = this.database.prepare("SELECT COALESCE(MAX(revision), 0) AS revision FROM plan_revisions WHERE objective_id = ?").get(objectiveId) as { revision: number };
+      const revision = row.revision + 1;
+      const storedPlan = redactValue({
+        ...parsed.plan,
+        revision,
+        previousRevision: revision > 1 ? revision - 1 : null,
+      }) as RunPlan;
+      this.database.prepare(`
+        INSERT INTO plan_revisions (objective_id, revision, plan_json, rationale, approved, created_at, approved_at)
+        VALUES (?, ?, ?, ?, 0, ?, NULL)
+      `).run(objectiveId, revision, JSON.stringify(storedPlan), redactText(parsed.rationale), new Date().toISOString());
+      this.database.exec("COMMIT");
+      return this.getPlanRevision(objectiveId, revision)!;
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getPlanRevision(objectiveId: string, revision: number): PlanRevisionRecord | null {
+    const row = this.database.prepare("SELECT * FROM plan_revisions WHERE objective_id = ? AND revision = ?").get(objectiveId, revision) as Record<string, unknown> | undefined;
+    return row ? this.mapPlanRevision(row) : null;
+  }
+
+  listPlanRevisions(objectiveId: string): PlanRevisionRecord[] {
+    const rows = this.database.prepare("SELECT * FROM plan_revisions WHERE objective_id = ? ORDER BY revision").all(objectiveId) as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => this.mapPlanRevision(row));
+  }
+
+  approvePlanRevision(objectiveId: string, revision: number): PlanRevisionRecord {
+    if (!Number.isSafeInteger(revision) || revision < 1) throw new Error("Plan revision must be a positive integer");
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const candidate = this.database.prepare("SELECT 1 AS present FROM plan_revisions WHERE objective_id = ? AND revision = ?").get(objectiveId, revision);
+      if (!candidate) throw new Error(`Plan revision ${revision} for objective '${objectiveId}' was not found`);
+      this.database.prepare("UPDATE plan_revisions SET approved = 0, approved_at = NULL WHERE objective_id = ? AND approved = 1").run(objectiveId);
+      this.database.prepare("UPDATE plan_revisions SET approved = 1, approved_at = ? WHERE objective_id = ? AND revision = ?").run(new Date().toISOString(), objectiveId, revision);
+      this.database.exec("COMMIT");
+      return this.getPlanRevision(objectiveId, revision)!;
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  createRun(
+    goal: string,
+    projectPath: string,
+    resumedFrom: string | null = null,
+    autonomy: RunAutonomy = "supervised",
+    linkage: RunObjectiveLink | null = null,
+  ): string {
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    let approvedPlanJson: string | null = null;
+    if (linkage) {
+      const approved = this.database.prepare(`
+        SELECT plan_json FROM plan_revisions
+        WHERE objective_id = ? AND revision = ? AND approved = 1
+      `).get(linkage.objectiveId, linkage.approvedPlanRevision) as { plan_json: string } | undefined;
+      if (!approved) {
+        throw new Error(`Plan revision ${linkage.approvedPlanRevision} is not the approved plan revision for objective '${linkage.objectiveId}'`);
+      }
+      approvedPlanJson = approved.plan_json;
+    }
     this.database
       .prepare(
-        "INSERT INTO runs (id, goal, project_path, status, resumed_from, autonomy, created_at, updated_at) VALUES (?, ?, ?, 'planning', ?, ?, ?, ?)",
+        "INSERT INTO runs (id, goal, project_path, status, plan_json, resumed_from, autonomy, objective_id, approved_plan_revision, created_at, updated_at) VALUES (?, ?, ?, 'planning', ?, ?, ?, ?, ?, ?, ?)",
       )
-      .run(id, redactText(goal), projectPath, resumedFrom, autonomy, now, now);
-    this.addEvent(id, "run.created", resumedFrom ? "Recovery run created" : "Run created", { ...(resumedFrom ? { resumedFrom } : {}), autonomy });
+      .run(id, redactText(goal), projectPath, approvedPlanJson, resumedFrom, autonomy, linkage?.objectiveId ?? null, linkage?.approvedPlanRevision ?? null, now, now);
+    this.addEvent(id, "run.created", resumedFrom ? "Recovery run created" : "Run created", {
+      ...(resumedFrom ? { resumedFrom } : {}),
+      ...(linkage ? { objectiveId: linkage.objectiveId, approvedPlanRevision: linkage.approvedPlanRevision } : {}),
+      autonomy,
+    });
     return id;
   }
 
@@ -943,6 +1140,8 @@ export class Ledger {
     const safePlan: RunPlan = {
       summary: redactText(plan.summary),
       recommendedConcurrency: plan.recommendedConcurrency,
+      ...(plan.revision === undefined ? {} : { revision: plan.revision }),
+      ...(plan.previousRevision === undefined ? {} : { previousRevision: plan.previousRevision }),
       tasks: plan.tasks.map((task) => ({
         ...task,
         title: redactText(task.title),
@@ -1288,6 +1487,9 @@ export class Ledger {
       updatedAt: run.updated_at,
       finalReview: run.final_review,
       resumedFrom: run.resumed_from,
+      objectiveId: run.objective_id,
+      approvedPlanRevision: run.approved_plan_revision,
+      plan: run.plan_json ? JSON.parse(run.plan_json) as RunPlan : null,
       tasks: tasks.map((task) => {
         const contract = JSON.parse(task.task_contract_json || "{}") as Partial<PlannedTask>;
         return {
@@ -2217,6 +2419,38 @@ export class Ledger {
       capabilityNeeds: contract.capabilityNeeds ?? ["code"],
       acceptanceCriteria: contract.acceptanceCriteria ?? [],
       expectedArtifacts: contract.expectedArtifacts ?? [],
+    };
+  }
+
+  private mapObjective(row: Record<string, unknown>): ObjectiveRecord {
+    return {
+      id: String(row.id),
+      outcome: String(row.outcome),
+      acceptanceCriteria: JSON.parse(String(row.acceptance_criteria_json)) as string[],
+      constraints: JSON.parse(String(row.constraints_json)) as string[],
+      projectPath: String(row.project_path),
+      ...(row.product_id === null ? {} : { productId: String(row.product_id) }),
+      repositoryIds: JSON.parse(String(row.repository_ids_json)) as string[],
+      risk: String(row.risk) as ObjectiveRecord["risk"],
+      autonomy: parseRunAutonomy(String(row.autonomy)),
+      priority: String(row.priority) as ObjectiveRecord["priority"],
+      ...(row.deadline === null ? {} : { deadline: String(row.deadline) }),
+      policyNotes: JSON.parse(String(row.policy_notes_json)) as string[],
+      revision: Number(row.revision),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
+  }
+
+  private mapPlanRevision(row: Record<string, unknown>): PlanRevisionRecord {
+    return {
+      objectiveId: String(row.objective_id),
+      revision: Number(row.revision),
+      plan: JSON.parse(String(row.plan_json)) as RunPlan,
+      rationale: String(row.rationale),
+      approved: Boolean(row.approved),
+      createdAt: String(row.created_at),
+      approvedAt: row.approved_at === null ? null : String(row.approved_at),
     };
   }
 

@@ -6,6 +6,8 @@ All notable DevHarmonics changes are documented here.
 
 ### Added
 
+- Durable structured objective drafts and immutable plan revisions with approval rationale, exact-revision run linkage, and restart-safe persistence.
+- A two-step objective composer that previews task dependencies, repository scope, permissions, checks, proposed model assignments, and capacity before execution.
 - Bounded Ollama implementation through scoped `file.read`, `file.search`, and hash-checked `file.patch` tools inside the assigned worktree, with typed policy and execution receipts.
 - Mellum2 Instruct and Thinking profiles as separate local specialist upgrade tracks, with published capability provenance and no automatic download or activation.
 - A machine-checked local specialist benchmark covering strict structured output, contradiction detection, and requirement counting; Mellum2 scheduling requires this benchmark in addition to its role qualification.
@@ -20,6 +22,7 @@ All notable DevHarmonics changes are documented here.
 
 ### Fixed
 
+- Approved objective runs execute the exact stored plan revision without invoking the architect again or depending on an in-memory approval callback.
 - Explicit local model assignment can no longer turn a read-only qualification into workspace-write authority.
 
 ## [0.4.0] - 2026-07-15

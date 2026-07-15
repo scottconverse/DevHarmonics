@@ -15,7 +15,7 @@ import { PRODUCT_NAME, VERSION } from "./product.js";
 import { redactText } from "./redaction.js";
 import { createRunEvidenceExport, createRunReport } from "./reporter.js";
 import { observeLocalResources } from "./resources.js";
-import { manualModelSchema, productRegistrationSchema } from "./schemas.js";
+import { manualModelSchema, objectiveInputSchema, productRegistrationSchema } from "./schemas.js";
 import type { ProviderName, RunRequest } from "./types.js";
 import { inferModelProfile } from "./model-intelligence.js";
 import type { ModelRecord } from "./registry.js";
@@ -352,6 +352,98 @@ async function route(
   if (request.method === "GET" && runMatch?.[1]) {
     const run = context.ledger.getRun(runMatch[1]);
     sendJson(response, run ? 200 : 404, run ?? { error: "Run not found" });
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/objectives") {
+    sendJson(response, 200, { objectives: context.ledger.listObjectives() });
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/objectives") {
+    requireJsonRequest(request);
+    const raw = await readJson(request) as Record<string, unknown>;
+    const parsed = objectiveInputSchema.safeParse({ ...raw, projectPath: path.resolve(String(raw.projectPath || context.defaultProject)) });
+    if (!parsed.success) {
+      sendJson(response, 400, { error: "Objective is invalid", issues: parsed.error.issues });
+      return;
+    }
+    const details = await stat(parsed.data.projectPath);
+    if (!details.isDirectory()) throw new Error("Project path must be a directory");
+    await initializeProject(parsed.data.projectPath);
+    sendJson(response, 201, { objective: context.ledger.createObjective(parsed.data) });
+    return;
+  }
+
+  const objectiveMatch = url.pathname.match(/^\/api\/objectives\/([a-f0-9-]+)$/i);
+  if (request.method === "GET" && objectiveMatch?.[1]) {
+    const objective = context.ledger.getObjective(objectiveMatch[1]);
+    sendJson(response, objective ? 200 : 404, objective ? { objective } : { error: "Objective not found" });
+    return;
+  }
+  if (request.method === "PUT" && objectiveMatch?.[1]) {
+    requireJsonRequest(request);
+    const raw = await readJson(request) as Record<string, unknown>;
+    const expectedRevision = Number(raw.expectedRevision);
+    const parsed = objectiveInputSchema.safeParse({ ...raw, projectPath: path.resolve(String(raw.projectPath || context.defaultProject)) });
+    if (!Number.isInteger(expectedRevision) || expectedRevision < 1) {
+      sendJson(response, 400, { error: "expectedRevision must be a positive integer" });
+      return;
+    }
+    if (!parsed.success) {
+      sendJson(response, 400, { error: "Objective is invalid", issues: parsed.error.issues });
+      return;
+    }
+    sendJson(response, 200, { objective: context.ledger.updateObjective(objectiveMatch[1], parsed.data, expectedRevision) });
+    return;
+  }
+
+  const objectivePlansMatch = url.pathname.match(/^\/api\/objectives\/([a-f0-9-]+)\/plans$/i);
+  if (request.method === "GET" && objectivePlansMatch?.[1]) {
+    const objective = context.ledger.getObjective(objectivePlansMatch[1]);
+    sendJson(response, objective ? 200 : 404, objective ? { plans: context.ledger.listPlanRevisions(objective.id) } : { error: "Objective not found" });
+    return;
+  }
+  if (request.method === "POST" && objectivePlansMatch?.[1]) {
+    requireJsonRequest(request);
+    const objective = context.ledger.getObjective(objectivePlansMatch[1]);
+    if (!objective) {
+      sendJson(response, 404, { error: "Objective not found" });
+      return;
+    }
+    const body = await readJson(request) as { enabledProviders?: ProviderName[]; revisionFeedback?: string; rationale?: string };
+    const previous = context.ledger.listPlanRevisions(objective.id).at(-1) ?? null;
+    const proposal = await context.orchestrator.proposeObjectivePlan({
+      objective,
+      ...(body.enabledProviders ? { enabledProviders: body.enabledProviders } : {}),
+      previous,
+      ...(body.revisionFeedback?.trim() ? { revisionFeedback: body.revisionFeedback.trim() } : {}),
+    });
+    const rationale = body.rationale?.trim() || body.revisionFeedback?.trim() || (previous ? "Refined objective plan" : "Initial objective plan");
+    const revision = context.ledger.appendPlanRevision(objective.id, proposal.plan, rationale);
+    sendJson(response, 201, { objective, revision, preview: proposal.preview });
+    return;
+  }
+
+  const objectiveStartMatch = url.pathname.match(/^\/api\/objectives\/([a-f0-9-]+)\/plans\/(\d+)\/start$/i);
+  if (request.method === "POST" && objectiveStartMatch?.[1] && objectiveStartMatch[2]) {
+    requireJsonRequest(request);
+    const objective = context.ledger.getObjective(objectiveStartMatch[1]);
+    const revisionNumber = Number(objectiveStartMatch[2]);
+    if (!objective || !context.ledger.getPlanRevision(objective.id, revisionNumber)) {
+      sendJson(response, 404, { error: "Objective or plan revision not found" });
+      return;
+    }
+    const body = await readJson(request) as { agents?: number | "auto"; enabledProviders?: ProviderName[] };
+    const revision = context.ledger.approvePlanRevision(objective.id, revisionNumber);
+    const agents = body.agents === "auto" ? "auto" : Number(body.agents);
+    const runId = context.orchestrator.beginApprovedObjective({
+      objective,
+      revision,
+      agents: agents === "auto" || Number.isInteger(agents) && agents > 0 ? agents : "auto",
+      ...(body.enabledProviders ? { enabledProviders: body.enabledProviders } : {}),
+    });
+    sendJson(response, 202, { runId, objectiveId: objective.id, approvedPlanRevision: revision.revision });
     return;
   }
 

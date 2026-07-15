@@ -57,6 +57,20 @@
             placeholder="Example: Add CSV export to the customer report, cover it with tests, and verify the download in the browser."
           ></textarea>
 
+          <div class="objective-grid">
+            <label for="acceptance-criteria">Acceptance criteria <small>One observable result per line</small><textarea id="acceptance-criteria" rows="4" placeholder="CSV downloads with the selected filters&#10;Export is covered by an automated test"></textarea></label>
+            <label for="constraints">Constraints <small>One boundary per line</small><textarea id="constraints" rows="4" placeholder="Preserve the existing report API&#10;Do not add a paid dependency"></textarea></label>
+          </div>
+
+          <div class="objective-policy-grid">
+            <label for="objective-risk">Objective risk<select id="objective-risk" class="input"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option></select></label>
+            <label for="objective-priority">Priority<select id="objective-priority" class="input"><option value="low">Low</option><option value="normal" selected>Normal</option><option value="high">High</option><option value="urgent">Urgent</option></select></label>
+            <label for="objective-deadline">Deadline <small>Optional</small><input id="objective-deadline" class="input" type="datetime-local"></label>
+          </div>
+
+          <label for="policy-notes">Policy notes <small>Optional; one instruction per line</small></label>
+          <textarea id="policy-notes" rows="2" placeholder="Require an independent accessibility review"></textarea>
+
           <div class="composer-grid">
             <div>
               <label for="run-autonomy">Run mode</label>
@@ -98,8 +112,24 @@
 
           <div class="composer-actions">
             <p id="composer-error" class="error" role="alert"></p>
-            <button id="start-run" class="primary">Start verified run <span>→</span></button>
+            <button id="preview-plan" class="primary" type="button">Build plan preview <span>→</span></button>
           </div>
+          <section id="plan-preview" class="plan-preview hidden" aria-live="polite">
+            <div class="plan-preview-head">
+              <div><span class="step">02</span><div><p class="eyebrow">APPROVAL PREVIEW</p><h2 id="plan-preview-title">Review the proposed plan</h2></div></div>
+              <span id="plan-revision" class="status-pill"></span>
+            </div>
+            <p id="plan-summary" class="plan-summary"></p>
+            <div id="plan-metrics" class="metrics"></div>
+            <div id="plan-task-list" class="plan-task-list"></div>
+            <label for="revision-feedback">What should change?</label>
+            <textarea id="revision-feedback" rows="3" placeholder="Keep the first task, split browser verification from implementation, and restrict changes to src/reports."></textarea>
+            <div class="plan-actions">
+              <p class="muted">No repository write begins until you approve this exact revision.</p>
+              <button id="revise-plan" class="secondary" type="button">Revise plan</button>
+              <button id="approve-plan-start" class="primary" type="button">Approve revision &amp; start</button>
+            </div>
+          </section>
         </section>
 
         <section id="run-view" class="run-view hidden">

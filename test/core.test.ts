@@ -25,7 +25,7 @@ import {
   type InvocationEvent,
 } from "../src/runtime.js";
 import type { DevHarmonicsConfig } from "../src/types.js";
-import { manualModelSchema, runPlanSchema } from "../src/schemas.js";
+import { manualModelSchema, objectiveInputSchema, runPlanSchema } from "../src/schemas.js";
 import { runProcess, subscriptionEnvironment } from "../src/process.js";
 import { REDACTED, redactText } from "../src/redaction.js";
 import { parseNvidiaSmi } from "../src/resources.js";
@@ -1741,6 +1741,7 @@ test("ledger upgrades a v0.1 database transactionally and preserves a pre-migrat
           { version: 15, name: "reviewer-invocation-performance" },
           { version: 16, name: "typed-tool-policy-receipts" },
           { version: 17, name: "structured-review-quorums" },
+          { version: 18, name: "durable-objectives-and-plan-revisions" },
         ],
       );
     } finally {
@@ -2669,6 +2670,173 @@ test("ledger retains observed products and repository intelligence without crede
     assert.equal(ledger.listProducts()[0]?.repositories.length, 1);
   } finally {
     ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("objective drafts persist without creating an execution run", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-objective-draft-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    const objective = ledger.createObjective(objectiveInputSchema.parse({
+      outcome: "Ship a bounded CSV export",
+      acceptanceCriteria: ["Filtered rows are preserved"],
+      constraints: ["Do not change authentication"],
+      projectPath: root,
+      productId: "github:civicsuite",
+      repositoryIds: ["github:civicsuite/civiccore"],
+      risk: "medium",
+      autonomy: "supervised",
+      priority: "high",
+      deadline: "2026-08-01T18:00:00.000Z",
+      policyNotes: ["No external writes"],
+    }));
+
+    assert.equal(objective.revision, 1);
+    assert.equal(ledger.getObjective(objective.id)?.outcome, "Ship a bounded CSV export");
+    assert.equal(ledger.listObjectives().length, 1);
+    assert.equal(ledger.listRuns().length, 0);
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("objective updates use optimistic revisions and redact persisted policy text", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-objective-update-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    const input = {
+      outcome: "Prepare the inventory",
+      acceptanceCriteria: ["Inventory is complete"],
+      constraints: [],
+      projectPath: root,
+      repositoryIds: [],
+      risk: "low" as const,
+      autonomy: "observe" as const,
+      priority: "normal" as const,
+      policyNotes: [],
+    };
+    const created = ledger.createObjective(input);
+    const updated = ledger.updateObjective(created.id, {
+      ...input,
+      outcome: "Prepare the verified inventory",
+      policyNotes: ["OPENAI_API_KEY=sk-proj-objectivesecret123456789"],
+    }, 1);
+
+    assert.equal(updated.revision, 2);
+    assert.equal(updated.outcome, "Prepare the verified inventory");
+    assert.match(updated.policyNotes[0]!, /\[REDACTED\]/);
+    assert.throws(() => ledger.updateObjective(created.id, input, 1), /revision conflict/i);
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("plan revision two retains revision one and its rationale", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-plan-revisions-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    const objective = ledger.createObjective({
+      outcome: "Improve export reliability",
+      acceptanceCriteria: ["Regression tests pass"],
+      constraints: [],
+      projectPath: root,
+      repositoryIds: [],
+      risk: "low",
+      autonomy: "observe",
+      priority: "normal",
+      policyNotes: [],
+    });
+    const baseTask = {
+      id: "export",
+      title: "Review export",
+      description: "Inspect the export path",
+      dependencies: [],
+      preferredProvider: "codex" as const,
+      checks: ["npm test"],
+    };
+    const revision1 = ledger.appendPlanRevision(objective.id, {
+      summary: "Inspect first",
+      recommendedConcurrency: 1,
+      tasks: [baseTask],
+    }, "Start with a read-only inspection");
+    const revision2 = ledger.appendPlanRevision(objective.id, {
+      summary: "Inspect and implement",
+      recommendedConcurrency: 1,
+      tasks: [{ ...baseTask, description: "Inspect and repair the export path" }],
+    }, "The inspection confirmed a bounded repair");
+
+    assert.equal(revision1.revision, 1);
+    assert.equal(revision2.revision, 2);
+    assert.deepEqual(ledger.listPlanRevisions(objective.id).map((revision) => revision.revision), [1, 2]);
+    assert.equal(ledger.getPlanRevision(objective.id, 1)?.rationale, "Start with a read-only inspection");
+    assert.equal(ledger.getPlanRevision(objective.id, 1)?.plan.summary, "Inspect first");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("approving an exact plan revision is durable and links the run to that immutable plan", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-plan-approval-"));
+  const filename = path.join(root, "devharmonics.db");
+  let objectiveId = "";
+  let runId = "";
+  const ledger = new Ledger(filename);
+  try {
+    const objective = ledger.createObjective({
+      outcome: "Prepare a release inventory",
+      acceptanceCriteria: ["Every repository is accounted for"],
+      constraints: ["Read only"],
+      projectPath: root,
+      repositoryIds: ["github:civicsuite/civiccore"],
+      risk: "low",
+      autonomy: "observe",
+      priority: "normal",
+      policyNotes: [],
+    });
+    objectiveId = objective.id;
+    const plan = {
+      summary: "Inventory repositories",
+      recommendedConcurrency: 1,
+      tasks: [{
+        id: "inventory",
+        title: "Inventory",
+        description: "List repository release state",
+        dependencies: [],
+        preferredProvider: "codex" as const,
+        checks: ["inventory receipt"],
+      }],
+    };
+    ledger.appendPlanRevision(objective.id, plan, "Initial proposal");
+    ledger.appendPlanRevision(objective.id, { ...plan, summary: "Approved inventory" }, "Clarified output");
+    ledger.approvePlanRevision(objective.id, 1);
+    const approved = ledger.approvePlanRevision(objective.id, 2);
+    assert.equal(approved.approved, true);
+    assert.equal(ledger.getPlanRevision(objective.id, 1)?.approved, false);
+    runId = ledger.createRun(objective.outcome, objective.projectPath, null, objective.autonomy, {
+      objectiveId: objective.id,
+      approvedPlanRevision: approved.revision,
+    });
+  } finally {
+    ledger.close();
+  }
+
+  const reopened = new Ledger(filename);
+  try {
+    assert.equal(reopened.getPlanRevision(objectiveId, 2)?.approved, true);
+    const run = reopened.getRun(runId);
+    assert.equal(run?.objectiveId, objectiveId);
+    assert.equal(run?.approvedPlanRevision, 2);
+    assert.equal(run?.plan?.summary, "Approved inventory");
+    assert.throws(
+      () => reopened.createRun("Wrong revision", root, null, "observe", { objectiveId, approvedPlanRevision: 1 }),
+      /not the approved plan revision/i,
+    );
+  } finally {
+    reopened.close();
     await rm(root, { recursive: true, force: true });
   }
 });

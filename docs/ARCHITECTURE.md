@@ -40,7 +40,7 @@ Read-only architect -> typed task DAG -> dependency scheduler
 - `src/ollama.ts` and `src/openrouter.ts`: qualified read-only local inference and governed opt-in API inference.
 - `src/worktrees.ts`: integration branch and isolated task worktree lifecycle.
 - `src/validators.ts`: execution of user-configured validator allowlists.
-- `src/ledger.ts`: SQLite-backed run, task, attempt, check, and event receipts.
+- `src/ledger.ts`: SQLite-backed objective drafts, immutable plan revisions, approved run linkage, and run/task/attempt/check/event receipts.
 - `src/redaction.ts`: centralized secret scrubbing before data crosses the ledger or UI-error boundary.
 - `src/ui/`: dependency-free browser interface.
 
@@ -63,6 +63,8 @@ Workers can edit only within their assigned worktrees using the selected CLI's r
 ## Persistence
 
 Each target project receives `.devharmonics/config.json`, `.devharmonics/constitution.md`, and `.devharmonics/devharmonics.db`. Temporary worktrees live below the operating system's temporary directory under `devharmonics/<run-id>`.
+
+Objective planning is a durable pre-run control plane. Saving or updating a structured objective creates no run. Each architect proposal is appended as an immutable numbered plan revision with its human or system rationale. Approval marks one exact revision and a linked run copies that plan into its own ledger projection; the orchestrator skips architecture planning and executes the approved graph. This keeps restarts and later evidence tied to what the user actually authorized rather than an in-memory callback or a silently regenerated plan.
 
 The ledger uses ordered, transactional schema migrations tracked by SQLite's `user_version` and a `schema_migrations` table. Before upgrading an existing schema, DevHarmonics creates a consistent SQLite backup beside the ledger using the filename pattern `devharmonics.db.backup-v<from>-to-v<to>-<timestamp>-<id>.sqlite`. It validates the required table shape, SQLite integrity, foreign keys, and migration history before accepting the upgraded database. Failed migrations roll back and retain the pre-migration backup; databases from newer DevHarmonics schema versions are rejected instead of being modified.
 

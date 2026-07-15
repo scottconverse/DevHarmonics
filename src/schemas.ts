@@ -51,6 +51,25 @@ export const runPlanSchema = z
     }
   });
 
+export const objectiveInputSchema = z.object({
+  outcome: z.string().trim().min(1).max(20_000),
+  acceptanceCriteria: z.array(z.string().trim().min(1).max(2_000)).max(200),
+  constraints: z.array(z.string().trim().min(1).max(2_000)).max(200),
+  projectPath: z.string().trim().min(1).max(4_096),
+  productId: z.string().trim().min(1).max(200).optional(),
+  repositoryIds: z.array(z.string().trim().min(1).max(300)).max(500),
+  risk: z.enum(["low", "medium", "high"]),
+  autonomy: z.enum(["observe", "supervised", "bounded"]),
+  priority: z.enum(["low", "normal", "high", "urgent"]),
+  deadline: z.string().datetime({ offset: true }).optional(),
+  policyNotes: z.array(z.string().trim().min(1).max(2_000)).max(200),
+});
+
+export const planRevisionInputSchema = z.object({
+  plan: runPlanSchema,
+  rationale: z.string().trim().min(1).max(10_000),
+});
+
 export const providerConfigSchema = z.object({
   enabled: z.boolean(),
   command: z.string().min(1),

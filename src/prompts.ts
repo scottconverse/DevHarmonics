@@ -1,4 +1,19 @@
-import type { CheckResult, PlannedTask, ProviderName, RunAutonomy, RunPlan } from "./types.js";
+import type { CheckResult, ObjectiveRecord, PlannedTask, ProviderName, RunAutonomy, RunPlan } from "./types.js";
+
+export function objectivePromptText(objective: Pick<ObjectiveRecord,
+  "outcome" | "acceptanceCriteria" | "constraints" | "risk" | "priority" | "deadline" | "policyNotes" | "repositoryIds">): string {
+  const lines = [
+    `Outcome:\n${objective.outcome}`,
+    `Acceptance criteria:\n${objective.acceptanceCriteria.length ? objective.acceptanceCriteria.map((item) => `- ${item}`).join("\n") : "- Not supplied; identify ambiguities explicitly."}`,
+    `Constraints:\n${objective.constraints.length ? objective.constraints.map((item) => `- ${item}`).join("\n") : "- None supplied."}`,
+    `Objective risk: ${objective.risk}`,
+    `Priority: ${objective.priority}`,
+    `Deadline: ${objective.deadline || "None supplied"}`,
+    `Selected repositories: ${objective.repositoryIds.length ? objective.repositoryIds.join(", ") : "Current local workspace"}`,
+    `Policy notes:\n${objective.policyNotes.length ? objective.policyNotes.map((item) => `- ${item}`).join("\n") : "- Use project policy and defaults."}`,
+  ];
+  return lines.join("\n\n");
+}
 
 export function architectPrompt(input: {
   goal: string;
@@ -7,6 +22,8 @@ export function architectPrompt(input: {
   providers: ProviderName[];
   workspacePath: string;
   autonomy: RunAutonomy;
+  previousPlan?: RunPlan | null;
+  revisionFeedback?: string;
 }): string {
   const observe = input.autonomy === "observe";
   const taskInstructions = observe
@@ -23,6 +40,8 @@ Operate only inside that directory. Do not search for, inspect, or modify anothe
 Goal:
 ${input.goal}
 
+${input.previousPlan ? `This is a revision of plan ${input.previousPlan.revision ?? 1}. Preserve sound work, address the requested changes, and return a complete replacement plan.\n\nPrevious plan:\n${JSON.stringify(input.previousPlan, null, 2)}\n\nRevision request:\n${input.revisionFeedback || "Refine the plan while preserving the objective."}\n` : ""}
+
 Constitution:
 ${input.constitution}
 
@@ -35,8 +54,8 @@ Return only a JSON object with this exact shape:
 {
   "summary": "short plan summary",
   "recommendedConcurrency": 4,
-  "revision": 1,
-  "previousRevision": null,
+      "revision": ${input.previousPlan ? (input.previousPlan.revision ?? 1) + 1 : 1},
+      "previousRevision": ${input.previousPlan ? input.previousPlan.revision ?? 1 : null},
   "tasks": [
     {
       "id": "short-lowercase-id",

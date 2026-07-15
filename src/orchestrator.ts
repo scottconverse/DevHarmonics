@@ -15,6 +15,7 @@ import {
   architectPrompt,
   formatFailures,
   localReviewerContextHeader,
+  objectivePromptText,
   reviewerPrompt,
   workerPrompt,
 } from "./prompts.js";
@@ -25,6 +26,8 @@ import {
   type PlannedTask,
   type ProviderName,
   type DevHarmonicsConfig,
+  type ObjectiveRecord,
+  type PlanRevisionRecord,
   type RunPlan,
   type RunRequest,
   type RunAutonomy,
@@ -51,7 +54,7 @@ export class Orchestrator {
   constructor(private readonly ledger: Ledger) {}
 
   begin(request: RunRequest, resumedFrom: string | null = null): string {
-    const runId = this.ledger.createRun(request.goal, request.projectPath, resumedFrom, request.autonomy ?? "supervised");
+    const runId = this.ledger.createRun(request.goal, request.projectPath, resumedFrom, request.autonomy ?? "supervised", request.objectiveLink ?? null);
     const controller = new AbortController();
     this.cancellations.set(runId, controller);
     const execution = this.execute(runId, request, controller.signal)
@@ -101,6 +104,120 @@ export class Orchestrator {
     resolve();
     this.approvalResolvers.delete(runId);
     return true;
+  }
+
+  async proposeObjectivePlan(input: {
+    objective: ObjectiveRecord;
+    enabledProviders?: ProviderName[];
+    previous?: PlanRevisionRecord | null;
+    revisionFeedback?: string;
+  }): Promise<{
+    plan: RunPlan;
+    preview: {
+      capacity: ReturnType<CapacityBroker["decide"]>;
+      assignments: Array<{ taskId: string; provider: string; modelId: string | null; tier: string; factors: string[] }>;
+    };
+  }> {
+    const projectPath = path.resolve(input.objective.projectPath);
+    const config = await loadConfig(projectPath);
+    const constitution = await loadConstitution(projectPath);
+    const configuredProviders = this.availableProviders(config, input.enabledProviders);
+    if (!configuredProviders.length) throw new Error("No subscription-backed providers are enabled");
+
+    const providerStatuses = await inspectProviders(config, projectPath);
+    syncSubscriptionConnections(this.ledger, providerStatuses);
+    await syncOllamaRuntimes(this.ledger, config.localRuntimes.ollama);
+    const unavailable = providerStatuses.filter((provider) => configuredProviders.includes(provider.name) && !provider.available);
+    if (unavailable.length) {
+      const instructions = unavailable.map((provider) => `${provider.name}: ${provider.summary}${provider.authenticated ? "" : `; run '${provider.loginCommand}'`}`).join("; ");
+      throw new Error(`Provider sign-in required before planning (${instructions}), then refresh and retry.`);
+    }
+    const availableProviders = configuredProviders.filter((name) => this.ledger.isConnectionEligible(projectLegacyProvider(name).connectionId));
+    const workerProviders = config.product.workers.filter((name) => availableProviders.includes(name));
+    if (!availableProviders.length || !workerProviders.length) throw new Error("No healthy provider is available to plan this objective");
+
+    const architectName = availableProviders.includes(config.product.architect) ? config.product.architect : availableProviders[0]!;
+    const architectCandidates = config.routing.allowFallback
+      ? [architectName, ...availableProviders.filter((provider) => provider !== architectName)]
+      : [architectName];
+    const router = new ModelRouter(this.ledger);
+    let plan: RunPlan | null = null;
+    let lastArchitectError: Error | null = null;
+    for (const candidate of architectCandidates) {
+      const qualification = await ensureSchedulerCandidateQualified({ ledger: this.ledger, config, cwd: projectPath, role: "architect", preferredProvider: candidate, permission: "read_only" });
+      if (qualification?.attempted && !qualification.passed) {
+        lastArchitectError = new Error(`${qualification.provider} model '${qualification.modelId}' failed architect qualification`);
+        continue;
+      }
+      const decision = router.route({ role: "architect", config, fallbackProvider: candidate, allowedProviders: [candidate], permission: "read_only" });
+      const architect = await this.provider(decision.provider, config, decision.connectionId);
+      try {
+        const result = await architect.invoke({
+          role: "architect",
+          prompt: architectPrompt({
+            goal: objectivePromptText(input.objective),
+            constitution,
+            validators: Object.keys(config.repository.validators),
+            providers: workerProviders,
+            workspacePath: projectPath,
+            autonomy: input.objective.autonomy,
+            previousPlan: input.previous?.plan ?? null,
+            ...(input.revisionFeedback ? { revisionFeedback: input.revisionFeedback } : {}),
+          }),
+          cwd: projectPath,
+          permission: "read_only",
+          timeoutMs: null,
+          model: decision.model,
+        });
+        const parsed = this.parsePlan(result.text, config, input.objective.autonomy);
+        const previousRevision = input.previous?.revision ?? null;
+        plan = { ...parsed, revision: previousRevision === null ? 1 : previousRevision + 1, previousRevision };
+        this.recordConnectionOutcome(architect.connection.id, { success: true });
+        break;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const failureKind = error instanceof RuntimeInvocationError ? error.kind : "incompatible";
+        lastArchitectError = new Error(`${decision.provider} could not produce a valid plan: ${message}`);
+        this.recordConnectionOutcome(architect.connection.id, { success: false, failureKind, detail: message });
+      }
+    }
+    if (!plan) throw lastArchitectError ?? new Error("No eligible architect produced a valid plan");
+
+    const assignments = plan.tasks.map((task) => {
+      const fallbackProvider = task.preferredProvider && workerProviders.includes(task.preferredProvider) ? task.preferredProvider : workerProviders[0]!;
+      try {
+        const decision = router.route({ role: "worker", config, fallbackProvider, allowedProviders: workerProviders, permission: task.permission ?? "workspace_write", task });
+        return { taskId: task.id, provider: decision.provider, modelId: decision.model.requestedModelId ?? null, tier: decision.workload.requiredTier, factors: decision.factors };
+      } catch (error) {
+        return { taskId: task.id, provider: fallbackProvider, modelId: null, tier: "unavailable", factors: [error instanceof Error ? error.message : String(error)] };
+      }
+    });
+    const capacity = new CapacityBroker().decide({
+      requestedConcurrency: plan.recommendedConcurrency,
+      userCeiling: config.application.concurrency.ceiling,
+      resources: await observeLocalResources(),
+    });
+    return { plan, preview: { capacity, assignments } };
+  }
+
+  beginApprovedObjective(input: {
+    objective: ObjectiveRecord;
+    revision: PlanRevisionRecord;
+    agents?: number | "auto";
+    enabledProviders?: ProviderName[];
+  }): string {
+    if (!input.revision.approved || input.revision.objectiveId !== input.objective.id) {
+      throw new Error("Only the exact approved plan revision can start execution");
+    }
+    return this.begin({
+      goal: objectivePromptText(input.objective),
+      projectPath: input.objective.projectPath,
+      autonomy: input.objective.autonomy,
+      agents: input.agents,
+      enabledProviders: input.enabledProviders,
+      approvedPlan: input.revision.plan,
+      objectiveLink: { objectiveId: input.objective.id, approvedPlanRevision: input.revision.revision },
+    });
   }
 
   async run(request: RunRequest): Promise<string> {
@@ -158,9 +275,9 @@ export class Orchestrator {
     const architectCandidates = config.routing.allowFallback
       ? [architectName, ...availableProviders.filter((provider) => provider !== architectName)]
       : [architectName];
-    let plan: RunPlan | null = null;
+    let plan: RunPlan | null = request.approvedPlan ?? null;
     let lastArchitectError: Error | null = null;
-    for (const candidate of architectCandidates) {
+    for (const candidate of plan ? [] : architectCandidates) {
       const qualification = await ensureSchedulerCandidateQualified({ ledger: this.ledger, config, cwd: worktrees.integrationPath, role: "architect", preferredProvider: candidate, permission: "read_only" });
       this.recordSchedulerQualification(runId, qualification, "architect");
       if (qualification?.attempted && !qualification.passed) {
@@ -220,7 +337,7 @@ export class Orchestrator {
     }
     if (!plan) throw lastArchitectError ?? new Error("No eligible architect produced a valid plan");
     this.ledger.savePlan(runId, plan);
-    if (config.runPolicy.requirePlanApproval) {
+    if (config.runPolicy.requirePlanApproval && !request.approvedPlan) {
       this.ledger.requestPlanApproval(runId);
       await new Promise<void>((resolve) => {
         const complete = () => resolve();

@@ -148,12 +148,12 @@ OpenRouter is disconnected and paid routing is disabled by default. OAuth stores
 
 ## Run lifecycle
 
-1. Require a clean Git working tree and authenticated providers.
-2. Persist the selected Observe, Supervised, or Bounded run mode and ask a read-only architect to emit a compatible typed task DAG.
-3. Create `devharmonics/<run-prefix>` as the integration branch.
-4. Assign each ready task a `devharmonics/<run-prefix>-task-<task>` branch and temporary worktree.
-5. Run a worker in that isolated worktree.
-6. Execute only allowlisted validators.
+1. Save a structured objective draft containing the outcome, acceptance criteria, constraints, risk, priority, deadline, policy, and run mode. Saving or refining a draft starts no run.
+2. Ask a read-only architect for an immutable plan revision and preview its dependency graph, scopes, permissions, checks, proposed model assignments, and capacity.
+3. Revise the plan or approve an exact revision. Execution uses that stored revision without silently replanning it.
+4. Require a clean Git working tree and authenticated providers, then create `devharmonics/<run-prefix>` as the integration branch.
+5. Assign each ready task a `devharmonics/<run-prefix>-task-<task>` branch and temporary worktree.
+6. Run a worker in that isolated worktree and execute only allowlisted validators.
 7. Return failed check receipts to a worker for a bounded retry.
 8. For writable tasks, commit passing work and merge it serially into the integration branch; Observe tasks retain reports without commits.
 9. Start dependent tasks only after their dependencies merge.

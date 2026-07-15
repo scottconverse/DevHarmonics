@@ -142,11 +142,51 @@ export interface RunRequest {
   goal: string;
   projectPath: string;
   autonomy?: RunAutonomy;
-  agents?: number | "auto";
-  enabledProviders?: ProviderName[];
+  agents?: number | "auto" | undefined;
+  enabledProviders?: ProviderName[] | undefined;
+  approvedPlan?: RunPlan | undefined;
+  objectiveLink?: RunObjectiveLink | undefined;
 }
 
 export type RunAutonomy = "observe" | "supervised" | "bounded";
+export type ObjectiveRisk = "low" | "medium" | "high";
+export type ObjectivePriority = "low" | "normal" | "high" | "urgent";
+
+export interface ObjectiveInput {
+  outcome: string;
+  acceptanceCriteria: string[];
+  constraints: string[];
+  projectPath: string;
+  productId?: string | undefined;
+  repositoryIds: string[];
+  risk: ObjectiveRisk;
+  autonomy: RunAutonomy;
+  priority: ObjectivePriority;
+  deadline?: string | undefined;
+  policyNotes: string[];
+}
+
+export interface ObjectiveRecord extends ObjectiveInput {
+  id: string;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PlanRevisionRecord {
+  objectiveId: string;
+  revision: number;
+  plan: RunPlan;
+  rationale: string;
+  approved: boolean;
+  createdAt: string;
+  approvedAt: string | null;
+}
+
+export interface RunObjectiveLink {
+  objectiveId: string;
+  approvedPlanRevision: number;
+}
 
 export interface RunSummary {
   id: string;
@@ -159,6 +199,9 @@ export interface RunSummary {
   updatedAt: string;
   finalReview: string | null;
   resumedFrom: string | null;
+  objectiveId: string | null;
+  approvedPlanRevision: number | null;
+  plan: RunPlan | null;
   tasks: Array<{
     id: string;
     title: string;

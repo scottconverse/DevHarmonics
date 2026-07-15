@@ -814,6 +814,89 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
   }
 });
 
+test("objective preview creates no run and exact approved revision executes without replanning", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-objective-preview-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  config.runPolicy.requirePlanApproval = true;
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  let runId = "";
+  try {
+    const created = await fetch(`${dashboard.url}/api/objectives`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        outcome: "Local orchestrator fixture: create the exact approved result",
+        acceptanceCriteria: ["Create result.txt"],
+        constraints: ["Use the configured validator"],
+        projectPath: project,
+        repositoryIds: [],
+        risk: "medium",
+        autonomy: "supervised",
+        priority: "normal",
+        policyNotes: [],
+      }),
+    });
+    assert.equal(created.status, 201, await created.clone().text());
+    const objective = (await created.json()) as { objective: { id: string } };
+    const before = await fetch(`${dashboard.url}/api/runs`).then((response) => response.json() as Promise<{ runs: unknown[] }>);
+    assert.equal(before.runs.length, 0, "saving an objective draft must not create a run");
+
+    const proposed = await fetch(`${dashboard.url}/api/objectives/${objective.objective.id}/plans`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabledProviders: ["codex", "claude", "gemini"] }),
+    });
+    assert.equal(proposed.status, 201, await proposed.clone().text());
+    const proposal = (await proposed.json()) as { revision: { revision: number; plan: { summary: string } }; preview: { assignments: unknown[] } };
+    assert.equal(proposal.revision.revision, 1);
+    assert.equal(proposal.revision.plan.summary, "fixture plan");
+    assert.ok(proposal.preview.assignments.length > 0);
+    const afterPreview = await fetch(`${dashboard.url}/api/runs`).then((response) => response.json() as Promise<{ runs: unknown[] }>);
+    assert.equal(afterPreview.runs.length, 0, "plan preview must not create a run");
+
+    const started = await fetch(`${dashboard.url}/api/objectives/${objective.objective.id}/plans/1/start`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agents: 1, enabledProviders: ["codex", "claude", "gemini"] }),
+    });
+    assert.equal(started.status, 202, await started.clone().text());
+    runId = ((await started.json()) as { runId: string }).runId;
+    const getRun = () => fetch(`${dashboard.url}/api/runs/${runId}`).then((response) => response.json() as Promise<{
+      status: string;
+      objectiveId: string | null;
+      approvedPlanRevision: number | null;
+      plan: { summary: string } | null;
+      events: Array<{ kind: string }>;
+    }>);
+    const run = await poll(getRun, (value) => ["ready", "not_ready", "failed"].includes(value.status), 30_000);
+    assert.ok(["ready", "not_ready"].includes(run.status), JSON.stringify(run, null, 2));
+    assert.equal(run.objectiveId, objective.objective.id);
+    assert.equal(run.approvedPlanRevision, 1);
+    assert.equal(run.plan?.summary, "fixture plan");
+    assert.ok(run.events.some((event) => event.kind === "scheduler.started"), "approved plan must reach execution");
+    assert.ok(!run.events.some((event) => event.kind === "architect.started"), "execution must not replan an approved revision");
+  } finally {
+    await dashboard.close();
+    if (runId) {
+      const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
+      for (const worktree of [path.join(runRoot, "tasks", "one"), path.join(runRoot, "integration")]) {
+        await runProcess({ command: "git", args: ["worktree", "remove", "--force", worktree], cwd: project, timeoutMs: 30_000 });
+      }
+      await rm(runRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    }
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
 test("cancel during planning does not save a late plan or restart the run", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-cancel-planning-"));
   const project = await createRepository(root);

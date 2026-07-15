@@ -100,7 +100,10 @@ Each provider is shown as `READY` or `SETUP`, with its detected version, authent
    - **Bounded autonomy** executes within the configured repository, tool, spending, and external-write policies.
 4. Choose **Architect decides** or enter a manual concurrency count.
 5. Enable the authenticated providers you want in the worker pool.
-6. Click **Start verified run**.
+6. Add acceptance criteria, constraints, risk, priority, an optional deadline, and any policy notes.
+7. Click **Build plan preview**. This saves a durable objective draft but starts no run.
+8. Review every proposed task, dependency, repository scope, permission, check, model assignment, and the capacity estimate.
+9. Enter requested changes and click **Revise plan**, or click **Approve revision & start**. DevHarmonics retains every revision and its rationale, and execution uses the exact revision you approved without asking the architect to silently produce another plan.
 
 Good goals specify the observable result and important verification. Example:
 

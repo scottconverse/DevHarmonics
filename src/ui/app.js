@@ -15,6 +15,7 @@ const state = {
   evidence: null,
   report: null,
   products: [],
+  productIntelligence: {},
   qualifications: [],
   performanceProfiles: [],
   performancePolicies: [],
@@ -85,20 +86,39 @@ async function refreshFleet() {
 async function refreshProducts() {
   const result = await api("/api/products");
   state.products = result.products;
+  state.productIntelligence = Object.fromEntries(await Promise.all(state.products.map(async (product) => {
+    const response = await fetch(`/api/products/${encodeURIComponent(product.id)}/intelligence`);
+    if (response.status === 404) return [product.id, null];
+    const value = await response.json();
+    if (!response.ok) throw new Error(value.error || `Could not load intelligence for ${product.name}`);
+    return [product.id, value];
+  })));
   const repositories = state.products.flatMap((product) => product.repositories);
   $("#repository-product").innerHTML = state.products.map((product) => `<option value="${escapeHtml(product.id)}">${escapeHtml(product.name)}</option>`).join("");
   $("#add-local-repository").disabled = state.products.length === 0;
   $("#product-summary").innerHTML = `<div class="metric"><span>Products</span><strong>${state.products.length}</strong></div><div class="metric"><span>Repositories</span><strong>${repositories.length}</strong></div><div class="metric"><span>Active repositories</span><strong>${repositories.filter((repository) => !repository.archived).length}</strong></div><div class="metric"><span>Private repositories</span><strong>${repositories.filter((repository) => repository.visibility === "private").length}</strong></div>`;
   $("#products-empty").classList.toggle("hidden", state.products.length > 0);
-  $("#product-list").innerHTML = state.products.map((product) => `<article class="panel product-card">
-    <div class="product-head"><div><span class="connection-kind">Registered product</span><h3>${escapeHtml(product.name)}</h3><p>${escapeHtml(product.description || "Registered product context")}</p></div><a href="${escapeHtml(product.organizationUrl)}" target="_blank" rel="noreferrer">Open organization</a></div>
+  $("#product-list").innerHTML = state.products.map((product) => {
+    const intelligence = state.productIntelligence[product.id];
+    const localSources = product.repositories.reduce((sum, repository) => sum + (repository.localPath ? repository.governanceSources.length : 0), 0);
+    const conflicts = intelligence?.findings.filter((finding) => finding.kind === "conflicting_claim").length || 0;
+    const missing = intelligence?.findings.filter((finding) => finding.kind === "missing_source" || finding.kind === "unreadable_source" || finding.kind === "unsafe_source").length || 0;
+    const intelligenceMarkup = intelligence ? `<details class="product-intelligence" ${conflicts ? "open" : ""}>
+      <summary><strong>Intelligence ${escapeHtml(intelligence.status)}</strong><span>${intelligence.sources.filter((source) => source.status === "read").length} sources · ${intelligence.claims.length} claims · ${conflicts} conflicts · ${missing} unavailable</span></summary>
+      <p>Immutable snapshot <code>${escapeHtml(intelligence.id)}</code> · ${escapeHtml(new Date(intelligence.createdAt).toLocaleString())}</p>
+      ${intelligence.findings.length ? `<ul>${intelligence.findings.map((finding) => `<li class="${escapeHtml(finding.severity)}"><strong>${escapeHtml(finding.kind.replaceAll("_", " "))}</strong> ${escapeHtml(finding.message)}${finding.citations.length ? `<small>${finding.citations.map(escapeHtml).join(" · ")}</small>` : ""}</li>`).join("")}</ul>` : '<p class="muted">No conflicts or unavailable sources were found.</p>'}
+    </details>` : `<div class="product-intelligence empty"><strong>No intelligence snapshot yet</strong><span>${localSources ? `${localSources} configured canonical sources are ready to scan.` : "Attach local repositories and configure canonical sources first."}</span></div>`;
+    return `<article class="panel product-card">
+    <div class="product-head"><div><span class="connection-kind">Registered product</span><h3>${escapeHtml(product.name)}</h3><p>${escapeHtml(product.description || "Registered product context")}</p></div><div class="product-actions"><a href="${escapeHtml(product.organizationUrl)}" target="_blank" rel="noreferrer">Open organization</a><button class="secondary small" type="button" data-scan-product="${escapeHtml(product.id)}">Scan intelligence</button></div></div>
+    ${intelligenceMarkup}
     <div class="repository-list">${product.repositories.map((repository) => {
       const local = repository.inspection || null;
       const issues = local?.compatibilityIssues || [];
       const facts = [repository.role ? repository.role.replaceAll("_", " ") : null, local?.currentBranch || repository.defaultBranch, local ? local.dirty ? "dirty" : "clean" : null, ...issues.slice(0, 2)].filter(Boolean);
       return `<div class="repository-row ${repository.localPath ? "local" : ""}"><span><strong>${escapeHtml(repository.name)}</strong><small>${escapeHtml(repository.localPath || repository.fullName)} · ${escapeHtml(repository.visibility)}${local?.headSha ? ` · ${escapeHtml(local.headSha.slice(0, 10))}` : ""}</small><span class="repository-facts">${facts.map((fact) => `<em class="${issues.includes(fact) ? "issue" : ""}">${escapeHtml(fact)}</em>`).join("")}</span></span><div class="repository-actions"><span class="lifecycle ${issues.length || local?.dirty ? "degraded" : repository.archived ? "retired" : "qualified"}">${issues.length ? `${issues.length} issues` : local?.dirty ? "dirty" : local ? "ready" : "observed"}</span>${repository.localPath ? `<button class="secondary small" type="button" data-refresh-repository="${escapeHtml(repository.id)}" data-product-id="${escapeHtml(product.id)}">Rescan</button>` : ""}</div></div>`;
     }).join("")}</div>
-  </article>`).join("");
+  </article>`;
+  }).join("");
   renderObjectiveRepositoryPicker();
 }
 
@@ -915,6 +935,27 @@ $("#repository-form").addEventListener("submit", async (event) => {
   }
 });
 $("#product-list").addEventListener("click", async (event) => {
+  const scanButton = event.target.closest("[data-scan-product]");
+  if (scanButton) {
+    scanButton.disabled = true;
+    const original = scanButton.textContent;
+    scanButton.textContent = "Scanning…";
+    try {
+      await api(`/api/products/${encodeURIComponent(scanButton.dataset.scanProduct)}/intelligence`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      await refreshProducts();
+    } catch (error) {
+      $("#repository-form-error").textContent = error.message;
+      $("#repository-form").classList.remove("hidden");
+    } finally {
+      scanButton.disabled = false;
+      scanButton.textContent = original;
+    }
+    return;
+  }
   const button = event.target.closest("[data-refresh-repository]");
   if (!button) return;
   button.disabled = true;

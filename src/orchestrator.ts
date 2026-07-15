@@ -41,7 +41,7 @@ import { observeLocalResources } from "./resources.js";
 import { evaluateToolRequest, type ToolStage } from "./policy.js";
 import { adjudicateReviewQuorum, parseReviewerResponse, reviewRequirement, type ReviewQuorumDecision, type ReviewRequirement, type StructuredReview } from "./review.js";
 import { estimateInvocationCost, OpenRouterService } from "./openrouter.js";
-import { ensureSchedulerCandidateQualified, type SchedulerQualificationResult } from "./qualification.js";
+import { ensureReviewerCandidateQualified, ensureSchedulerCandidateQualified, type SchedulerQualificationResult } from "./qualification.js";
 import { runValidator, unknownValidator } from "./validators.js";
 import { analyzeVerificationIntegrity } from "./verification-integrity.js";
 import { runLocalToolLoop } from "./local-tools.js";
@@ -1060,24 +1060,24 @@ export class Orchestrator {
       const integrationSha256 = this.reviewEvidenceSha256({ autonomy: input.autonomy, plan: input.plan, taskReports, diff: aggregatedDiffs });
       const reviewerName = input.availableProviders.includes(input.config.product.reviewer) ? input.config.product.reviewer : input.availableProviders[0]!;
       const implementationProviders = [...new Set((this.ledger.getRun(input.runId)?.tasks ?? []).filter((task) => !task.id.startsWith("__integration__") && task.provider).map((task) => String(task.provider)))];
+      const reviewerStart = input.availableProviders.indexOf(reviewerName);
+      const qualificationProviders = input.availableProviders.map((_, index) => input.availableProviders[(Math.max(0, reviewerStart) + index) % input.availableProviders.length]!);
+      const qualification = await ensureReviewerCandidateQualified({
+        ledger: this.ledger,
+        config: input.config,
+        cwd: integration.manager(affectedIds[0]!).integrationPath,
+        providers: qualificationProviders,
+        onResult: (result) => this.recordSchedulerQualification(input.runId, result, "reviewer"),
+      });
+      if (!qualification) throw new Error("No premium multi-repository reviewer candidate is available for first-use qualification");
       const reviewerDecision = new ModelRouter(this.ledger).route({
         role: "reviewer",
         config: input.config,
-        fallbackProvider: reviewerName,
+        fallbackProvider: qualification.provider as ProviderName,
         allowedProviders: input.availableProviders,
         permission: "read_only",
         avoidProviders: implementationProviders,
       });
-      const qualification = await ensureSchedulerCandidateQualified({
-        ledger: this.ledger,
-        config: input.config,
-        cwd: integration.manager(affectedIds[0]!).integrationPath,
-        role: "reviewer",
-        preferredProvider: reviewerDecision.provider,
-        permission: "read_only",
-      });
-      this.recordSchedulerQualification(input.runId, qualification, "reviewer");
-      if (qualification?.attempted && !qualification.passed) throw new Error(`${qualification.provider} failed multi-repository reviewer qualification`);
       const reviewer = await this.provider(reviewerDecision.provider, input.config, reviewerDecision.connectionId);
       this.ledger.addEvent(input.runId, "review.started", `${reviewerDecision.provider} is reviewing the exact multi-repository integration set`, { routing: reviewerDecision, repositoryIds: affectedIds });
       const chunks = input.autonomy === "observe" ? this.diagnosticReportChunks(input.runId) : chunkDiffFiles(aggregatedDiffs);
@@ -1749,10 +1749,30 @@ export class Orchestrator {
         `compatibilityIssues=${inspection?.compatibilityIssues.join(" | ") || "none observed"}`,
       ].join("; ");
     });
+    const snapshot = this.ledger.latestProductIntelligenceSnapshot(product.id);
+    const intelligenceContext = snapshot ? this.productIntelligenceContext(snapshot, new Set(requiredImpactIds)) : null;
     return {
       requiredImpactIds,
-      text: `Product ${product.name} (${product.id}). Repositories requiring an explicit impact decision:\n${lines.map((line) => `- ${line}`).join("\n")}`,
+      text: [
+        `Product ${product.name} (${product.id}). Repositories requiring an explicit impact decision:\n${lines.map((line) => `- ${line}`).join("\n")}`,
+        intelligenceContext,
+      ].filter(Boolean).join("\n\n"),
     };
+  }
+
+  private productIntelligenceContext(
+    snapshot: import("./product-intelligence.js").ProductIntelligenceSnapshot,
+    relevantRepositoryIds: Set<string>,
+  ): string {
+    const relevant = (repositoryId: string | null) => repositoryId === null || relevantRepositoryIds.has(repositoryId);
+    const claims = snapshot.claims.filter((claim) => relevant(claim.repositoryId)).slice(0, 30);
+    const findings = snapshot.findings.filter((finding) => relevant(finding.repositoryId)).slice(0, 30);
+    const lines = [
+      `Source-backed product intelligence snapshot ${snapshot.id} (${snapshot.createdAt}; ${snapshot.status}).`,
+      ...findings.map((finding) => `Finding [${finding.severity}/${finding.kind}]: ${finding.message}${finding.citations.length ? ` Citations: ${finding.citations.join(", ")}` : ""}`),
+      ...claims.map((claim) => `Claim ${claim.subject}.${claim.kind}=${claim.value}; citation=${claim.repositoryId}:${claim.sourcePath}:${claim.line}; revision=${claim.revision}; contentSha256=${claim.contentSha256}; workingTree=${claim.workingTree}`),
+    ];
+    return lines.join("\n");
   }
 
   private validateObjectiveRepositoryPlan(objective: ObjectiveRecord, plan: RunPlan, requiredImpactIds: string[]): void {

@@ -25,6 +25,7 @@ import {
   workbenchSessionInputSchema,
 } from "./schemas.js";
 import type { ReviewFinding, StructuredReview } from "./review.js";
+import type { ProductIntelligenceSnapshot } from "./product-intelligence.js";
 import { aggregateModelPerformance, type ModelPerformanceObservation, type ModelPerformanceProfile } from "./model-performance.js";
 import { classifyWorkload } from "./model-intelligence.js";
 import {
@@ -147,7 +148,7 @@ interface CheckRow {
   duration_ms: number;
 }
 
-export const LEDGER_SCHEMA_VERSION = 21;
+export const LEDGER_SCHEMA_VERSION = 22;
 
 export const REPOSITORY_ROLES = [
   "umbrella",
@@ -1037,6 +1038,23 @@ const MIGRATIONS: readonly LedgerMigration[] = [
       `);
     },
   },
+  {
+    version: 22,
+    name: "source-backed-product-intelligence",
+    apply(database) {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS product_intelligence_snapshots (
+          id TEXT PRIMARY KEY,
+          product_id TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+          status TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS product_intelligence_snapshots_product
+          ON product_intelligence_snapshots(product_id, created_at DESC);
+      `);
+    },
+  },
 ];
 
 function summarizeGoal(goal: string, maxLength = 180): string {
@@ -1165,6 +1183,7 @@ const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
   workbench_messages: ["id", "session_id", "role", "content", "provider", "connection_id", "requested_model_id", "resolved_model_id", "status", "error", "input_tokens", "output_tokens", "cost_usd", "duration_ms", "created_at"],
   integration_sets: ["id", "run_id", "product_id", "status", "integration_conditions_json", "created_at", "updated_at"],
   integration_set_repositories: ["integration_set_id", "repository_id", "local_path", "base_commit", "integration_branch", "integration_worktree_path", "head_commit", "status", "error", "updated_at"],
+  product_intelligence_snapshots: ["id", "product_id", "status", "snapshot_json", "created_at"],
   model_performance_policies: ["model_id", "ignored_before", "excluded", "updated_at"],
   schema_migrations: ["version", "name", "applied_at"],
 };
@@ -2649,6 +2668,23 @@ export class Ledger {
       input.fallbackReason ? redactText(input.fallbackReason) : null,
       new Date().toISOString(),
     );
+  }
+
+  recordProductIntelligenceSnapshot(snapshot: ProductIntelligenceSnapshot): ProductIntelligenceSnapshot {
+    if (!this.getProduct(snapshot.productId)) throw new Error(`Product '${snapshot.productId}' was not found`);
+    this.database.prepare(`
+      INSERT INTO product_intelligence_snapshots (id, product_id, status, snapshot_json, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(snapshot.id, snapshot.productId, snapshot.status, JSON.stringify(redactValue(snapshot)), snapshot.createdAt);
+    return this.latestProductIntelligenceSnapshot(snapshot.productId)!;
+  }
+
+  latestProductIntelligenceSnapshot(productId: string): ProductIntelligenceSnapshot | null {
+    const row = this.database.prepare(`
+      SELECT snapshot_json FROM product_intelligence_snapshots
+      WHERE product_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1
+    `).get(productId) as { snapshot_json: string } | undefined;
+    return row ? JSON.parse(row.snapshot_json) as ProductIntelligenceSnapshot : null;
   }
 
   recordToolPolicyReceipt(input: ToolPolicyReceiptInput): number {

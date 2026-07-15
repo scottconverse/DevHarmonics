@@ -6,6 +6,9 @@ All notable DevHarmonics changes are documented here.
 
 ### Added
 
+- Immutable source-backed product-intelligence snapshots over configured canonical repository files, retaining exact HEAD revisions, blob/content hashes, working-tree state, explicit subject-aware claims, cited contradictions, and missing/unsafe-source findings without modifying repositories.
+- Products-page **Scan intelligence** controls and planning-context injection of the latest bounded snapshot findings; Git tags are deliberately excluded as maturity evidence.
+- Multi-repository final review now performs first-use premium reviewer qualification before adaptive routing, closing a live-run sequencing gap that could leave an available model unschedulable for review.
 - A local product/repository registry that preserves multi-repository boundaries and records repository roles, owners, dependencies, validator commands, governance sources, branch/HEAD/remote identity, dirty state, and compatibility issues through read-only Git inspection.
 - Product-aware objective composition and cross-repository planning with explicit repository selection, affected/excluded impact rationale, repository-scoped tasks, required integration conditions, and fail-closed topology checks before execution.
 - The first DH-720 exact integration-set execution slice: one repository per task; isolated per-repository integration/task branches and worktrees pinned to retained base commits; concurrent work across repositories with serialized same-repository merges; repository-local validators and verification-integrity checks; aggregate context-only review; exact base/HEAD evidence in the ledger, export, API, and run UI; and no mutation of primary checkouts.

@@ -1,14 +1,16 @@
 # DevHarmonics Detailed Implementation Plan
 
 Document status: **Build-ready execution plan**
-Plan version: **1.13**
+Plan version: **1.14**
 Written: **2026-07-14**
 Revised: **2026-07-15**
 Product specification baseline: **DevHarmonics Product Specification v1.6**
 Current implementation baseline: **DevHarmonics v0.4.0**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 
-Revision history: **v1.13 (2026-07-15)** — Implemented the first DH-720 vertical slice: exact multi-repository integration sets with one repository per task, isolated per-repository integration/task branches and worktrees, retained base/HEAD commit evidence, repository-local validators, concurrent work across repositories, serialized same-repository merges, aggregate context-only review, evidence export, and a visible run-board integration-set card. Primary checkouts remain untouched.
+Revision history: **v1.14 (2026-07-15)** — Implemented the first DH-730 vertical slice: immutable source-backed product-intelligence snapshots over configured canonical local files, exact repository HEAD/content-hash/working-tree provenance, explicit version/release/status/maturity claim extraction, subject-aware contradiction detection, missing/unsafe/dirty-source findings, planning-context injection, and Products-page scan/readback controls. Git tags are never treated as maturity evidence. CivicCore and CivicCode are attached as the first current CivicSuite repository set, and their live snapshot identifies the CivicCore 1.2.0 versus 1.2.1 dependency conflict with cited sources. The live Observe proof also exposed and closed DH-720's reviewer first-use qualification ordering gap.
+
+Prior revision: **v1.13 (2026-07-15)** — Implemented the first DH-720 vertical slice: exact multi-repository integration sets with one repository per task, isolated per-repository integration/task branches and worktrees, retained base/HEAD commit evidence, repository-local validators, concurrent work across repositories, serialized same-repository merges, aggregate context-only review, evidence export, and a visible run-board integration-set card. Primary checkouts remain untouched.
 
 Prior revision: **v1.12 (2026-07-15)** — Implemented DH-710 cross-repository objective planning: explicit product/repository selection, registry-informed dependency context, affected/excluded repository impact maps, repository-scoped tasks, cross-repository integration conditions, and a fail-closed execution gate pending the first DH-720 integration-set slice.
 
@@ -867,7 +869,7 @@ Acceptance:
 
 #### DH-720: Integration sets — XL
 
-Status: **First vertical slice implemented in the v0.5 development line; milestone remains in progress.** A supported approved plan creates an exact integration set across compatible local repositories. Each repository receives its own run integration branch and worktree pinned to a retained base commit; each task targets one repository and receives its own branch/worktree. Tasks in different repositories may run concurrently, while merges targeting the same repository use that repository's serialized merge queue. Repository-local validators and verification-integrity checks run against each integration branch. Final review is read-only and context-only across the aggregate, repository-prefixed diff evidence. The ledger, evidence export, API, and run-board card retain every repository's base commit, integration HEAD, branch, worktree, status, error, and integration conditions. The registered primary checkouts are not checked out, merged, reset, or otherwise changed.
+Status: **First vertical slice implemented in the v0.5 development line; milestone remains in progress.** A supported approved plan creates an exact integration set across compatible local repositories. Each repository receives its own run integration branch and worktree pinned to a retained base commit; each task targets one repository and receives its own branch/worktree. Tasks in different repositories may run concurrently, while merges targeting the same repository use that repository's serialized merge queue. Repository-local validators and verification-integrity checks run against each integration branch. Final review is read-only and context-only across the aggregate, repository-prefixed diff evidence. The scheduler now qualifies an eligible premium reviewer before multi-repository review routing, rather than allowing an architect-only qualification to block an otherwise available reviewer. The ledger, evidence export, API, and run-board card retain every repository's base commit, integration HEAD, branch, worktree, status, error, and integration conditions. The registered primary checkouts are not checked out, merged, reset, or otherwise changed.
 
 Deferred from this first slice: automatic multi-repository fixer/re-review and review quorums greater than one; runs remain `NOT READY` when review policy requires more than the single supported reviewer. Restart/resume reconstruction, automatic worktree cleanup, pushing branches or opening pull requests, and a single task mutating more than one repository also remain unimplemented.
 
@@ -886,6 +888,12 @@ Acceptance:
 
 #### DH-730: CivicSuite repository intelligence — L
 
+Status: **First vertical slice implemented and proven on the v0.5 development line; milestone remains in progress.** Products can now retain immutable, source-backed intelligence snapshots over each local repository's configured canonical sources. Every readable source retains the repository ID, exact HEAD revision, tracked blob identity when available, SHA-256 content hash, and working-tree status. Only explicit, subject-aware version, release, status, maturity, and tier claims enter the snapshot; contradictions cite exact repository paths and lines. Missing, unreadable, unsafe, symlink-escaping, oversized, binary, and dirty sources fail visibly. The latest bounded claims/findings enter cross-repository planning context, and the Products view exposes scan status, counts, conflicts, unavailable evidence, citations, and snapshot identity. Tags are not scanned and cannot become maturity evidence.
+
+The first current CivicSuite set attaches `civiccore` as the shared platform and `civiccode` as a dependent module without changing either checkout. The retained snapshot over nine configured canonical files identifies one actionable compatibility conflict: CivicCode pins and documents CivicCore 1.2.0 while CivicCore's current `pyproject.toml` declares 1.2.1. The stale umbrella checkout remains deliberately excluded until refreshed.
+
+The source-backed snapshot then informed real Observe run `5f70b82c-0e18-4d5e-8d61-da7d3e05c89d`. The run closed honestly as **NOT READY**: Gemini exhausted its subscription quota after two citation-gate retries on one diagnostic, the remaining seven bounded reports completed, GPT-5.5 passed first-use reviewer qualification, and aggregate review retained the concrete version, migration-head, stale release-claim, and clean-wheel validation gaps requiring follow-up. CivicCore and CivicCode remained clean at their original exact commits throughout. This is an accepted proof of detection and fail-closed review behavior, not a compatibility approval.
+
 The initial CivicSuite inventory should recognize:
 
 - the civicsuite umbrella repository as suite-wide governance, architecture, compatibility, installer, desktop, and release truth;
@@ -903,6 +911,8 @@ Acceptance:
 - suite-wide instructions and repository-local instructions are reconciled with source links and revisions;
 - version and release claims are checked across canonical surfaces;
 - no module maturity claim is inferred from a tag alone.
+
+Remaining DH-730 scope: remote-only canonical-source acquisition; semantic compatibility-matrix parsing; explicit PostgreSQL/Ollama/Gemma dependency discovery; installer/Tauri architecture analysis; deeper governance reconciliation; and a complete release-truth workflow spanning refreshed umbrella, module, installer, and release surfaces.
 
 #### DH-740: CivicSuite pilot ladder — XL
 

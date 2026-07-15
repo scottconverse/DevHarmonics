@@ -101,6 +101,10 @@ Each provider is shown as `READY` or `SETUP`, with its detected version, authent
 
 Register CivicSuite repositories independently. Use roles such as **Umbrella**, **Shared platform**, **Module**, **Desktop**, **Installer**, **Documentation**, and **Release truth** so cross-repository planning can preserve their distinct governance and delivery boundaries.
 
+For every attached local repository, configure **Canonical intelligence sources**. These are relative paths to the files DevHarmonics should treat as evidence—such as `AGENTS.md`, `CLAUDE.md`, `ARCHITECTURE.md`, `STATUS.md`, `pyproject.toml`, `package.json`, a compatibility matrix, or release documentation. Then select **Scan intelligence** on the product card.
+
+The scan is read-only and creates an immutable snapshot. It records each repository's exact HEAD, every source content hash, whether the source is uncommitted, explicit version/release/status/maturity claims, missing or unsafe sources, and subject-aware contradictions with `repository:path:line` citations. Different repositories may legitimately have different package versions; DevHarmonics flags a conflict only when sources disagree about the same named subject. Git tags are never used as maturity evidence. The newest snapshot is supplied to future product-aware planning, while older snapshots remain in the local ledger.
+
 ## 5. Start a run in the dashboard
 
 1. Confirm the **Project folder** points to the intended Git repository.

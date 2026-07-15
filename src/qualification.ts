@@ -101,6 +101,35 @@ export async function ensureSchedulerCandidateQualified(input: {
   return { modelId: refreshed.id, connectionId: connection.id, provider: connection.provider, role: qualificationRole, attempted, passed: true, activated, reason };
 }
 
+export async function ensureReviewerCandidateQualified(input: {
+  ledger: Ledger;
+  config: DevHarmonicsConfig;
+  cwd: string;
+  providers: readonly string[];
+  excludedModelIds?: ReadonlySet<string>;
+  excludedConnectionIds?: ReadonlySet<string>;
+  qualify?: (input: { model: ModelRecord; connection: ConnectionRecord; role: QualificationRole }) => Promise<QualificationOutcome>;
+  onResult?: (result: SchedulerQualificationResult) => void;
+}): Promise<SchedulerQualificationResult | null> {
+  for (const provider of input.providers) {
+    const result = await ensureSchedulerCandidateQualified({
+      ledger: input.ledger,
+      config: input.config,
+      cwd: input.cwd,
+      role: "reviewer",
+      preferredProvider: provider,
+      permission: "read_only",
+      ...(input.excludedModelIds ? { excludedModelIds: input.excludedModelIds } : {}),
+      ...(input.excludedConnectionIds ? { excludedConnectionIds: input.excludedConnectionIds } : {}),
+      ...(input.qualify ? { qualify: input.qualify } : {}),
+    });
+    if (!result) continue;
+    input.onResult?.(result);
+    if (result.passed) return result;
+  }
+  return null;
+}
+
 export function trackedFamilyQualificationRole(transport: ConnectionRecord["transport"], role: QualificationRole): QualificationRole {
   if (transport !== "local") return role;
   return role === "worker" ? "local_tools" : "analysis";

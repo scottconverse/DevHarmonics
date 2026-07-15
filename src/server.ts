@@ -16,6 +16,7 @@ import { redactText } from "./redaction.js";
 import { createRunEvidenceExport, createRunReport } from "./reporter.js";
 import { observeLocalResources } from "./resources.js";
 import { inspectLocalRepository } from "./repository-intelligence.js";
+import { scanProductIntelligence } from "./product-intelligence.js";
 import { manualModelSchema, objectiveInputSchema, productRegistrationSchema, workbenchSessionInputSchema } from "./schemas.js";
 import type { ObjectiveInput, ProviderName, RunRequest } from "./types.js";
 import { inferModelProfile } from "./model-intelligence.js";
@@ -361,6 +362,31 @@ async function route(
     return;
   }
 
+  const productIntelligenceMatch = url.pathname.match(/^\/api\/products\/([^/]+)\/intelligence$/);
+  if (productIntelligenceMatch?.[1] && request.method === "GET") {
+    const productId = decodeURIComponent(productIntelligenceMatch[1]);
+    if (!context.ledger.getProduct(productId)) {
+      sendJson(response, 404, { error: "Product not found" });
+      return;
+    }
+    const snapshot = context.ledger.latestProductIntelligenceSnapshot(productId);
+    sendJson(response, snapshot ? 200 : 404, snapshot ?? { error: "Product has no intelligence snapshot" });
+    return;
+  }
+
+  if (productIntelligenceMatch?.[1] && request.method === "POST") {
+    requireJsonRequest(request);
+    const productId = decodeURIComponent(productIntelligenceMatch[1]);
+    const product = context.ledger.getProduct(productId);
+    if (!product) {
+      sendJson(response, 404, { error: "Product not found" });
+      return;
+    }
+    const snapshot = context.ledger.recordProductIntelligenceSnapshot(await scanProductIntelligence(product));
+    sendJson(response, 201, snapshot);
+    return;
+  }
+
   if (request.method === "GET" && runMatch?.[1]) {
     const run = context.ledger.getRun(runMatch[1]);
     sendJson(response, run ? 200 : 404, run ?? { error: "Run not found" });
@@ -414,7 +440,7 @@ async function route(
     const repository = context.ledger.upsertRepository({
       id: repositoryId,
       productId: product.id,
-      name: inspection.repositoryName,
+      name: remoteIdentity?.fullName.split("/").at(-1) ?? existing?.name ?? inspection.repositoryName,
       fullName,
       url: remoteIdentity?.webUrl ?? existing?.url ?? pathToFileURL(inspection.gitRoot).toString(),
       cloneUrl: inspection.originRemoteUrl ?? existing?.cloneUrl ?? pathToFileURL(inspection.gitRoot).toString(),

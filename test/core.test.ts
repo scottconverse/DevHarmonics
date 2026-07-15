@@ -40,7 +40,7 @@ import { classifyWorkload, inferModelProfile, profileMetadata, SUBSCRIPTION_COMP
 import { parseCurrentClaudeModels } from "../src/catalog.js";
 import { estimateInvocationCost, estimateQualificationCost, isExactOpenRouterModelId } from "../src/openrouter.js";
 import { architectPrompt, localReviewerContextHeader, reviewerPrompt, workerPrompt } from "../src/prompts.js";
-import { ensureSchedulerCandidateQualified, hasCurrentOperationalQualification, qualifyRuntimeModel, trackedFamilyQualificationRole } from "../src/qualification.js";
+import { ensureReviewerCandidateQualified, ensureSchedulerCandidateQualified, hasCurrentOperationalQualification, qualifyRuntimeModel, trackedFamilyQualificationRole } from "../src/qualification.js";
 import { aggregateModelPerformance } from "../src/model-performance.js";
 
 test("provider output parsers extract each CLI's final response", () => {
@@ -762,6 +762,35 @@ test("tool policy allows receipted local work but gates external and unrestricte
   assert.equal(evaluateToolPolicy("shell.unrestricted", config).outcome, "deny");
   config.runPolicy.allowExternalWrites = true;
   assert.equal(evaluateToolPolicy("github.pull_request", config).outcome, "require_approval");
+});
+
+test("multi-repository review qualifies a premium candidate before adaptive routing", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-reviewer-first-use-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    ledger.upsertConnection({ id: "subscription-cli:codex", provider: "codex", transport: "subscription_cli", authentication: "subscription", displayName: "Codex", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "unknown", capacity: "unknown", adapterVersion: "test", runtimeVersion: "test", metadata: {} });
+    const modelId = "subscription-cli:codex:model:sol";
+    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "subscription-cli:codex", canonicalName: "gpt-5.6", displayName: "GPT-5.6 Sol", source: "runtime_discovery", lifecycle: "known", visible: true, verified: false, qualified: false, active: false, metadata: profileMetadata({ tier: "premium", family: "gpt-5.6", capabilities: ["text", "analysis", "code", "tools"], source: "catalog" }) });
+    ledger.recordModelQualification({ modelId, fixtureVersion: "test", role: "architect", passed: true, score: 1, evidence: {} });
+    ledger.setModelPreference(modelId, { active: true });
+    const config = structuredClone(defaultConfig);
+
+    assert.throws(() => new ModelRouter(ledger).route({ role: "reviewer", config, fallbackProvider: "codex", allowedProviders: ["codex"], permission: "read_only" }), /No eligible model/);
+    const qualification = await ensureReviewerCandidateQualified({
+      ledger,
+      config,
+      cwd: root,
+      providers: ["codex"],
+      qualify: async ({ role }) => ({ fixtureVersion: "test-reviewer-v1", role, passed: true, score: 1, evidence: {} }),
+    });
+    assert.equal(qualification?.modelId, modelId);
+    assert.equal(qualification?.passed, true);
+    const routed = new ModelRouter(ledger).route({ role: "reviewer", config, fallbackProvider: "codex", allowedProviders: ["codex"], permission: "read_only" });
+    assert.equal(routed.model.requestedModelId, modelId);
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("Mellum2 local variants are distinct qualified-only specialist tracks", () => {

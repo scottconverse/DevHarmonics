@@ -98,6 +98,17 @@ button { cursor: pointer; }
 .product-head h3 { font-size: 24px; margin: 5px 0 7px; }
 .product-head p { color: var(--muted); margin: 0; font-size: 13px; }
 .product-head a { color: var(--lime); font-size: 12px; font-weight: 750; text-decoration: none; }
+.product-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.product-intelligence { margin: 14px 0; border: 1px solid var(--border); border-radius: 10px; padding: 11px 13px; background: #0d1014; }
+.product-intelligence summary { cursor: pointer; display: flex; justify-content: space-between; gap: 12px; color: var(--text); }
+.product-intelligence summary span, .product-intelligence.empty span { color: var(--muted); font-size: 11px; }
+.product-intelligence p { margin: 9px 0 0; color: var(--muted); font-size: 11px; }
+.product-intelligence ul { margin: 10px 0 0; padding-left: 20px; display: grid; gap: 7px; }
+.product-intelligence li { color: var(--muted); font-size: 11px; }
+.product-intelligence li.error { color: var(--rose); }
+.product-intelligence li.warning { color: var(--amber); }
+.product-intelligence li small { display: block; margin-top: 3px; color: var(--muted); }
+.product-intelligence.empty { display: flex; justify-content: space-between; gap: 12px; }
 .repository-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 20px; }
 .repository-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; border: 1px solid var(--border); border-radius: 10px; padding: 12px; color: var(--text); text-decoration: none; background: #0d1014; min-width: 0; }
 .repository-row:hover { border-color: #4a535e; }

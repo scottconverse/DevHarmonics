@@ -1,13 +1,15 @@
 # DevHarmonics Canonical Product Specification
 
 Document status: **Canonical product direction**
-Specification version: **1.8**
+Specification version: **1.9**
 Written: **2026-07-13**
 Revised: **2026-07-15**
 Current implementation baseline: **DevHarmonics v0.4.0**
 Google Doc: [DevHarmonics Canonical Product Specification](https://docs.google.com/document/d/1rd-_gqHHPZHhTkrULJR9tHcbAVUOGONsbuEFCV-8pRQ/edit?usp=drivesdk)
 
-Revision history: **v1.8 (2026-07-15)** — Established the canonical product-category positioning: DevHarmonics is a local-first, provider-neutral software factory for product owners managing AI agents as development teams.
+Revision history: **v1.9 (2026-07-15)** — Fixed the product boundary around a locally operated software factory for a solo product owner or very small product team. Added live run steering, GitHub/Linear and bounded local triggers, approved PR/delivery handoff, evidence-based analytics and evaluation loops, and Git-versioned workflows/skills. Explicitly rejected a DevHarmonics cloud-hosting platform, remote workers that continue while the user's computer is off, enterprise workforce/IAM/compliance administration, and message-driven execution from arbitrary email or chat.
+
+Prior revision: **v1.8 (2026-07-15)** — Established the canonical product-category positioning: DevHarmonics is a local-first, provider-neutral software factory for product owners managing AI agents as development teams.
 
 Prior revision: **v1.7 (2026-07-15)** — Clarified provider-neutral identity and quota boundaries for Google Antigravity: one authenticated subscription connection may expose Google, Anthropic, and OpenAI model vendors; its Gemini and Claude/GPT quota groups are scheduled independently; and requested model identity is never reported as actual execution identity unless the runtime verifies it.
 
@@ -73,7 +75,15 @@ The primary user:
 - expects the system to keep working across long efforts, interruptions, quota windows, model upgrades, and machine reboots; and
 - needs trustworthy evidence before merging or releasing anything.
 
-Secondary users may eventually include technical product managers, founders, engineering leads, solo developers, and small AI-native product teams. Their needs must not displace the primary owner-operator workflow until that workflow is excellent.
+Secondary users may include technical product managers, founders, solo developers, and very small AI-native product teams. Their needs must not displace the primary owner-operator workflow until that workflow is excellent.
+
+### 3.1 Product boundary
+
+DevHarmonics is a locally operated product, not a hosted DevHarmonics cloud service. The control plane, ledger, scheduler, worktrees, policy enforcement, evidence, workflows, and primary UI run on the user's computer. Subscription providers, optional APIs, GitHub, Linear, and other configured services may be contacted as external capabilities, but they do not become the product's hosting layer.
+
+The primary operating model is one product owner directing an AI development workforce. A very small team may exchange approved objectives, workflow definitions, evidence bundles, and delivery handoffs, but DevHarmonics is not intended to manage a corporate engineering organization. It will not become an enterprise identity provider, centralized secrets-administration platform, compliance suite, or remote-worker service.
+
+When the computer is off, DevHarmonics work stops. Durable state allows safe local resume after restart; the roadmap does not include DevHarmonics-hosted sandboxes that keep running in the cloud or seamless local-to-cloud migration of active agents.
 
 ## 4. Primary target environment: CivicSuite
 
@@ -153,6 +163,14 @@ Large transformations must prove their workflow on a small representative slice 
 ### 5.11 Layered proof, not test-green theater
 
 Tests are necessary executable evidence but are not correctness by themselves. Readiness combines the acceptance contract, test-integrity evidence, deterministic checks, behavioral comparison, independent review, repository state, runtime evidence, applicable nonfunctional gates, and human acceptance. DevHarmonics must detect attempts to make checks green by weakening the evidence rather than fixing the product.
+
+### 5.12 Local control plane, external capabilities
+
+Local-first is an architectural commitment. DevHarmonics owns orchestration and evidence locally while invoking subscription models, optional APIs, source-control services, issue systems, and approved tools as bounded external capabilities. No normal feature may require a DevHarmonics-hosted account, server, or remote execution fleet.
+
+### 5.13 Product-owner operation before organization administration
+
+The interface and workflow model must optimize for a product owner directing AI agents, not for engineering-department staffing, corporate role hierarchies, or compliance administration. Small-team handoff may be supported through explicit, portable artifacts without turning team management into the product center.
 
 ## 6. User experience
 
@@ -649,19 +667,22 @@ Policies may narrow access by repository, path, command, tool, provider, model, 
 
 DevHarmonics must show why an approval is required, what will happen, what evidence supports it, and whether the action is reversible.
 
-### 7.15 GitHub and product-management integration
+### 7.15 Development triggers and external integration
 
-DevHarmonics SHOULD connect product intent with existing work systems without forcing migration. It should be able to:
+DevHarmonics SHOULD connect product intent with existing work systems without forcing migration. GitHub and Linear are the first trigger and work-item priorities. It should be able to:
 
 - read GitHub repositories, issues, pull requests, checks, releases, and Projects;
-- map an objective to existing issues or create proposed issue sets;
-- preserve links between tasks, commits, pull requests, decisions, and releases;
-- monitor CI and route failures back into bounded repair tasks;
-- prepare draft pull requests with evidence summaries;
+- read and link Linear issues when a user configures Linear;
+- map an objective to an approved work item or create a proposed issue set;
+- preserve links between objectives, tasks, commits, pull requests, decisions, releases, and originating work items;
+- react to explicitly configured events such as an approved issue, CI failure, requested PR change, or milestone transition;
+- run local scheduled maintenance, catalog, audit, and validation workflows while DevHarmonics and the computer are available;
+- accept monitoring events as evidence for a bounded diagnostic objective, not as authority to modify production;
+- prepare draft pull requests and delivery handoffs with evidence summaries;
 - update product status only after approved evidence thresholds are met; and
 - operate across a GitHub organization such as CivicSuite while respecting repository permissions and governance.
 
-External writes require the corresponding autonomy level and approval policy.
+External writes require the corresponding autonomy level and approval policy. Trigger rules are allowlisted, attributable, deduplicated, and visible before activation. Email and Slack may eventually deliver notifications or approval links, but arbitrary messages MUST NOT start mutating development work by default. Linear, email, Slack, or monitoring integrations must remain optional; none may be required for normal local use.
 
 ### 7.16 Installation and operations
 
@@ -704,7 +725,27 @@ After verification, a read-only Run Reporter should create the human-facing outc
 
 The dashboard should consume persisted server-sent events or an equivalently resumable event stream with durable event IDs/cursors, automatic reconnection, resume after browser refresh, live provider/model state, and live validator progress. Closing the browser connection must not cancel the run. Cancellation is a separate control-plane action that terminates scheduling and active processes and records the transition in the ledger.
 
-### 7.19 Campaign-scale development orchestration
+### 7.19 Live run steering
+
+The product owner must be able to redirect work while a run is active without editing the ledger or agent terminal manually. Steering controls should support:
+
+- pausing new task admission while preserving active evidence;
+- changing task priority or redirecting queued work;
+- adding a clarification or constraint at a safe task/attempt boundary;
+- stopping an active invocation and creating an attributed continuation attempt with the new direction;
+- reassigning a queued or interrupted task to another qualified model or provider;
+- approving, rejecting, or requesting disposition of a reviewer finding; and
+- seeing whether a steering instruction is pending, applied, rejected by policy, or superseded.
+
+DevHarmonics must not pretend every provider can accept mid-response instruction injection. When an adapter cannot steer an invocation safely, the control plane interrupts it, retains its partial evidence, and starts a new attempt with an explicit handoff. Steering cannot silently widen repository scope, permissions, spending, deployment authority, or acceptance criteria.
+
+### 7.20 Factory analytics, evaluation, and improvement
+
+DevHarmonics should learn which models, workflows, and team shapes work best from retained evidence. Analytics should cover cycle time, verified throughput, first-pass acceptance, retries, validator and reviewer findings, fallback, quota effects, human intervention, local-resource use, and provider/model participation. Exact API tokens and cost are recorded when available; subscription utilization and equivalent cost estimates must be labeled as estimates rather than false precision. ROI is calculated only from explicit user-supplied value or time assumptions.
+
+Evaluation fixtures, workflow experiments, routing policies, prompts, skill versions, and benchmark versions are retained and comparable. Candidate improvements must be evaluated against historical or representative workloads before promotion. DevHarmonics may recommend a new routing rule, workflow revision, skill revision, or model promotion, but it must not silently rewrite its own policy, validators, evaluation fixtures, or user authority. Promotion is versioned, reviewable, and reversible.
+
+### 7.21 Campaign-scale development orchestration
 
 DevHarmonics must support large engineering objectives as governed campaigns rather than one enormous prompt or undifferentiated task list.
 
@@ -874,6 +915,19 @@ All identifiers referenced in a run receipt must remain resolvable after provide
 - **FR-406:** Persisted live events reconnect from a cursor after navigation, refresh, or transient disconnection.
 - **FR-407:** A non-mutating Workbench can turn exploratory product/repository conversations into proposed verified-run objectives.
 - **FR-408:** Model analytics expose role assignments, latency, retries, malformed outputs, validator outcomes, fallback history, and local-versus-subscription workload.
+- **FR-409:** The user can pause admission, redirect queued work, interrupt and continue an active attempt with new direction, and reassign eligible work without losing attribution or evidence.
+
+### Triggers, workflows, and learning
+
+- **FR-600:** Explicitly configured GitHub or Linear events can create or update bounded objective drafts without silently authorizing execution.
+- **FR-601:** Local schedules can start approved maintenance or audit workflows only while the local machine and DevHarmonics runtime are available.
+- **FR-602:** Monitoring events create diagnostic evidence and proposed work; they do not authorize production mutation.
+- **FR-603:** Email and chat integrations, if added, default to notification and approval-link delivery rather than message-driven code execution.
+- **FR-604:** DevHarmonics can prepare a draft pull request and evidence-backed delivery handoff under explicit external-write approval.
+- **FR-605:** Merge, deployment, signing, publication, and production changes retain separate explicit approval boundaries.
+- **FR-606:** Workflows, agent skills, evaluation fixtures, and product-specific packs are version-controlled and historical runs retain the exact revision used.
+- **FR-607:** Analytics report verified throughput, cycle time, quality, human intervention, provider/model utilization, and exact or clearly labeled estimated cost.
+- **FR-608:** Workflow, routing, prompt, skill, and model improvements require retained evaluation evidence and an explicit, reversible promotion decision.
 
 ## 11. Non-functional requirements
 
@@ -881,6 +935,8 @@ All identifiers referenced in a run receipt must remain resolvable after provide
 
 - Product state and source orchestration run locally by default.
 - The dashboard binds to loopback unless the user deliberately configures otherwise.
+- Normal use has no dependency on a DevHarmonics-hosted account, server, control plane, or remote execution fleet.
+- When the local computer is off, scheduled and active DevHarmonics work does not continue elsewhere.
 - Source or context crosses a provider boundary only when that provider is selected and policy allows it.
 - Secrets are minimized, redacted from logs, and never placed in model prompts without explicit need and permission.
 - Redaction occurs at the ledger boundary before provider output, validator receipts, events, errors, or tool logs are persisted or displayed. If optional integrations require secrets, credentials belong in the operating-system credential store rather than DevHarmonics data files.
@@ -915,6 +971,7 @@ All identifiers referenced in a run receipt must remain resolvable after provide
 - Scheduling accounts for local resource pressure.
 - Expensive shared diagnostics execute at deliberate barriers and are partitioned instead of redundantly invoked by every worker.
 - Scale is measured as verified useful throughput; raw agent count, commit rate, token volume, and lines changed are not completion metrics.
+- Scale targets one owner-operator or a very small product team directing AI agents, not a corporate engineering workforce or multi-tenant service.
 
 ### Extensibility
 
@@ -1069,21 +1126,21 @@ Priorities:
 12. configurable adversarial review/fix/re-review topologies; and
 13. diagnostic partitioning, test-integrity controls, differential evidence, and regression accounting.
 
-### 14.5 Milestone D: Optional cloud breadth and team operation
+### 14.5 Milestone D: Optional API and ecosystem breadth
 
-Goal: expand capability without compromising the personal local-first product.
+Goal: expand the locally operated factory's available models, tools, and integrations without creating a DevHarmonics cloud platform.
 
 Priorities:
 
 1. opt-in OpenRouter with explicit OAuth connection, activated model, privacy, and spending policy;
 2. cost-aware routing and budgets;
 3. additional local runtimes and direct APIs where justified;
-4. shared/team workspaces and role-based approvals;
-5. optional remote workers or control-plane components;
-6. enterprise policy, audit export, and administrative controls; and
-7. ecosystem packaging for providers, tools, workflows, and qualification suites.
+4. ACP and ecosystem packaging for providers, tools, workflows, skills, and qualification suites;
+5. GitHub and optional Linear triggers under local policy;
+6. portable workflow, objective, evidence, and delivery-handoff bundles for a very small team when useful; and
+7. local analytics and evaluation-driven workflow/model improvement.
 
-Milestone D features must not make API keys, cloud hosting, or team administration mandatory for Scott’s local use.
+Milestone D does not include DevHarmonics-hosted execution, remote workers that continue while the computer is off, enterprise IAM/compliance/secrets administration, or a mandatory team service.
 
 ## 15. CivicSuite acceptance ladder
 
@@ -1140,8 +1197,11 @@ Key measures include:
 - provider quota wasted on unsuitable tasks;
 - local-model work successfully offloaded;
 - validation and independent-review defect catch rate;
+- live steering actions applied without losing accepted work or evidence;
 - resume success after interruption;
 - cross-repository consistency defects found before release;
+- workflow, skill, routing, and model experiment recommendations accepted, rejected, or rolled back;
+- triggered objective drafts that become useful approved work rather than duplicate or noisy runs;
 - model-upgrade recommendations accepted, rejected, or rolled back; and
 - percentage of final claims backed by complete evidence.
 
@@ -1154,6 +1214,9 @@ The north-star measure is:
 DevHarmonics is not intended to:
 
 - become a general-purpose consumer chatbot;
+- become a cloud hosting platform, hosted control plane, or remote sandbox provider;
+- continue active or scheduled work on DevHarmonics infrastructure while the user's computer is off;
+- manage a corporate engineering workforce or become an enterprise IAM, compliance, or centralized secrets-administration product;
 - replace Git, repository-native tests, CI, code review, or release governance;
 - collect or centrally manage provider passwords;
 - require API keys or cloud hosting for normal use;
@@ -1171,7 +1234,9 @@ DevHarmonics is not intended to:
 - Product name: DevHarmonics.
 - Primary design customer: Scott Converse.
 - Primary proving ground: CivicSuite.
-- Local-first control plane and dashboard.
+- Local-first control plane and dashboard for a solo product owner or very small product team; no DevHarmonics cloud-hosting platform.
+- Active work stops when the user's computer is off and resumes from the durable local ledger after restart.
+- Enterprise workforce management, IAM, compliance administration, and centralized secrets administration are out of scope.
 - Subscription-backed Codex, Claude, and Gemini are first-class.
 - Ollama/local models are first-class target capability.
 - OpenRouter/API access is optional and disabled until explicitly configured.
@@ -1179,6 +1244,8 @@ DevHarmonics is not intended to:
 - Models are selected independently per role/task.
 - Live model discovery, qualification, scheduling, fallback, and upgrade coordination are core differentiation.
 - Health-aware capacity queues, empirical role scoring, blackboard/context management, structured result envelopes, persisted event reconnection, run reporting, analytics, and ledger-boundary redaction are required parts of that coordination layer.
+- Live run steering, GitHub/Linear development triggers, approved draft-PR handoff, version-controlled workflows/skills, and evaluation-driven improvement are required product capabilities.
+- Email and chat integrations, if ever added, default to notifications or approval links and do not authorize arbitrary message-driven development runs.
 - Git isolation, deterministic validation, durable evidence, and human approval boundaries are mandatory.
 
 ### Open

@@ -1,14 +1,16 @@
 # DevHarmonics Detailed Implementation Plan
 
 Document status: **Build-ready execution plan**
-Plan version: **1.17**
+Plan version: **1.18**
 Written: **2026-07-14**
 Revised: **2026-07-15**
-Product specification baseline: **DevHarmonics Product Specification v1.8**
+Product specification baseline: **DevHarmonics Product Specification v1.9**
 Current implementation baseline: **DevHarmonics v0.4.0**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 
-Revision history: **v1.17 (2026-07-15)** — Implemented DH-720's automatic multi-repository correction loop: risk-configured independent review quorums, exact repository-scoped finding assignment, per-repository fixer tasks, repository-local revalidation, changed-evidence hashing and receipt invalidation, and mandatory independent re-review. Unscoped or ambiguous findings fail closed. Product release numbering remains unchanged.
+Revision history: **v1.18 (2026-07-15)** — Re-scoped the roadmap around a locally operated factory for a solo product owner or very small product team. Added live run steering, bounded GitHub/Linear/local-schedule/monitoring triggers, approved PR handoff, evidence-based analytics and evaluation promotion, and Git-versioned workflows/skills. Removed remote workers, DevHarmonics cloud hosting, enterprise workforce/IAM/compliance/secrets administration, and arbitrary email/chat-driven execution from the roadmap. Product release numbering remains unchanged.
+
+Prior revision: **v1.17 (2026-07-15)** — Implemented DH-720's automatic multi-repository correction loop: risk-configured independent review quorums, exact repository-scoped finding assignment, per-repository fixer tasks, repository-local revalidation, changed-evidence hashing and receipt invalidation, and mandatory independent re-review. Unscoped or ambiguous findings fail closed. Product release numbering remains unchanged.
 
 Prior revision: **v1.16 (2026-07-15)** — Reconciled the plan with Product Specification v1.8 and its canonical positioning of DevHarmonics as a local-first, provider-neutral software factory for product owners managing AI agents as development teams. Corrected the immediate recommendation to reflect that Increment 4 feature scope is implemented and Increment 5 multi-repository operation is now in progress; this does not change release numbering.
 
@@ -122,6 +124,12 @@ The scheduler will not contain a product-level maximum agent count. Effective co
 - CPU, RAM, GPU or VRAM, disk, and process capacity;
 - repository integration bottlenecks;
 - observed failure and contention rates.
+
+### 3.6 Local owner-operator boundary
+
+The control plane, ledger, scheduler, worktrees, workflows, evidence, and UI remain local. External providers and product systems are bounded integrations, not a DevHarmonics hosting layer. When the computer is off, work stops and later resumes from durable local state.
+
+Implementation targets one product owner or a very small product team directing AI agents. Do not build remote-worker hosting, multi-tenant infrastructure, enterprise role administration, compliance administration, or centralized secrets management. Small-team support, if needed, uses explicit portable objectives, workflow revisions, evidence bundles, and delivery handoffs.
 
 ## 4. Target architecture
 
@@ -810,6 +818,23 @@ Acceptance:
 - Cancel affects the scheduler and active processes rather than only the browser stream;
 - the run board does not rely on polling for active updates.
 
+#### DH-635: Live run steering — L
+
+Deliverables:
+
+- pause new task admission while retaining active state and evidence;
+- redirect, reprioritize, or reassign queued tasks;
+- interrupt an active invocation and start an attributed continuation attempt with updated direction when provider-native steering is unavailable;
+- apply clarifications and constraints only at safe task/attempt boundaries;
+- show pending, applied, policy-rejected, and superseded steering instructions;
+- prohibit steering from silently widening scope, permissions, spending, deployment authority, or acceptance criteria.
+
+Acceptance:
+
+- a user can redirect a live run without editing an agent terminal or losing completed evidence;
+- unsupported mid-response injection becomes an explicit interrupt-and-handoff rather than a false steering claim;
+- every steering action has an actor, timestamp, target, disposition, and resulting attempt/task linkage.
+
 #### DH-640: Workbench — M
 
 Status: **Core implemented in the v0.5 development line.** Workbench sessions and attributed consultation results persist across restarts; the user can compare exact active qualified models under read-only runtime permission and explicitly convert the retained discussion into a linked objective draft. Conversion creates no plan or run, and paid API models remain subject to project spending policy.
@@ -840,6 +865,22 @@ Acceptance:
 - analytics use ledger evidence rather than provider self-report;
 - low-sample uncertainty is visible;
 - reports can be filtered by product, repository, role, model, and time.
+
+#### DH-660: Evaluation and improvement loop — L
+
+Deliverables:
+
+- versioned evaluation fixtures and representative historical workloads;
+- comparable workflow, prompt, routing-policy, skill, and model experiments;
+- promotion recommendations backed by quality, latency, intervention, fallback, and regression evidence;
+- exact API cost when observable and clearly labeled subscription/equivalent-cost estimates otherwise;
+- reversible promotion records that retain the prior configuration.
+
+Acceptance:
+
+- evaluations cannot rewrite their own fixtures, validators, or pass criteria during the evaluated run;
+- a candidate improvement is never silently promoted from model self-report or one successful example;
+- historical runs retain the exact workflow, skill, prompt, model, policy, and fixture revisions used.
 
 ### 6.7 Multi-repository products and CivicSuite
 
@@ -954,6 +995,23 @@ Acceptance:
 - every external write has an approval and receipt;
 - DevHarmonics never treats a pull request as merged until GitHub confirms it.
 
+#### DH-805: Development triggers — M
+
+Deliverables:
+
+- allowlisted GitHub and optional Linear event triggers with attribution, deduplication, and visible activation state;
+- local schedules for approved maintenance, catalog, audit, and validation workflows;
+- monitoring-event intake that creates bounded diagnostic evidence or objective drafts without production-write authority;
+- optional email/chat notification and approval-link adapters that cannot authorize arbitrary message-driven implementation;
+- per-trigger repository, workflow, autonomy, permission, and rate policies.
+
+Acceptance:
+
+- a trigger can draft or update an objective without silently starting mutating work;
+- schedules run only while the local computer and DevHarmonics runtime are available;
+- monitoring, email, and chat input cannot bypass plan approval or consequential-action gates;
+- duplicate external events do not create duplicate runs.
+
 #### DH-810: Reusable workflow engine — L
 
 Deliverables:
@@ -961,13 +1019,14 @@ Deliverables:
 - versioned parameterized workflows for dependency upgrades, issue-to-PR, accessibility audit, release-truth audit, clean-machine checklist, module finishing, and documentation consistency;
 - typed inputs, required evidence, approval points, and completion contracts;
 - versioned campaign templates whose pilot-proven stage, shard, reviewer, command, diagnostic, and resource policies remain inspectable;
-- product-specific workflow packs.
+- product-specific workflow and agent-skill packs stored in Git.
 
 Acceptance:
 
 - workflows are reviewable before execution;
 - workflow updates do not rewrite historical runs;
 - promoting a pilot creates a new template revision without silently widening permissions;
+- historical runs retain the exact workflow and skill revisions used;
 - CivicSuite can maintain approved suite-specific workflows.
 
 #### DH-820: ACP transport — L
@@ -1004,19 +1063,19 @@ Acceptance:
 - spending and data-boundary violations fail before invocation;
 - disabling it removes all API candidates from scheduling.
 
-#### DH-840: Optional team operating mode — XL
+#### DH-840: Small-team handoff — M (deferred)
 
 Deliverables:
 
-- shared workspace state, role-based approvals, remote workers, and team audit;
-- keep personal local-first mode fully functional;
-- separate user identity from provider credentials.
+- export and import approved objective, workflow, evidence, and delivery-handoff bundles;
+- explicit bundle provenance, revisions, checksums, and authority boundaries;
+- simple attribution for a very small product team without corporate role hierarchy or a hosted DevHarmonics service.
 
 Acceptance:
 
-- team infrastructure is not required for Scott's use;
-- enabling team mode does not weaken local evidence or permission boundaries;
-- provider sessions remain attributable and revocable.
+- solo local operation remains the complete primary product;
+- sharing a bundle never transfers provider credentials, local secrets, or unapproved authority;
+- no remote worker, multi-tenant control plane, enterprise IAM, compliance-administration, or centralized secrets-management infrastructure is introduced.
 
 ### 6.9 Packaging, diagnostics, and release
 
@@ -1196,10 +1255,13 @@ Exit gate:
 
 Work:
 
+- DH-635 live run steering;
 - DH-650 analytics;
+- DH-660 evaluation and improvement;
 - DH-370 diagnostic partitioner and shard barriers;
 - DH-480 differential validation and regression accounting;
 - DH-800 GitHub;
+- DH-805 development triggers;
 - DH-810 reusable workflows;
 - DH-740 CivicSuite Level 5;
 - release and consistency workflow packs.
@@ -1207,9 +1269,11 @@ Work:
 Exit gate:
 
 - Scott can move from objective through draft PR and evidence-backed review;
+- Scott can redirect, reprioritize, interrupt-and-handoff, or reassign live work with durable attribution;
 - CivicSuite release truth and compatibility workflows produce actionable, reviewable evidence;
+- an allowlisted GitHub or Linear event can create a bounded objective draft without silently authorizing execution;
 - one campaign centralizes an expensive diagnostic, partitions non-overlapping repairs, and reports equivalence plus regressions honestly;
-- analytics identify routing and workflow improvements.
+- analytics and versioned evaluations identify routing and workflow improvements without silently promoting them.
 
 ### Increment 7: Ecosystem breadth — v0.8
 
@@ -1235,7 +1299,7 @@ Work:
 - DH-910 diagnostics;
 - DH-920 release engineering;
 - performance, accessibility, security, upgrade, and clean-machine gates;
-- team-mode architecture seams without requiring team deployment.
+- portable small-team handoff bundles without hosted infrastructure.
 
 Exit gate:
 
@@ -1244,9 +1308,9 @@ Exit gate:
 - all shipped claims have automated or retained acceptance evidence;
 - unresolved high-risk security or data-loss defects are zero.
 
-### Later expansion: Team operation
+### Later expansion: Small-team handoff
 
-DH-840 is implemented when Scott's personal workflow is stable and a real multi-user need exists. The architecture supports it, but personal local-first operation remains a complete product mode.
+DH-840 is implemented only when Scott's personal workflow is stable and a concrete need exists to exchange approved work with a very small team. It remains an artifact-handoff capability, not a hosted team service, remote-worker platform, or enterprise administration layer.
 
 ## 8. Dependency map and parallelism
 
@@ -1437,6 +1501,11 @@ The first implementation sequence is:
 23. Add configurable adversarial review quorums, fixer disposition, and re-review invalidation.
 24. Add expected-versus-actual test census, anti-shortcut fixtures, and differential behavior baselines.
 25. Add campaign stages, resource-aware shards, centralized diagnostic partitioning, regression budgets, and restart-safe promotion gates.
+26. Add live run steering with pause-admission, redirect, interrupt-and-handoff, reprioritization, and reassignment receipts.
+27. Add approved branch/draft-PR delivery handoff with exact evidence and no implicit merge or deployment.
+28. Add Git-versioned reusable workflow and agent-skill packs with exact historical revision retention.
+29. Add allowlisted GitHub/Linear and local schedule/monitoring triggers that create bounded drafts without bypassing approval.
+30. Add evidence-based analytics and evaluation promotion with honest subscription-cost uncertainty and reversible configuration changes.
 
 This order deliberately produces inspectable user value after items 9 through 13 while the deeper scheduler and multi-repository work continues.
 
@@ -1453,7 +1522,7 @@ These decisions should be resolved with prototypes and evidence rather than spec
 - the exact secure-storage implementation on Windows, macOS, and Linux;
 - the first CivicSuite repository set and bounded objective;
 - which GitHub writes should be available first;
-- when team operation has enough real demand to justify its infrastructure.
+- which portable small-team handoff artifacts are useful after solo operation is proven.
 
 These are not permission to weaken the product principles. When an integration cannot meet the trust, evidence, or recovery contract, it remains unavailable or experimental.
 

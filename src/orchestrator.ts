@@ -795,7 +795,7 @@ export class Orchestrator {
           });
           const selected = reviewerDecision.model.requestedModelId ? this.ledger.getModel(String(reviewerDecision.model.requestedModelId)) : null;
           if (reviewerDecision.provider === "openrouter" && !selected) throw new Error("OpenRouter paid routing requires an exact selected model");
-          const costCeiling = selected ? requireInvocationCostCeiling(selected, "", 512) * chunks.length : 0;
+          const costCeiling = reviewerDecision.provider === "openrouter" ? requireInvocationCostCeiling(selected!, "", 512) * chunks.length : 0;
           const review = reviewerDecision.provider === "openrouter"
             ? await new OpenRouterService(this.ledger).withPaidRoutingAllowed(config, runId, costCeiling, performReview)
             : await performReview();
@@ -1418,7 +1418,7 @@ export class Orchestrator {
           });
           const selected = decision.model.requestedModelId ? this.ledger.getModel(String(decision.model.requestedModelId)) : null;
           if (decision.provider === "openrouter" && !selected) throw new Error("OpenRouter paid routing requires an exact selected model");
-          const costCeiling = selected ? requireInvocationCostCeiling(selected, "", 512) * chunks.length : 0;
+          const costCeiling = decision.provider === "openrouter" ? requireInvocationCostCeiling(selected!, "", 512) * chunks.length : 0;
           const review = decision.provider === "openrouter"
             ? await new OpenRouterService(this.ledger).withPaidRoutingAllowed(input.config, input.runId, costCeiling, performReview)
             : await performReview();

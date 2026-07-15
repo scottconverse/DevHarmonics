@@ -2,7 +2,7 @@
 
 ## Supported version
 
-DevHarmonics is an early MVP. Security fixes currently target the latest tagged release, **v0.1.0**.
+DevHarmonics is an early public preview. Security fixes currently target the latest tagged release, **v0.4.0**.
 
 ## Reporting a vulnerability
 

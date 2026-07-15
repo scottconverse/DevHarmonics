@@ -4,15 +4,46 @@ import type {
   ProviderRequest,
   ProviderResult,
 } from "./types.js";
+import { projectLegacyProvider } from "./compatibility.js";
 import { runProcess, subscriptionEnvironment } from "./process.js";
+import { VERSION } from "./product.js";
+import {
+  RuntimeInvocationError,
+  classifyInvocationFailure,
+  type InvocationEvent,
+  type InvocationOptions,
+  type InvocationRequest,
+  type InvocationResult,
+  type ProviderConnection,
+  type RuntimeAdapter,
+  type RuntimeMetadata,
+  type ModelSelection,
+} from "./runtime.js";
 
-export interface ProviderAdapter {
+const runtimeVersionCache = new Map<string, Promise<string | null>>();
+
+export interface SubscriptionCliConnection extends ProviderConnection {
+  provider: ProviderName;
+  transport: "subscription_cli";
+  authentication: "subscription";
+  cli: {
+    command: string;
+    outputFormat: "json_lines" | "json" | "text";
+    promptTransport: "stdin" | "argument";
+  };
+}
+
+export interface ProviderAdapter extends RuntimeAdapter {
   readonly name: ProviderName;
+  readonly connection: SubscriptionCliConnection;
   run(request: ProviderRequest, signal?: AbortSignal): Promise<ProviderResult>;
 }
 
 abstract class CliProvider implements ProviderAdapter {
   abstract readonly name: ProviderName;
+  abstract readonly displayName: string;
+  abstract readonly outputFormat: SubscriptionCliConnection["cli"]["outputFormat"];
+  readonly promptTransport: SubscriptionCliConnection["cli"]["promptTransport"] = "stdin";
 
   constructor(protected readonly config: ProviderConfig) {}
 
@@ -22,37 +53,225 @@ abstract class CliProvider implements ProviderAdapter {
     return request.prompt;
   }
 
-  async run(request: ProviderRequest, signal?: AbortSignal): Promise<ProviderResult> {
-    const result = await runProcess({
-      command: this.config.command,
-      args: this.argumentsFor(request),
-      cwd: request.cwd,
-      timeoutMs: request.timeoutMs ?? this.config.timeoutMs,
-      stdin: this.stdinFor(request),
-      env: subscriptionEnvironment(this.name),
-      ...(signal ? { signal } : {}),
-    });
+  get connection(): SubscriptionCliConnection {
+    const projection = projectLegacyProvider(this.name);
+    return {
+      id: projection.connectionId,
+      provider: this.name,
+      displayName: this.displayName,
+      transport: "subscription_cli",
+      authentication: "subscription",
+      capabilities: {
+        structuredOutput: this.name !== "gemini",
+        streaming: false,
+        providerManagedTools: true,
+        modelSelection: true,
+        modelSettings: this.name === "gemini" ? [] : ["effort"],
+        permissions: ["read_only", "workspace_write"],
+      },
+      cli: {
+        command: this.config.command,
+        outputFormat: this.outputFormat,
+        promptTransport: this.promptTransport,
+      },
+    };
+  }
 
-    if (result.exitCode !== 0) {
-      const detail = result.stderr.trim() || result.stdout.trim() || "No diagnostic output";
-      throw new Error(
-        `${this.name} exited with code ${result.exitCode}${result.timedOut ? " after timing out" : ""}: ${detail}`,
+  async metadata(): Promise<RuntimeMetadata> {
+    const key = `${this.name}\0${this.config.command}`;
+    let pending = runtimeVersionCache.get(key);
+    if (!pending) {
+      pending = runProcess({
+        command: this.config.command,
+        args: ["--version"],
+        cwd: process.cwd(),
+        timeoutMs: 10_000,
+        env: subscriptionEnvironment(this.name),
+      })
+        .then((result) => {
+          if (result.exitCode !== 0) return null;
+          return (result.stdout || result.stderr).trim().split(/\r?\n/)[0] || null;
+        })
+        .catch(() => null);
+      runtimeVersionCache.set(key, pending);
+    }
+    return { adapterVersion: VERSION, runtimeVersion: await pending };
+  }
+
+  async invoke(request: InvocationRequest, options: InvocationOptions = {}): Promise<InvocationResult> {
+    const legacyRequest: ProviderRequest = {
+      role: request.role,
+      prompt: request.prompt,
+      cwd: request.cwd,
+      writeAccess: request.permission === "workspace_write",
+      ...(request.timeoutMs === null ? {} : { timeoutMs: request.timeoutMs }),
+    };
+    const metadata = await this.metadata();
+    const emit = (event: InvocationEvent) => options.onEvent?.(event);
+    emit({ type: "started", connectionId: this.connection.id, at: new Date().toISOString() });
+    const unsupportedSettings = Object.keys(request.model.settings).filter((setting) => !this.connection.capabilities.modelSettings.includes(setting));
+    if (unsupportedSettings.length) {
+      emit({
+        type: "failed",
+        kind: "incompatible",
+        exitCode: 0,
+        retryable: false,
+        at: new Date().toISOString(),
+      });
+      throw new RuntimeInvocationError(
+        `${this.name} does not support model settings: ${unsupportedSettings.join(", ")}`,
+        "incompatible",
+        this.connection.id,
+        0,
+        false,
       );
     }
 
+    let result;
+    try {
+      result = await runProcess({
+        command: this.config.command,
+        args: [...this.modelArguments(request.model), ...this.argumentsFor(legacyRequest)],
+        cwd: legacyRequest.cwd,
+        timeoutMs: legacyRequest.timeoutMs ?? this.config.timeoutMs,
+        stdin: this.stdinFor(legacyRequest),
+        env: subscriptionEnvironment(this.name),
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+    } catch (error) {
+      const cancelled = options.signal?.aborted ?? false;
+      const message = error instanceof Error ? error.message : String(error);
+      emit({
+        type: "failed",
+        kind: cancelled ? "cancelled" : "process_failed",
+        exitCode: -1,
+        retryable: !cancelled,
+        at: new Date().toISOString(),
+      });
+      throw new RuntimeInvocationError(
+        `${this.name} could not start: ${message}`,
+        cancelled ? "cancelled" : "process_failed",
+        this.connection.id,
+        -1,
+        !cancelled,
+      );
+    }
+
+    if (result.stdout) emit({ type: "stdout", text: result.stdout, at: new Date().toISOString() });
+    if (result.stderr) emit({ type: "stderr", text: result.stderr, at: new Date().toISOString() });
+    if (result.exitCode !== 0 || result.timedOut) {
+      const detail = result.stderr.trim() || result.stdout.trim() || "No diagnostic output";
+      const failure = classifyInvocationFailure({
+        detail,
+        exitCode: result.exitCode,
+        timedOut: result.timedOut,
+        aborted: options.signal?.aborted ?? false,
+      });
+      emit({
+        type: "failed",
+        kind: failure.kind,
+        exitCode: result.exitCode,
+        retryable: failure.retryable,
+        at: new Date().toISOString(),
+      });
+      throw new RuntimeInvocationError(
+        `${this.name} exited with code ${result.exitCode}${result.timedOut ? " after timing out" : ""}: ${detail}`,
+        failure.kind,
+        this.connection.id,
+        result.exitCode,
+        failure.retryable,
+      );
+    }
+
+    let text: string;
+    try {
+      text = this.extractText(result.stdout);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      emit({
+        type: "failed",
+        kind: "incompatible",
+        exitCode: result.exitCode,
+        retryable: false,
+        at: new Date().toISOString(),
+      });
+      throw new RuntimeInvocationError(
+        `${this.name} returned an incompatible response: ${detail}`,
+        "incompatible",
+        this.connection.id,
+        result.exitCode,
+        false,
+      );
+    }
+
+    emit({
+      type: "completed",
+      exitCode: result.exitCode,
+      durationMs: result.durationMs,
+      at: new Date().toISOString(),
+    });
+    const projection = projectLegacyProvider(this.name);
+    return {
+      connectionId: projection.connectionId,
+      provider: this.name,
+      ...metadata,
+      model: {
+        ...request.model,
+        resolvedModelId: request.model.requestedModelId ?? projection.modelId,
+        resolution: request.model.requestedModelId === null
+          ? "provider_default_unresolved"
+          : "concrete",
+      },
+      text,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      exitCode: result.exitCode,
+      durationMs: result.durationMs,
+      usage: { inputTokens: null, outputTokens: null, costUsd: null },
+      toolRequests: [],
+    };
+  }
+
+  async run(request: ProviderRequest, signal?: AbortSignal): Promise<ProviderResult> {
+    const result = await this.invoke({
+      role: request.role,
+      prompt: request.prompt,
+      cwd: request.cwd,
+      permission: request.writeAccess ? "workspace_write" : "read_only",
+      timeoutMs: request.timeoutMs ?? null,
+      model: { requestedModelId: null, alias: null, settings: {} },
+    }, signal ? { signal } : {});
     return {
       provider: this.name,
-      text: this.extractText(result.stdout),
+      text: result.text,
       stdout: result.stdout,
       stderr: result.stderr,
       exitCode: result.exitCode,
       durationMs: result.durationMs,
     };
   }
+
+  protected modelArguments(selection: ModelSelection): string[] {
+    const requested = selection.alias ?? (selection.requestedModelId ? String(selection.requestedModelId) : null);
+    const model = requested?.replace(/^subscription-cli:[^:]+:model:/, "").replace(new RegExp(`^${this.name}:`), "") ?? null;
+    if (this.name === "codex") {
+      const args = model ? ["--model", model] : [];
+      if (selection.settings.effort) args.push("--config", `model_reasoning_effort=${JSON.stringify(selection.settings.effort)}`);
+      return args;
+    }
+    if (this.name === "claude") {
+      const args = model ? ["--model", model] : [];
+      if (selection.settings.effort) args.push("--effort", String(selection.settings.effort));
+      return args;
+    }
+    return model ? ["--model", model] : [];
+  }
 }
 
 export class CodexProvider extends CliProvider {
   readonly name = "codex" as const;
+  readonly displayName = "OpenAI Codex";
+  readonly outputFormat = "json_lines" as const;
 
   protected argumentsFor(request: ProviderRequest): string[] {
     return [
@@ -73,6 +292,8 @@ export class CodexProvider extends CliProvider {
 
 export class ClaudeProvider extends CliProvider {
   readonly name = "claude" as const;
+  readonly displayName = "Claude Code";
+  readonly outputFormat = "json" as const;
 
   protected argumentsFor(request: ProviderRequest): string[] {
     return [
@@ -91,9 +312,16 @@ export class ClaudeProvider extends CliProvider {
 
 export class GeminiProvider extends CliProvider {
   readonly name = "gemini" as const;
+  readonly displayName = "Google Antigravity";
+  readonly outputFormat = "text" as const;
+  override readonly promptTransport = "argument" as const;
 
   protected argumentsFor(request: ProviderRequest): string[] {
     return [
+      "--new-project",
+      "--add-dir",
+      request.cwd,
+      "--sandbox",
       "--mode",
       request.writeAccess ? "accept-edits" : "plan",
       "--print-timeout",
@@ -167,4 +395,8 @@ export function createProvider(name: ProviderName, config: ProviderConfig): Prov
   if (name === "codex") return new CodexProvider(config);
   if (name === "claude") return new ClaudeProvider(config);
   return new GeminiProvider(config);
+}
+
+export function createRuntimeAdapter(name: ProviderName, config: ProviderConfig): RuntimeAdapter {
+  return createProvider(name, config);
 }

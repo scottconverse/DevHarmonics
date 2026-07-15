@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>DevHarmonics</title>
-    <link rel="stylesheet" href="/app.css" />
+    <link rel="stylesheet" href="/app.css?v=0.4.0" />
   </head>
   <body>
     <div class="app-shell">
@@ -14,11 +14,18 @@
           <div><strong>DevHarmonics</strong><span>Agent operations</span></div>
         </div>
         <button id="new-run" class="primary full">＋ New run</button>
+        <nav class="app-nav" aria-label="Application">
+          <button class="nav-link active" data-view="runs">Runs</button>
+          <button class="nav-link" data-view="products">Products</button>
+          <button class="nav-link" data-view="setup">Setup</button>
+          <button class="nav-link" data-view="models">Models</button>
+          <button class="nav-link" data-view="evidence">Evidence</button>
+        </nav>
         <div class="section-label">Recent runs</div>
         <nav id="run-list" class="run-list" aria-label="Recent runs"></nav>
         <div class="sidebar-foot">
           <span class="security-dot"></span>
-          Subscription-only mode · v0.1.0
+          Subscription + local mode · paid API opt-in · v0.4.0
         </div>
       </aside>
 
@@ -52,13 +59,22 @@
 
           <div class="composer-grid">
             <div>
+              <label for="run-autonomy">Run mode</label>
+              <select id="run-autonomy" class="input" aria-describedby="run-autonomy-help">
+                <option value="observe">Observe only</option>
+                <option value="supervised">Supervised</option>
+                <option value="bounded">Bounded autonomy</option>
+              </select>
+              <small id="run-autonomy-help" class="field-help">Read-only diagnostics and evidence. No repository changes.</small>
+            </div>
+            <div>
               <label for="agent-mode">Concurrency</label>
               <div class="joined">
                 <select id="agent-mode" class="input">
                   <option value="auto">Architect decides</option>
                   <option value="manual">I’ll choose</option>
                 </select>
-                <input id="agent-count" class="input count" type="number" min="1" value="20" disabled />
+                <input id="agent-count" class="input count" type="number" min="1" value="20" aria-label="Agent count" disabled />
               </div>
             </div>
             <fieldset>
@@ -91,8 +107,15 @@
             <div>
               <p id="run-project" class="eyebrow"></p>
               <h2 id="run-goal"></h2>
+              <details id="run-objective" class="run-objective" hidden>
+                <summary>View full objective</summary>
+                <p id="run-goal-full"></p>
+              </details>
             </div>
             <div id="run-status" class="status-pill"></div>
+            <button id="approve-run" class="primary hidden">Approve plan</button>
+            <button id="pause-run" class="secondary hidden">Pause run</button>
+            <button id="resume-run" class="primary hidden">Resume as recovery run</button>
             <button id="cancel-run" class="danger hidden">Cancel run</button>
           </div>
 
@@ -116,15 +139,114 @@
             </section>
           </div>
         </section>
+
+        <section id="products-view" class="workspace-view hidden" aria-labelledby="products-title">
+          <div class="view-heading">
+            <div><p class="eyebrow">PRODUCT OPERATIONS</p><h2 id="products-title">Product portfolio</h2></div>
+            <button id="refresh-products" class="secondary" type="button">Refresh portfolio</button>
+          </div>
+          <div id="product-summary" class="metrics"></div>
+          <div id="product-list" class="product-list"></div>
+          <div id="products-empty" class="panel empty-state product-empty">No products registered yet. An Observe pass can add a product and its repositories without cloning or changing them.</div>
+        </section>
+
+        <section id="setup-view" class="workspace-view hidden" aria-labelledby="setup-title">
+          <div class="view-heading">
+            <div><p class="eyebrow">CONTROL PLANE</p><h2 id="setup-title">Connections and run policy</h2></div>
+            <button id="refresh-setup" class="secondary" type="button">Refresh diagnostics</button>
+          </div>
+          <div id="connection-cards" class="connection-grid"></div>
+          <form id="settings-form" class="panel settings-panel">
+            <div class="panel-heading"><div><span class="step">02</span><h2>Team defaults</h2></div><span class="muted">No passwords or API keys are stored here.</span></div>
+            <div class="settings-grid">
+              <label>Architect<select id="setting-architect" class="input"></select></label>
+              <label>Reviewer<select id="setting-reviewer" class="input"></select></label>
+              <label>Default agents<input id="setting-agents" class="input" type="number" min="1"></label>
+              <label>Autonomy<select id="setting-autonomy" class="input"><option value="observe">Observe only</option><option value="supervised">Supervised</option><option value="bounded">Bounded autonomy</option></select></label>
+              <label>Model scheduling<select id="setting-routing-mode" class="input"><option value="adaptive">Adaptive by task</option><option value="manual">Manual role defaults</option></select></label>
+              <label>Architect model<select id="setting-architect-model" class="input"></select></label>
+              <label>Architect tier<select id="setting-architect-tier" class="input"></select></label>
+              <label>Architect effort<select id="setting-architect-effort" class="input"></select></label>
+              <label>Architect upgrades<select id="setting-architect-upgrade" class="input"><option value="pinned">Pinned exact model</option><option value="track_family">Track qualified family</option></select></label>
+              <label>Worker model<select id="setting-worker-model" class="input"></select></label>
+              <label>Worker tier<select id="setting-worker-tier" class="input"></select></label>
+              <label>Worker effort<select id="setting-worker-effort" class="input"></select></label>
+              <label>Worker upgrades<select id="setting-worker-upgrade" class="input"><option value="pinned">Pinned exact model</option><option value="track_family">Track qualified family</option></select></label>
+              <label>Reviewer model<select id="setting-reviewer-model" class="input"></select></label>
+              <label>Reviewer tier<select id="setting-reviewer-tier" class="input"></select></label>
+              <label>Reviewer effort<select id="setting-reviewer-effort" class="input"></select></label>
+              <label>Reviewer upgrades<select id="setting-reviewer-upgrade" class="input"><option value="pinned">Pinned exact model</option><option value="track_family">Track qualified family</option></select></label>
+            </div>
+            <fieldset><legend>Eligible subscription workers</legend><div id="setting-workers" class="toggles"></div></fieldset>
+            <div class="policy-list">
+              <label><input id="setting-plan-approval" type="checkbox"> Require plan approval before execution</label>
+              <label><input id="setting-external-writes" type="checkbox"> Allow external writes when a tool policy permits them</label>
+              <label><input id="setting-paid-api" type="checkbox"> Allow paid API runtimes for this project</label>
+              <label><input id="setting-fallback" type="checkbox"> Allow qualified fallback when the assigned runtime is unavailable</label>
+            </div>
+            <section class="api-policy">
+              <div><strong>OpenRouter paid fallback</strong><p class="muted">OAuth connection alone never enables spending. DevHarmonics chooses the exact model and performs fallback itself.</p></div>
+              <div class="settings-grid">
+                <label><span><input id="openrouter-enabled" type="checkbox"> Enable OpenRouter connection</span></label>
+                <label><span><input id="openrouter-paid-fallback" type="checkbox"> Allow paid API fallback</span></label>
+                <label>Per-run limit (USD)<input id="openrouter-run-limit" class="input" type="number" min="0" step="0.01"></label>
+                <label>Monthly limit (USD)<input id="openrouter-month-limit" class="input" type="number" min="0" step="0.01"></label>
+              </div>
+              <div class="model-actions"><button id="openrouter-connect" class="secondary" type="button">Connect OpenRouter with OAuth</button><button id="openrouter-disconnect" class="secondary" type="button">Disconnect</button><span id="openrouter-status" class="muted"></span></div>
+            </section>
+            <div class="composer-actions"><p id="settings-message" class="muted" role="status"></p><button class="primary" type="submit">Save settings</button></div>
+          </form>
+        </section>
+
+        <section id="models-view" class="workspace-view hidden" aria-labelledby="models-title">
+          <div class="view-heading"><div><p class="eyebrow">MODEL FLEET</p><h2 id="models-title">Known models</h2></div><button id="refresh-models" class="secondary" type="button">Refresh fleet</button></div>
+          <div id="model-summary" class="metrics"></div>
+          <div id="runtime-list" class="connection-grid"></div>
+          <div id="model-filter-bar" class="panel joined"><input id="model-filter" class="input" placeholder="Filter known models"><select id="model-status-filter" class="input"><option value="all">All current models</option><option value="active">Active</option><option value="qualified">Qualified</option><option value="stale">Stale</option><option value="unqualified">Unqualified</option></select></div>
+          <div id="model-list" class="model-grid"></div>
+          <section id="openrouter-panel" class="panel settings-panel">
+            <div class="panel-heading"><div><span class="step">API</span><h2>OpenRouter catalog</h2></div><span class="muted">Searching is free. Importing a model does not qualify it or enable paid routing.</span></div>
+            <div class="joined"><input id="openrouter-model-query" class="input" placeholder="Search exact OpenRouter models"><button id="openrouter-search" class="secondary" type="button">Search catalog</button></div>
+            <div id="openrouter-catalog" class="model-grid"></div>
+          </section>
+          <form id="runtime-form" class="panel settings-panel">
+            <div class="panel-heading"><div><span class="step">+</span><h2>Add a local Ollama runtime</h2></div><span class="muted">Loopback endpoints only. DevHarmonics never downloads models automatically.</span></div>
+            <div class="settings-grid">
+              <label>Runtime ID<input id="runtime-id" class="input" required pattern="[A-Za-z0-9][A-Za-z0-9_-]*" placeholder="civicsuite"></label>
+              <label>Display name<input id="runtime-display" class="input" required placeholder="CivicSuite Ollama"></label>
+              <label>Base URL<input id="runtime-url" class="input" required type="url" value="http://127.0.0.1:15434"></label>
+            </div>
+            <div class="composer-actions"><p class="muted">Refresh Fleet probes configured runtimes.</p><button class="primary" type="submit">Add runtime</button></div>
+          </form>
+          <form id="model-form" class="panel settings-panel">
+            <div class="panel-heading"><div><span class="step">+</span><h2>Add a known model</h2></div><span class="muted">Manual entries remain unschedulable until verified and qualified.</span></div>
+            <div class="settings-grid">
+              <label>Connection<select id="model-connection" class="input" required></select></label>
+              <label>Model identifier<input id="model-id" class="input" required placeholder="provider:model-name"></label>
+              <label>Canonical name<input id="model-canonical" class="input" required placeholder="model-name"></label>
+              <label>Display name<input id="model-display" class="input" required placeholder="Model Name"></label>
+            </div>
+            <div class="composer-actions"><p id="model-message" class="muted" role="status"></p><button class="primary" type="submit">Add model</button></div>
+          </form>
+        </section>
+
+        <section id="evidence-view" class="workspace-view hidden" aria-labelledby="evidence-title">
+          <div class="view-heading"><div><p class="eyebrow">READ-ONLY REPORTER</p><h2 id="evidence-title">Run evidence</h2></div><button id="refresh-evidence" class="secondary" type="button">Refresh evidence</button></div>
+          <div id="evidence-empty" class="panel empty-state">Select a run to inspect its immutable execution receipts.</div>
+          <div id="evidence-content" class="hidden">
+            <div id="evidence-metrics" class="metrics"></div>
+            <section class="panel evidence-panel"><div class="panel-heading"><h3>Integrity and attempts</h3><code id="evidence-hash"></code></div><div id="evidence-attempts" class="evidence-list"></div></section>
+          </div>
+        </section>
       </main>
     </div>
 
     <div id="drawer-backdrop" class="drawer-backdrop hidden"></div>
-    <aside id="task-drawer" class="task-drawer" aria-label="Task details" aria-hidden="true">
+    <aside id="task-drawer" class="task-drawer" aria-label="Task details" aria-hidden="true" inert>
       <button id="close-drawer" class="icon-button" aria-label="Close task details">×</button>
       <div id="drawer-content"></div>
     </aside>
 
-    <script src="/app.js"></script>
+    <script src="/app.js?v=0.4.0"></script>
   </body>
 </html>

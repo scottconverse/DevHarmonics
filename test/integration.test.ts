@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { initializeProject, loadConfig, devHarmonicsDirectory } from "../src/config.js";
@@ -53,11 +54,25 @@ if (process.argv.includes("--version")) {
   console.log("fake 1.0");
 } else if (authCheck) {
   ${authenticated ? 'console.log("Authenticated fixture");' : 'console.error("Sign-in required"); process.exitCode = 1;'}
+} else if (input.includes("DevHarmonics non-destructive") || input.includes("DevHarmonics deterministic baseline")) {
+  const marker = input.includes("deterministic baseline") ? "DEVHARMONICS_BENCHMARK_QUALIFIED|17|BLUE" : (input.match(/DEVHARMONICS_[A-Z]+_QUALIFIED/) || ["DEVHARMONICS_GENERAL_QUALIFIED"])[0];
+  if (process.argv.includes("--json")) console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:marker}}));
+  else if (process.argv.includes("--output-format")) console.log(JSON.stringify({result:marker}));
+  else console.log(marker);
 } else if (input.includes("You are the architect")) {
-  const plan = {summary:"fixture plan",recommendedConcurrency:1,tasks:[{id:"one",title:"Create result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"]}]};
+  const observe = input.includes("This is an OBSERVE run");
+  const task = observe
+    ? {id:"observe",title:"Audit fixture",description:"Report the README heading",dependencies:[],preferredProvider:"codex",checks:["diff-check"],kind:"diagnostic",repositoryScope:["README.md"],permission:"read_only",risk:"low",capabilityNeeds:["analysis"],acceptanceCriteria:["Cite the README heading"],expectedArtifacts:["evidence report"]}
+    : {id:"one",title:"Create result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"]};
+  const plan = {summary:"fixture plan",recommendedConcurrency:1,tasks:[task]};
   console.log(JSON.stringify({result:JSON.stringify(plan)}));
 } else if (input.includes("You are the final reviewer")) {
-  console.log("READY\\n\\nFixture integration is valid.");
+  const review = input.includes("Audit fixture") && !input.includes("README.md:1 contains the heading Fixture") ? "NOT READY\\n\\nDiagnostic report was not supplied." : "READY\\n\\nFixture integration is valid.";
+  if (process.argv.includes("--json")) console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:review}}));
+  else if (process.argv.includes("--output-format")) console.log(JSON.stringify({result:review}));
+  else console.log(review);
+} else if (input.includes("diagnostic investigator")) {
+  console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"README.md:1 contains the heading Fixture. This directly satisfies the assigned diagnostic criterion, and the read-only inspection identified no contradictory heading elsewhere. No files were changed."}}));
 } else {
   writeFileSync("result.txt", "created by worker\\n", "utf8");
   console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"Created result.txt"}}));
@@ -90,12 +105,20 @@ if (process.argv.includes("--version")) {
   console.log("fake 1.0");
 } else if (process.argv[2] === "models" || process.argv[2] === "login" || process.argv[2] === "auth") {
   console.log("Authenticated fixture");
+} else if (input.includes("DevHarmonics non-destructive") || input.includes("DevHarmonics deterministic baseline")) {
+  const marker = input.includes("deterministic baseline") ? "DEVHARMONICS_BENCHMARK_QUALIFIED|17|BLUE" : (input.match(/DEVHARMONICS_[A-Z]+_QUALIFIED/) || ["DEVHARMONICS_GENERAL_QUALIFIED"])[0];
+  if (process.argv.includes("--json")) console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:marker}}));
+  else if (process.argv.includes("--output-format")) console.log(JSON.stringify({result:marker}));
+  else console.log(marker);
 } else if (input.includes("You are the architect")) {
   await delay(1_000);
   const plan = {summary:"late plan",recommendedConcurrency:1,tasks:[{id:"one",title:"Create result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"]}]};
   console.log(JSON.stringify({result:JSON.stringify(plan)}));
 } else if (input.includes("You are the final reviewer")) {
-  console.log("READY\\n\\nShould not review after cancellation.");
+  const review = "READY\\n\\nShould not review after cancellation.";
+  if (process.argv.includes("--json")) console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:review}}));
+  else if (process.argv.includes("--output-format")) console.log(JSON.stringify({result:review}));
+  else console.log(review);
 } else {
   console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"Should not work after cancellation"}}));
 }
@@ -129,11 +152,19 @@ if (process.argv.includes("--version")) {
   console.log("fake 1.0");
 } else if (process.argv[2] === "models" || process.argv[2] === "login" || process.argv[2] === "auth") {
   console.log("Authenticated fixture");
+} else if (input.includes("DevHarmonics non-destructive") || input.includes("DevHarmonics deterministic baseline")) {
+  const marker = input.includes("deterministic baseline") ? "DEVHARMONICS_BENCHMARK_QUALIFIED|17|BLUE" : (input.match(/DEVHARMONICS_[A-Z]+_QUALIFIED/) || ["DEVHARMONICS_GENERAL_QUALIFIED"])[0];
+  if (process.argv.includes("--json")) console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:marker}}));
+  else if (process.argv.includes("--output-format")) console.log(JSON.stringify({result:marker}));
+  else console.log(marker);
 } else if (input.includes("You are the architect")) {
   const plan = {summary:"cancel plan",recommendedConcurrency:1,tasks:[{id:"one",title:"Create result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"]}]};
   console.log(JSON.stringify({result:JSON.stringify(plan)}));
 } else if (input.includes("You are the final reviewer")) {
-  console.log("READY\\n\\nFixture integration is valid.");
+  const review = "READY\\n\\nFixture integration is valid.";
+  if (process.argv.includes("--json")) console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:review}}));
+  else if (process.argv.includes("--output-format")) console.log(JSON.stringify({result:review}));
+  else console.log(review);
 } else {
   // Worker prompt: hang until the orchestrator kills us on cancel. Bounded to
   // ~10s so a killed-but-orphaned grandchild (the Windows .cmd wrapper spawns
@@ -176,7 +207,7 @@ test("signed-out providers are detected and blocked before a run starts", async 
   await initializeProject(project);
   const config = await loadConfig(project);
   for (const provider of ["codex", "claude", "gemini"] as const) {
-    config.providers[provider].command = command;
+    config.connections[provider].command = command;
   }
   await writeFile(
     path.join(devHarmonicsDirectory(project), "config.json"),
@@ -188,6 +219,17 @@ test("signed-out providers are detected and blocked before a run starts", async 
   assert.ok(statuses.every((provider) => provider.installed));
   assert.ok(statuses.every((provider) => !provider.authenticated));
   assert.ok(statuses.every((provider) => provider.authStatus.includes("Sign-in required")));
+  assert.ok(statuses.every((provider) => !provider.visible));
+  assert.ok(statuses.every((provider) => !provider.healthy));
+  assert.ok(statuses.every((provider) => !provider.available));
+  assert.ok(statuses.every((provider) => provider.entitlement === "unknown"));
+  assert.ok(statuses.every((provider) => provider.capacity === "unknown"));
+  assert.ok(statuses.every((provider) =>
+    provider.diagnostics.find((diagnostic) => diagnostic.layer === "authentication")?.state === "fail"
+  ));
+  assert.ok(statuses.every((provider) =>
+    provider.diagnostics.find((diagnostic) => diagnostic.layer === "capacity")?.state === "unknown"
+  ));
 
   const ledger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
   try {
@@ -200,7 +242,7 @@ test("signed-out providers are detected and blocked before a run starts", async 
     });
     const run = ledger.getRun(runId);
     assert.equal(run?.status, "failed");
-    assert.match(run?.finalReview ?? "", /codex: run 'codex login'/);
+    assert.match(run?.finalReview ?? "", /codex: Sign-in required; run 'codex login'/);
     assert.equal(run?.events.some((event) => event.kind === "worktree.created"), false);
   } finally {
     ledger.close();
@@ -222,12 +264,12 @@ test("orchestrator completes a verified run through fake subscription CLIs", asy
   );
   await initializeProject(project);
   const config = await loadConfig(project);
-  config.architect = "claude";
-  config.reviewer = "gemini";
-  config.workers = ["codex"];
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
   for (const provider of ["codex", "claude", "gemini"] as const) {
-    config.providers[provider].command = command;
-    config.providers[provider].timeoutMs = 30_000;
+    config.connections[provider].command = command;
+    config.connections[provider].timeoutMs = 30_000;
   }
   await writeFile(
     path.join(devHarmonicsDirectory(project), "config.json"),
@@ -247,6 +289,27 @@ test("orchestrator completes a verified run through fake subscription CLIs", asy
     assert.equal(run?.tasks.find((task) => task.id === "__integration__")?.status, "passed");
     assert.match(run?.finalReview ?? "", /^READY/);
     assert.ok(run?.events.some((event) => event.message === "Scheduler using concurrency 37"));
+    const receiptDatabase = new DatabaseSync(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+    try {
+      const attempt = receiptDatabase
+        .prepare(
+          `SELECT connection_id, model_id, model_resolution, adapter_version, runtime_version,
+                  model_settings_json, failure_kind
+           FROM attempts WHERE run_id = ? AND task_id = 'one' ORDER BY id LIMIT 1`,
+        )
+        .get(runId) as Record<string, unknown>;
+      assert.deepEqual({ ...attempt }, {
+        connection_id: "subscription-cli:codex",
+        model_id: "subscription-cli:codex:model:gpt-5-6-terra",
+        model_resolution: "concrete",
+        adapter_version: "0.4.0",
+        runtime_version: "fake 1.0",
+        model_settings_json: '{"effort":"medium"}',
+        failure_kind: null,
+      });
+    } finally {
+      receiptDatabase.close();
+    }
     const shown = await git(project, ["show", `devharmonics/${runId.slice(0, 8)}:result.txt`]);
     assert.equal(shown.stdout, "created by worker\n");
     assert.equal(
@@ -268,24 +331,223 @@ test("orchestrator completes a verified run through fake subscription CLIs", asy
   }
 });
 
+test("observe run completes from diagnostic reports without repository changes or integration task", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-observe-e2e-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  config.runPolicy.requirePlanApproval = false;
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+  const ledger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  let runId = "";
+  try {
+    const orchestrator = new Orchestrator(ledger);
+    runId = await orchestrator.run({ goal: "Audit fixture without changing it", projectPath: project, autonomy: "observe", agents: 1 });
+    const run = ledger.getRun(runId);
+    assert.equal(run?.status, "ready", JSON.stringify(run, null, 2));
+    assert.equal(run?.autonomy, "observe");
+    assert.deepEqual(run?.tasks.map((task) => task.id), ["observe"]);
+    assert.equal(run?.tasks[0]?.kind, "diagnostic");
+    assert.equal(run?.tasks[0]?.permission, "read_only");
+    assert.equal(run?.tasks[0]?.risk, "low");
+    assert.match(run?.finalReview ?? "", /^READY/);
+    const evidence = ledger.getRunEvidence(runId);
+    assert.ok(evidence?.blackboard.some((entry) => entry.kind === "finding" && entry.content.includes("README.md:1 contains the heading Fixture")));
+    assert.equal((await git(project, ["status", "--porcelain"])).stdout, "");
+    assert.equal((await git(project, ["diff", `main...devharmonics/${runId.slice(0, 8)}`])).stdout, "");
+  } finally {
+    ledger.close();
+    if (runId) {
+      const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
+      await runProcess({ command: "git", args: ["worktree", "remove", "--force", path.join(runRoot, "tasks", "observe")], cwd: project, timeoutMs: 30_000 });
+      await runProcess({ command: "git", args: ["worktree", "remove", "--force", path.join(runRoot, "integration")], cwd: project, timeoutMs: 30_000 });
+      await rm(runRoot, { recursive: true, force: true });
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("dashboard serves its UI and bootstrap data on localhost", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-server-"));
   const project = await createRepository(root);
+  await initializeProject(project);
+  const seedLedger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  const serverSecret = "sk-proj-serversecret123456789";
+  const runId = seedLedger.createRun(`Replay through the API ${serverSecret}`, project);
+  const longGoal = `Long objective ${"x".repeat(500)}`;
+  const longRunId = seedLedger.createRun(longGoal, project);
+  const firstCursor = seedLedger.listEvents(runId)[0]!.cursor;
+  seedLedger.addEvent(runId, "scheduler.started", "Scheduler using concurrency 3", {
+    concurrency: 3,
+  });
+  seedLedger.close();
   const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
   try {
     const page = await fetch(dashboard.url);
     assert.equal(page.status, 200);
-    assert.match(await page.text(), /Assemble a verified agent team/);
+    const pageText = await page.text();
+    assert.match(pageText, /Assemble a verified agent team/);
+    assert.match(pageText, /aria-label="Agent count"/);
+    assert.match(pageText, /id="run-autonomy"/);
     const bootstrap = await fetch(`${dashboard.url}/api/bootstrap`);
     const value = (await bootstrap.json()) as {
       product: { name: string; version: string };
       defaultProject: string;
       providers: Array<{ name: string; setupSteps: string[] }>;
     };
-    assert.deepEqual(value.product, { name: "DevHarmonics", version: "0.1.0" });
+    assert.deepEqual(value.product, { name: "DevHarmonics", version: "0.4.0" });
     assert.equal(value.defaultProject, project);
     assert.equal(value.providers.length, 3);
     assert.ok(value.providers.find((provider) => provider.name === "gemini")?.setupSteps.some((step) => step.includes("one-time code")));
+    const configResponse = await fetch(`${dashboard.url}/api/config`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...(await loadConfig(project)),
+        product: { architect: "codex", reviewer: "claude", workers: ["codex", "gemini"] },
+      }),
+    });
+    assert.equal(configResponse.status, 200);
+    assert.equal((await loadConfig(project)).product.reviewer, "claude");
+    const invalidConfigResponse = await fetch(`${dashboard.url}/api/config`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ version: 2 }),
+    });
+    assert.equal(invalidConfigResponse.status, 500);
+    assert.match(await invalidConfigResponse.text(), /application/);
+    const connectionsResponse = await fetch(`${dashboard.url}/api/connections`);
+    const connectionsValue = (await connectionsResponse.json()) as {
+      connections: Array<{ id: string; entitlement: string; capacity: string }>;
+    };
+    assert.equal(connectionsValue.connections.length, 5);
+    assert.ok(connectionsValue.connections.some((connection) => connection.id === "subscription-cli:codex"));
+    assert.ok(connectionsValue.connections.some((connection) => connection.id === "local:ollama"));
+    assert.ok(connectionsValue.connections.some((connection) => connection.id === "api:openrouter"));
+    assert.ok(connectionsValue.connections.filter((connection) => connection.id.startsWith("subscription-cli:" )).every((connection) => connection.entitlement === "unknown"));
+    assert.ok(connectionsValue.connections.filter((connection) => connection.id.startsWith("subscription-cli:" )).every((connection) => connection.capacity === "unknown"));
+    assert.equal(connectionsValue.connections.find((connection) => connection.id === "local:ollama")?.entitlement, "local");
+
+    const modelSecret = "sk-proj-modelapisecret123456789";
+    const createdModelResponse = await fetch(`${dashboard.url}/api/models`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "manual:codex:test-model",
+        connectionId: "subscription-cli:codex",
+        canonicalName: "test-model",
+        displayName: "Test Model",
+        lifecycle: "known",
+        metadata: { api_key: modelSecret },
+      }),
+    });
+    assert.equal(createdModelResponse.status, 201);
+    const createdModelText = await createdModelResponse.text();
+    assert.equal(createdModelText.includes(modelSecret), false);
+    assert.match(createdModelText, /\[REDACTED\]/);
+    const modelsResponse = await fetch(
+      `${dashboard.url}/api/models?connectionId=${encodeURIComponent("subscription-cli:codex")}`,
+    );
+    const modelsValue = (await modelsResponse.json()) as { models: Array<{ id: string }> };
+    const modelIds = modelsValue.models.map((model) => model.id);
+    assert.ok(modelIds.includes("manual:codex:test-model"));
+    assert.ok(modelIds.includes("subscription-cli:codex:model:gpt-5-6-luna"));
+    assert.ok(modelIds.includes("subscription-cli:codex:model:gpt-5-6-sol"));
+    assert.ok(modelIds.includes("subscription-cli:codex:model:gpt-5-6-terra"));
+
+    const performanceResponse = await fetch(`${dashboard.url}/api/model-performance`);
+    assert.equal(performanceResponse.status, 200);
+    const performanceValue = await performanceResponse.json() as { profiles: unknown[]; policies: unknown[] };
+    assert.ok(Array.isArray(performanceValue.profiles));
+    assert.ok(Array.isArray(performanceValue.policies));
+    const performancePolicyResponse = await fetch(`${dashboard.url}/api/model-performance/${encodeURIComponent("manual:codex:test-model")}/policy`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ excluded: true }),
+    });
+    assert.equal(performancePolicyResponse.status, 200);
+
+    const invalidModelResponse = await fetch(`${dashboard.url}/api/models`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "manual:invalid",
+        connectionId: "subscription-cli:codex",
+        canonicalName: "invalid",
+        displayName: "Invalid",
+        lifecycle: "active",
+        active: true,
+      }),
+    });
+    assert.equal(invalidModelResponse.status, 400);
+    const runsResponse = await fetch(`${dashboard.url}/api/runs`);
+    const runsText = await runsResponse.text();
+    assert.equal(runsText.includes(serverSecret), false);
+    assert.match(runsText, /\[REDACTED\]/);
+    const runsValue = JSON.parse(runsText) as { runs: Array<{ id: string; goal: string; goalSummary?: string }> };
+    const longRun = runsValue.runs.find((run) => run.id === longRunId);
+    assert.equal(longRun?.goal, longGoal);
+    assert.ok(longRun?.goalSummary);
+    assert.ok(longRun.goalSummary.length <= 180, longRun.goalSummary);
+    assert.match(longRun.goalSummary, /…$/);
+    const replay = await fetch(`${dashboard.url}/api/runs/${runId}/events?after=${firstCursor}&limit=1`);
+    assert.equal(replay.status, 200);
+    const replayValue = (await replay.json()) as {
+      nextCursor: number;
+      events: Array<{ cursor: number; kind: string; data: Record<string, unknown> }>;
+    };
+    assert.equal(replayValue.events.length, 1);
+    assert.equal(replayValue.events[0]?.kind, "scheduler.started");
+    assert.deepEqual(replayValue.events[0]?.data, { concurrency: 3 });
+    assert.equal(replayValue.nextCursor, replayValue.events[0]?.cursor);
+
+    const streamController = new AbortController();
+    const stream = await fetch(`${dashboard.url}/api/events`, {
+      headers: { "last-event-id": String(firstCursor) },
+      signal: streamController.signal,
+    });
+    assert.match(stream.headers.get("content-type") ?? "", /text\/event-stream/);
+    const reader = stream.body!.getReader();
+    const decoder = new TextDecoder();
+    let streamText = "";
+    for (let readCount = 0; readCount < 5 && !streamText.includes("scheduler.started"); readCount++) {
+      const chunk = await Promise.race([
+        reader.read(),
+        delay(2_000).then(() => { throw new Error("timed out waiting for SSE replay"); }),
+      ]);
+      if (chunk.done) break;
+      streamText += decoder.decode(chunk.value, { stream: true });
+    }
+    await reader.cancel();
+    streamController.abort();
+    assert.match(streamText, new RegExp(`id: ${replayValue.nextCursor}`));
+    assert.match(streamText, /event: run-event/);
+    assert.match(streamText, /"kind":"scheduler.started"/);
+
+    const indexResponse = await fetch(`${dashboard.url}/`);
+    const indexHtml = await indexResponse.text();
+    assert.match(indexHtml, /\/app\.css\?v=0\.4\.0/);
+    assert.match(indexHtml, /\/app\.js\?v=0\.4\.0/);
+    assert.equal(indexResponse.headers.get("cache-control"), "no-store");
+    assert.equal(indexResponse.headers.get("expires"), "0");
+
+    const appScript = await fetch(`${dashboard.url}/app.js?v=0.4.0`).then((response) => response.text());
+    assert.match(appScript, /new EventSource/);
+    assert.doesNotMatch(appScript, /setInterval\(refreshRuns/);
+    assert.match(appScript, /autonomy:\s*\$\("#run-autonomy"\)\.value/);
+    assert.match(appScript, /window\.scrollTo\(\{\s*top:\s*0/);
+
+    const appStyles = await fetch(`${dashboard.url}/app.css?v=0.4.0`).then((response) => response.text());
+    assert.match(appStyles, /@media \(max-width:\s*1200px\)[\s\S]*?\.board\s*\{\s*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
+    assert.match(appStyles, /@media \(max-width:\s*950px\)[\s\S]*?\.run-list\s*\{[\s\S]*?display:\s*flex/);
+    assert.match(appStyles, /\.app-shell\s*\{[^}]*overflow-x:\s*clip/);
+    assert.match(appStyles, /\.run-list\s*\{[^}]*max-width:\s*100%/);
   } finally {
     await dashboard.close();
     await rm(root, { recursive: true, force: true });
@@ -298,12 +560,12 @@ test("cancel during planning does not save a late plan or restart the run", asyn
   const command = await createSlowArchitectCli(root);
   await initializeProject(project);
   const config = await loadConfig(project);
-  config.architect = "claude";
-  config.reviewer = "gemini";
-  config.workers = ["codex"];
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
   for (const provider of ["codex", "claude", "gemini"] as const) {
-    config.providers[provider].command = command;
-    config.providers[provider].timeoutMs = 30_000;
+    config.connections[provider].command = command;
+    config.connections[provider].timeoutMs = 30_000;
   }
   await writeFile(
     path.join(devHarmonicsDirectory(project), "config.json"),
@@ -368,12 +630,12 @@ test("cancel stops the scheduler and marks the run and in-flight task cancelled"
   const command = await createHangingCli(root);
   await initializeProject(project);
   const config = await loadConfig(project);
-  config.architect = "claude";
-  config.reviewer = "gemini";
-  config.workers = ["codex"];
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
   for (const provider of ["codex", "claude", "gemini"] as const) {
-    config.providers[provider].command = command;
-    config.providers[provider].timeoutMs = 30_000;
+    config.connections[provider].command = command;
+    config.connections[provider].timeoutMs = 30_000;
   }
   await writeFile(
     path.join(devHarmonicsDirectory(project), "config.json"),
@@ -456,6 +718,11 @@ if (process.argv.includes("--version")) {
   console.log("fake 1.0");
 } else if (process.argv[2] === "models" || process.argv[2] === "login" || process.argv[2] === "auth") {
   console.log("Authenticated fixture");
+} else if (input.includes("DevHarmonics non-destructive") || input.includes("DevHarmonics deterministic baseline")) {
+  const marker = input.includes("deterministic baseline") ? "DEVHARMONICS_BENCHMARK_QUALIFIED|17|BLUE" : (input.match(/DEVHARMONICS_[A-Z]+_QUALIFIED/) || ["DEVHARMONICS_GENERAL_QUALIFIED"])[0];
+  if (process.argv.includes("--json")) console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:marker}}));
+  else if (process.argv.includes("--output-format")) console.log(JSON.stringify({result:marker}));
+  else console.log(marker);
 } else if (input.includes("You are the architect")) {
   writeFileSync(${JSON.stringify(startedFile)}, "started\\n", "utf8");
   const until = Date.now() + 15000;
@@ -471,7 +738,10 @@ if (process.argv.includes("--version")) {
   const plan = {summary:"fixture plan",recommendedConcurrency:1,tasks:[{id:"one",title:"Create result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"]}]};
   console.log(JSON.stringify({result:JSON.stringify(plan)}));
 } else if (input.includes("You are the final reviewer")) {
-  console.log("READY\\n\\nFixture integration is valid.");
+  const review = "READY\\n\\nFixture integration is valid.";
+  if (process.argv.includes("--json")) console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:review}}));
+  else if (process.argv.includes("--output-format")) console.log(JSON.stringify({result:review}));
+  else console.log(review);
 } else {
   writeFileSync("result.txt", "created by worker\\n", "utf8");
   console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"Created result.txt"}}));
@@ -504,11 +774,19 @@ if (process.argv.includes("--version")) {
   console.log("fake 1.0");
 } else if (process.argv[2] === "models" || process.argv[2] === "login" || process.argv[2] === "auth") {
   console.log("Authenticated fixture");
+} else if (input.includes("DevHarmonics non-destructive") || input.includes("DevHarmonics deterministic baseline")) {
+  const marker = input.includes("deterministic baseline") ? "DEVHARMONICS_BENCHMARK_QUALIFIED|17|BLUE" : (input.match(/DEVHARMONICS_[A-Z]+_QUALIFIED/) || ["DEVHARMONICS_GENERAL_QUALIFIED"])[0];
+  if (process.argv.includes("--json")) console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:marker}}));
+  else if (process.argv.includes("--output-format")) console.log(JSON.stringify({result:marker}));
+  else console.log(marker);
 } else if (input.includes("You are the architect")) {
   const plan = {summary:"validator plan",recommendedConcurrency:1,tasks:[{id:"one",title:"Create result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["slow-check"]}]};
   console.log(JSON.stringify({result:JSON.stringify(plan)}));
 } else if (input.includes("You are the final reviewer")) {
-  console.log("READY\\n\\nFixture integration is valid.");
+  const review = "READY\\n\\nFixture integration is valid.";
+  if (process.argv.includes("--json")) console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:review}}));
+  else if (process.argv.includes("--output-format")) console.log(JSON.stringify({result:review}));
+  else console.log(review);
 } else {
   writeFileSync("result.txt", "created by worker\\n", "utf8");
   console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"Created result.txt"}}));
@@ -565,12 +843,12 @@ test("cancel during planning terminates the architect child process", async () =
   const command = await createPlanningHangingCli(root, startedFile, completedFile);
   await initializeProject(project);
   const config = await loadConfig(project);
-  config.architect = "claude";
-  config.reviewer = "gemini";
-  config.workers = ["codex"];
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
   for (const provider of ["codex", "claude", "gemini"] as const) {
-    config.providers[provider].command = command;
-    config.providers[provider].timeoutMs = 30_000;
+    config.connections[provider].command = command;
+    config.connections[provider].timeoutMs = 30_000;
   }
   await writeFile(
     path.join(devHarmonicsDirectory(project), "config.json"),
@@ -647,14 +925,14 @@ test("cancel during validator verification marks task cancelled and avoids merge
   const slowCheckCommand = await createSlowCheckScript(root);
   await initializeProject(project);
   const config = await loadConfig(project);
-  config.architect = "claude";
-  config.reviewer = "gemini";
-  config.workers = ["codex"];
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
   for (const provider of ["codex", "claude", "gemini"] as const) {
-    config.providers[provider].command = command;
-    config.providers[provider].timeoutMs = 30_000;
+    config.connections[provider].command = command;
+    config.connections[provider].timeoutMs = 30_000;
   }
-  config.validators["slow-check"] = {
+  config.repository.validators["slow-check"] = {
     command: slowCheckCommand,
     args: [],
     timeoutMs: 30_000,

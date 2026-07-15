@@ -1,7 +1,7 @@
 # DevHarmonics User Manual
 
-Manual version: **0.1.0**<br>
-Product release: **v0.1.0**
+Manual version: **0.4.0**<br>
+Product release: **v0.4.0**
 
 DevHarmonics turns one software-development objective into a planned, parallel, validated run across Codex, Claude Code, and Gemini through Google Antigravity. It runs locally and uses the subscription sessions cached by the providers' official command-line tools.
 
@@ -38,7 +38,7 @@ npm.cmd link
 devharmonics --version
 ```
 
-Expected version output is `DevHarmonics 0.1.0`.
+Expected version output is `DevHarmonics 0.4.0`.
 
 ## 3. Sign in to providers
 
@@ -94,9 +94,13 @@ Each provider is shown as `READY` or `SETUP`, with its detected version, authent
 
 1. Confirm the **Project folder** points to the intended Git repository.
 2. Describe a concrete, testable result in **What should the team accomplish?**
-3. Choose **Architect decides** or enter a manual concurrency count.
-4. Enable the authenticated providers you want in the worker pool.
-5. Click **Start verified run**.
+3. Choose a **Run mode**:
+   - **Observe only** permits diagnostic, read-only, low-risk tasks and rejects plans or results that attempt implementation.
+   - **Supervised** prepares repository changes after the configured plan-approval gate.
+   - **Bounded autonomy** executes within the configured repository, tool, spending, and external-write policies.
+4. Choose **Architect decides** or enter a manual concurrency count.
+5. Enable the authenticated providers you want in the worker pool.
+6. Click **Start verified run**.
 
 Good goals specify the observable result and important verification. Example:
 
@@ -112,6 +116,8 @@ The agent count is not artificially capped. High settings can consume substantia
 - **Resolved**: the task passed, failed, was blocked, or was cancelled.
 
 The metrics show task count, passed checks, attempts, and currently active agents. Select a task to inspect its validator receipts. The activity panel records durable run events; refreshing the browser does not erase them.
+
+For an Observe run, DevHarmonics stores the selected mode with the run, requires every planned task to be `diagnostic`, `read_only`, and `low` risk, and rejects a worker that asks for approval again or omits contracted path-and-line evidence. Accepted findings are retained in the evidence package and reviewed independently; an empty Git diff alone is not sufficient for success.
 
 ## 7. Cancel a run
 
@@ -159,10 +165,39 @@ Key settings in `config.json`:
 - `concurrency.agents`: default manual count
 - `concurrency.ceiling`: optional administrator limit; `null` means no configured limit
 - `retry.maxAttempts`: maximum attempts per task
+- `runPolicy.autonomy`: default run mode used by the dashboard and CLI
 - `providers.*.timeoutMs`: provider-process timeout
 - `validators`: commands the architect may select by name
 
 Validator commands are trusted local configuration. Models can request a configured validator name but cannot invent a command for execution.
+
+### Local Ollama reviewers
+
+Use the Models view to qualify a discovered Ollama model before activating or pinning it. Ollama models are read-only and receive orchestrator-supplied context rather than arbitrary repository tools. When assigned as reviewer, the model receives either the combined integration diff as bounded per-file chunks or each accepted Observe report as an independent diagnostic-evidence chunk, plus bounded goal, task-contract, and validator context. DevHarmonics records timing and token evidence for every completed chunk and fails closed on missing or contradictory verdicts. A classified local-review timeout cools that exact model and reroutes final review to the next eligible qualified reviewer. CPU-only reviews can take substantially longer than subscription-backed reviews.
+
+### Refreshing and qualifying the fleet
+
+The application performs a complete catalog check at launch and repeats it every 24 hours. **Refresh fleet** forces a complete rediscovery. Starting a run also refreshes when the last catalog check is stale or a Codex, Claude, or Antigravity CLI version changed.
+
+Each model card shows whether its qualification is current and exposes **Requalify** plus recent **Qualification history**. Activating an unqualified or stale subscription/local model runs the small read-only qualification automatically. DevHarmonics probes only active, pinned, family-tracked, or scheduler-selected candidates; it does not invoke every model in a provider catalog.
+
+When adaptive routing first selects a concrete Codex, Claude, Gemini/Antigravity, or explicitly assigned Ollama candidate, DevHarmonics runs the smallest role-compatible read-only fixture before giving it real work. A pass is recorded and the model becomes active; a failure cools that exact model and allows another qualified provider/model to be selected. A changed CLI/runtime, adapter, model identifier, capability profile, or fixture fingerprint makes the old result stale and triggers the same check at the next scheduled use. Paid OpenRouter probes remain excluded from this automatic path and still require the explicit cost-confirmation workflow below.
+
+Read-only attempts also have workload-aware watchdogs so a stalled subscription CLI can be classified and retried in useful time: three minutes for a simple diagnostic, ten minutes for standard analysis, and fifteen minutes for complex read-only work, or the provider's shorter configured timeout. Workspace-write tasks retain their provider-configured timeout because legitimate implementation runs can take longer.
+
+Open a task and review **Why this model** to see the exact selected model, classified workload tier, total routing score, every non-zero score contribution, and the plain-language selection factors. The Models view separately shows completion, first-pass success, latency, billed cost when available, validator failures, attempt-linked integration conflicts, workload slices, sample count, and uncertainty for each exact model. A NOT READY count means the model participated in a run that did not pass final review; it is explicitly non-causal and does not penalize the model without task-linked findings. Fewer than 5 observations are **insufficient**, 5–19 are **emerging**, and 20 or more are **established**. Only established workload evidence can influence reliability or latency. Use **Reset observation baseline** to ignore older observations without deleting ledger evidence, or **Exclude empirical history** to disable adaptive use for that model.
+
+**Pinned exact model** keeps the selected identifier. **Track qualified family** evaluates the newest discovered member of the same tier family and promotes it only after exact-ID qualification and the baseline benchmark pass. Newly published or temporarily missing models are therefore never silently substituted.
+
+### Optional OpenRouter setup
+
+1. In **Setup**, select **Connect OpenRouter with OAuth** and approve the provider-owned browser flow. DevHarmonics stores the returned credential with Windows current-user encryption; there is no key to paste into the app.
+2. OAuth connection alone permits no paid routing. Save **Enable OpenRouter connection**, **Allow paid API runtimes for this project**, and **Allow paid API fallback**, plus positive per-run and monthly USD limits.
+3. In **Models**, search the public OpenRouter catalog and import only the exact candidates you want. Importing is inventory only.
+4. Select **Qualify paid model**. The app displays an estimated probe cost and requires confirmation. The provider's current credit/limit status is checked before the probe.
+5. Activate the qualified model. DevHarmonics may now choose that exact model for compatible read-only work or context-injected review, including fallback after a subscription capacity failure.
+
+DevHarmonics sends one exact `model` identifier and disables OpenRouter provider fallback. If spending or key limits cannot be verified, paid routing stops. Actual provider, resolved model, tokens, cost, and fallback reason are retained in the run ledger.
 
 ## 10. Command reference
 
@@ -171,6 +206,7 @@ devharmonics serve [--project PATH] [--port 4317] [--open false]
 devharmonics init [--project PATH]
 devharmonics doctor [--project PATH]
 devharmonics run --goal "..." [--project PATH] [--agents auto|N]
+                   [--autonomy observe|supervised|bounded]
                    [--providers codex,claude,gemini]
 devharmonics --version
 ```
@@ -180,11 +216,28 @@ devharmonics --version
 - `doctor` inspects provider installation and sign-in state.
 - `run` performs a noninteractive run and prints the final ledger record as JSON.
 
+### Advanced: inspect or seed the model registry API
+
+While the dashboard is running, `GET /api/connections` and `GET /api/models` expose the local provider-neutral registry. `POST /api/models` can add or update a manual model record for an existing connection. A manual entry is inventory only: it does not make model selection available or qualify the model for work. The request is schema-validated, cannot replace a discovery-managed record, and must not contain credentials.
+
+```json
+{
+  "id": "manual:codex:example",
+  "connectionId": "subscription-cli:codex",
+  "canonicalName": "example-model",
+  "displayName": "Example Model",
+  "lifecycle": "known",
+  "metadata": { "note": "Awaiting visibility and qualification" }
+}
+```
+
 ## 11. Troubleshooting
 
 ### A provider says Sign-in required
 
 Run the login and status commands in a separate terminal, finish every browser/terminal step, then click **Refresh sign-in status**. Installing a CLI does not sign it in.
+
+The setup status separates configuration, installation, authentication, account visibility, model entitlement, control-plane health, capacity, and final availability. `Unknown` for entitlement or capacity is expected when a subscription CLI does not expose that fact; it does not mean DevHarmonics has detected a failure.
 
 ### Antigravity browser says sign-in failed but also shows a code
 
@@ -200,6 +253,8 @@ devharmonics serve --project C:\path\to\your\project
 
 Provider sign-ins are cached by their CLIs and normally survive this restart.
 
+Refreshing or temporarily disconnecting the dashboard resumes activity from its last durable event cursor. It does not cancel the run. If the stream is interrupted, the Activity indicator shows **Reconnecting** while the browser retries.
+
 ### DevHarmonics requires a clean working tree
 
 Commit, stash, or otherwise resolve your own pending changes before starting parallel work. DevHarmonics will not overwrite or hide them.
@@ -210,7 +265,7 @@ Open the task drawer and inspect the exact command receipt. After bounded retrie
 
 ### A merge conflict stopped a task
 
-Automatic conflict repair is not available in v0.1.0. Inspect the task and integration branches, resolve manually if appropriate, and start a new run for remaining work.
+Automatic conflict repair is not available in v0.4.0. Inspect the task and integration branches, resolve manually if appropriate, and start a new run for remaining work.
 
 ### A provider is throttled
 
@@ -221,9 +276,11 @@ Reduce concurrency, use fewer providers, or wait for the subscription allowance 
 - The dashboard listens only on the local loopback interface.
 - Authentication remains inside official provider tools.
 - DevHarmonics strips common model API-key and cloud-credential variables from child processes.
+- DevHarmonics redacts common API keys, bearer/OAuth tokens, passwords, private keys, credential-bearing URLs, and sensitive structured fields before prompts, outputs, errors, checks, reviews, or events are persisted.
 - Work is isolated with Git branches and worktrees.
 - Commands run by validators are allowlisted in local configuration.
-- Run prompts, paths, model output, and validation receipts are stored locally in SQLite; treat the runtime directory as potentially sensitive.
+- Redaction is defense in depth, not a reason to place credentials in goals, prompts, repository files, or validator output. Treat the runtime directory as potentially sensitive.
+- When DevHarmonics upgrades an existing ledger schema, it creates a pre-migration `.sqlite` backup beside `devharmonics.db`. Keep that backup until the upgraded application and run history have been verified. Because it preserves data exactly as it existed before migration, it can contain values stored by an older version before ledger-boundary redaction was available.
 
 Report security issues using the private process in [SECURITY.md](../SECURITY.md), not a public issue or Discussion.
 

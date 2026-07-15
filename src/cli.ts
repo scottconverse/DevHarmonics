@@ -28,10 +28,12 @@ async function main(): Promise<void> {
     const config = await loadConfig(projectPath);
     const providers = await inspectProviders(config, projectPath);
     for (const provider of providers) {
-      const ready = provider.installed && provider.authenticated;
       console.log(
-        `${ready ? "READY" : "SETUP"} ${provider.name.padEnd(7)} ${provider.version || "not installed"} — ${provider.authStatus}; login: ${provider.loginCommand}`,
+        `${provider.available ? "READY" : "SETUP"} ${provider.name.padEnd(7)} ${provider.version || "not installed"} — ${provider.summary}; login: ${provider.loginCommand}`,
       );
+      for (const diagnostic of provider.diagnostics.filter((item) => item.state !== "pass")) {
+        console.log(`  ${diagnostic.state.toUpperCase().padEnd(8)} ${diagnostic.layer}: ${diagnostic.detail}${diagnostic.action ? `; ${diagnostic.action}` : ""}`);
+      }
     }
     console.log("Subscription-only mode is enforced; API-key environment variables are removed from provider processes.");
     return;
@@ -41,15 +43,21 @@ async function main(): Promise<void> {
     const goal = options.goal;
     if (!goal) throw new Error("Use --goal \"what the team should accomplish\"");
     await initializeProject(projectPath);
+    const config = await loadConfig(projectPath);
     const ledger = new Ledger(path.join(devHarmonicsDirectory(projectPath), "devharmonics.db"));
     const orchestrator = new Orchestrator(ledger);
     const agents = options.agents === "auto" || !options.agents ? "auto" : Number(options.agents);
     const providers = options.providers?.split(",").map((value) => value.trim()) as
       | ProviderName[]
       | undefined;
+    const autonomy = options.autonomy ?? config.runPolicy.autonomy;
+    if (!(["observe", "supervised", "bounded"] as const).includes(autonomy as "observe" | "supervised" | "bounded")) {
+      throw new Error("Use --autonomy observe|supervised|bounded");
+    }
     const request = {
       goal,
       projectPath,
+      autonomy: autonomy as "observe" | "supervised" | "bounded",
       agents: agents === "auto" || Number.isInteger(agents) && agents > 0 ? agents : "auto",
       ...(providers ? { enabledProviders: providers } : {}),
     } as const;
@@ -108,6 +116,7 @@ Usage:
   ${PRODUCT_SLUG} init [--project PATH]
   ${PRODUCT_SLUG} doctor [--project PATH]
   ${PRODUCT_SLUG} run --goal "..." [--project PATH] [--agents auto|N]
+             [--autonomy observe|supervised|bounded]
              [--providers codex,claude,gemini]
   ${PRODUCT_SLUG} --version
 `);

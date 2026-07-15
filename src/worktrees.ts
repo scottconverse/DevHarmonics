@@ -2,12 +2,21 @@ import { lstat, mkdir, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { runProcess } from "./process.js";
+import type { DiffFileContext } from "./local-review.js";
+
+export class WorkspaceIsolationError extends Error {
+  constructor(message: string, readonly status: string) {
+    super(message);
+    this.name = "WorkspaceIsolationError";
+  }
+}
 
 export class WorktreeManager {
   readonly root: string;
   readonly integrationPath: string;
   readonly integrationBranch: string;
   private mergeQueue: Promise<void> = Promise.resolve();
+  private baseCommit: string | null = null;
 
   constructor(
     private readonly projectPath: string,
@@ -28,6 +37,11 @@ export class WorktreeManager {
     if (status.stdout.trim()) {
       throw new Error("DevHarmonics requires a clean working tree before starting a parallel run");
     }
+    const base = await this.git(this.projectPath, ["rev-parse", "HEAD"]);
+    if (base.exitCode !== 0 || !base.stdout.trim()) {
+      throw new Error(`Could not resolve the run base commit: ${base.stderr.trim() || "git rev-parse failed"}`);
+    }
+    this.baseCommit = base.stdout.trim();
     await mkdir(this.root, { recursive: true });
     const created = await this.git(this.projectPath, [
       "worktree",
@@ -39,6 +53,42 @@ export class WorktreeManager {
     ]);
     if (created.exitCode !== 0) throw new Error(`Could not create integration worktree: ${created.stderr}`);
     await this.linkSharedDependencies(this.integrationPath);
+  }
+
+  async assertPrimaryClean(context: string): Promise<void> {
+    const status = await this.git(this.projectPath, ["status", "--porcelain", "--untracked-files=all"]);
+    if (status.exitCode !== 0) {
+      throw new WorkspaceIsolationError(
+        `Could not verify the primary checkout ${context}: ${status.stderr.trim() || "git status failed"}`,
+        status.stderr.trim(),
+      );
+    }
+    const dirty = status.stdout.trim();
+    if (dirty) {
+      throw new WorkspaceIsolationError(
+        `Workspace isolation breach ${context}: the primary checkout changed outside its isolated task worktree`,
+        dirty,
+      );
+    }
+  }
+
+  async integrationDiffFiles(): Promise<DiffFileContext[]> {
+    if (!this.baseCommit) throw new Error("Integration worktree has not been initialized");
+    const range = `${this.baseCommit}..HEAD`;
+    const names = await this.git(this.integrationPath, ["diff", "--name-only", range]);
+    if (names.exitCode !== 0) {
+      throw new Error(`Could not list integration changes: ${names.stderr.trim() || "git diff failed"}`);
+    }
+    const files = names.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+    const contexts: DiffFileContext[] = [];
+    for (const file of files) {
+      const diff = await this.git(this.integrationPath, ["diff", "--no-ext-diff", "--unified=2", range, "--", file]);
+      if (diff.exitCode !== 0) {
+        throw new Error(`Could not read integration diff for ${file}: ${diff.stderr.trim() || "git diff failed"}`);
+      }
+      contexts.push({ path: file, diff: diff.stdout });
+    }
+    return contexts;
   }
 
   async createTask(taskId: string): Promise<{ path: string; branch: string }> {

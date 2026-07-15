@@ -1,6 +1,6 @@
 # Contributing to DevHarmonics
 
-DevHarmonics v0.1.0 is an early public project. Start with a GitHub Discussion for design proposals and use an issue for a bounded, reproducible defect.
+DevHarmonics v0.4.0 is an early public project. Start with a GitHub Discussion for design proposals and use an issue for a bounded, reproducible defect.
 
 ## Local checks
 

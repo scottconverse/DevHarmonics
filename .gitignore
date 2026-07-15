@@ -2,3 +2,6 @@ node_modules/
 dist/
 .devharmonics/
 *.log
+.env
+.env.*
+!.env.example

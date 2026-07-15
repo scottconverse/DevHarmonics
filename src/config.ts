@@ -1,34 +1,64 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { devHarmonicsConfigSchema } from "./schemas.js";
+import { devHarmonicsConfigSchema, legacyDevHarmonicsConfigSchema } from "./schemas.js";
 import type { ProviderName, DevHarmonicsConfig } from "./types.js";
 
 export const defaultConfig: DevHarmonicsConfig = {
-  version: 1,
-  architect: "claude",
-  reviewer: "codex",
-  workers: ["codex", "claude", "gemini"],
-  concurrency: {
-    mode: "auto",
-    agents: 8,
-    ceiling: null,
+  version: 2,
+  application: {
+    concurrency: {
+      mode: "auto",
+      agents: 8,
+      ceiling: null,
+    },
+    retry: {
+      maxAttempts: 3,
+      backoffMs: 1_500,
+    },
   },
-  retry: {
-    maxAttempts: 3,
-    backoffMs: 1_500,
-  },
-  providers: {
+  connections: {
     codex: { enabled: true, command: "codex", timeoutMs: 30 * 60_000 },
     claude: { enabled: true, command: "claude", timeoutMs: 30 * 60_000 },
     gemini: { enabled: true, command: "agy", timeoutMs: 30 * 60_000 },
   },
-  validators: {
-    "diff-check": {
-      command: "git",
-      args: ["diff", "--check"],
-      timeoutMs: 60_000,
+  localRuntimes: {
+    ollama: [
+      { id: "system", displayName: "System Ollama", baseUrl: "http://127.0.0.1:11434", enabled: true },
+    ],
+  },
+  openRouter: {
+    enabled: false,
+    allowPaidFallback: false,
+    perRunLimitUsd: 0,
+    monthlyLimitUsd: 0,
+  },
+  product: {
+    architect: "claude",
+    reviewer: "codex",
+    workers: ["codex", "claude", "gemini"],
+  },
+  repository: {
+    validators: {
+      "diff-check": {
+        command: "git",
+        args: ["diff", "--check"],
+        timeoutMs: 60_000,
+      },
     },
+  },
+  runPolicy: {
+    autonomy: "supervised",
+    requirePlanApproval: false,
+    allowPaidApi: false,
+    allowExternalWrites: false,
+  },
+  routing: {
+    mode: "adaptive",
+    architect: { modelId: null, effort: "high", preferredTier: "auto", upgradePolicy: "pinned" },
+    worker: { modelId: null, effort: "high", preferredTier: "auto", upgradePolicy: "pinned" },
+    reviewer: { modelId: null, effort: "high", preferredTier: "auto", upgradePolicy: "pinned" },
+    allowFallback: true,
   },
 };
 
@@ -56,7 +86,7 @@ export async function initializeProject(projectPath: string): Promise<string> {
       ) as { scripts?: Record<string, string> };
       for (const name of ["test", "lint", "build", "typecheck"]) {
         if (packageJson.scripts?.[name]) {
-          config.validators[name] = {
+          config.repository.validators[name] = {
             command: "npm",
             args: ["run", name],
             timeoutMs: 10 * 60_000,
@@ -97,8 +127,75 @@ async function excludeRuntimeDirectory(projectPath: string): Promise<void> {
 
 export async function loadConfig(projectPath: string): Promise<DevHarmonicsConfig> {
   await initializeProject(projectPath);
-  const contents = await readFile(configPath(projectPath), "utf8");
-  return devHarmonicsConfigSchema.parse(JSON.parse(contents));
+  const destination = configPath(projectPath);
+  const contents = await readFile(destination, "utf8");
+  let raw: unknown;
+  try {
+    raw = JSON.parse(contents);
+  } catch (error) {
+    throw new Error(`Invalid configuration JSON in ${destination}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const version = typeof raw === "object" && raw !== null && "version" in raw
+    ? (raw as { version?: unknown }).version
+    : undefined;
+  if (version === 1) {
+    const legacy = parseConfig(legacyDevHarmonicsConfigSchema, raw, destination);
+    const migrated: DevHarmonicsConfig = {
+      version: 2,
+      application: { concurrency: legacy.concurrency, retry: legacy.retry },
+      connections: legacy.providers,
+      localRuntimes: structuredClone(defaultConfig.localRuntimes),
+      openRouter: structuredClone(defaultConfig.openRouter),
+      product: {
+        architect: legacy.architect,
+        reviewer: legacy.reviewer,
+        workers: legacy.workers,
+      },
+      repository: { validators: legacy.validators },
+      runPolicy: structuredClone(defaultConfig.runPolicy),
+      routing: structuredClone(defaultConfig.routing),
+    };
+    await persistMigration(destination, contents, migrated);
+    return migrated;
+  }
+  return parseConfig(devHarmonicsConfigSchema, raw, destination);
+}
+
+export async function saveConfig(projectPath: string, value: unknown): Promise<DevHarmonicsConfig> {
+  await initializeProject(projectPath);
+  const destination = configPath(projectPath);
+  const config = parseConfig(devHarmonicsConfigSchema, value, destination);
+  const temporary = `${destination}.saving`;
+  await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  await rename(temporary, destination);
+  return config;
+}
+
+function parseConfig<T>(schema: { safeParse(value: unknown): { success: true; data: T } | { success: false; error: { issues: Array<{ path: PropertyKey[]; message: string }> } } }, raw: unknown, destination: string): T {
+  const parsed = schema.safeParse(raw);
+  if (parsed.success) return parsed.data;
+  const details = parsed.error.issues
+    .map((issue) => `${issue.path.map(String).join(".") || "configuration"}: ${issue.message}`)
+    .join("; ");
+  throw new Error(`Invalid DevHarmonics configuration in ${destination}: ${details}`);
+}
+
+async function persistMigration(destination: string, original: string, migrated: DevHarmonicsConfig): Promise<void> {
+  const backup = `${destination}.v1.backup`;
+  try {
+    await copyFile(destination, backup, 1);
+  } catch (error) {
+    const code = error instanceof Error && "code" in error ? (error as NodeJS.ErrnoException).code : undefined;
+    if (code !== "EEXIST") throw error;
+  }
+  const temporary = `${destination}.migrating`;
+  await writeFile(temporary, `${JSON.stringify(migrated, null, 2)}\n`, "utf8");
+  try {
+    await rename(temporary, destination);
+  } catch (error) {
+    await writeFile(destination, original, "utf8");
+    throw error;
+  }
 }
 
 export function resolveProviderCommand(name: ProviderName, configuredCommand: string): string {

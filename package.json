@@ -1,8 +1,17 @@
 {
   "name": "devharmonics-local",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Local, subscription-backed multi-agent orchestrator for Codex, Claude Code, and Gemini via Antigravity CLI.",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/scottconverse/DevHarmonics.git"
+  },
+  "homepage": "https://scottconverse.github.io/DevHarmonics/",
+  "bugs": {
+    "url": "https://github.com/scottconverse/DevHarmonics/issues"
+  },
   "type": "module",
   "bin": {
     "devharmonics": "dist/src/cli.js"
@@ -10,6 +19,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
     "start": "node dist/src/cli.js",
+    "launch": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/start-devharmonics.ps1",
     "dev": "tsx src/cli.ts",
     "test": "npm run build && node --test \"dist/test/*.test.js\"",
     "version:check": "node scripts/check-version.mjs",

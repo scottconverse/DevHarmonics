@@ -163,7 +163,7 @@ interface CheckRow {
   duration_ms: number;
 }
 
-export const LEDGER_SCHEMA_VERSION = 24;
+export const LEDGER_SCHEMA_VERSION = 25;
 
 export const REPOSITORY_ROLES = [
   "umbrella",
@@ -393,6 +393,14 @@ export interface InvocationReceiptInput {
   durationMs?: number | null;
   workloadClass?: string | null;
   fallbackReason?: string | null;
+}
+
+export interface PaidSpendReservationInput {
+  scopeType: "run" | "workbench";
+  scopeId: string;
+  estimatedCostUsd: number;
+  perScopeLimitUsd: number;
+  monthlyLimitUsd: number;
 }
 
 export interface ToolPolicyReceiptInput {
@@ -1132,6 +1140,26 @@ const MIGRATIONS: readonly LedgerMigration[] = [
       if (!columns.has("evidence_binding_json")) database.exec("ALTER TABLE review_receipts ADD COLUMN evidence_binding_json TEXT NOT NULL DEFAULT '{}';");
     },
   },
+  {
+    version: 25,
+    name: "atomic-paid-spend-reservations",
+    apply(database) {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS paid_spend_reservations (
+          id TEXT PRIMARY KEY,
+          scope_type TEXT NOT NULL CHECK(scope_type IN ('run', 'workbench')),
+          scope_id TEXT NOT NULL,
+          estimated_cost_usd REAL NOT NULL CHECK(estimated_cost_usd >= 0),
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS paid_spend_reservations_scope
+          ON paid_spend_reservations(scope_type, scope_id, expires_at);
+        CREATE INDEX IF NOT EXISTS paid_spend_reservations_month
+          ON paid_spend_reservations(created_at, expires_at);
+      `);
+    },
+  },
 ];
 
 function summarizeGoal(goal: string, maxLength = 180): string {
@@ -1259,6 +1287,7 @@ const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
   plan_revisions: ["objective_id", "revision", "plan_json", "rationale", "approved", "created_at", "approved_at"],
   workbench_sessions: ["id", "project_path", "title", "mode", "objective_id", "converted_at", "created_at", "updated_at"],
   workbench_messages: ["id", "session_id", "role", "content", "provider", "connection_id", "requested_model_id", "resolved_model_id", "status", "error", "input_tokens", "output_tokens", "cost_usd", "duration_ms", "created_at"],
+  paid_spend_reservations: ["id", "scope_type", "scope_id", "estimated_cost_usd", "created_at", "expires_at"],
   integration_sets: ["id", "run_id", "product_id", "status", "integration_conditions_json", "created_at", "updated_at"],
   integration_set_repositories: ["integration_set_id", "repository_id", "local_path", "base_commit", "integration_branch", "integration_worktree_path", "head_commit", "status", "error", "updated_at"],
   product_intelligence_snapshots: ["id", "product_id", "status", "snapshot_json", "created_at"],
@@ -1284,6 +1313,7 @@ export class Ledger {
     this.database = new DatabaseSync(filename);
     try {
       this.database.exec("PRAGMA foreign_keys = ON;");
+      this.database.exec("PRAGMA busy_timeout = 5000;");
       this.migrate(existed);
       this.database.exec("PRAGMA journal_mode = WAL;");
     } catch (error) {
@@ -2818,6 +2848,59 @@ export class Ledger {
         (SELECT COALESCE(SUM(cost_usd), 0) FROM workbench_messages WHERE created_at >= ? AND status = 'complete') AS total
     `).get(start, start) as { total: number };
     return Number(row.total);
+  }
+
+  reservePaidSpend(input: PaidSpendReservationInput): string {
+    if (!input.scopeId.trim()) throw new Error("Paid-spend reservations require a scope identifier");
+    if (!Number.isFinite(input.estimatedCostUsd) || input.estimatedCostUsd < 0) throw new Error("Paid-spend estimates must be finite and non-negative");
+    if (!Number.isFinite(input.perScopeLimitUsd) || input.perScopeLimitUsd <= 0 || !Number.isFinite(input.monthlyLimitUsd) || input.monthlyLimitUsd <= 0) {
+      throw new Error("OpenRouter requires positive per-run and monthly spending limits");
+    }
+
+    const id = crypto.randomUUID();
+    const nowDate = new Date();
+    const now = nowDate.toISOString();
+    const monthStart = new Date(Date.UTC(nowDate.getUTCFullYear(), nowDate.getUTCMonth(), 1)).toISOString();
+    const expiresAt = new Date(nowDate.getTime() + 24 * 60 * 60_000).toISOString();
+    this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      this.database.prepare("DELETE FROM paid_spend_reservations WHERE expires_at <= ?").run(now);
+      const actualScopeSpend = input.scopeType === "run"
+        ? this.database.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS total FROM invocation_receipts WHERE run_id = ?").get(input.scopeId) as { total: number }
+        : this.database.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS total FROM workbench_messages WHERE session_id = ? AND status = 'complete'").get(input.scopeId) as { total: number };
+      const reservedScopeSpend = this.database.prepare(
+        "SELECT COALESCE(SUM(estimated_cost_usd), 0) AS total FROM paid_spend_reservations WHERE scope_type = ? AND scope_id = ?",
+      ).get(input.scopeType, input.scopeId) as { total: number };
+      const actualMonthlySpend = this.database.prepare(`
+        SELECT
+          (SELECT COALESCE(SUM(cost_usd), 0) FROM invocation_receipts WHERE created_at >= ?) +
+          (SELECT COALESCE(SUM(cost_usd), 0) FROM workbench_messages WHERE created_at >= ? AND status = 'complete') AS total
+      `).get(monthStart, monthStart) as { total: number };
+      const reservedMonthlySpend = this.database.prepare(
+        "SELECT COALESCE(SUM(estimated_cost_usd), 0) AS total FROM paid_spend_reservations WHERE created_at >= ?",
+      ).get(monthStart) as { total: number };
+      const scopeCommitted = Number(actualScopeSpend.total) + Number(reservedScopeSpend.total);
+      const monthlyCommitted = Number(actualMonthlySpend.total) + Number(reservedMonthlySpend.total);
+      if (scopeCommitted + input.estimatedCostUsd > input.perScopeLimitUsd) {
+        throw new Error(`OpenRouter per-run limit would be exceeded ($${scopeCommitted.toFixed(4)} spent or reserved of $${input.perScopeLimitUsd.toFixed(2)})`);
+      }
+      if (monthlyCommitted + input.estimatedCostUsd > input.monthlyLimitUsd) {
+        throw new Error(`OpenRouter monthly limit would be exceeded ($${monthlyCommitted.toFixed(4)} spent or reserved of $${input.monthlyLimitUsd.toFixed(2)})`);
+      }
+      this.database.prepare(`
+        INSERT INTO paid_spend_reservations (id, scope_type, scope_id, estimated_cost_usd, created_at, expires_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(id, input.scopeType, input.scopeId, input.estimatedCostUsd, now, expiresAt);
+      this.database.exec("COMMIT;");
+      return id;
+    } catch (error) {
+      this.database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  releasePaidSpendReservation(id: string): void {
+    this.database.prepare("DELETE FROM paid_spend_reservations WHERE id = ?").run(id);
   }
 
   recordInvocationReceipt(input: InvocationReceiptInput): void {

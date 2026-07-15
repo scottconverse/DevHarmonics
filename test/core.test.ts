@@ -561,6 +561,7 @@ test("OpenRouter Workbench consultation enforces budgets and contributes to mont
 test("concurrent OpenRouter Workbench consultations cannot oversubscribe the same paid budget", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-openrouter-budget-race-"));
   const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  let secondLedger: Ledger | null = null;
   const originalStatus = OpenRouterService.prototype.status;
   try {
     await initializeProject(root);
@@ -582,8 +583,7 @@ test("concurrent OpenRouter Workbench consultations cannot oversubscribe the sam
     let activeInvocations = 0;
     let maximumConcurrentInvocations = 0;
     let invocationCount = 0;
-    const orchestrator = new Orchestrator(ledger);
-    (orchestrator as any).provider = async () => ({
+    const provider = async () => ({
       connection: { id: domainId("ProviderConnection", "api:openrouter"), provider: "openrouter", displayName: "OpenRouter", transport: "api", authentication: "credential_reference", capabilities: { structuredOutput: true, streaming: false, providerManagedTools: false, modelSelection: true, modelSettings: [], permissions: ["read_only"] } },
       metadata: async () => ({ adapterVersion: "test", runtimeVersion: "test" }),
       invoke: async (request: any) => {
@@ -595,11 +595,16 @@ test("concurrent OpenRouter Workbench consultations cannot oversubscribe the sam
         return { connectionId: "api:openrouter", provider: "openrouter", adapterVersion: "test", runtimeVersion: "test", model: { ...request.model, resolvedModelId: modelId, resolution: "concrete" }, text: "paid result", stdout: "", stderr: "", exitCode: 0, durationMs: 1, usage: { inputTokens: 1, outputTokens: 1, costUsd: 0.004 }, toolRequests: [] };
       },
     });
+    secondLedger = new Ledger(path.join(root, "devharmonics.db"));
+    const firstOrchestrator = new Orchestrator(ledger);
+    const secondOrchestrator = new Orchestrator(secondLedger);
+    (firstOrchestrator as any).provider = provider;
+    (secondOrchestrator as any).provider = provider;
     OpenRouterService.prototype.status = async () => ({ connected: true, key: { limit_remaining: 10 } });
 
-    const persist = async (consultations: Array<any>) => {
+    const persistWith = (targetLedger: Ledger) => async (consultations: Array<any>) => {
       for (const consultation of consultations) {
-        ledger.appendWorkbenchMessage({
+        targetLedger.appendWorkbenchMessage({
           sessionId: session.id,
           role: "assistant",
           content: consultation.text ?? "",
@@ -616,10 +621,9 @@ test("concurrent OpenRouter Workbench consultations cannot oversubscribe the sam
         });
       }
     };
-    const request = { projectPath: root, sessionId: session.id, question: "Compare approaches", discussionContext: "", modelIds: [modelId], persist };
     const outcomes = await Promise.all([
-      (orchestrator as any).consultWorkbench(request),
-      (orchestrator as any).consultWorkbench(request),
+      (firstOrchestrator as any).consultWorkbench({ projectPath: root, sessionId: session.id, question: "Compare approaches", discussionContext: "", modelIds: [modelId], persist: persistWith(ledger) }),
+      (secondOrchestrator as any).consultWorkbench({ projectPath: root, sessionId: session.id, question: "Compare approaches", discussionContext: "", modelIds: [modelId], persist: persistWith(secondLedger) }),
     ]) as Array<Array<{ status: string; error: string | null }>>;
 
     assert.deepEqual(outcomes.flat().map((result) => result.status).sort(), ["complete", "failed"]);
@@ -629,6 +633,7 @@ test("concurrent OpenRouter Workbench consultations cannot oversubscribe the sam
     assert.equal(ledger.getMonthlySpendUsd(), 0.004);
   } finally {
     OpenRouterService.prototype.status = originalStatus;
+    secondLedger?.close();
     ledger.close();
     await rm(root, { recursive: true, force: true });
   }
@@ -2165,6 +2170,7 @@ test("ledger upgrades a v0.1 database transactionally and preserves a pre-migrat
           { version: 22, name: "source-backed-product-intelligence" },
           { version: 23, name: "provider-quota-groups-and-honest-model-resolution" },
           { version: 24, name: "review-evidence-bindings" },
+          { version: 25, name: "atomic-paid-spend-reservations" },
         ],
       );
     } finally {

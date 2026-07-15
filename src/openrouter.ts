@@ -11,23 +11,6 @@ export const OPENROUTER_CONNECTION_ID = "api:openrouter";
 const OPENROUTER_API = "https://openrouter.ai/api/v1";
 const OPENROUTER_AUTH = "https://openrouter.ai/auth";
 const CREDENTIAL_NAME = "openrouter-oauth";
-const paidSpendTails = new WeakMap<Ledger, Promise<void>>();
-
-async function acquirePaidSpendLock(ledger: Ledger): Promise<() => void> {
-  const previous = paidSpendTails.get(ledger) ?? Promise.resolve();
-  let releaseTurn!: () => void;
-  const turn = new Promise<void>((resolve) => { releaseTurn = resolve; });
-  const tail = previous.then(() => turn);
-  paidSpendTails.set(ledger, tail);
-  await previous;
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    releaseTurn();
-    if (paidSpendTails.get(ledger) === tail) paidSpendTails.delete(ledger);
-  };
-}
 
 export interface OpenRouterCatalogModel {
   id: string;
@@ -121,19 +104,21 @@ export class OpenRouterService {
   }
 
   async assertPaidRoutingAllowed(config: DevHarmonicsConfig, runId: string, estimatedCostUsd = 0): Promise<void> {
-    await this.assertPaidSpendAllowed(config, this.ledger.getRunSpendUsd(runId), estimatedCostUsd);
+    const release = await this.acquirePaidRouting(config, runId, estimatedCostUsd);
+    release();
   }
 
   async assertPaidWorkbenchAllowed(config: DevHarmonicsConfig, sessionId: string, estimatedCostUsd = 0): Promise<void> {
-    await this.assertPaidSpendAllowed(config, this.ledger.getWorkbenchSpendUsd(sessionId), estimatedCostUsd);
+    const release = await this.acquirePaidWorkbench(config, sessionId, estimatedCostUsd);
+    release();
   }
 
   async acquirePaidRouting(config: DevHarmonicsConfig, runId: string, estimatedCostUsd = 0): Promise<() => void> {
-    return this.acquirePaidSpend(config, this.ledger.getRunSpendUsd.bind(this.ledger, runId), estimatedCostUsd);
+    return this.acquirePaidSpend(config, "run", runId, estimatedCostUsd);
   }
 
   async acquirePaidWorkbench(config: DevHarmonicsConfig, sessionId: string, estimatedCostUsd = 0): Promise<() => void> {
-    return this.acquirePaidSpend(config, this.ledger.getWorkbenchSpendUsd.bind(this.ledger, sessionId), estimatedCostUsd);
+    return this.acquirePaidSpend(config, "workbench", sessionId, estimatedCostUsd);
   }
 
   async withPaidRoutingAllowed<T>(config: DevHarmonicsConfig, runId: string, estimatedCostUsd: number, action: () => Promise<T>): Promise<T> {
@@ -145,32 +130,36 @@ export class OpenRouterService {
     }
   }
 
-  private async acquirePaidSpend(config: DevHarmonicsConfig, currentScopeSpend: () => number, estimatedCostUsd: number): Promise<() => void> {
-    const release = await acquirePaidSpendLock(this.ledger);
-    try {
-      await this.assertPaidSpendAllowed(config, currentScopeSpend(), estimatedCostUsd);
-      return release;
-    } catch (error) {
-      release();
-      throw error;
-    }
-  }
-
-  private async assertPaidSpendAllowed(config: DevHarmonicsConfig, scopeSpent: number, estimatedCostUsd: number): Promise<void> {
+  private async acquirePaidSpend(config: DevHarmonicsConfig, scopeType: "run" | "workbench", scopeId: string, estimatedCostUsd: number): Promise<() => void> {
     if (!config.openRouter.enabled || !config.openRouter.allowPaidFallback || !config.runPolicy.allowPaidApi) {
       throw new Error("OpenRouter paid routing is disabled by policy");
     }
     if (config.openRouter.perRunLimitUsd <= 0 || config.openRouter.monthlyLimitUsd <= 0) {
       throw new Error("OpenRouter requires positive per-run and monthly spending limits");
     }
-    const monthlySpent = this.ledger.getMonthlySpendUsd();
-    if (scopeSpent + estimatedCostUsd > config.openRouter.perRunLimitUsd) throw new Error(`OpenRouter per-run limit would be exceeded ($${scopeSpent.toFixed(4)} spent of $${config.openRouter.perRunLimitUsd.toFixed(2)})`);
-    if (monthlySpent + estimatedCostUsd > config.openRouter.monthlyLimitUsd) throw new Error(`OpenRouter monthly limit would be exceeded ($${monthlySpent.toFixed(4)} spent of $${config.openRouter.monthlyLimitUsd.toFixed(2)})`);
-    const status = await this.status();
-    if (!status.connected) throw new Error("OpenRouter OAuth connection is unavailable");
-    if (!status.key) throw new Error("OpenRouter key limits and credits could not be verified; paid routing is stopped");
-    const remaining = numeric(status.key?.limit_remaining);
-    if (remaining !== null && remaining < estimatedCostUsd) throw new Error(`OpenRouter key has only $${remaining.toFixed(4)} remaining`);
+    const reservationId = this.ledger.reservePaidSpend({
+      scopeType,
+      scopeId,
+      estimatedCostUsd,
+      perScopeLimitUsd: config.openRouter.perRunLimitUsd,
+      monthlyLimitUsd: config.openRouter.monthlyLimitUsd,
+    });
+    try {
+      const status = await this.status();
+      if (!status.connected) throw new Error("OpenRouter OAuth connection is unavailable");
+      if (!status.key) throw new Error("OpenRouter key limits and credits could not be verified; paid routing is stopped");
+      const remaining = numeric(status.key?.limit_remaining);
+      if (remaining !== null && remaining < estimatedCostUsd) throw new Error(`OpenRouter key has only $${remaining.toFixed(4)} remaining`);
+    } catch (error) {
+      this.ledger.releasePaidSpendReservation(reservationId);
+      throw error;
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.ledger.releasePaidSpendReservation(reservationId);
+    };
   }
 
   async assertQualificationCredit(estimatedCostUsd: number | null): Promise<void> {

@@ -14,6 +14,8 @@ const expectations = [
   ["docs/USER_MANUAL.md", `Manual version: **${version}**`],
   ["docs/USER_MANUAL.md", `Product release: **v${version}**`],
   ["docs/index.html", `data-product-version="${version}"`],
+  ["docs/index.html", `href="USER_MANUAL.html">Manual`],
+  ["docs/index.html", `href="USER_MANUAL.html">Read the user manual`],
   ["src/ui/index.html", `v${version}`],
   ["src/ui/index.html", `/app.css?v=${version}`],
   ["src/ui/index.html", `/app.js?v=${version}`],

@@ -49,6 +49,20 @@ import { WorktreeManager, WorkspaceIsolationError } from "./worktrees.js";
 import { IntegrationSetManager } from "./integration-sets.js";
 import { modelQuotaGroup, quotaResetAt } from "./antigravity.js";
 
+export interface WorkbenchConsultationResult {
+  requestedModelId: string;
+  provider: string;
+  connectionId: string | null;
+  resolvedModelId: string | null;
+  text: string | null;
+  status: "complete" | "failed";
+  error: string | null;
+  durationMs: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: number | null;
+}
+
 export class Orchestrator {
   private readonly backgroundRuns = new Map<string, Promise<void>>();
   private readonly cancellations = new Map<string, AbortController>();
@@ -252,19 +266,8 @@ export class Orchestrator {
     question: string;
     discussionContext: string;
     modelIds: string[];
-  }): Promise<Array<{
-    requestedModelId: string;
-    provider: string;
-    connectionId: string | null;
-    resolvedModelId: string | null;
-    text: string | null;
-    status: "complete" | "failed";
-    error: string | null;
-    durationMs: number | null;
-    inputTokens: number | null;
-    outputTokens: number | null;
-    costUsd: number | null;
-  }>> {
+    persist?: (consultations: WorkbenchConsultationResult[]) => Promise<void> | void;
+  }): Promise<WorkbenchConsultationResult[]> {
     const projectPath = path.resolve(input.projectPath);
     const config = await loadConfig(projectPath);
     if (!input.question.trim()) throw new Error("Workbench question is required");
@@ -282,16 +285,22 @@ export class Orchestrator {
       return model && connection?.provider === "openrouter" && model.active && !model.excluded && !model.retired && !model.qualificationStale ? [model] : [];
     });
     let paidBudgetError: Error | null = null;
+    let releasePaidSpend: (() => void) | null = null;
     if (paidModels.length) {
       const estimatedCost = paidModels.reduce((sum, model) => sum + (estimateInvocationCost(model, prompt) ?? 0), 0);
       try {
-        await new OpenRouterService(this.ledger).assertPaidWorkbenchAllowed(config, input.sessionId, estimatedCost);
+        releasePaidSpend = await new OpenRouterService(this.ledger).acquirePaidWorkbench(config, input.sessionId, estimatedCost);
+        if (!input.persist) {
+          releasePaidSpend();
+          releasePaidSpend = null;
+          paidBudgetError = new Error("Paid Workbench consultations require a durable receipt before the spending gate can be released");
+        }
       } catch (error) {
         paidBudgetError = error instanceof Error ? error : new Error(String(error));
       }
     }
 
-    return Promise.all(modelIds.map(async (modelId) => {
+    const consultations = await Promise.all(modelIds.map(async (modelId) => {
       const model = this.ledger.getModel(modelId);
       const connection = model ? this.ledger.listConnections().find((item) => item.id === model.connectionId) : null;
       const provider = connection?.provider ?? "unknown";
@@ -368,6 +377,12 @@ export class Orchestrator {
         return failed(error);
       }
     }));
+    try {
+      await input.persist?.(consultations);
+    } finally {
+      releasePaidSpend?.();
+    }
+    return consultations;
   }
 
   beginApprovedObjective(input: {
@@ -750,13 +765,8 @@ export class Orchestrator {
         } else {
           const diffFiles = await worktrees.integrationDiffFiles();
           const chunks = autonomy === "observe" ? this.diagnosticReportChunks(runId) : chunkDiffFiles(diffFiles);
-          if (reviewerDecision.provider === "openrouter") {
-            const selected = reviewerDecision.model.requestedModelId ? this.ledger.getModel(String(reviewerDecision.model.requestedModelId)) : null;
-            const estimated = selected ? estimateInvocationCost(selected, chunks.map((chunk) => chunk.content).join("\n"), Math.max(500, chunks.length * 192)) ?? 0 : 0;
-            await new OpenRouterService(this.ledger).assertPaidRoutingAllowed(config, runId, estimated);
-          }
           const localTaskReports = autonomy === "observe" ? "Each accepted diagnostic report is supplied as an independent evidence chunk." : taskReports;
-          const review = await runContextOnlyReview({
+          const performReview = () => runContextOnlyReview({
             adapter: reviewer,
             model: reviewerDecision.model,
             cwd: worktrees.integrationPath,
@@ -769,6 +779,11 @@ export class Orchestrator {
               this.ledger.recordInvocationReceipt({ runId, role: "reviewer", provider: receipt.provider, connectionId: receipt.connectionId, requestedModelId: reviewerDecision.model.requestedModelId ? String(reviewerDecision.model.requestedModelId) : null, resolvedModelId: receipt.resolvedModelId, inputTokens: receipt.inputTokens, outputTokens: receipt.outputTokens, costUsd: receipt.costUsd, durationMs: receipt.durationMs, workloadClass: "complex:premium", fallbackReason: reviewerFallbackReason ?? (reviewerDecision.fallback ? reviewerDecision.factors.join("; ") : null) });
             },
           });
+          const selected = reviewerDecision.model.requestedModelId ? this.ledger.getModel(String(reviewerDecision.model.requestedModelId)) : null;
+          const estimated = selected ? estimateInvocationCost(selected, chunks.map((chunk) => chunk.content).join("\n"), Math.max(500, chunks.length * 192)) ?? 0 : 0;
+          const review = reviewerDecision.provider === "openrouter"
+            ? await new OpenRouterService(this.ledger).withPaidRoutingAllowed(config, runId, estimated, performReview)
+            : await performReview();
           reviewText = review.text;
         }
         completedReviewerIdentity = {
@@ -1370,13 +1385,8 @@ export class Orchestrator {
           const chunks = input.reviewChunks ?? (input.autonomy === "observe"
             ? this.diagnosticReportChunks(input.runId)
             : chunkDiffFiles(await input.worktrees!.integrationDiffFiles()));
-          if (decision.provider === "openrouter") {
-            const selected = decision.model.requestedModelId ? this.ledger.getModel(String(decision.model.requestedModelId)) : null;
-            const estimated = selected ? estimateInvocationCost(selected, chunks.map((chunk) => chunk.content).join("\n"), Math.max(500, chunks.length * 192)) ?? 0 : 0;
-            await new OpenRouterService(this.ledger).assertPaidRoutingAllowed(input.config, input.runId, estimated);
-          }
           const localTaskReports = input.autonomy === "observe" ? "Each accepted diagnostic report is supplied as an independent evidence chunk." : input.taskReports;
-          const review = await runContextOnlyReview({
+          const performReview = () => runContextOnlyReview({
             adapter: reviewer,
             model: decision.model,
             cwd: reviewCwd,
@@ -1389,6 +1399,11 @@ export class Orchestrator {
               this.ledger.recordInvocationReceipt({ runId: input.runId, role: "reviewer", provider: receipt.provider, connectionId: receipt.connectionId, requestedModelId: decision.model.requestedModelId ? String(decision.model.requestedModelId) : null, resolvedModelId: receipt.resolvedModelId, inputTokens: receipt.inputTokens, outputTokens: receipt.outputTokens, costUsd: receipt.costUsd, durationMs: receipt.durationMs, workloadClass: "complex:premium", fallbackReason: fallbackReason ?? (decision.fallback ? decision.factors.join("; ") : null) });
             },
           });
+          const selected = decision.model.requestedModelId ? this.ledger.getModel(String(decision.model.requestedModelId)) : null;
+          const estimated = selected ? estimateInvocationCost(selected, chunks.map((chunk) => chunk.content).join("\n"), Math.max(500, chunks.length * 192)) ?? 0 : 0;
+          const review = decision.provider === "openrouter"
+            ? await new OpenRouterService(this.ledger).withPaidRoutingAllowed(input.config, input.runId, estimated, performReview)
+            : await performReview();
           text = review.text;
         }
         this.recordConnectionOutcome(reviewer.connection.id, { success: true });
@@ -1594,12 +1609,13 @@ export class Orchestrator {
           ...runtimeMetadata,
         },
       );
+      let releasePaidSpend: (() => void) | null = null;
 
       try {
         if (providerName === "openrouter") {
           const selected = model.requestedModelId ? this.ledger.getModel(String(model.requestedModelId)) : null;
           const estimated = selected ? estimateInvocationCost(selected, prompt) ?? 0 : 0;
-          await new OpenRouterService(this.ledger).assertPaidRoutingAllowed(input.config, input.runId, estimated);
+          releasePaidSpend = await new OpenRouterService(this.ledger).acquirePaidRouting(input.config, input.runId, estimated);
         }
         await input.worktrees.assertPrimaryClean?.(`before ${input.task.id} attempt ${attempt}`);
         const invocationRequest = {
@@ -1657,6 +1673,8 @@ export class Orchestrator {
           fallbackReason,
         });
         this.recordInvocation(input.runId, input.task.id, "worker", routing, result, fallbackReason);
+        releasePaidSpend?.();
+        releasePaidSpend = null;
         this.recordConnectionOutcome(provider.connection.id, { success: true });
         if (model.requestedModelId) {
           const modelId = String(model.requestedModelId);
@@ -1679,6 +1697,8 @@ export class Orchestrator {
         }
         this.ledger.addBlackboardEntry({ runId: input.runId, taskId: input.task.id, kind: taskPermission === "read_only" ? "finding" : "handoff", content: normalizedResult.summary, sourceAttemptId: attemptId });
       } catch (error) {
+        releasePaidSpend?.();
+        releasePaidSpend = null;
         // A cancel aborts the child process, surfacing here as a failure. Stop
         // without marking the task 'failed' or retrying; cancelRun owns status.
         if (input.signal.aborted) return "cancelled";

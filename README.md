@@ -15,7 +15,7 @@ Normal subscription and local-model use requires no model API keys. Each subscri
 ## What works today
 
 - Local browser dashboard at `http://127.0.0.1:4317`
-- Separate installation and sign-in checks for Codex, Claude, and Gemini
+- Separate installation and sign-in checks for Codex, Claude Code, and Google Antigravity
 - Layered connection diagnostics that keep model entitlement and remaining subscription capacity explicitly unknown until verified
 - Manual or architect-selected concurrency, with no built-in agent-count ceiling
 - Typed, dependency-aware task planning
@@ -70,7 +70,7 @@ devharmonics --version
 devharmonics serve --project C:\path\to\your\repository
 ```
 
-This first release is source-distributed; it does not yet include a packaged Windows installer.
+The current release is source-distributed; it does not yet include a packaged Windows installer.
 
 ## First-run sign-in
 

@@ -5,24 +5,30 @@ Architecture version: **0.5.0**
 DevHarmonics is a local-first, provider-neutral software factory for product owners managing AI agents as development teams. Its current architecture is a local orchestration layer over official subscription-authenticated coding-agent CLIs. It does not proxy provider HTTP APIs.
 
 ```text
-Goal + project
-      |
-      v
+Goal + product/repository scope
+              |
+              v
 Read-only architect -> typed task DAG -> dependency scheduler
-                                           |
-                           +---------------+---------------+
-                           |               |               |
-                      Codex worker    Claude worker   Antigravity worker
-                           |               |               |
-                           +------- isolated worktrees ----+
-                                           |
-                                allowlisted validators
-                                           |
-                                serial integration branch
-                                           |
-                                  read-only final reviewer
-                                           |
-                              verdict + SQLite run ledger
+                                               |
+                  +----------------------------+----------------------------+
+                  |                            |                            |
+             Codex worker                Claude worker        Antigravity/local worker
+                  |                            |                            |
+                  +---------- repository-scoped isolated worktrees --------+
+                                               |
+                                    allowlisted validators
+                                               |
+                       per-repository serial integration branches
+                                               |
+                                  exact integration set
+                                               |
+                             read-only reviewer quorum
+                                  |             |
+                            NOT READY         READY
+                                  |             |
+                   repository-scoped fixers    +----> verdict + SQLite ledger
+                                  |
+                       revalidate and re-review
 ```
 
 ## Components

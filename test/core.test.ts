@@ -558,6 +558,82 @@ test("OpenRouter Workbench consultation enforces budgets and contributes to mont
   }
 });
 
+test("concurrent OpenRouter Workbench consultations cannot oversubscribe the same paid budget", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-openrouter-budget-race-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  const originalStatus = OpenRouterService.prototype.status;
+  try {
+    await initializeProject(root);
+    const config = await loadConfig(root);
+    config.openRouter.enabled = true;
+    config.openRouter.allowPaidFallback = true;
+    config.openRouter.perRunLimitUsd = 0.005;
+    config.openRouter.monthlyLimitUsd = 0.005;
+    config.runPolicy.allowPaidApi = true;
+    await writeFile(path.join(root, ".devharmonics", "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+    ledger.upsertConnection({ id: "api:openrouter", provider: "openrouter", transport: "api", authentication: "credential_reference", displayName: "OpenRouter", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "paid", capacity: "available", adapterVersion: "test", runtimeVersion: "test", metadata: {} });
+    const modelId = "api:openrouter:model:concurrent-paid-test";
+    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "api:openrouter", canonicalName: "openai/concurrent-paid-test-20260715", displayName: "Concurrent Paid Test", source: "provider_catalog", lifecycle: "known", visible: true, verified: false, qualified: false, active: false, metadata: { ...profileMetadata({ tier: "premium", family: "paid-fixture", capabilities: ["text", "analysis"], source: "catalog" }), promptPrice: 0, completionPrice: 0.000002 } });
+    ledger.recordModelQualification({ modelId, fixtureVersion: "test", role: "reviewer", passed: true, score: 1, evidence: {} });
+    ledger.setModelPreference(modelId, { active: true });
+    const session = ledger.createWorkbenchSession({ projectPath: root, title: "Concurrent paid consultation" });
+
+    let activeInvocations = 0;
+    let maximumConcurrentInvocations = 0;
+    let invocationCount = 0;
+    const orchestrator = new Orchestrator(ledger);
+    (orchestrator as any).provider = async () => ({
+      connection: { id: domainId("ProviderConnection", "api:openrouter"), provider: "openrouter", displayName: "OpenRouter", transport: "api", authentication: "credential_reference", capabilities: { structuredOutput: true, streaming: false, providerManagedTools: false, modelSelection: true, modelSettings: [], permissions: ["read_only"] } },
+      metadata: async () => ({ adapterVersion: "test", runtimeVersion: "test" }),
+      invoke: async (request: any) => {
+        invocationCount += 1;
+        activeInvocations += 1;
+        maximumConcurrentInvocations = Math.max(maximumConcurrentInvocations, activeInvocations);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        activeInvocations -= 1;
+        return { connectionId: "api:openrouter", provider: "openrouter", adapterVersion: "test", runtimeVersion: "test", model: { ...request.model, resolvedModelId: modelId, resolution: "concrete" }, text: "paid result", stdout: "", stderr: "", exitCode: 0, durationMs: 1, usage: { inputTokens: 1, outputTokens: 1, costUsd: 0.004 }, toolRequests: [] };
+      },
+    });
+    OpenRouterService.prototype.status = async () => ({ connected: true, key: { limit_remaining: 10 } });
+
+    const persist = async (consultations: Array<any>) => {
+      for (const consultation of consultations) {
+        ledger.appendWorkbenchMessage({
+          sessionId: session.id,
+          role: "assistant",
+          content: consultation.text ?? "",
+          provider: consultation.provider,
+          connectionId: consultation.connectionId,
+          requestedModelId: consultation.requestedModelId,
+          resolvedModelId: consultation.resolvedModelId,
+          status: consultation.status,
+          error: consultation.error,
+          inputTokens: consultation.inputTokens,
+          outputTokens: consultation.outputTokens,
+          costUsd: consultation.costUsd,
+          durationMs: consultation.durationMs,
+        });
+      }
+    };
+    const request = { projectPath: root, sessionId: session.id, question: "Compare approaches", discussionContext: "", modelIds: [modelId], persist };
+    const outcomes = await Promise.all([
+      (orchestrator as any).consultWorkbench(request),
+      (orchestrator as any).consultWorkbench(request),
+    ]) as Array<Array<{ status: string; error: string | null }>>;
+
+    assert.deepEqual(outcomes.flat().map((result) => result.status).sort(), ["complete", "failed"]);
+    assert.equal(invocationCount, 1);
+    assert.equal(maximumConcurrentInvocations, 1);
+    assert.equal(ledger.getWorkbenchSpendUsd(session.id), 0.004);
+    assert.equal(ledger.getMonthlySpendUsd(), 0.004);
+  } finally {
+    OpenRouterService.prototype.status = originalStatus;
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("workload classification gives narrow low-risk bounded implementation to the economy specialist lane", () => {
   const classification = classifyWorkload("worker", {
     id: "small-fix", title: "Small fix", description: "Patch one bounded file", dependencies: [], preferredProvider: null,

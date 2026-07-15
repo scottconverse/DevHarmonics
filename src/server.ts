@@ -18,7 +18,7 @@ import { observeLocalResources } from "./resources.js";
 import { inspectLocalRepository } from "./repository-intelligence.js";
 import { scanProductIntelligence } from "./product-intelligence.js";
 import { manualModelSchema, objectiveInputSchema, productRegistrationSchema, workbenchSessionInputSchema } from "./schemas.js";
-import type { ObjectiveInput, ProviderName, RunRequest } from "./types.js";
+import type { ObjectiveInput, ProviderName, RunRequest, WorkbenchMessageRecord } from "./types.js";
 import { inferModelProfile } from "./model-intelligence.js";
 import type { ModelRecord } from "./registry.js";
 
@@ -567,28 +567,31 @@ async function route(
       return `${identity}: ${bodyText}`;
     }).join("\n\n");
     const userMessage = context.ledger.appendWorkbenchMessage({ sessionId: session.id, role: "user", content: question });
+    let responses: WorkbenchMessageRecord[] = [];
     const consultations = await context.orchestrator.consultWorkbench({
       sessionId: session.id,
       projectPath: session.projectPath,
       question,
       discussionContext,
       modelIds,
+      persist: (results) => {
+        responses = results.map((consultation) => context.ledger.appendWorkbenchMessage({
+          sessionId: session.id,
+          role: "assistant",
+          content: consultation.text ?? "",
+          provider: consultation.provider,
+          connectionId: consultation.connectionId,
+          requestedModelId: consultation.requestedModelId,
+          resolvedModelId: consultation.resolvedModelId,
+          status: consultation.status,
+          error: consultation.error,
+          inputTokens: consultation.inputTokens,
+          outputTokens: consultation.outputTokens,
+          costUsd: consultation.costUsd,
+          durationMs: consultation.durationMs,
+        }));
+      },
     });
-    const responses = consultations.map((consultation) => context.ledger.appendWorkbenchMessage({
-      sessionId: session.id,
-      role: "assistant",
-      content: consultation.text ?? "",
-      provider: consultation.provider,
-      connectionId: consultation.connectionId,
-      requestedModelId: consultation.requestedModelId,
-      resolvedModelId: consultation.resolvedModelId,
-      status: consultation.status,
-      error: consultation.error,
-      inputTokens: consultation.inputTokens,
-      outputTokens: consultation.outputTokens,
-      costUsd: consultation.costUsd,
-      durationMs: consultation.durationMs,
-    }));
     sendJson(response, 201, { userMessage, responses });
     return;
   }

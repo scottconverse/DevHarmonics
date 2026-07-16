@@ -650,10 +650,10 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
     assert.match(pageText, /aria-label="Agent count"/);
     assert.match(pageText, /id="run-autonomy"/);
     assert.match(pageText, /id="delivery-panel"/);
-    assert.match(pageText, /Approve &amp; push branch/);
-    assert.match(pageText, /Approve &amp; create draft PR/);
     const appText = await fetch(`${dashboard.url}/app.js`).then((response) => response.text());
     assert.match(appText, /create_draft_pr/);
+    assert.match(appText, /Approve &amp; push branch/);
+    assert.match(appText, /Approve &amp; create draft PR/);
     assert.doesNotMatch(appText, /data-delivery-action=["']merge|action:\s*["']merge/i, "the delivery UI must expose no merge action");
     const bootstrap = await fetch(`${dashboard.url}/api/bootstrap`);
     const value = (await bootstrap.json()) as {

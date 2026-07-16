@@ -44,6 +44,11 @@ if (packageLock.version !== version || lockVersion !== version) {
 }
 checks += 1;
 
+if (packageLock.packages?.[""]?.license !== packageJson.license) {
+  failures.push(`package-lock.json: root package license must match package.json (${packageJson.license})`);
+}
+checks += 1;
+
 const productSpec = await readFile(path.join(root, "docs/PRODUCT_SPEC.md"), "utf8");
 const implementationPlan = await readFile(path.join(root, "docs/IMPLEMENTATION_PLAN.md"), "utf8");
 const changelog = await readFile(path.join(root, "CHANGELOG.md"), "utf8");

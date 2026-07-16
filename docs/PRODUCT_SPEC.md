@@ -1,13 +1,15 @@
 # DevHarmonics Canonical Product Specification
 
 Document status: **Canonical product direction**
-Specification version: **1.11**
+Specification version: **1.12**
 Written: **2026-07-13**
-Revised: **2026-07-15**
+Revised: **2026-07-16**
 Current implementation baseline: **DevHarmonics v0.5.1**
 Google Doc: [DevHarmonics Canonical Product Specification](https://docs.google.com/document/d/1rd-_gqHHPZHhTkrULJR9tHcbAVUOGONsbuEFCV-8pRQ/edit?usp=drivesdk)
 
-Revision history: **v1.11 (2026-07-15)** — Made visible working-state feedback a required product capability rather than deferred polish. Every DevHarmonics-owned operation must acknowledge immediately, expose truthful lifecycle and elapsed activity, distinguish active/waiting/retrying/stalled states, persist across navigation and refresh, and end visibly. Progress indicators must be evidence-based rather than fabricated. Each remaining workflow must ship its own complete feedback states so UI/UX debt is not deferred into a later retrofit.
+Revision history: **v1.12 (2026-07-16)** — Recorded the owner's licensing decision: DevHarmonics is released under the Apache License 2.0. The licensing open question is resolved and removed; the repository carries the canonical LICENSE file, and the version-consistency check enforces the license file plus matching package and lockfile metadata.
+
+Prior revision: **v1.11 (2026-07-15)** — Made visible working-state feedback a required product capability rather than deferred polish. Every DevHarmonics-owned operation must acknowledge immediately, expose truthful lifecycle and elapsed activity, distinguish active/waiting/retrying/stalled states, persist across navigation and refresh, and end visibly. Progress indicators must be evidence-based rather than fabricated. Each remaining workflow must ship its own complete feedback states so UI/UX debt is not deferred into a later retrofit.
 
 Prior revision: **v1.10 (2026-07-15)** — Reconciled the canonical baseline with the v0.5 verified-implementation line: durable objectives and exact plan approval, Workbench, bounded local-model write tools, product/repository intelligence, exact multi-repository integration sets, structured reviewer fix/re-review, and cryptographic review binding to the exact plan, checks, diff, and repository base/HEAD set. Locked the next capability sequence as approved branch/draft-PR delivery, a real single-repository CivicSuite implementation, live run steering, real provider/local fallback, a real cross-repository CivicSuite implementation, and reusable Git-versioned development workflows.
 
@@ -1282,7 +1284,6 @@ DevHarmonics is not intended to:
 - How should historical prompts and model outputs be retained, redacted, or compacted by privacy policy?
 - What Windows packaging approach provides the best upgrade and recovery experience?
 - When should DevHarmonics offer automatic provider CLI updates versus instructions only?
-- What licensing model best supports public adoption while protecting sustainable development?
 - Which GitHub write actions should first be available under approval: draft issues, draft pull requests, comments, or project updates?
 
 Open questions are design work, not permission to weaken the decided principles.

@@ -123,6 +123,7 @@ export const workbenchMessageInputSchema = z.object({
   outputTokens: z.number().int().nonnegative().nullable().optional(),
   costUsd: z.number().nonnegative().nullable().optional(),
   durationMs: z.number().int().nonnegative().nullable().optional(),
+  paidSpendReservationId: z.string().uuid().nullable().optional(),
 }).superRefine((message, context) => {
   if (message.role === "assistant") {
     if (!message.provider) context.addIssue({ code: "custom", path: ["provider"], message: "Assistant consultations require a provider" });
@@ -133,7 +134,7 @@ export const workbenchMessageInputSchema = z.object({
   } else {
     const attributed = message.provider || message.connectionId || message.requestedModelId || message.resolvedModelId
       || message.status || message.error || message.inputTokens != null || message.outputTokens != null
-      || message.costUsd != null || message.durationMs != null;
+      || message.costUsd != null || message.durationMs != null || message.paidSpendReservationId != null;
     if (attributed) context.addIssue({ code: "custom", message: "Only assistant consultations may carry model execution attribution" });
     if (!message.content) context.addIssue({ code: "custom", path: ["content"], message: "User and system messages require content" });
   }

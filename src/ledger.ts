@@ -163,7 +163,7 @@ interface CheckRow {
   duration_ms: number;
 }
 
-export const LEDGER_SCHEMA_VERSION = 25;
+export const LEDGER_SCHEMA_VERSION = 26;
 
 export const REPOSITORY_ROLES = [
   "umbrella",
@@ -393,6 +393,7 @@ export interface InvocationReceiptInput {
   durationMs?: number | null;
   workloadClass?: string | null;
   fallbackReason?: string | null;
+  paidSpendReservationId?: string | null;
 }
 
 export interface PaidSpendReservationInput {
@@ -401,6 +402,7 @@ export interface PaidSpendReservationInput {
   estimatedCostUsd: number;
   perScopeLimitUsd: number;
   monthlyLimitUsd: number;
+  expectedReceiptCount?: number;
 }
 
 export interface ToolPolicyReceiptInput {
@@ -1160,6 +1162,24 @@ const MIGRATIONS: readonly LedgerMigration[] = [
       `);
     },
   },
+  {
+    version: 26,
+    name: "paid-spend-reservation-lifecycle",
+    apply(database) {
+      const reservationColumns = new Set((database.prepare("SELECT name FROM pragma_table_info('paid_spend_reservations')").all() as unknown as Array<{ name: string }>).map((column) => column.name));
+      if (!reservationColumns.has("state")) database.exec("ALTER TABLE paid_spend_reservations ADD COLUMN state TEXT NOT NULL DEFAULT 'invoked' CHECK(state IN ('reserved', 'invoked'));");
+      if (!reservationColumns.has("expected_receipt_count")) database.exec("ALTER TABLE paid_spend_reservations ADD COLUMN expected_receipt_count INTEGER NOT NULL DEFAULT 1 CHECK(expected_receipt_count > 0);");
+      if (!reservationColumns.has("invoked_at")) database.exec("ALTER TABLE paid_spend_reservations ADD COLUMN invoked_at TEXT;");
+      const invocationColumns = new Set((database.prepare("SELECT name FROM pragma_table_info('invocation_receipts')").all() as unknown as Array<{ name: string }>).map((column) => column.name));
+      if (!invocationColumns.has("paid_spend_reservation_id")) database.exec("ALTER TABLE invocation_receipts ADD COLUMN paid_spend_reservation_id TEXT;");
+      const workbenchColumns = new Set((database.prepare("SELECT name FROM pragma_table_info('workbench_messages')").all() as unknown as Array<{ name: string }>).map((column) => column.name));
+      if (!workbenchColumns.has("paid_spend_reservation_id")) database.exec("ALTER TABLE workbench_messages ADD COLUMN paid_spend_reservation_id TEXT;");
+      database.exec(`
+        CREATE INDEX IF NOT EXISTS invocation_receipts_paid_reservation ON invocation_receipts(paid_spend_reservation_id);
+        CREATE INDEX IF NOT EXISTS workbench_messages_paid_reservation ON workbench_messages(paid_spend_reservation_id);
+      `);
+    },
+  },
 ];
 
 function summarizeGoal(goal: string, maxLength = 180): string {
@@ -1279,15 +1299,15 @@ const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
   ],
   catalog_refreshes: ["provider", "status", "source", "model_count", "detail", "refreshed_at"],
   provider_catalog_models: ["id", "provider", "canonical_name", "display_name", "metadata_json", "first_seen_at", "last_seen_at", "missing_observations", "retired"],
-  invocation_receipts: ["id", "run_id", "task_id", "role", "provider", "connection_id", "requested_model_id", "resolved_model_id", "model_resolution", "input_tokens", "output_tokens", "cost_usd", "duration_ms", "workload_class", "fallback_reason", "created_at"],
+  invocation_receipts: ["id", "run_id", "task_id", "role", "provider", "connection_id", "requested_model_id", "resolved_model_id", "model_resolution", "input_tokens", "output_tokens", "cost_usd", "duration_ms", "workload_class", "fallback_reason", "paid_spend_reservation_id", "created_at"],
   tool_policy_receipts: ["id", "run_id", "task_id", "attempt_id", "tool_id", "actor_role", "stage", "side_effect", "outcome", "reason", "request_json", "lock_keys_json", "approval_id", "created_at"],
   review_receipts: ["id", "run_id", "round", "integration_sha256", "evidence_binding_json", "verdict", "provider", "model_id", "connection_id", "summary", "raw_text", "invalidated_at", "invalidation_reason", "created_at"],
   review_findings: ["id", "review_receipt_id", "finding_id", "severity", "location", "rationale", "suggested_correction", "disposition", "created_at"],
   objectives: ["id", "outcome", "acceptance_criteria_json", "constraints_json", "project_path", "product_id", "repository_ids_json", "risk", "autonomy", "priority", "deadline", "policy_notes_json", "revision", "created_at", "updated_at"],
   plan_revisions: ["objective_id", "revision", "plan_json", "rationale", "approved", "created_at", "approved_at"],
   workbench_sessions: ["id", "project_path", "title", "mode", "objective_id", "converted_at", "created_at", "updated_at"],
-  workbench_messages: ["id", "session_id", "role", "content", "provider", "connection_id", "requested_model_id", "resolved_model_id", "status", "error", "input_tokens", "output_tokens", "cost_usd", "duration_ms", "created_at"],
-  paid_spend_reservations: ["id", "scope_type", "scope_id", "estimated_cost_usd", "created_at", "expires_at"],
+  workbench_messages: ["id", "session_id", "role", "content", "provider", "connection_id", "requested_model_id", "resolved_model_id", "status", "error", "input_tokens", "output_tokens", "cost_usd", "duration_ms", "paid_spend_reservation_id", "created_at"],
+  paid_spend_reservations: ["id", "scope_type", "scope_id", "estimated_cost_usd", "state", "expected_receipt_count", "invoked_at", "created_at", "expires_at"],
   integration_sets: ["id", "run_id", "product_id", "status", "integration_conditions_json", "created_at", "updated_at"],
   integration_set_repositories: ["integration_set_id", "repository_id", "local_path", "base_commit", "integration_branch", "integration_worktree_path", "head_commit", "status", "error", "updated_at"],
   product_intelligence_snapshots: ["id", "product_id", "status", "snapshot_json", "created_at"],
@@ -1358,31 +1378,40 @@ export class Ledger {
       throw new Error(`Workbench session '${message.sessionId}' was not found`);
     }
     const now = new Date().toISOString();
-    const result = this.database.prepare(`
-      INSERT INTO workbench_messages (
-        session_id, role, content, provider, connection_id, requested_model_id,
-        resolved_model_id, status, error, input_tokens, output_tokens, cost_usd,
-        duration_ms, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      message.sessionId,
-      message.role,
-      redactText(message.content),
-      message.provider ?? null,
-      message.connectionId ?? null,
-      message.requestedModelId ?? null,
-      message.resolvedModelId ?? null,
-      message.status ?? null,
-      message.error == null ? null : redactText(message.error),
-      message.inputTokens ?? null,
-      message.outputTokens ?? null,
-      message.costUsd ?? null,
-      message.durationMs ?? null,
-      now,
-    );
-    this.database.prepare("UPDATE workbench_sessions SET updated_at = ? WHERE id = ?").run(now, message.sessionId);
-    const row = this.database.prepare("SELECT * FROM workbench_messages WHERE id = ?").get(Number(result.lastInsertRowid)) as Record<string, unknown>;
-    return this.mapWorkbenchMessage(row);
+    if (message.paidSpendReservationId) this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      const result = this.database.prepare(`
+        INSERT INTO workbench_messages (
+          session_id, role, content, provider, connection_id, requested_model_id,
+          resolved_model_id, status, error, input_tokens, output_tokens, cost_usd,
+          duration_ms, paid_spend_reservation_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        message.sessionId,
+        message.role,
+        redactText(message.content),
+        message.provider ?? null,
+        message.connectionId ?? null,
+        message.requestedModelId ?? null,
+        message.resolvedModelId ?? null,
+        message.status ?? null,
+        message.error == null ? null : redactText(message.error),
+        message.inputTokens ?? null,
+        message.outputTokens ?? null,
+        message.costUsd ?? null,
+        message.durationMs ?? null,
+        message.paidSpendReservationId ?? null,
+        now,
+      );
+      this.database.prepare("UPDATE workbench_sessions SET updated_at = ? WHERE id = ?").run(now, message.sessionId);
+      if (message.paidSpendReservationId) this.reconcilePaidSpendReservation(message.paidSpendReservationId);
+      const row = this.database.prepare("SELECT * FROM workbench_messages WHERE id = ?").get(Number(result.lastInsertRowid)) as Record<string, unknown>;
+      if (message.paidSpendReservationId) this.database.exec("COMMIT;");
+      return this.mapWorkbenchMessage(row);
+    } catch (error) {
+      if (message.paidSpendReservationId) this.database.exec("ROLLBACK;");
+      throw error;
+    }
   }
 
   listWorkbenchMessages(sessionId: string): WorkbenchMessageRecord[] {
@@ -2856,14 +2885,18 @@ export class Ledger {
     if (!Number.isFinite(input.perScopeLimitUsd) || input.perScopeLimitUsd <= 0 || !Number.isFinite(input.monthlyLimitUsd) || input.monthlyLimitUsd <= 0) {
       throw new Error("OpenRouter requires positive per-run and monthly spending limits");
     }
+    const expectedReceiptCount = input.expectedReceiptCount ?? 1;
+    if (!Number.isSafeInteger(expectedReceiptCount) || expectedReceiptCount < 1) throw new Error("Paid-spend reservations require a positive expected receipt count");
 
     const id = crypto.randomUUID();
     const nowDate = new Date();
     const now = nowDate.toISOString();
     const monthStart = new Date(Date.UTC(nowDate.getUTCFullYear(), nowDate.getUTCMonth(), 1)).toISOString();
-    const expiresAt = new Date(nowDate.getTime() + 24 * 60 * 60_000).toISOString();
+    const expiresAt = new Date(nowDate.getTime() + 5 * 60_000).toISOString();
     this.database.exec("BEGIN IMMEDIATE;");
     try {
+      this.database.prepare("DELETE FROM paid_spend_reservations WHERE state = 'reserved' AND expires_at <= ?").run(now);
+      this.reconcileAllPaidSpendReservations();
       const actualScopeSpend = input.scopeType === "run"
         ? this.database.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS total FROM invocation_receipts WHERE run_id = ?").get(input.scopeId) as { total: number }
         : this.database.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS total FROM workbench_messages WHERE session_id = ? AND status = 'complete'").get(input.scopeId) as { total: number };
@@ -2887,9 +2920,9 @@ export class Ledger {
         throw new Error(`OpenRouter monthly limit would be exceeded ($${monthlyCommitted.toFixed(4)} spent or reserved of $${input.monthlyLimitUsd.toFixed(2)})`);
       }
       this.database.prepare(`
-        INSERT INTO paid_spend_reservations (id, scope_type, scope_id, estimated_cost_usd, created_at, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(id, input.scopeType, input.scopeId, input.estimatedCostUsd, now, expiresAt);
+        INSERT INTO paid_spend_reservations (id, scope_type, scope_id, estimated_cost_usd, state, expected_receipt_count, invoked_at, created_at, expires_at)
+        VALUES (?, ?, ?, ?, 'reserved', ?, NULL, ?, ?)
+      `).run(id, input.scopeType, input.scopeId, input.estimatedCostUsd, expectedReceiptCount, now, expiresAt);
       this.database.exec("COMMIT;");
       return id;
     } catch (error) {
@@ -2902,29 +2935,75 @@ export class Ledger {
     this.database.prepare("DELETE FROM paid_spend_reservations WHERE id = ?").run(id);
   }
 
+  markPaidSpendInvoked(id: string): void {
+    const result = this.database.prepare("UPDATE paid_spend_reservations SET state = 'invoked', invoked_at = ? WHERE id = ? AND state = 'reserved'").run(new Date().toISOString(), id);
+    if (Number(result.changes) !== 1) throw new Error("Paid-spend reservation is missing or was already invoked");
+  }
+
+  settlePaidSpendReservation(id: string): boolean {
+    this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      const settled = this.reconcilePaidSpendReservation(id);
+      this.database.exec("COMMIT;");
+      return settled;
+    } catch (error) {
+      this.database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  private reconcileAllPaidSpendReservations(): void {
+    const rows = this.database.prepare("SELECT id FROM paid_spend_reservations WHERE state = 'invoked'").all() as unknown as Array<{ id: string }>;
+    for (const row of rows) this.reconcilePaidSpendReservation(row.id);
+  }
+
+  private reconcilePaidSpendReservation(id: string): boolean {
+    const reservation = this.database.prepare("SELECT scope_type, estimated_cost_usd, expected_receipt_count, state FROM paid_spend_reservations WHERE id = ?").get(id) as { scope_type: "run" | "workbench"; estimated_cost_usd: number; expected_receipt_count: number; state: string } | undefined;
+    if (!reservation) return true;
+    if (reservation.state !== "invoked") return false;
+    const receipts = reservation.scope_type === "run"
+      ? this.database.prepare("SELECT COUNT(*) AS count, COALESCE(SUM(cost_usd), 0) AS total FROM invocation_receipts WHERE paid_spend_reservation_id = ? AND cost_usd IS NOT NULL").get(id) as { count: number; total: number }
+      : this.database.prepare("SELECT COUNT(*) AS count, COALESCE(SUM(cost_usd), 0) AS total FROM workbench_messages WHERE paid_spend_reservation_id = ? AND status = 'complete' AND cost_usd IS NOT NULL").get(id) as { count: number; total: number };
+    if (Number(receipts.count) < Number(reservation.expected_receipt_count)) return false;
+    if (Number(receipts.total) > Number(reservation.estimated_cost_usd) + 1e-9) return false;
+    this.database.prepare("DELETE FROM paid_spend_reservations WHERE id = ?").run(id);
+    return true;
+  }
+
   recordInvocationReceipt(input: InvocationReceiptInput): void {
-    this.database.prepare(
-      `INSERT INTO invocation_receipts
-       (run_id, task_id, role, provider, connection_id, requested_model_id, resolved_model_id, model_resolution,
-        input_tokens, output_tokens, cost_usd, duration_ms, workload_class, fallback_reason, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      input.runId,
-      input.taskId ?? null,
-      input.role,
-      input.provider,
-      input.connectionId,
-      input.requestedModelId ?? null,
-      input.resolvedModelId,
-      input.modelResolution ?? null,
-      input.inputTokens ?? null,
-      input.outputTokens ?? null,
-      input.costUsd ?? null,
-      input.durationMs ?? null,
-      input.workloadClass ?? (input.role === "reviewer" ? "complex:premium" : null),
-      input.fallbackReason ? redactText(input.fallbackReason) : null,
-      new Date().toISOString(),
-    );
+    if (input.paidSpendReservationId) this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      this.database.prepare(
+        `INSERT INTO invocation_receipts
+         (run_id, task_id, role, provider, connection_id, requested_model_id, resolved_model_id, model_resolution,
+          input_tokens, output_tokens, cost_usd, duration_ms, workload_class, fallback_reason, paid_spend_reservation_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        input.runId,
+        input.taskId ?? null,
+        input.role,
+        input.provider,
+        input.connectionId,
+        input.requestedModelId ?? null,
+        input.resolvedModelId,
+        input.modelResolution ?? null,
+        input.inputTokens ?? null,
+        input.outputTokens ?? null,
+        input.costUsd ?? null,
+        input.durationMs ?? null,
+        input.workloadClass ?? (input.role === "reviewer" ? "complex:premium" : null),
+        input.fallbackReason ? redactText(input.fallbackReason) : null,
+        input.paidSpendReservationId ?? null,
+        new Date().toISOString(),
+      );
+      if (input.paidSpendReservationId) {
+        this.reconcilePaidSpendReservation(input.paidSpendReservationId);
+        this.database.exec("COMMIT;");
+      }
+    } catch (error) {
+      if (input.paidSpendReservationId) this.database.exec("ROLLBACK;");
+      throw error;
+    }
   }
 
   recordProductIntelligenceSnapshot(snapshot: ProductIntelligenceSnapshot): ProductIntelligenceSnapshot {
@@ -3269,6 +3348,7 @@ export class Ledger {
       outputTokens: row.output_tokens === null ? null : Number(row.output_tokens),
       costUsd: row.cost_usd === null ? null : Number(row.cost_usd),
       durationMs: row.duration_ms === null ? null : Number(row.duration_ms),
+      paidSpendReservationId: row.paid_spend_reservation_id === null ? null : String(row.paid_spend_reservation_id),
       createdAt: String(row.created_at),
     };
   }

@@ -41,7 +41,7 @@ All notable DevHarmonics changes are documented here.
 - Cancellation and shutdown now settle every concurrent active attempt before returning.
 - Malformed JSON requests return a stable HTTP 400 response instead of an internal-server error.
 - Repository validators cannot escape their assigned worktree through a relative working directory.
-- OpenRouter spending gates now atomically reserve concurrent Workbench and run spend in the shared SQLite ledger. Successful calls release only after durable cost persistence; ambiguous failures and crashes stay reserved, unknown prices fail closed, and accepted API requests carry a hard completion-token ceiling used for their conservative maximum-cost reservation.
+- OpenRouter spending gates now atomically reserve concurrent Workbench and run spend in the shared SQLite ledger. Durable lifecycle state and reservation-bound receipts reclaim expired pre-invocation leases and settle the final receipt atomically, while ambiguous invoked failures remain reserved. Unknown prices fail closed, and accepted API requests carry a hard completion-token ceiling used for their conservative maximum-cost reservation.
 - Landing-page manual links now open rendered documentation, the illustrated run console reflows on compact screens, and public architecture/identity copy matches the v0.5 multi-repository reviewer-quorum topology.
 - A task retry can no longer report success while an existing task-branch commit remains unmerged.
 - Antigravity quota exhaustion is scoped to the provider-reported **Gemini Models** or **Claude and GPT Models** group, so one exhausted group no longer cools the entire connection or blocks qualified fallback through the other group.

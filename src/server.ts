@@ -589,6 +589,7 @@ async function route(
           outputTokens: consultation.outputTokens,
           costUsd: consultation.costUsd,
           durationMs: consultation.durationMs,
+          paidSpendReservationId: consultation.paidSpendReservationId,
         }));
       },
     });

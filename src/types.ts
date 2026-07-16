@@ -254,6 +254,7 @@ export interface WorkbenchMessageInput {
   outputTokens?: number | null | undefined;
   costUsd?: number | null | undefined;
   durationMs?: number | null | undefined;
+  paidSpendReservationId?: string | null | undefined;
 }
 
 export interface WorkbenchMessageRecord {
@@ -271,6 +272,7 @@ export interface WorkbenchMessageRecord {
   outputTokens: number | null;
   costUsd: number | null;
   durationMs: number | null;
+  paidSpendReservationId: string | null;
   createdAt: string;
 }
 

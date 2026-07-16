@@ -114,18 +114,19 @@ export class OpenRouterService {
     reservation.cancelBeforeInvocation();
   }
 
-  async acquirePaidRouting(config: DevHarmonicsConfig, runId: string, estimatedCostUsd = 0): Promise<PaidSpendReservation> {
-    return this.acquirePaidSpend(config, "run", runId, estimatedCostUsd);
+  async acquirePaidRouting(config: DevHarmonicsConfig, runId: string, estimatedCostUsd = 0, expectedReceiptCount = 1): Promise<PaidSpendReservation> {
+    return this.acquirePaidSpend(config, "run", runId, estimatedCostUsd, expectedReceiptCount);
   }
 
-  async acquirePaidWorkbench(config: DevHarmonicsConfig, sessionId: string, estimatedCostUsd = 0): Promise<PaidSpendReservation> {
-    return this.acquirePaidSpend(config, "workbench", sessionId, estimatedCostUsd);
+  async acquirePaidWorkbench(config: DevHarmonicsConfig, sessionId: string, estimatedCostUsd = 0, expectedReceiptCount = 1): Promise<PaidSpendReservation> {
+    return this.acquirePaidSpend(config, "workbench", sessionId, estimatedCostUsd, expectedReceiptCount);
   }
 
-  async withPaidRoutingAllowed<T>(config: DevHarmonicsConfig, runId: string, estimatedCostUsd: number, action: () => Promise<T>): Promise<T> {
-    const reservation = await this.acquirePaidRouting(config, runId, estimatedCostUsd);
+  async withPaidRoutingAllowed<T>(config: DevHarmonicsConfig, runId: string, estimatedCostUsd: number, action: (reservation: PaidSpendReservation) => Promise<T>, expectedReceiptCount = 1): Promise<T> {
+    const reservation = await this.acquirePaidRouting(config, runId, estimatedCostUsd, expectedReceiptCount);
     try {
-      const result = await action();
+      reservation.markInvoked();
+      const result = await action(reservation);
       reservation.settleAfterDurableReceipt();
       return result;
     } catch (error) {
@@ -135,7 +136,7 @@ export class OpenRouterService {
     }
   }
 
-  private async acquirePaidSpend(config: DevHarmonicsConfig, scopeType: "run" | "workbench", scopeId: string, estimatedCostUsd: number): Promise<PaidSpendReservation> {
+  private async acquirePaidSpend(config: DevHarmonicsConfig, scopeType: "run" | "workbench", scopeId: string, estimatedCostUsd: number, expectedReceiptCount: number): Promise<PaidSpendReservation> {
     if (!config.openRouter.enabled || !config.openRouter.allowPaidFallback || !config.runPolicy.allowPaidApi) {
       throw new Error("OpenRouter paid routing is disabled by policy");
     }
@@ -148,6 +149,7 @@ export class OpenRouterService {
       estimatedCostUsd,
       perScopeLimitUsd: config.openRouter.perRunLimitUsd,
       monthlyLimitUsd: config.openRouter.monthlyLimitUsd,
+      expectedReceiptCount,
     });
     try {
       const status = await this.status();
@@ -165,7 +167,15 @@ export class OpenRouterService {
       closed = true;
       this.ledger.releasePaidSpendReservation(reservationId);
     };
-    return { settleAfterDurableReceipt: close, cancelBeforeInvocation: close };
+    return {
+      id: reservationId,
+      markInvoked: () => this.ledger.markPaidSpendInvoked(reservationId),
+      settleAfterDurableReceipt: () => {
+        if (closed) return;
+        if (this.ledger.settlePaidSpendReservation(reservationId)) closed = true;
+      },
+      cancelBeforeInvocation: close,
+    };
   }
 
   async assertQualificationCredit(estimatedCostUsd: number | null): Promise<void> {
@@ -286,6 +296,8 @@ export function requireInvocationCostCeiling(model: { metadata: Readonly<Record<
 }
 
 export interface PaidSpendReservation {
+  id: string;
+  markInvoked(): void;
   settleAfterDurableReceipt(): void;
   cancelBeforeInvocation(): void;
 }

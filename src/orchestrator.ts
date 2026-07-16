@@ -61,6 +61,7 @@ export interface WorkbenchConsultationResult {
   inputTokens: number | null;
   outputTokens: number | null;
   costUsd: number | null;
+  paidSpendReservationId: string | null;
 }
 
 export class Orchestrator {
@@ -290,7 +291,7 @@ export class Orchestrator {
     if (paidModels.length) {
       try {
         const costCeiling = paidModels.reduce((sum, model) => sum + requireInvocationCostCeiling(model, prompt), 0);
-        paidSpendReservation = await new OpenRouterService(this.ledger).acquirePaidWorkbench(config, input.sessionId, costCeiling);
+        paidSpendReservation = await new OpenRouterService(this.ledger).acquirePaidWorkbench(config, input.sessionId, costCeiling, paidModels.length);
         if (!input.persist) {
           paidSpendReservation.cancelBeforeInvocation();
           paidSpendReservation = null;
@@ -300,6 +301,7 @@ export class Orchestrator {
         paidBudgetError = error instanceof Error ? error : new Error(String(error));
       }
     }
+    paidSpendReservation?.markInvoked();
 
     const consultations = await Promise.all(modelIds.map(async (modelId) => {
       const model = this.ledger.getModel(modelId);
@@ -317,6 +319,7 @@ export class Orchestrator {
         inputTokens: null,
         outputTokens: null,
         costUsd: null,
+        paidSpendReservationId: provider === "openrouter" ? paidSpendReservation?.id ?? null : null,
       });
       if (!model || !connection) return failed(new Error("Selected model is no longer in the current fleet"));
       if (!model.active || model.excluded || model.retired || model.qualificationStale) {
@@ -371,6 +374,7 @@ export class Orchestrator {
           inputTokens: result.usage.inputTokens,
           outputTokens: result.usage.outputTokens,
           costUsd: result.usage.costUsd,
+          paidSpendReservationId: provider === "openrouter" ? paidSpendReservation?.id ?? null : null,
         };
       } catch (error) {
         const failureKind = error instanceof RuntimeInvocationError ? error.kind : "incompatible";
@@ -510,7 +514,7 @@ export class Orchestrator {
           workspacePath: worktrees.integrationPath,
           autonomy,
         });
-        const performArchitecture = async () => {
+        const performArchitecture = async (paidSpendReservationId?: string) => {
           const result = await architect.invoke({
             role: "architect",
             prompt,
@@ -520,13 +524,13 @@ export class Orchestrator {
             maxOutputTokens: OPENROUTER_MAX_OUTPUT_TOKENS,
             model: architectDecision.model,
           }, { signal });
-          this.recordInvocation(runId, null, "architect", architectDecision, result);
+          this.recordInvocation(runId, null, "architect", architectDecision, result, null, paidSpendReservationId);
           return result;
         };
         const selected = architectDecision.model.requestedModelId ? this.ledger.getModel(String(architectDecision.model.requestedModelId)) : null;
         if (architectDecision.provider === "openrouter" && !selected) throw new Error("OpenRouter paid routing requires an exact selected model");
         const architectResult = architectDecision.provider === "openrouter"
-          ? await new OpenRouterService(this.ledger).withPaidRoutingAllowed(config, runId, requireInvocationCostCeiling(selected!, prompt), performArchitecture)
+          ? await new OpenRouterService(this.ledger).withPaidRoutingAllowed(config, runId, requireInvocationCostCeiling(selected!, prompt), (reservation) => performArchitecture(reservation.id))
           : await performArchitecture();
         if (signal.aborted) return;
         try {
@@ -779,7 +783,7 @@ export class Orchestrator {
           const diffFiles = await worktrees.integrationDiffFiles();
           const chunks = autonomy === "observe" ? this.diagnosticReportChunks(runId) : chunkDiffFiles(diffFiles);
           const localTaskReports = autonomy === "observe" ? "Each accepted diagnostic report is supplied as an independent evidence chunk." : taskReports;
-          const performReview = () => runContextOnlyReview({
+          const performReview = (paidSpendReservationId?: string) => runContextOnlyReview({
             adapter: reviewer,
             model: reviewerDecision.model,
             cwd: worktrees.integrationPath,
@@ -790,14 +794,14 @@ export class Orchestrator {
             signal,
             onChunk: (receipt, index, total) => {
               this.ledger.addEvent(runId, "review.chunk_completed", `${reviewerDecision.provider} reviewed chunk ${index + 1}/${total}: ${receipt.label} — ${receipt.verdict}`, { label: receipt.label, verdict: receipt.verdict, durationMs: receipt.durationMs, inputTokens: receipt.inputTokens, outputTokens: receipt.outputTokens, costUsd: receipt.costUsd });
-              this.ledger.recordInvocationReceipt({ runId, role: "reviewer", provider: receipt.provider, connectionId: receipt.connectionId, requestedModelId: reviewerDecision.model.requestedModelId ? String(reviewerDecision.model.requestedModelId) : null, resolvedModelId: receipt.resolvedModelId, inputTokens: receipt.inputTokens, outputTokens: receipt.outputTokens, costUsd: receipt.costUsd, durationMs: receipt.durationMs, workloadClass: "complex:premium", fallbackReason: reviewerFallbackReason ?? (reviewerDecision.fallback ? reviewerDecision.factors.join("; ") : null) });
+              this.ledger.recordInvocationReceipt({ runId, role: "reviewer", provider: receipt.provider, connectionId: receipt.connectionId, requestedModelId: reviewerDecision.model.requestedModelId ? String(reviewerDecision.model.requestedModelId) : null, resolvedModelId: receipt.resolvedModelId, inputTokens: receipt.inputTokens, outputTokens: receipt.outputTokens, costUsd: receipt.costUsd, durationMs: receipt.durationMs, workloadClass: "complex:premium", fallbackReason: reviewerFallbackReason ?? (reviewerDecision.fallback ? reviewerDecision.factors.join("; ") : null), ...(paidSpendReservationId ? { paidSpendReservationId } : {}) });
             },
           });
           const selected = reviewerDecision.model.requestedModelId ? this.ledger.getModel(String(reviewerDecision.model.requestedModelId)) : null;
           if (reviewerDecision.provider === "openrouter" && !selected) throw new Error("OpenRouter paid routing requires an exact selected model");
           const costCeiling = reviewerDecision.provider === "openrouter" ? requireInvocationCostCeiling(selected!, "", 512) * chunks.length : 0;
           const review = reviewerDecision.provider === "openrouter"
-            ? await new OpenRouterService(this.ledger).withPaidRoutingAllowed(config, runId, costCeiling, performReview)
+            ? await new OpenRouterService(this.ledger).withPaidRoutingAllowed(config, runId, costCeiling, (reservation) => performReview(reservation.id), chunks.length)
             : await performReview();
           reviewText = review.text;
         }
@@ -1402,7 +1406,7 @@ export class Orchestrator {
             ? this.diagnosticReportChunks(input.runId)
             : chunkDiffFiles(await input.worktrees!.integrationDiffFiles()));
           const localTaskReports = input.autonomy === "observe" ? "Each accepted diagnostic report is supplied as an independent evidence chunk." : input.taskReports;
-          const performReview = () => runContextOnlyReview({
+          const performReview = (paidSpendReservationId?: string) => runContextOnlyReview({
             adapter: reviewer,
             model: decision.model,
             cwd: reviewCwd,
@@ -1413,14 +1417,14 @@ export class Orchestrator {
             signal: input.signal,
             onChunk: (receipt, index, total) => {
               this.ledger.addEvent(input.runId, "review.chunk_completed", `${decision.provider} reviewed chunk ${index + 1}/${total}: ${receipt.label} - ${receipt.verdict}`, { ...input.eventContext, reviewSlot: input.reviewSlot, label: receipt.label, verdict: receipt.verdict, durationMs: receipt.durationMs, inputTokens: receipt.inputTokens, outputTokens: receipt.outputTokens, costUsd: receipt.costUsd });
-              this.ledger.recordInvocationReceipt({ runId: input.runId, role: "reviewer", provider: receipt.provider, connectionId: receipt.connectionId, requestedModelId: decision.model.requestedModelId ? String(decision.model.requestedModelId) : null, resolvedModelId: receipt.resolvedModelId, inputTokens: receipt.inputTokens, outputTokens: receipt.outputTokens, costUsd: receipt.costUsd, durationMs: receipt.durationMs, workloadClass: "complex:premium", fallbackReason: fallbackReason ?? (decision.fallback ? decision.factors.join("; ") : null) });
+              this.ledger.recordInvocationReceipt({ runId: input.runId, role: "reviewer", provider: receipt.provider, connectionId: receipt.connectionId, requestedModelId: decision.model.requestedModelId ? String(decision.model.requestedModelId) : null, resolvedModelId: receipt.resolvedModelId, inputTokens: receipt.inputTokens, outputTokens: receipt.outputTokens, costUsd: receipt.costUsd, durationMs: receipt.durationMs, workloadClass: "complex:premium", fallbackReason: fallbackReason ?? (decision.fallback ? decision.factors.join("; ") : null), ...(paidSpendReservationId ? { paidSpendReservationId } : {}) });
             },
           });
           const selected = decision.model.requestedModelId ? this.ledger.getModel(String(decision.model.requestedModelId)) : null;
           if (decision.provider === "openrouter" && !selected) throw new Error("OpenRouter paid routing requires an exact selected model");
           const costCeiling = decision.provider === "openrouter" ? requireInvocationCostCeiling(selected!, "", 512) * chunks.length : 0;
           const review = decision.provider === "openrouter"
-            ? await new OpenRouterService(this.ledger).withPaidRoutingAllowed(input.config, input.runId, costCeiling, performReview)
+            ? await new OpenRouterService(this.ledger).withPaidRoutingAllowed(input.config, input.runId, costCeiling, (reservation) => performReview(reservation.id), chunks.length)
             : await performReview();
           text = review.text;
         }
@@ -1652,7 +1656,10 @@ export class Orchestrator {
           maxOutputTokens: OPENROUTER_MAX_OUTPUT_TOKENS,
           model,
         };
-        if (providerName === "openrouter") paidInvocationStarted = true;
+        if (providerName === "openrouter") {
+          paidSpendReservation!.markInvoked();
+          paidInvocationStarted = true;
+        }
         const result = providerName === "ollama" && taskPermission === "workspace_write"
           ? await runLocalToolLoop({
               adapter: provider,
@@ -1693,7 +1700,7 @@ export class Orchestrator {
           costUsd: result.usage.costUsd,
           fallbackReason,
         });
-        this.recordInvocation(input.runId, input.task.id, "worker", routing, result, fallbackReason);
+        this.recordInvocation(input.runId, input.task.id, "worker", routing, result, fallbackReason, paidSpendReservation?.id);
         if (result.usage.costUsd !== null) paidSpendReservation?.settleAfterDurableReceipt();
         paidSpendReservation = null;
         this.recordConnectionOutcome(provider.connection.id, { success: true });
@@ -2116,6 +2123,7 @@ export class Orchestrator {
     routing: { provider: string; connectionId: string; model: { requestedModelId: unknown }; fallback: boolean; factors: string[] },
     result: { provider?: string; durationMs?: number | null; model: { resolvedModelId: unknown; resolution?: string }; usage: { inputTokens: number | null; outputTokens: number | null; costUsd: number | null } },
     fallbackReason?: string | null,
+    paidSpendReservationId?: string,
   ): void {
     this.ledger.recordInvocationReceipt({
       runId,
@@ -2132,6 +2140,7 @@ export class Orchestrator {
       durationMs: result.durationMs ?? null,
       workloadClass: role === "reviewer" ? "complex:premium" : null,
       fallbackReason: fallbackReason ?? (routing.fallback ? routing.factors.join("; ") : null),
+      ...(paidSpendReservationId ? { paidSpendReservationId } : {}),
     });
   }
 

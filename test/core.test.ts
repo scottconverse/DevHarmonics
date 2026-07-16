@@ -539,6 +539,34 @@ test("ambiguous paid failures retain their durable reservation without expiry", 
   }
 });
 
+test("paid reservation lifecycle reclaims pre-invocation leases and atomically settles bound receipts", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-openrouter-lifecycle-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    const config = structuredClone(defaultConfig);
+    config.openRouter = { enabled: true, allowPaidFallback: true, perRunLimitUsd: 0.005, monthlyLimitUsd: 0.01 };
+    config.runPolicy.allowPaidApi = true;
+    const service = new OpenRouterService(ledger, {} as any);
+    (service as any).status = async () => ({ connected: true, key: { limit_remaining: 10 } });
+    const runId = ledger.createRun("Paid lifecycle fixture", root);
+
+    const abandonedBeforeInvocation = await service.acquirePaidRouting(config, runId, 0.004);
+    (ledger as any).database.prepare("UPDATE paid_spend_reservations SET expires_at = ? WHERE id = ?").run("2000-01-01T00:00:00.000Z", abandonedBeforeInvocation.id);
+    const replacement = await service.acquirePaidRouting(config, runId, 0.004);
+    replacement.cancelBeforeInvocation();
+    assert.equal(Number((ledger as any).database.prepare("SELECT COUNT(*) AS count FROM paid_spend_reservations").get().count), 0);
+
+    const invoked = await service.acquirePaidRouting(config, runId, 0.004);
+    invoked.markInvoked();
+    ledger.recordInvocationReceipt({ runId, role: "architect", provider: "openrouter", connectionId: "api:openrouter", resolvedModelId: "api:openrouter:model:lifecycle", costUsd: 0.004, paidSpendReservationId: invoked.id });
+    assert.equal(ledger.getRunSpendUsd(runId), 0.004);
+    assert.equal(Number((ledger as any).database.prepare("SELECT COUNT(*) AS count FROM paid_spend_reservations").get().count), 0, "the bound receipt and reservation must settle in one transaction");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("OpenRouter Workbench consultation enforces budgets and contributes to monthly spend", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-openrouter-workbench-"));
   const ledger = new Ledger(path.join(root, "devharmonics.db"));
@@ -666,6 +694,7 @@ test("concurrent OpenRouter Workbench consultations cannot oversubscribe the sam
           outputTokens: consultation.outputTokens,
           costUsd: consultation.costUsd,
           durationMs: consultation.durationMs,
+          paidSpendReservationId: consultation.paidSpendReservationId,
         });
       }
     };
@@ -2219,6 +2248,7 @@ test("ledger upgrades a v0.1 database transactionally and preserves a pre-migrat
           { version: 23, name: "provider-quota-groups-and-honest-model-resolution" },
           { version: 24, name: "review-evidence-bindings" },
           { version: 25, name: "atomic-paid-spend-reservations" },
+          { version: 26, name: "paid-spend-reservation-lifecycle" },
         ],
       );
     } finally {

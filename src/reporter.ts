@@ -32,6 +32,7 @@ export interface RunEvidenceExport {
     toolReceipts: readonly unknown[];
     reviews: readonly unknown[];
     integrationSet: unknown;
+    delivery: unknown;
   }>;
 }
 
@@ -176,6 +177,7 @@ export function createRunEvidenceExport(evidence: RunEvidencePackage | Record<st
     toolReceipts: Array.isArray(evidence.toolReceipts) ? evidence.toolReceipts : [],
     reviews: Array.isArray(evidence.reviews) ? evidence.reviews : [],
     integrationSet: evidence.integrationSet ?? null,
+    delivery: evidence.delivery ?? null,
   });
   return deepFreeze({
     version: 1 as const,

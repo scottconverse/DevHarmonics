@@ -162,6 +162,10 @@ export const RUN_EVENT_KINDS = [
   "tool.allowed",
   "tool.denied",
   "tool.approval_required",
+  "delivery.prepared",
+  "delivery.branch_pushed",
+  "delivery.draft_pr_created",
+  "delivery.failed",
   "run.failed",
 ] as const;
 export type RunEventKind = (typeof RUN_EVENT_KINDS)[number];

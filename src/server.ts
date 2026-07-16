@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
@@ -16,6 +17,7 @@ import { redactText } from "./redaction.js";
 import { createRunEvidenceExport, createRunReport } from "./reporter.js";
 import { observeLocalResources } from "./resources.js";
 import { inspectLocalRepository } from "./repository-intelligence.js";
+import { DeliveryService, type DeliveryAction } from "./delivery.js";
 import { scanProductIntelligence } from "./product-intelligence.js";
 import { manualModelSchema, objectiveInputSchema, productRegistrationSchema, workbenchSessionInputSchema } from "./schemas.js";
 import type { ObjectiveInput, ProviderName, RunRequest, WorkbenchMessageRecord } from "./types.js";
@@ -38,6 +40,7 @@ export async function startDashboard(options: {
   const orchestrator = new Orchestrator(ledger);
   const catalog = new ModelCatalogCoordinator(ledger, defaultProject);
   const openRouter = new OpenRouterService(ledger);
+  const delivery = new DeliveryService(ledger);
   const eventStreams = new Set<ServerResponse>();
 
   await catalog.refresh(true, "application_launch");
@@ -45,7 +48,7 @@ export async function startDashboard(options: {
 
   const server = createServer(async (request, response) => {
     try {
-      await route(request, response, { defaultProject, ledger, orchestrator, catalog, openRouter, eventStreams });
+      await route(request, response, { defaultProject, ledger, orchestrator, catalog, openRouter, delivery, eventStreams });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       sendJson(response, error instanceof ClientRequestError ? 400 : 500, { error: redactText(message) });
@@ -84,6 +87,7 @@ async function route(
     orchestrator: Orchestrator;
     catalog: ModelCatalogCoordinator;
     openRouter: OpenRouterService;
+    delivery: DeliveryService;
     eventStreams: Set<ServerResponse>;
   },
 ): Promise<void> {
@@ -781,6 +785,39 @@ async function route(
   if (request.method === "GET" && evidenceMatch?.[1]) {
     const evidence = context.ledger.getRunEvidence(evidenceMatch[1]);
     sendJson(response, evidence ? 200 : 404, evidence ?? { error: "Run not found" });
+    return;
+  }
+
+  const deliveryMatch = url.pathname.match(/^\/api\/runs\/([a-f0-9-]+)\/delivery$/i);
+  if (request.method === "GET" && deliveryMatch?.[1]) {
+    const run = context.ledger.getRun(deliveryMatch[1]);
+    sendJson(response, run ? 200 : 404, run ? { delivery: run.delivery } : { error: "Run not found" });
+    return;
+  }
+  if (request.method === "POST" && deliveryMatch?.[1]) {
+    requireJsonRequest(request);
+    const body = await readJson(request) as { repositoryId?: unknown; action?: unknown; expectedHeadCommit?: unknown };
+    const repositoryId = typeof body.repositoryId === "string" ? body.repositoryId.trim() : "";
+    const action = body.action as DeliveryAction;
+    const expectedHeadCommit = typeof body.expectedHeadCommit === "string" ? body.expectedHeadCommit.trim() : "";
+    if (!repositoryId || !["push_branch", "create_draft_pr"].includes(action) || !expectedHeadCommit) {
+      throw new ClientRequestError("Delivery requires repositoryId, expectedHeadCommit, and a supported action");
+    }
+    const run = context.ledger.getRun(deliveryMatch[1]);
+    if (!run) {
+      sendJson(response, 404, { error: "Run not found" });
+      return;
+    }
+    const config = await loadConfig(run.projectPath);
+    const result = await context.delivery.execute({
+      runId: run.id,
+      repositoryId,
+      action,
+      expectedHeadCommit,
+      config,
+      approval: { id: randomUUID(), kind: "external_write", approvedBy: "local-owner", approvedAt: new Date().toISOString() },
+    });
+    sendJson(response, 200, { delivery: result });
     return;
   }
 

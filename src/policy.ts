@@ -99,9 +99,14 @@ const builtInTools: Readonly<Record<string, ToolDefinition>> = {
     description: "Merge a verified task branch into the integration worktree", allowedRoles: ["coordinator"], allowedStages: ["integration"],
     secretPolicy: "forbid", inputSchema: { type: "object", required: ["branch"] }, outputSchema: { type: "object", required: ["commit"] }, lockScope: "repository",
   },
+  "github.branch_push": {
+    id: "github.branch_push", trust: "external", sideEffect: "external_write", receiptsRequired: true,
+    description: "Push an exact reviewed delivery branch to GitHub", allowedRoles: ["coordinator"], allowedStages: ["release"],
+    secretPolicy: "credential_reference", inputSchema: { type: "object", required: ["repository", "head", "branch"] }, outputSchema: { type: "object", required: ["remote", "head"] }, lockScope: "external_github",
+  },
   "github.pull_request": {
     id: "github.pull_request", trust: "external", sideEffect: "external_write", receiptsRequired: true,
-    description: "Create or update a GitHub pull request", allowedRoles: ["coordinator"], allowedStages: ["release"],
+    description: "Create a draft GitHub pull request for an exact reviewed branch", allowedRoles: ["coordinator"], allowedStages: ["release"],
     secretPolicy: "credential_reference", inputSchema: { type: "object", required: ["repository", "head", "base"] }, outputSchema: { type: "object", required: ["url"] }, lockScope: "external_github",
   },
   "shell.unrestricted": {

@@ -627,9 +627,39 @@ function renderSelectedRun() {
   $("#metric-attempts").textContent = run.tasks.reduce((sum, task) => sum + task.attemptCount, 0);
   $("#metric-active").textContent = run.tasks.filter((task) => ["working", "verifying", "retry"].includes(task.status)).length;
   renderIntegrationSet(run);
+  renderDelivery(run);
   renderBoard(run);
   renderActivity(run);
   renderVerdict(run);
+}
+
+function renderDelivery(run) {
+  const panel = $("#delivery-panel");
+  const delivery = run.delivery;
+  panel.classList.toggle("hidden", !delivery);
+  if (!delivery) return;
+  const externalWritesAllowed = Boolean(state.bootstrap?.config?.runPolicy?.allowExternalWrites);
+  $("#delivery-status").textContent = delivery.status.replaceAll("_", " ");
+  $("#delivery-status").className = `lifecycle ${delivery.status === "draft_pr_created" ? "qualified" : delivery.status === "failed" ? "degraded" : ""}`;
+  $("#delivery-guidance").textContent = externalWritesAllowed
+    ? "Each action requires a separate confirmation. DevHarmonics creates draft pull requests and never merges them."
+    : "External writes are disabled. Enable them in Setup before approving a branch push or draft pull request.";
+  $("#delivery-repositories").innerHTML = delivery.repositories.map((repository) => {
+    const pushed = ["branch_pushed", "draft_pr_created"].includes(repository.status);
+    const created = repository.status === "draft_pr_created";
+    return `<article class="integration-repository-card delivery-repository-card">
+      <header><strong>${escapeHtml(repository.repositoryId)}</strong><span class="lifecycle ${created ? "qualified" : repository.status === "failed" ? "degraded" : ""}">${escapeHtml(repository.status.replaceAll("_", " "))}</span></header>
+      <code class="integration-commit-range">${escapeHtml(repository.baseBranch)}: ${escapeHtml(repository.baseCommit)} â†’ ${escapeHtml(repository.headCommit)}</code>
+      <code>${escapeHtml(repository.branch)}</code>
+      ${repository.remoteUrl ? `<a href="${escapeHtml(repository.remoteUrl)}" target="_blank" rel="noreferrer">${escapeHtml(repository.remoteUrl)}</a>` : ""}
+      ${repository.pullRequestUrl ? `<a href="${escapeHtml(repository.pullRequestUrl)}" target="_blank" rel="noreferrer">Open draft pull request</a>` : ""}
+      ${repository.error ? `<p class="error">${escapeHtml(repository.error)}</p>` : ""}
+      <div class="plan-actions">
+        <button class="secondary small" type="button" data-delivery-action="push_branch" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || pushed ? "disabled" : ""}>Approve &amp; push branch</button>
+        <button class="primary small" type="button" data-delivery-action="create_draft_pr" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || !pushed || created ? "disabled" : ""}>Approve &amp; create draft PR</button>
+      </div>
+    </article>`;
+  }).join("");
 }
 
 function renderIntegrationSet(run) {
@@ -1410,6 +1440,26 @@ $("#run-list").addEventListener("click", (event) => {
 $("#board").addEventListener("click", (event) => {
   const button = event.target.closest("[data-task-id]");
   if (button) openTask(button.dataset.taskId);
+});
+$("#delivery-repositories").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-delivery-action]");
+  if (!button) return;
+  const action = button.dataset.deliveryAction;
+  const label = action === "push_branch" ? "push this exact reviewed branch to GitHub" : "create a draft pull request for this exact reviewed branch";
+  if (!window.confirm(`Approve DevHarmonics to ${label}? This is a separate external write. DevHarmonics will not merge it.`)) return;
+  button.disabled = true;
+  $("#delivery-error").textContent = "";
+  try {
+    await api(`/api/runs/${state.selectedRunId}/delivery`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repositoryId: button.dataset.repositoryId, action, expectedHeadCommit: button.dataset.headCommit }),
+    });
+    await refreshRuns();
+  } catch (error) {
+    $("#delivery-error").textContent = error.message;
+    button.disabled = false;
+  }
 });
 $("#close-drawer").addEventListener("click", closeTask);
 $("#drawer-backdrop").addEventListener("click", closeTask);

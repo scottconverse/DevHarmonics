@@ -46,6 +46,7 @@ import { aggregateModelPerformance } from "../src/model-performance.js";
 import { quotaResetAt } from "../src/antigravity.js";
 import { runValidator } from "../src/validators.js";
 import { parseReviewerResponse } from "../src/review.js";
+import { DeliveryService } from "../src/delivery.js";
 
 test("provider output parsers extract each CLI's final response", () => {
   const codex = [
@@ -1502,6 +1503,69 @@ test("typed tool policy enforces actor, stage, path scope, and consequential app
   assert.deepEqual(approved.lockKeys, ["external:github"]);
 });
 
+test("approved delivery pushes the exact reviewed branch before creating a draft PR and never merges", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-delivery-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  const commands: Array<{ command: string; args: string[]; cwd: string }> = [];
+  const runner = async (request: { command: string; args: string[]; cwd: string }) => {
+    commands.push({ command: request.command, args: [...request.args], cwd: request.cwd });
+    if (request.command === "git" && request.args.join(" ") === "remote get-url origin") {
+      return { stdout: "https://github.com/civicsuite/example.git\n", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args.includes("create")) {
+      return { stdout: "https://github.com/civicsuite/example/pull/42\n", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    return { stdout: "", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+  };
+  try {
+    const runId = ledger.createRun("Deliver the reviewed branch", root);
+    ledger.setRunStatus(runId, "running");
+    ledger.setRunStatus(runId, "ready", "READY");
+    ledger.prepareDeliveryRepository({
+      runId,
+      repositoryId: "repo:example",
+      localPath: root,
+      baseBranch: "main",
+      baseCommit: "a".repeat(40),
+      headCommit: "b".repeat(40),
+      branch: "devharmonics/12345678",
+    });
+    const service = new DeliveryService(ledger, runner as never);
+    const config = structuredClone(defaultConfig);
+    const approval = { id: "approval-push", kind: "external_write" as const, approvedBy: "local-owner", approvedAt: new Date().toISOString() };
+
+    await assert.rejects(
+      () => service.execute({ runId, repositoryId: "repo:example", action: "push_branch", config, approval }),
+      /external writes are disabled/i,
+    );
+    config.runPolicy.allowExternalWrites = true;
+    await assert.rejects(
+      () => service.execute({ runId, repositoryId: "repo:example", action: "create_draft_pr", config, approval: { ...approval, id: "approval-pr" } }),
+      /push the reviewed branch first/i,
+    );
+
+    const pushed = await service.execute({ runId, repositoryId: "repo:example", action: "push_branch", config, approval });
+    assert.equal(pushed.status, "branch_pushed");
+    assert.equal(pushed.remoteUrl, "https://github.com/civicsuite/example");
+    assert.deepEqual(commands.at(-1), {
+      command: "git",
+      args: ["push", "origin", `${"b".repeat(40)}:refs/heads/devharmonics/12345678`],
+      cwd: root,
+    });
+
+    const delivered = await service.execute({ runId, repositoryId: "repo:example", action: "create_draft_pr", config, approval: { ...approval, id: "approval-pr" } });
+    assert.equal(delivered.status, "draft_pr_created");
+    assert.equal(delivered.pullRequestUrl, "https://github.com/civicsuite/example/pull/42");
+    assert.ok(commands.some((item) => item.command === "gh" && item.args.includes("--draft") && item.args.includes("--head") && item.args.includes("devharmonics/12345678")));
+    assert.equal(commands.some((item) => item.args.includes("merge")), false, "delivery must expose no implicit merge operation");
+    assert.deepEqual(ledger.listToolPolicyReceipts(runId).filter((item) => item.outcome === "allow").map((item) => item.approvalId), ["approval-push", "approval-pr"]);
+    assert.equal(ledger.getRun(runId)?.delivery?.repositories[0]?.headCommit, "b".repeat(40));
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("repository validators cannot escape their assigned worktree through cwd", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-validator-scope-"));
   const worktree = path.join(root, "worktree");
@@ -1561,7 +1625,7 @@ test("ledger retains redacted tool-policy receipts in the run evidence package",
     const evidence = ledger.getRunEvidence(runId) as ReturnType<Ledger["getRunEvidence"]> & {
       toolReceipts?: Array<Record<string, unknown>>;
     };
-    assert.equal((evidence as unknown as { version: number } | null)?.version, 4);
+    assert.equal((evidence as unknown as { version: number } | null)?.version, 5);
     assert.equal(evidence?.toolReceipts?.length, 1);
     assert.equal(evidence?.toolReceipts?.[0]?.id, receiptId);
   } finally {
@@ -1724,7 +1788,7 @@ test("ledger retains structured reviews and invalidates them when fixer evidence
     assert.ok(reviews[0]!.invalidatedAt);
     assert.match(reviews[0]!.invalidationReason!, /fixer changed/i);
     const evidence = ledger.getRunEvidence(runId) as Record<string, any>;
-    assert.equal(evidence.version, 4);
+    assert.equal(evidence.version, 5);
     assert.equal(evidence.reviews[0].id, reviewId);
     assert.ok(evidence.reviews[0].invalidatedAt);
   } finally {
@@ -2249,6 +2313,7 @@ test("ledger upgrades a v0.1 database transactionally and preserves a pre-migrat
           { version: 24, name: "review-evidence-bindings" },
           { version: 25, name: "atomic-paid-spend-reservations" },
           { version: 26, name: "paid-spend-reservation-lifecycle" },
+          { version: 27, name: "approved-delivery-handoffs" },
         ],
       );
     } finally {

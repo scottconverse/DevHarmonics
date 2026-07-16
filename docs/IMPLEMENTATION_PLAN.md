@@ -1,14 +1,16 @@
 # DevHarmonics Detailed Implementation Plan
 
 Document status: **Build-ready execution plan**
-Plan version: **1.20**
+Plan version: **1.21**
 Written: **2026-07-14**
 Revised: **2026-07-15**
-Product specification baseline: **DevHarmonics Product Specification v1.10**
+Product specification baseline: **DevHarmonics Product Specification v1.11**
 Current implementation baseline: **DevHarmonics v0.5.1**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 
-Revision history: **v1.20 (2026-07-15)** — Implemented the approved branch/draft-PR delivery handoff: immutable exact reviewed repository coordinates, separate external-write approvals for an exact-SHA branch push and draft pull-request creation, retained policy receipts and results, ledger/evidence integration, and no merge surface. The first real bounded single-repository CivicSuite implementation is now next; later sequence items remain unchanged.
+Revision history: **v1.21 (2026-07-15)** — Added DH-632 as a cross-cutting visible-operation-feedback requirement. Every DevHarmonics-owned asynchronous action must have immediate acknowledgement, truthful lifecycle and stage feedback, elapsed activity and heartbeat, durable refresh/navigation recovery, accessible success/failure/retry states, and evidence-based rather than fabricated progress. The first real CivicSuite implementation must deliver the feedback states it exercises, and every later workflow must extend the same contract instead of deferring a UI/UX retrofit.
+
+Prior revision: **v1.20 (2026-07-15)** — Implemented the approved branch/draft-PR delivery handoff: immutable exact reviewed repository coordinates, separate external-write approvals for an exact-SHA branch push and draft pull-request creation, retained policy receipts and results, ledger/evidence integration, and no merge surface. The first real bounded single-repository CivicSuite implementation is now next; later sequence items remain unchanged.
 
 Prior revision: **v1.19 (2026-07-15)** — Reconciled the v0.5 release candidate with the implemented verified-development capabilities and locked the owner-approved next sequence: approved branch/draft-PR delivery; a real bounded single-repository CivicSuite implementation; live run steering; real provider/local fallback during that work; a real cross-repository CivicSuite implementation; and reusable Git-versioned development workflows. Restart reconstruction, cleanup, analytics, triggers, and campaign breadth remain in the plan but may not displace this capability sequence.
 
@@ -822,6 +824,32 @@ Acceptance:
 - Cancel affects the scheduler and active processes rather than only the browser stream;
 - the run board does not rely on polling for active updates.
 
+#### DH-632: Visible operation feedback — M
+
+Deliverables:
+
+- a shared operation-state model for queued, starting, running, waiting-for-capacity, waiting-for-approval, retrying, blocked, stalled, succeeded, failed, and cancelled work;
+- immediate per-control acknowledgement with disabled/stateful controls, concise status text, accessible busy state, and an appropriate spinner for indeterminate work;
+- a global activity surface that keeps background operations visible when the user changes screens;
+- meaningful stage, elapsed-time, latest-activity, responsible agent/model/provider, and heartbeat or last-update feedback for long operations;
+- durable reconstruction of operation state from ledger events and receipts after navigation, browser refresh, reconnect, or restart where the underlying workflow itself is restart-capable;
+- evidence-based progress bars only where a real stage sequence, completed/total count, or provider-reported measure exists; otherwise use an honest indeterminate state;
+- explicit success, failure, cancellation, timeout/stall, retry, recovery, and evidence-link end states; and
+- accessible live regions, keyboard behavior, contrast, and reduced-motion support.
+
+Acceptance:
+
+- every DevHarmonics-owned action acknowledges the initiating input immediately and never leaves a clickable control appearing inert;
+- an operation lasting more than a moment shows what is happening, how long it has been active, and when meaningful activity was last observed;
+- the user can distinguish active work from waiting, retrying, disconnected, stalled, failed, and completed work without reading a terminal;
+- changing screens or refreshing does not hide or falsely reset an active operation;
+- progress bars and percentages are backed by retained measurable evidence and never inferred from elapsed time;
+- failures and stalls provide a visible reason and a safe next action;
+- feedback is present for provider/catalog/model operations, Workbench, repository scans, planning, execution, validation, review/repair, delivery, exports, and settings changes; and
+- external work outside the DevHarmonics control plane is not presented as DevHarmonics activity.
+
+Implementation rule: DH-632 is not a later cleanup phase. The first real CivicSuite implementation must include feedback for every operation and state it exercises, and each subsequent capability must extend this shared contract before that capability is accepted.
+
 #### DH-635: Live run steering — L
 
 Deliverables:
@@ -1237,11 +1265,12 @@ Exit gate:
 
 ### Increment 5: CivicSuite single- and multi-repository operation — v0.6
 
-Status: **In progress.** DH-700's registry/local Git inspection, DH-710's product-aware repository selection and impact planning, DH-720's exact multi-repository execution plus automatic fixer/re-review quorum loop, and DH-800's first approved-delivery slice are implemented. The first bounded real CivicSuite implementation is next. Restart reconstruction and cleanup remain follow-on reliability work and do not displace the owner-locked capability sequence.
+Status: **In progress.** DH-700's registry/local Git inspection, DH-710's product-aware repository selection and impact planning, DH-720's exact multi-repository execution plus automatic fixer/re-review quorum loop, and DH-800's first approved-delivery slice are implemented. The first bounded real CivicSuite implementation is next and must include the DH-632 feedback states exercised by that workflow. Restart reconstruction and cleanup remain follow-on reliability work and do not displace the owner-locked capability sequence.
 
 Work:
 
 - DH-400 product and repository intelligence;
+- DH-632 visible operation feedback for every workflow exercised by the pilot;
 - DH-350 campaign and stage orchestrator;
 - DH-360 pilot-to-scale promotion;
 - DH-700 product registry;
@@ -1328,13 +1357,14 @@ Critical sequence:
         -> health and qualification
         -> capacity, routing, and fallback
         -> structured context, tools, and evidence
+        -> durable visible operation feedback
         -> multi-repository integration
         -> CivicSuite release workflows
         -> ACP and API breadth
 
 Useful parallel tracks after DH-100 and DH-110:
 
-- Experience: application shell, setup flows, and SSE client;
+- Experience: application shell, setup flows, SSE client, and the shared DH-632 operation-feedback contract;
 - Runtime: subscription adapters, Ollama, and model discovery;
 - Intelligence: repository ingestion, context packs, and qualification fixtures;
 - Assurance: redaction, migration tests, scheduler simulation, and evidence export;
@@ -1412,6 +1442,7 @@ A deterministic fake clock and fake fleet will simulate:
 - stage-specific command denial including stash, destructive reset, cross-worktree mutation, and redundant expensive diagnostics;
 - expected-versus-actual test census, deleted/weakened-test fixtures, stubs, disabled checks, and swallowed-error fixtures;
 - differential old/new behavior with intentional and unexplained mismatches.
+- operation-state transitions, quiet-work heartbeats, stall/timeout classification, screen navigation, browser refresh/reconnect, and accessible feedback for every asynchronous control.
 
 ### 9.6 End-to-end acceptance
 
@@ -1428,6 +1459,7 @@ A deterministic fake clock and fake fleet will simulate:
 - adversarial implement-review-fix-re-review execution;
 - resource-pressure admission reduction and restart-safe stage recovery;
 - regression and behavioral-equivalence report that remains not-ready when material evidence is missing.
+- a complete newcomer pass proving every exercised action acknowledges immediately, stays visibly active or waiting, survives navigation/refresh, and ends with an actionable success, failure, cancellation, or recovery state without fabricated percentage progress.
 
 ### 9.7 Non-functional gates
 
@@ -1452,6 +1484,7 @@ Every work package must include:
 - diagnostics and error classification;
 - security and redaction review;
 - user-visible status and recovery guidance;
+- immediate, durable, accessible working-state feedback for every asynchronous operation introduced or exercised by the work package, without fabricated progress;
 - documentation of shipped behavior;
 - retained acceptance evidence;
 - verification-integrity evidence proving expected tests and gates actually ran and were not materially weakened;
@@ -1554,13 +1587,15 @@ The product specification remains the authority for product scope. This implemen
 Increment 4 shipped as v0.5.1. Continue Increment 5 in this exact capability order:
 
 1. **Approved branch/draft-PR delivery — implemented.** Present the exact resulting commits and evidence, require explicit approval before pushing a delivery branch or creating a draft pull request, and never merge automatically.
-2. **First real CivicSuite implementation — next.** Select one bounded, useful single-repository change and run it from objective through implementation, validation, review, repair, and approved delivery. Fix only blockers actually encountered in that run.
+2. **First real CivicSuite implementation — next.** Select one bounded, useful single-repository change and run it from objective through implementation, validation, review, repair, and approved delivery. Include DH-632 feedback for every operation and state exercised by this workflow. Fix only blockers actually encountered in that run.
 3. **Live run steering.** Pause task admission; redirect, reprioritize, or reassign queued work; interrupt an active attempt; continue with new instructions; and retain exactly what changed.
 4. **Real provider/local fallback.** Continue an interrupted CivicSuite task through another subscription model or qualified local model while preserving context, evidence, and task state.
 5. **Real cross-repository CivicSuite implementation.** Make and deliver one coordinated change across at least two registered repositories with exact integration evidence.
 6. **Reusable development workflows.** Save proven issue-to-PR, dependency-upgrade, module-finishing, compatibility-checking, and release-truth-review processes as Git-versioned workflows.
 
 Restart reconstruction, automatic worktree cleanup, analytics, triggers, and campaign-scale orchestration remain planned. They must not be pulled ahead of this sequence unless a real run exposes one as a direct blocker or Scott explicitly changes the plan.
+
+DH-632 is a cross-cutting acceptance obligation, not an additional roadmap detour: each item above must ship its own complete immediate acknowledgement, working/waiting/retry/stall, completion/failure, and refresh-safe feedback before that item is accepted.
 
 ## Sources
 

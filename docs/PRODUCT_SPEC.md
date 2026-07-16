@@ -1,13 +1,15 @@
 # DevHarmonics Canonical Product Specification
 
 Document status: **Canonical product direction**
-Specification version: **1.10**
+Specification version: **1.11**
 Written: **2026-07-13**
 Revised: **2026-07-15**
 Current implementation baseline: **DevHarmonics v0.5.1**
 Google Doc: [DevHarmonics Canonical Product Specification](https://docs.google.com/document/d/1rd-_gqHHPZHhTkrULJR9tHcbAVUOGONsbuEFCV-8pRQ/edit?usp=drivesdk)
 
-Revision history: **v1.10 (2026-07-15)** — Reconciled the canonical baseline with the v0.5 verified-implementation line: durable objectives and exact plan approval, Workbench, bounded local-model write tools, product/repository intelligence, exact multi-repository integration sets, structured reviewer fix/re-review, and cryptographic review binding to the exact plan, checks, diff, and repository base/HEAD set. Locked the next capability sequence as approved branch/draft-PR delivery, a real single-repository CivicSuite implementation, live run steering, real provider/local fallback, a real cross-repository CivicSuite implementation, and reusable Git-versioned development workflows.
+Revision history: **v1.11 (2026-07-15)** — Made visible working-state feedback a required product capability rather than deferred polish. Every DevHarmonics-owned operation must acknowledge immediately, expose truthful lifecycle and elapsed activity, distinguish active/waiting/retrying/stalled states, persist across navigation and refresh, and end visibly. Progress indicators must be evidence-based rather than fabricated. Each remaining workflow must ship its own complete feedback states so UI/UX debt is not deferred into a later retrofit.
+
+Prior revision: **v1.10 (2026-07-15)** — Reconciled the canonical baseline with the v0.5 verified-implementation line: durable objectives and exact plan approval, Workbench, bounded local-model write tools, product/repository intelligence, exact multi-repository integration sets, structured reviewer fix/re-review, and cryptographic review binding to the exact plan, checks, diff, and repository base/HEAD set. Locked the next capability sequence as approved branch/draft-PR delivery, a real single-repository CivicSuite implementation, live run steering, real provider/local fallback, a real cross-repository CivicSuite implementation, and reusable Git-versioned development workflows.
 
 Prior revision: **v1.9 (2026-07-15)** — Fixed the product boundary around a locally operated software factory for a solo product owner or very small product team. Added live run steering, GitHub/Linear and bounded local triggers, approved PR/delivery handoff, evidence-based analytics and evaluation loops, and Git-versioned workflows/skills. Explicitly rejected a DevHarmonics cloud-hosting platform, remote workers that continue while the user's computer is off, enterprise workforce/IAM/compliance administration, and message-driven execution from arbitrary email or chat.
 
@@ -258,6 +260,23 @@ The default experience must feel like directing a competent product and engineer
 - receive an evidence-backed result and clear next actions.
 
 Raw logs remain available, but they are supporting detail rather than the primary interface.
+
+### 6.4 Visible working-state feedback
+
+DevHarmonics must never leave the user guessing whether an operation it owns is working, waiting, stalled, or finished. Every user-initiated or background operation visible in the product must:
+
+- acknowledge input immediately with a disabled or stateful control, concise status text, and an accessible busy indication;
+- expose a truthful lifecycle such as queued, starting, running, waiting for capacity, waiting for approval, retrying, blocked, stalled, succeeded, failed, or cancelled;
+- show the current meaningful stage, elapsed time, latest retained activity, and responsible agent/model/provider when known;
+- provide a continuing heartbeat or last-update timestamp during quiet work so slow operations are distinguishable from a disconnected or stalled process;
+- remain visible through a global activity surface when the user navigates away from the initiating screen;
+- reconstruct its state after browser refresh or reconnection from durable control-plane evidence rather than browser memory alone;
+- end with a visible result, failure explanation, recovery or retry action, and retained evidence link when applicable; and
+- respect accessibility requirements including `aria-live`, keyboard operation, sufficient contrast, and reduced-motion preferences.
+
+Spinners are appropriate only for genuinely indeterminate work. Progress bars and percentages require a real numerator/denominator, bounded stage sequence, or provider-reported measure; DevHarmonics must never invent completion percentages from elapsed time. When exact progress is unknowable, show the active stage, elapsed time, last activity, and honest indeterminate state.
+
+This contract applies to provider discovery and sign-in checks, catalog refresh, model qualification and benchmarking, Workbench consultation, product/repository scans, plan generation and revision, run execution, validation, review and repair, delivery, exports, settings changes, and every future workflow. DevHarmonics cannot report external work performed outside its control plane, such as a separate Codex or Computer Use session, and must not imply that it can.
 
 ## 7. Core product capabilities
 

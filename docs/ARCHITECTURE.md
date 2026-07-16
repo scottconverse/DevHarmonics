@@ -35,6 +35,7 @@ Read-only architect -> typed task DAG -> dependency scheduler
 
 - `src/cli.ts`: command entry point for `serve`, `init`, `doctor`, and `run`.
 - `src/server.ts`: loopback-only HTTP server and static dashboard delivery.
+- `src/delivery.ts`: READY-run delivery service for separately approved exact-SHA branch pushes and draft GitHub pull requests; it has no merge operation.
 - `src/doctor.ts`: provider installation and authentication inspection.
 - `src/providers.ts`: provider-specific process adapters and credential stripping.
 - `src/runtime.ts`: transport-neutral connection, model-selection, invocation, event, result, usage, and classified-failure contracts.
@@ -109,6 +110,8 @@ OpenRouter is an API transport with OAuth-backed, OS-protected credential storag
 
 Events are typed, append-only ledger records. Their monotonic SQLite IDs are durable cursors; `GET /api/runs/<run-id>/events?after=<cursor>&limit=<n>` replays one run oldest-first and returns `nextCursor`. The dashboard uses `GET /api/events` as a persisted server-sent event stream, stores its last cursor for refresh/reconnection, ignores duplicate delivery, and fetches a fresh run projection only after a new durable event. The local server polls SQLite behind the stream; closing or reconnecting a browser never controls run execution.
 
+Development builds after v0.5.1 persist immutable reviewed delivery coordinates in ledger schema 27 and include them in evidence package version 5. A READY transition captures the final base branch, base commit, reviewed HEAD, and delivery branch. The loopback dashboard issues a fresh external-write approval for exactly one action: either push that exact SHA to its GitHub delivery branch or create a draft pull request after the push. Both actions use typed policy receipts, revalidate the live origin, and retain the result. No delivery API or UI merge action exists.
+
 On a controlled server shutdown, the orchestrator pauses and aborts active runs, waits for their background execution to settle, and only then closes the SQLite ledger. Startup reconciliation remains the recovery path after an uncontrolled process or machine termination.
 
 Prompts, provider output, validator stdout/stderr, errors, reviews, event messages, and event payloads are redacted before persistence. Migration backups are byte-consistent snapshots of pre-existing data, so a backup may contain sensitive values written by an older version and must be protected like the original ledger.
@@ -119,7 +122,7 @@ Prompts, provider output, validator stdout/stderr, errors, reviews, event messag
 - No remote DevHarmonics service
 - No automatic merge into the user's checked-out branch
 - No automatic Git merge-conflict repair; structured reviewer findings can be fixed and independently re-reviewed
-- Multi-repository execution does not yet provide restart reconstruction, automatic cleanup, pushes/pull requests, or one task spanning several repositories
+- The tagged v0.5.1 release does not provide pushes/pull requests; development builds add separately approved exact-SHA branch pushes and draft pull requests. Restart reconstruction, automatic cleanup, and one task spanning several repositories remain unavailable.
 - Local Ollama models cannot inspect or write arbitrary repository paths; reviewers receive orchestrator-supplied context, while qualified implementors receive only scoped read/search/hash-checked-patch tools inside the assigned worktree
 - Large CPU-only local reviews can be materially slower than subscription reviewers, so capacity-aware background scheduling and stronger local-model profiles remain follow-up work
 - No Agent Client Protocol transport yet

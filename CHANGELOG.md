@@ -4,6 +4,14 @@ All notable DevHarmonics changes are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Owner-approved delivery handoffs for READY runs. DevHarmonics retains each repository's exact reviewed base, HEAD, branch, and local path; requires one explicit external-write approval for an exact-SHA GitHub branch push and a separate approval for draft pull-request creation; records tool-policy receipts and resulting URLs in run evidence; and exposes no merge action.
+
+### Changed
+
+- Run evidence packages advance to version 5 and ledger schema 27 so approved delivery coordinates and results survive restarts and exports.
+
 ## [0.5.1] - 2026-07-15
 
 ### Fixed

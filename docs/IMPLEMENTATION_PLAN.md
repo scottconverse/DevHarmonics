@@ -1,14 +1,16 @@
 # DevHarmonics Detailed Implementation Plan
 
 Document status: **Build-ready execution plan**
-Plan version: **1.19**
+Plan version: **1.20**
 Written: **2026-07-14**
 Revised: **2026-07-15**
 Product specification baseline: **DevHarmonics Product Specification v1.10**
 Current implementation baseline: **DevHarmonics v0.5.1**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 
-Revision history: **v1.19 (2026-07-15)** — Reconciled the v0.5 release candidate with the implemented verified-development capabilities and locked the owner-approved next sequence: approved branch/draft-PR delivery; a real bounded single-repository CivicSuite implementation; live run steering; real provider/local fallback during that work; a real cross-repository CivicSuite implementation; and reusable Git-versioned development workflows. Restart reconstruction, cleanup, analytics, triggers, and campaign breadth remain in the plan but may not displace this capability sequence.
+Revision history: **v1.20 (2026-07-15)** — Implemented the approved branch/draft-PR delivery handoff: immutable exact reviewed repository coordinates, separate external-write approvals for an exact-SHA branch push and draft pull-request creation, retained policy receipts and results, ledger/evidence integration, and no merge surface. The first real bounded single-repository CivicSuite implementation is now next; later sequence items remain unchanged.
+
+Prior revision: **v1.19 (2026-07-15)** — Reconciled the v0.5 release candidate with the implemented verified-development capabilities and locked the owner-approved next sequence: approved branch/draft-PR delivery; a real bounded single-repository CivicSuite implementation; live run steering; real provider/local fallback during that work; a real cross-repository CivicSuite implementation; and reusable Git-versioned development workflows. Restart reconstruction, cleanup, analytics, triggers, and campaign breadth remain in the plan but may not displace this capability sequence.
 
 Prior revision: **v1.18 (2026-07-15)** — Re-scoped the roadmap around a locally operated factory for a solo product owner or very small product team. Added live run steering, bounded GitHub/Linear/local-schedule/monitoring triggers, approved PR handoff, evidence-based analytics and evaluation promotion, and Git-versioned workflows/skills. Removed remote workers, DevHarmonics cloud hosting, enterprise workforce/IAM/compliance/secrets administration, and arbitrary email/chat-driven execution from the roadmap. Product release numbering remains unchanged.
 
@@ -1235,7 +1237,7 @@ Exit gate:
 
 ### Increment 5: CivicSuite single- and multi-repository operation — v0.6
 
-Status: **In progress.** DH-700's registry/local Git inspection, DH-710's product-aware repository selection and impact planning, and DH-720's exact multi-repository execution plus automatic fixer/re-review quorum loop are implemented. Approved delivery and the bounded CivicSuite pilots are next. Restart reconstruction and cleanup remain follow-on reliability work and do not displace the owner-locked capability sequence.
+Status: **In progress.** DH-700's registry/local Git inspection, DH-710's product-aware repository selection and impact planning, DH-720's exact multi-repository execution plus automatic fixer/re-review quorum loop, and DH-800's first approved-delivery slice are implemented. The first bounded real CivicSuite implementation is next. Restart reconstruction and cleanup remain follow-on reliability work and do not displace the owner-locked capability sequence.
 
 Work:
 
@@ -1506,7 +1508,7 @@ The first implementation sequence is:
 24. Add expected-versus-actual test census, anti-shortcut fixtures, and differential behavior baselines.
 25. Add campaign stages, resource-aware shards, centralized diagnostic partitioning, regression budgets, and restart-safe promotion gates.
 26. Add live run steering with pause-admission, redirect, interrupt-and-handoff, reprioritization, and reassignment receipts.
-27. Add approved branch/draft-PR delivery handoff with exact evidence and no implicit merge or deployment.
+27. **Implemented:** Add approved branch/draft-PR delivery handoff with exact evidence and no implicit merge or deployment.
 28. Add Git-versioned reusable workflow and agent-skill packs with exact historical revision retention.
 29. Add allowlisted GitHub/Linear and local schedule/monitoring triggers that create bounded drafts without bypassing approval.
 30. Add evidence-based analytics and evaluation promotion with honest subscription-cost uncertainty and reversible configuration changes.
@@ -1549,10 +1551,10 @@ The product specification remains the authority for product scope. This implemen
 
 ## 15. Immediate recommendation
 
-Increment 4 is at its v0.5 release gate. After publication, implement the following capability sequence in this exact order:
+Increment 4 shipped as v0.5.1. Continue Increment 5 in this exact capability order:
 
-1. **Approved branch/draft-PR delivery.** Present the exact resulting commits and evidence, require explicit approval before pushing a delivery branch or creating a draft pull request, and never merge automatically.
-2. **First real CivicSuite implementation.** Select one bounded, useful single-repository change and run it from objective through implementation, validation, review, repair, and approved delivery. Fix only blockers actually encountered in that run.
+1. **Approved branch/draft-PR delivery — implemented.** Present the exact resulting commits and evidence, require explicit approval before pushing a delivery branch or creating a draft pull request, and never merge automatically.
+2. **First real CivicSuite implementation — next.** Select one bounded, useful single-repository change and run it from objective through implementation, validation, review, repair, and approved delivery. Fix only blockers actually encountered in that run.
 3. **Live run steering.** Pause task admission; redirect, reprioritize, or reassign queued work; interrupt an active attempt; continue with new instructions; and retain exactly what changed.
 4. **Real provider/local fallback.** Continue an interrupted CivicSuite task through another subscription model or qualified local model while preserving context, evidence, and task state.
 5. **Real cross-repository CivicSuite implementation.** Make and deliver one coordinated change across at least two registered repositories with exact integration evidence.

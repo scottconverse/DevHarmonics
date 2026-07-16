@@ -220,4 +220,6 @@ The automated suite covers configuration, credential stripping, provider parsing
 
 ## Project status and licensing
 
-DevHarmonics v0.5.1 is an early public preview. The repository is public for evaluation and collaboration. No open-source license has been selected yet, so public visibility alone does not grant reuse rights. License selection is intentionally open for community discussion.
+DevHarmonics v0.5.1 is an early public preview. The repository is public for evaluation and collaboration.
+
+DevHarmonics is released under the [Apache License 2.0](LICENSE). You may use, modify, and redistribute it under that license's terms, which include a patent grant and require preserving attribution and change notices.

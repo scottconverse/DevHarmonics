@@ -3,7 +3,7 @@
   "version": "0.5.1",
   "private": true,
   "description": "Local-first, provider-neutral software factory for product owners managing AI agents as development teams.",
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/scottconverse/DevHarmonics.git"

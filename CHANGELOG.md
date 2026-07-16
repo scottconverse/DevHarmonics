@@ -11,6 +11,7 @@ All notable DevHarmonics changes are documented here.
 ### Changed
 
 - Run evidence packages advance to version 5 and ledger schema 27 so approved delivery coordinates and results survive restarts and exports.
+- DevHarmonics is now released under the Apache License 2.0. Added the canonical `LICENSE` file and updated the README, contributor terms, and package metadata; the version-consistency check now requires the Apache-2.0 license file and metadata.
 
 ## [0.5.1] - 2026-07-15
 

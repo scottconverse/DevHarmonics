@@ -53,6 +53,12 @@ export const defaultConfig: DevHarmonicsConfig = {
     allowPaidApi: false,
     allowExternalWrites: false,
   },
+  reviewPolicy: {
+    reviewerCountByRisk: { low: 1, medium: 1, high: 2 },
+    minimumDistinctProvidersByRisk: { low: 1, medium: 1, high: 2 },
+    requireImplementorIndependenceByRisk: { low: false, medium: true, high: true },
+    maxFixRounds: 2,
+  },
   routing: {
     mode: "adaptive",
     architect: { modelId: null, effort: "high", preferredTier: "auto", upgradePolicy: "pinned" },
@@ -153,6 +159,7 @@ export async function loadConfig(projectPath: string): Promise<DevHarmonicsConfi
       },
       repository: { validators: legacy.validators },
       runPolicy: structuredClone(defaultConfig.runPolicy),
+      reviewPolicy: structuredClone(defaultConfig.reviewPolicy),
       routing: structuredClone(defaultConfig.routing),
     };
     await persistMigration(destination, contents, migrated);

@@ -1,4 +1,8 @@
 import { domainId } from "./domain.js";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { runLocalToolLoop } from "./local-tools.js";
 import { VERSION } from "./product.js";
 import { inferModelProfile, profileMetadata } from "./model-intelligence.js";
 import type { ConnectionRegistryInput, ModelDiscoveryInput } from "./registry.js";
@@ -303,6 +307,103 @@ export async function qualifyOllamaModel(
       responseMatched: passed,
     },
   };
+}
+
+export async function qualifyOllamaSpecialistModel(
+  modelId: string,
+  cwd: string,
+  baseUrl = DEFAULT_OLLAMA_URL,
+  connectionId = "local:ollama",
+  modelName?: string,
+) {
+  const adapter = new OllamaAdapter(baseUrl, connectionId);
+  const result = await adapter.invoke({
+    role: "worker",
+    prompt: [
+      "DevHarmonics local specialist qualification local-specialist-v2.",
+      "A proposed design has two legs and requires two M4 holes per leg.",
+      "The complete design must fit inside a 40 mm bounding box, but the proposed legs are 60 mm long.",
+      "Reply with only one JSON object having exactly these keys and types:",
+      "valid: boolean indicating whether every stated constraint can be satisfied;",
+      "reason: string formatted as '<larger dimension> exceeds <bounding dimension>';",
+      "holeCount: integer giving the total number of required holes across all legs.",
+      "Derive every value from the scenario. Do not copy an example answer because none is provided.",
+      "Do not use tools and do not modify files.",
+    ].join(" "),
+    cwd,
+    permission: "read_only",
+    timeoutMs: 2 * 60_000,
+    model: { requestedModelId: domainId("Model", modelId), alias: modelName ?? null, settings: { temperature: 0, num_predict: 128 } },
+  });
+  let parsed: Record<string, unknown> | null = null;
+  try {
+    const value = JSON.parse(result.text.trim()) as unknown;
+    if (value && typeof value === "object" && !Array.isArray(value)) parsed = value as Record<string, unknown>;
+  } catch {
+    parsed = null;
+  }
+  const structuredOutput = parsed !== null && Object.keys(parsed).sort().join(",") === "holeCount,reason,valid";
+  const reason = typeof parsed?.reason === "string" ? parsed.reason.trim().toLowerCase().replace(/\s+/g, " ") : "";
+  const contradictionDetected = parsed?.valid === false && /^60(?:\s*mm)?\s+exceeds\s+40(?:\s*mm)?[.!]?$/.test(reason);
+  const featureCountMatched = parsed?.holeCount === 4;
+  const passed = structuredOutput && contradictionDetected && featureCountMatched;
+  return {
+    fixtureVersion: "local-specialist-v2",
+    role: "benchmark" as const,
+    passed,
+    score: passed ? 1 : 0,
+    evidence: {
+      resolvedModelId: result.model.resolvedModelId,
+      durationMs: result.durationMs,
+      inputTokens: result.usage.inputTokens,
+      outputTokens: result.usage.outputTokens,
+      structuredOutput,
+      contradictionDetected,
+      featureCountMatched,
+    },
+  };
+}
+
+export async function qualifyOllamaToolModel(
+  modelId: string,
+  baseUrl = DEFAULT_OLLAMA_URL,
+  connectionId = "local:ollama",
+  modelName?: string,
+) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-local-tool-qualification-"));
+  const fixturePath = path.join(root, "fixture.txt");
+  const initial = "DEVHARMONICS_LOCAL_TOOL_BEFORE\n";
+  const expected = "DEVHARMONICS_LOCAL_TOOL_AFTER\n";
+  await writeFile(fixturePath, initial, "utf8");
+  const adapter = new OllamaAdapter(baseUrl, connectionId);
+  try {
+    const result = await runLocalToolLoop({
+      adapter,
+      request: {
+        role: "worker",
+        prompt: "DevHarmonics bounded local-tool qualification v1. Read fixture.txt, replace its complete content with exactly DEVHARMONICS_LOCAL_TOOL_AFTER followed by one newline using file.patch and the observed sha256, then return final. Use no other file.",
+        cwd: root,
+        permission: "workspace_write",
+        timeoutMs: 2 * 60_000,
+        model: { requestedModelId: domainId("Model", modelId), alias: modelName ?? null, settings: { temperature: 0, num_predict: 512 } },
+      },
+      worktreePath: root,
+      repositoryScope: ["fixture.txt"],
+      maxSteps: 6,
+      authorize: (request) => ({ outcome: ["file.read", "file.patch"].includes(request.toolId) ? "allow" : "deny", reason: "bounded qualification fixture", lockKeys: request.targetPaths }),
+    });
+    const finalContent = await readFile(fixturePath, "utf8");
+    const passed = finalContent === expected && result.toolExecutions.some((execution) => execution.toolId === "file.read") && result.toolExecutions.some((execution) => execution.toolId === "file.patch");
+    return {
+      fixtureVersion: "local-tools-v1",
+      role: "local_tools" as const,
+      passed,
+      score: passed ? 1 : 0,
+      evidence: { resolvedModelId: result.model.resolvedModelId, toolSequence: result.toolExecutions.map((execution) => execution.toolId), finalContentMatched: finalContent === expected, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, costUsd: 0 },
+    };
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 }
 
 export function ollamaConnectionId(runtimeId: string): string {

@@ -1,4 +1,19 @@
-import type { CheckResult, PlannedTask, ProviderName, RunAutonomy, RunPlan } from "./types.js";
+import type { CheckResult, ObjectiveRecord, PlannedTask, ProviderName, RunAutonomy, RunPlan } from "./types.js";
+
+export function objectivePromptText(objective: Pick<ObjectiveRecord,
+  "outcome" | "acceptanceCriteria" | "constraints" | "risk" | "priority" | "deadline" | "policyNotes" | "repositoryIds">): string {
+  const lines = [
+    `Outcome:\n${objective.outcome}`,
+    `Acceptance criteria:\n${objective.acceptanceCriteria.length ? objective.acceptanceCriteria.map((item) => `- ${item}`).join("\n") : "- Not supplied; identify ambiguities explicitly."}`,
+    `Constraints:\n${objective.constraints.length ? objective.constraints.map((item) => `- ${item}`).join("\n") : "- None supplied."}`,
+    `Objective risk: ${objective.risk}`,
+    `Priority: ${objective.priority}`,
+    `Deadline: ${objective.deadline || "None supplied"}`,
+    `Selected repositories: ${objective.repositoryIds.length ? objective.repositoryIds.join(", ") : "Current local workspace"}`,
+    `Policy notes:\n${objective.policyNotes.length ? objective.policyNotes.map((item) => `- ${item}`).join("\n") : "- Use project policy and defaults."}`,
+  ];
+  return lines.join("\n\n");
+}
 
 export function architectPrompt(input: {
   goal: string;
@@ -7,6 +22,10 @@ export function architectPrompt(input: {
   providers: ProviderName[];
   workspacePath: string;
   autonomy: RunAutonomy;
+  repositoryContext?: string;
+  selectedRepositoryIds?: string[];
+  previousPlan?: RunPlan | null;
+  revisionFeedback?: string;
 }): string {
   const observe = input.autonomy === "observe";
   const taskInstructions = observe
@@ -17,14 +36,22 @@ export function architectPrompt(input: {
     : { description: "complete, bounded implementation instructions", kind: "implementation", permission: "workspace_write", risk: '"low" | "medium" | "high"', capabilities: "code", artifacts: "expected file, commit, or report" };
   return `You are the architect for a local software-development agent team.
 
-Exact isolated workspace root: ${input.workspacePath}
-Operate only inside that directory. Do not search for, inspect, or modify another checkout of this repository.
+Exact planning workspace root: ${input.workspacePath}
+Operate read-only inside that directory. Do not inspect another checkout unless it is explicitly listed in the repository registry context below. Registry metadata is authoritative for repositories that are not locally available.
 
 Goal:
 ${input.goal}
 
+${input.previousPlan ? `This is a revision of plan ${input.previousPlan.revision ?? 1}. Preserve sound work, address the requested changes, and return a complete replacement plan.\n\nPrevious plan:\n${JSON.stringify(input.previousPlan, null, 2)}\n\nRevision request:\n${input.revisionFeedback || "Refine the plan while preserving the objective."}\n` : ""}
+
 Constitution:
 ${input.constitution}
+
+${input.repositoryContext ? `Repository registry context:
+${input.repositoryContext}
+
+For every repository listed as requiring an impact decision, include exactly one repositoryImpact entry with an affected or excluded disposition and concrete rationale. Every affected repository must have at least one task whose repositoryIds includes it. Do not silently expand the selected scope. When shared-platform work can affect modules, or documentation, installer, version, or release-truth work may be required, represent that impact explicitly rather than burying it in another task. Multi-repository plans must list their cross-repository integration conditions.
+` : ""}
 
 Available worker providers: ${input.providers.join(", ")}
 Allowlisted validators: ${input.validators.length ? input.validators.join(", ") : "none"}
@@ -35,8 +62,12 @@ Return only a JSON object with this exact shape:
 {
   "summary": "short plan summary",
   "recommendedConcurrency": 4,
-  "revision": 1,
-  "previousRevision": null,
+      "revision": ${input.previousPlan ? (input.previousPlan.revision ?? 1) + 1 : 1},
+      "previousRevision": ${input.previousPlan ? input.previousPlan.revision ?? 1 : null},
+  "repositoryImpact": [
+    { "repositoryId": "registered-repository-id", "disposition": "affected" | "excluded", "rationale": "why this repository is or is not part of the change" }
+  ],
+  "integrationConditions": ["condition required before the affected repositories are ready together"],
   "tasks": [
     {
       "id": "short-lowercase-id",
@@ -46,6 +77,7 @@ Return only a JSON object with this exact shape:
       "preferredProvider": "codex" | "claude" | "gemini" | null,
       "checks": ["validator-name"],
       "kind": "${example.kind}",
+      "repositoryIds": ${JSON.stringify(input.selectedRepositoryIds ?? [])},
       "repositoryScope": ["."],
       "permission": "${example.permission}",
       "risk": ${example.risk},
@@ -132,7 +164,11 @@ ${input.checkSummary}
 Diagnostic task reports and handoffs:
 ${input.taskReports || "No task reports were recorded."}
 
-${reviewSubject} Return a concise verdict beginning with exactly READY or NOT READY, followed by evidence, material risks, and any required follow-up. Do not modify files.`;
+${reviewSubject} Return a concise verdict beginning with exactly READY or NOT READY. After the verdict, explain the evidence and material risks. Then include exactly one fenced JSON object with this shape:
+\`\`\`json
+{"findings":[{"id":"stable-short-id","severity":"low|medium|high|critical","location":"path:line or null","rationale":"evidence-backed reason","suggestedCorrection":"bounded correction","disposition":"open"}]}
+\`\`\`
+READY must use an empty findings array. NOT READY must include every blocking finding. Do not inherit implementor claims as fact, do not modify files, and do not emit another verdict after the first line.`;
 }
 
 export function localReviewerContextHeader(input: {
@@ -175,6 +211,26 @@ export function formatFailures(results: CheckResult[]): string {
       return `${result.name} exited ${result.exitCode}:\n${output || "No output"}`;
     })
     .join("\n\n");
+}
+
+export function workbenchConsultationPrompt(input: {
+  projectPath: string;
+  question: string;
+  discussionContext: string;
+}): string {
+  return `You are consulting inside the DevHarmonics Workbench, a discussion-only project scratchpad.
+
+Project root: ${input.projectPath}
+
+Hard boundary: this is not an execution run. Work read-only. Do not modify files, create commits or branches, install dependencies, invoke write-capable tools, or write to external systems. You may inspect the project when the runtime supports read-only tools. Clearly distinguish observed repository facts from inference.
+
+Prior discussion:
+${bounded(input.discussionContext || "No prior discussion.", 12_000)}
+
+Current question:
+${bounded(input.question, 6_000)}
+
+Give a direct, useful answer for a product manager. Include concrete repository evidence when available, material tradeoffs, and unresolved questions. Do not produce an execution claim or imply that any proposed action has been approved.`;
 }
 
 function bounded(value: string, limit: number): string {

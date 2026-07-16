@@ -25,6 +25,7 @@ export interface ProviderConnection {
 export type ModelResolution =
   | "concrete"
   | "alias_resolved"
+  | "requested_unverified"
   | "provider_default_unresolved";
 
 export interface ModelSelection {
@@ -44,6 +45,7 @@ export interface InvocationRequest {
   cwd: string;
   permission: InvocationPermission;
   timeoutMs: number | null;
+  maxOutputTokens?: number;
   model: ModelSelection;
 }
 
@@ -94,6 +96,7 @@ export type InvocationFailureKind =
   | "timeout"
   | "authentication"
   | "quota_exhausted"
+  | "quota_group_exhausted"
   | "model_quota_exhausted"
   | "rate_limited"
   | "context_overflow"
@@ -139,7 +142,10 @@ export function classifyInvocationFailure(input: {
   if (/model (?:allowance|quota).*(?:exhaust|exceed|limit)|(?:allowance|quota).*for (?:this |the )?model/.test(detail)) {
     return { kind: "model_quota_exhausted", retryable: true };
   }
-  if (/weekly limit|usage limit|quota (?:exhausted|exceeded)|allowance/.test(detail)) {
+  if (/individual quota reached|quota group.*(?:reached|exhausted|exceeded)/.test(detail)) {
+    return { kind: "quota_group_exhausted", retryable: true };
+  }
+  if (/weekly limit|usage limit|quota (?:reached|exhausted|exceeded)|allowance/.test(detail)) {
     return { kind: "quota_exhausted", retryable: true };
   }
   if (/rate.?limit|too many requests|throttl/.test(detail)) {
@@ -155,10 +161,11 @@ export function classifyInvocationFailure(input: {
   return { kind: "unknown", retryable: false };
 }
 
-export type InvocationFailureScope = "model" | "connection" | "task";
+export type InvocationFailureScope = "model" | "quota_group" | "connection" | "task";
 
 export function invocationFailureScope(kind: InvocationFailureKind, hasExactModel: boolean): InvocationFailureScope {
   if (kind === "cancelled") return "task";
+  if (kind === "quota_group_exhausted") return "quota_group";
   if (hasExactModel && ["model_quota_exhausted", "context_overflow", "resource_exhausted", "incompatible", "timeout"].includes(kind)) {
     return "model";
   }

@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { createServer } from "node:http";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { initializeProject, loadConfig, devHarmonicsDirectory } from "../src/config.js";
 import { inspectProviders } from "../src/doctor.js";
 import { Ledger } from "../src/ledger.js";
-import { Orchestrator } from "../src/orchestrator.js";
+import { Orchestrator, repositoryTaskIds } from "../src/orchestrator.js";
 import { runProcess } from "../src/process.js";
 import { startDashboard } from "../src/server.js";
 
@@ -41,7 +43,7 @@ async function createFakeCli(root: string, authenticated = true): Promise<string
   const script = path.join(root, "fake-cli.mjs");
   await writeFile(
     script,
-    `import { writeFileSync } from "node:fs";
+    `import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 let input = "";
 process.stdin.setEncoding("utf8");
 for await (const chunk of process.stdin) input += chunk;
@@ -63,16 +65,63 @@ if (process.argv.includes("--version")) {
   const observe = input.includes("This is an OBSERVE run");
   const task = observe
     ? {id:"observe",title:"Audit fixture",description:"Report the README heading",dependencies:[],preferredProvider:"codex",checks:["diff-check"],kind:"diagnostic",repositoryScope:["README.md"],permission:"read_only",risk:"low",capabilityNeeds:["analysis"],acceptanceCriteria:["Cite the README heading"],expectedArtifacts:["evidence report"]}
-    : {id:"one",title:"Create result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"]};
-  const plan = {summary:"fixture plan",recommendedConcurrency:1,tasks:[task]};
+    : input.includes("High-risk fixture")
+      ? {id:"one",title:"Create critical result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"],kind:"implementation",repositoryScope:["result.txt"],permission:"workspace_write",risk:"high",capabilityNeeds:["implementation"],acceptanceCriteria:["Create result.txt"],expectedArtifacts:["result.txt"]}
+      : input.includes("Fixer fixture")
+        ? {id:"one",title:"Create repairable result",description:"Create needs-fix.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"],kind:"implementation",repositoryScope:["needs-fix.txt","result.txt"],permission:"workspace_write",risk:"medium",capabilityNeeds:["implementation"],acceptanceCriteria:["Create a reviewable result"],expectedArtifacts:["result.txt"]}
+      : input.includes("Shortcut fixture")
+        ? {id:"one",title:"Add a shortcut test",description:"Add a skipped test",dependencies:[],preferredProvider:"codex",checks:["diff-check"],kind:"implementation",repositoryScope:["test/shortcut.test.ts"],permission:"workspace_write",risk:"medium",capabilityNeeds:["implementation","testing"],acceptanceCriteria:["Add verification"],expectedArtifacts:["test/shortcut.test.ts"]}
+      : input.includes("Local orchestrator fixture")
+        ? {id:"one",title:"Create local result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"],kind:"implementation",repositoryScope:["result.txt"],permission:"workspace_write",risk:"medium",capabilityNeeds:["implementation"],acceptanceCriteria:["Create result.txt"],expectedArtifacts:["result.txt"]}
+      : {id:"one",title:"Create result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"]};
+  const plan = input.includes("Cross repository fixture")
+    ? {
+        summary:"cross-repository fixture plan",
+        recommendedConcurrency:2,
+        repositoryImpact:[
+          {repositoryId:"repo:core",disposition:"affected",rationale:"The product implementation changes here."},
+          {repositoryId:"repo:docs",disposition:"affected",rationale:"The user documentation must describe the change."}
+        ],
+        integrationConditions:["The documentation must describe the behavior implemented in the core repository."],
+        tasks:[
+          {id:"core",title:"Implement the product change",description:"Update the core repository",dependencies:[],preferredProvider:"codex",checks:input.includes("automatic fixer")?["diff-check","defect-free"]:["diff-check"],repositoryIds:["repo:core"]},
+          {id:"docs",title:"Document the product change",description:"Update the documentation repository",dependencies:["core"],preferredProvider:"codex",checks:["diff-check"],repositoryIds:["repo:docs"]}
+        ]
+      }
+    : {summary:"fixture plan",recommendedConcurrency:1,tasks:[task]};
   console.log(JSON.stringify({result:JSON.stringify(plan)}));
+} else if (input.includes("You are reviewing bounded") || (args.includes("--new-project") && process.cwd().includes("integration"))) {
+  const review = input.includes("repo:core/needs-fix.txt")
+    ? "NOT READY\\n\\nA retained defect marker remains.\\n" + JSON.stringify({findings:[{id:"remove-core-defect-marker",severity:"high",location:"repo:core/needs-fix.txt:1",rationale:"The core repository still contains the defect marker.",suggestedCorrection:"Remove needs-fix.txt and create the corrected result.txt in repo:core.",disposition:"open"}]})
+    : "READY\\n\\nThe supplied repository diff chunk matches the approved task scope.";
+  if (process.argv.includes("--json")) console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:review}}));
+  else if (process.argv.includes("--output-format")) console.log(JSON.stringify({result:review}));
+  else console.log(review);
 } else if (input.includes("You are the final reviewer")) {
-  const review = input.includes("Audit fixture") && !input.includes("README.md:1 contains the heading Fixture") ? "NOT READY\\n\\nDiagnostic report was not supplied." : "READY\\n\\nFixture integration is valid.";
+  const review = input.includes("Audit fixture") && !input.includes("README.md:1 contains the heading Fixture")
+    ? "NOT READY\\n\\nDiagnostic report was not supplied."
+    : input.includes("Fixer fixture") && existsSync("needs-fix.txt")
+      ? "NOT READY\\n\\nA retained defect marker remains.\\n" + JSON.stringify({findings:[{id:"remove-defect-marker",severity:"high",location:"needs-fix.txt:1",rationale:"The defect marker remains in the integration set.",suggestedCorrection:"Remove needs-fix.txt and create the corrected result.txt.",disposition:"open"}]})
+      : "READY\\n\\nFixture integration is valid.";
   if (process.argv.includes("--json")) console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:review}}));
   else if (process.argv.includes("--output-format")) console.log(JSON.stringify({result:review}));
   else console.log(review);
 } else if (input.includes("diagnostic investigator")) {
   console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"README.md:1 contains the heading Fixture. This directly satisfies the assigned diagnostic criterion, and the read-only inspection identified no contradictory heading elsewhere. No files were changed."}}));
+} else if (input.includes("Correct only these retained review findings")) {
+  if (existsSync("needs-fix.txt")) unlinkSync("needs-fix.txt");
+  writeFileSync("result.txt", "corrected by independent fixer\\n", "utf8");
+  console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"Removed needs-fix.txt and created corrected result.txt"}}));
+} else if (input.includes("Fixer fixture")) {
+  writeFileSync("needs-fix.txt", "defect marker\\n", "utf8");
+  console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"Created needs-fix.txt for review"}}));
+} else if (input.includes("Cross repository fixture with automatic fixer") && input.includes("Implement the product change")) {
+  writeFileSync("needs-fix.txt", "cross-repository defect marker\\n", "utf8");
+  console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"Created the repository-scoped defect marker for review"}}));
+} else if (input.includes("Shortcut fixture")) {
+  mkdirSync("test", {recursive:true});
+  writeFileSync("test/shortcut.test.ts", "test.skip('important behavior', () => {});\\n", "utf8");
+  console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"Added shortcut test"}}));
 } else {
   writeFileSync("result.txt", "created by worker\\n", "utf8");
   console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"Created result.txt"}}));
@@ -90,6 +139,56 @@ if (process.argv.includes("--version")) {
   await writeFile(wrapper, `#!/bin/sh\n"${process.execPath}" "${script}" "$@"\n`, "utf8");
   await chmod(wrapper, 0o755);
   return wrapper;
+}
+
+async function startFakeOllama(): Promise<{ baseUrl: string; close: () => Promise<void> }> {
+  const beforeHash = createHash("sha256").update("DEVHARMONICS_LOCAL_TOOL_BEFORE\n").digest("hex");
+  const server = createServer(async (request, response) => {
+    const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    response.setHeader("content-type", "application/json");
+    if (url.pathname === "/api/version") {
+      response.end(JSON.stringify({ version: "fixture-1.0" }));
+      return;
+    }
+    if (url.pathname === "/api/tags") {
+      response.end(JSON.stringify({ models: [{ name: "fixture-writer:14b", model: "fixture-writer:14b", size: 1_000, digest: "fixture" }] }));
+      return;
+    }
+    if (url.pathname === "/api/show") {
+      response.end(JSON.stringify({ capabilities: ["completion"], details: { parameter_size: "14B", family: "fixture" } }));
+      return;
+    }
+    if (url.pathname === "/api/chat") {
+      let raw = "";
+      for await (const chunk of request) raw += chunk;
+      const body = JSON.parse(raw) as { messages?: Array<{ content?: string }> };
+      const prompt = body.messages?.[0]?.content ?? "";
+      const toolResultCount = (prompt.match(/TOOL RESULTS FOR STEP/g) ?? []).length;
+      let content: string;
+      if (prompt.includes("bounded local-tool qualification")) {
+        content = toolResultCount === 0
+          ? JSON.stringify({ toolRequests: [{ id: "qualification-read", toolId: "file.read", arguments: { path: "fixture.txt" } }] })
+          : toolResultCount === 1
+            ? JSON.stringify({ toolRequests: [{ id: "qualification-patch", toolId: "file.patch", arguments: { path: "fixture.txt", expectedSha256: beforeHash, content: "DEVHARMONICS_LOCAL_TOOL_AFTER\n" } }] })
+            : JSON.stringify({ final: "Bounded qualification completed." });
+      } else {
+        content = toolResultCount === 0
+          ? JSON.stringify({ toolRequests: [{ id: "result-patch", toolId: "file.patch", arguments: { path: "result.txt", expectedSha256: null, content: "created by bounded local tools\n" } }] })
+          : JSON.stringify({ final: "Created result.txt through the approved file.patch tool." });
+      }
+      response.end(JSON.stringify({ message: { content }, prompt_eval_count: 20, eval_count: 10 }));
+      return;
+    }
+    response.statusCode = 404;
+    response.end(JSON.stringify({ error: "not found" }));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Fake Ollama did not bind a TCP port");
+  return { baseUrl: `http://127.0.0.1:${address.port}`, close: () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())) };
 }
 
 async function createSlowArchitectCli(root: string): Promise<string> {
@@ -288,7 +387,21 @@ test("orchestrator completes a verified run through fake subscription CLIs", asy
     assert.equal(run?.tasks[0]?.checks[0]?.passed, true);
     assert.equal(run?.tasks.find((task) => task.id === "__integration__")?.status, "passed");
     assert.match(run?.finalReview ?? "", /^READY/);
+    const reviews = ledger.listReviewReceipts(runId);
+    assert.equal(reviews.length, 1);
+    assert.equal(reviews[0]!.verdict, "READY");
+    assert.notEqual(reviews[0]!.provider, "codex", "the reviewer should be independent from the implementor when another provider is available");
+    assert.equal(reviews[0]!.integrationSha256.length, 64);
+    assert.equal(reviews[0]!.invalidatedAt, null);
     assert.ok(run?.events.some((event) => event.message === "Scheduler using concurrency 37"));
+    const toolReceipts = ledger.listToolPolicyReceipts(runId);
+    assert.deepEqual(
+      toolReceipts.map((receipt) => `${receipt.toolId}:${receipt.outcome}`),
+      ["validator:diff-check:allow", "git.commit:allow", "git.merge:allow", "validator:diff-check:allow"],
+    );
+    assert.ok(toolReceipts.every((receipt) => receipt.actorRole === "coordinator"));
+    assert.ok(toolReceipts.every((receipt) => receipt.lockKeys.length === 1));
+    assert.ok(toolReceipts.filter((receipt) => receipt.toolId.startsWith("git.")).every((receipt) => receipt.attemptId !== null));
     const receiptDatabase = new DatabaseSync(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
     try {
       const attempt = receiptDatabase
@@ -302,7 +415,7 @@ test("orchestrator completes a verified run through fake subscription CLIs", asy
         connection_id: "subscription-cli:codex",
         model_id: "subscription-cli:codex:model:gpt-5-6-terra",
         model_resolution: "concrete",
-        adapter_version: "0.4.0",
+        adapter_version: "0.5.0",
         runtime_version: "fake 1.0",
         model_settings_json: '{"effort":"medium"}',
         failure_kind: null,
@@ -321,6 +434,143 @@ test("orchestrator completes a verified run through fake subscription CLIs", asy
     );
   } finally {
     ledger.close();
+    if (runId) {
+      const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
+      await runProcess({ command: "git", args: ["worktree", "remove", "--force", path.join(runRoot, "tasks", "one")], cwd: project, timeoutMs: 30_000 });
+      await runProcess({ command: "git", args: ["worktree", "remove", "--force", path.join(runRoot, "integration")], cwd: project, timeoutMs: 30_000 });
+      await rm(runRoot, { recursive: true, force: true });
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("high-risk orchestration requires two independent provider reviews", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-review-quorum-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  config.routing.reviewer.preferredTier = "standard";
+  for (const provider of ["codex", "claude", "gemini"] as const) {
+    config.connections[provider].command = command;
+    config.connections[provider].timeoutMs = 30_000;
+  }
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  const ledger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  try {
+    const runId = await new Orchestrator(ledger).run({ goal: "High-risk fixture", projectPath: project, agents: 1 });
+    const run = ledger.getRun(runId);
+    assert.equal(run?.status, "ready", run?.finalReview ?? "missing final review");
+    const reviews = ledger.listReviewReceipts(runId);
+    assert.equal(reviews.length, 2);
+    assert.equal(new Set(reviews.map((review) => review.provider)).size, 2);
+    assert.ok(reviews.every((review) => review.provider !== "codex"), "both reviewers must be independent from the implementor provider");
+    assert.ok(reviews.every((review) => review.verdict === "READY"));
+    assert.ok(run?.events.some((event) => event.kind === "review.quorum_passed"));
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("review fixer changes evidence, invalidates the rejected receipt, and requires re-review", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-review-fixer-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  for (const provider of ["codex", "claude", "gemini"] as const) {
+    config.connections[provider].command = command;
+    config.connections[provider].timeoutMs = 30_000;
+  }
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  const ledger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  try {
+    const runId = await new Orchestrator(ledger).run({ goal: "Fixer fixture", projectPath: project, agents: 1 });
+    const run = ledger.getRun(runId);
+    assert.equal(run?.status, "ready", run?.finalReview ?? "missing final review");
+    const reviews = ledger.listReviewReceipts(runId);
+    assert.equal(reviews.length, 2);
+    assert.equal(reviews[0]!.verdict, "NOT_READY");
+    assert.ok(reviews[0]!.invalidatedAt, "the rejected review must remain retained but invalidated");
+    assert.equal(reviews[1]!.verdict, "READY");
+    assert.equal(reviews[1]!.invalidatedAt, null);
+    assert.notEqual(reviews[0]!.integrationSha256, reviews[1]!.integrationSha256);
+    assert.equal(run?.tasks.find((task) => task.id === "__review_fix_1")?.status, "passed");
+    assert.ok(run?.events.some((event) => event.kind === "review.invalidated"));
+    assert.ok(run?.events.some((event) => event.kind === "fixer.completed"));
+    assert.ok(run?.events.some((event) => event.kind === "review.quorum_passed"));
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("green validators cannot hide a verification-integrity shortcut", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-integrity-shortcut-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  const ledger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  try {
+    const runId = await new Orchestrator(ledger).run({ goal: "Shortcut fixture", projectPath: project, agents: 1 });
+    const run = ledger.getRun(runId);
+    assert.equal(run?.status, "not_ready");
+    const integration = run?.tasks.find((task) => task.id === "__integration__");
+    assert.equal(integration?.checks.find((check) => check.name === "diff-check")?.passed, true);
+    const integrity = integration?.checks.find((check) => check.name === "verification-integrity");
+    assert.equal(integrity?.passed, false);
+    assert.match(integrity?.stdout ?? "", /test-skipped/);
+    assert.match(run?.finalReview ?? "", /^READY/, "the reviewer may pass while the independent integrity gate still blocks readiness");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("qualified Ollama implementor completes a bounded receipted local-tool change", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-local-tool-orchestration-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  const ollama = await startFakeOllama();
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  config.localRuntimes.ollama = [{ id: "system", displayName: "Fixture Ollama", baseUrl: ollama.baseUrl, enabled: true }];
+  config.routing.worker.modelId = "ollama:fixture-writer:14b";
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  const ledger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  let runId = "";
+  try {
+    runId = await new Orchestrator(ledger).run({ goal: "Local orchestrator fixture", projectPath: project, agents: 1 });
+    const run = ledger.getRun(runId);
+    assert.equal(run?.status, "ready", run?.finalReview ?? "missing final review");
+    assert.equal(run?.tasks.find((task) => task.id === "one")?.provider, "ollama");
+    const localQualifications = ledger.listModelQualifications("ollama:fixture-writer:14b");
+    assert.ok(localQualifications.some((qualification) => qualification.role === "local_tools" && qualification.passed));
+    const receipts = ledger.listToolPolicyReceipts(runId);
+    assert.ok(receipts.some((receipt) => receipt.toolId === "file.patch" && receipt.actorRole === "worker" && receipt.outcome === "allow"));
+    assert.ok(receipts.some((receipt) => receipt.toolId === "git.commit" && receipt.outcome === "allow"));
+    const integrationRoot = path.join(os.tmpdir(), "devharmonics", runId, "integration");
+    assert.equal((await readFile(path.join(integrationRoot, "result.txt"), "utf8")).replace(/\r\n/g, "\n"), "created by bounded local tools\n");
+  } finally {
+    ledger.close();
+    await ollama.close();
     if (runId) {
       const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
       await runProcess({ command: "git", args: ["worktree", "remove", "--force", path.join(runRoot, "tasks", "one")], cwd: project, timeoutMs: 30_000 });
@@ -401,7 +651,7 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
       defaultProject: string;
       providers: Array<{ name: string; setupSteps: string[] }>;
     };
-    assert.deepEqual(value.product, { name: "DevHarmonics", version: "0.4.0" });
+    assert.deepEqual(value.product, { name: "DevHarmonics", version: "0.5.0" });
     assert.equal(value.defaultProject, project);
     assert.equal(value.providers.length, 3);
     assert.ok(value.providers.find((provider) => provider.name === "gemini")?.setupSteps.some((step) => step.includes("one-time code")));
@@ -486,6 +736,13 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
       }),
     });
     assert.equal(invalidModelResponse.status, 400);
+    const malformedProductResponse = await fetch(`${dashboard.url}/api/products`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{not-json",
+    });
+    assert.equal(malformedProductResponse.status, 400);
+    assert.deepEqual(await malformedProductResponse.json(), { error: "Request body must contain valid JSON" });
     const runsResponse = await fetch(`${dashboard.url}/api/runs`);
     const runsText = await runsResponse.text();
     assert.equal(runsText.includes(serverSecret), false);
@@ -496,6 +753,26 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
     assert.ok(longRun?.goalSummary);
     assert.ok(longRun.goalSummary.length <= 180, longRun.goalSummary);
     assert.match(longRun.goalSummary, /…$/);
+    const reportResponse = await fetch(`${dashboard.url}/api/runs/${runId}/report`);
+    assert.equal(reportResponse.status, 200);
+    const reportValue = await reportResponse.json() as { runId: string; verdict: string; evidenceHash: string };
+    assert.equal(reportValue.runId, runId);
+    assert.equal(reportValue.verdict, "INCONCLUSIVE");
+    assert.equal(reportValue.evidenceHash.length, 64);
+    const exportResponse = await fetch(`${dashboard.url}/api/runs/${runId}/evidence/export`);
+    assert.equal(exportResponse.status, 200);
+    assert.match(exportResponse.headers.get("content-disposition") ?? "", new RegExp(`attachment; filename="devharmonics-${runId}-evidence\\.json"`));
+    const exportValue = await exportResponse.json() as { version: number; evidenceVersion: number; integritySha256: string; report: { runId: string } };
+    assert.equal(exportValue.version, 1);
+    assert.equal(exportValue.evidenceVersion, 4);
+    assert.equal(exportValue.integritySha256, reportValue.evidenceHash);
+    assert.equal(exportValue.report.runId, runId);
+    const reporterMutation = await fetch(`${dashboard.url}/api/runs/${runId}/report`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(reporterMutation.status, 404, "the read-only reporter must expose no mutation route");
     const replay = await fetch(`${dashboard.url}/api/runs/${runId}/events?after=${firstCursor}&limit=1`);
     assert.equal(replay.status, 200);
     const replayValue = (await replay.json()) as {
@@ -532,22 +809,466 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
 
     const indexResponse = await fetch(`${dashboard.url}/`);
     const indexHtml = await indexResponse.text();
-    assert.match(indexHtml, /\/app\.css\?v=0\.4\.0/);
-    assert.match(indexHtml, /\/app\.js\?v=0\.4\.0/);
+    assert.match(indexHtml, /\/app\.css\?v=0\.5\.0/);
+    assert.match(indexHtml, /\/app\.js\?v=0\.5\.0/);
     assert.equal(indexResponse.headers.get("cache-control"), "no-store");
     assert.equal(indexResponse.headers.get("expires"), "0");
 
-    const appScript = await fetch(`${dashboard.url}/app.js?v=0.4.0`).then((response) => response.text());
+    const appScript = await fetch(`${dashboard.url}/app.js?v=0.5.0`).then((response) => response.text());
     assert.match(appScript, /new EventSource/);
     assert.doesNotMatch(appScript, /setInterval\(refreshRuns/);
     assert.match(appScript, /autonomy:\s*\$\("#run-autonomy"\)\.value/);
     assert.match(appScript, /window\.scrollTo\(\{\s*top:\s*0/);
+    assert.match(appScript, /\/api\/runs\/\$\{runId\}\/report/);
+    assert.match(appScript, /\/api\/runs\/\$\{runId\}\/evidence\/export/);
+    assert.match(appScript, /data-qualify-benchmark/);
+    assert.match(appScript, /model\.qualified\s*&&\s*!model\.qualificationStale\s*&&\s*!model\.excluded/);
+    assert.match(appScript, /Specialist scheduling requires the benchmark pass/);
+    assert.match(appScript, /function isModelSchedulable\(model\)/);
+    assert.match(appScript, /function hasCurrentOperationalQualification\(model\)/);
+    assert.match(appScript, /function hasCurrentQualificationForUiRole\(model, role\)/);
+    assert.match(appScript, /hasCurrentQualificationForUiRole\(model, role\)/);
+    assert.match(appScript, /not currently role-qualified/);
+    assert.match(appScript, /isModelSchedulable\(qualifiedModel\)\s*\?\s*"It is active and schedulable\."/);
+    assert.match(appScript, /Role-qualified models/);
+    assert.match(appScript, /Qualified only for passing roles; failed roles remain unschedulable/);
+    assert.match(appScript, /No current role qualification; not schedulable/);
 
-    const appStyles = await fetch(`${dashboard.url}/app.css?v=0.4.0`).then((response) => response.text());
+    const appStyles = await fetch(`${dashboard.url}/app.css?v=0.5.0`).then((response) => response.text());
     assert.match(appStyles, /@media \(max-width:\s*1200px\)[\s\S]*?\.board\s*\{\s*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
     assert.match(appStyles, /@media \(max-width:\s*950px\)[\s\S]*?\.run-list\s*\{[\s\S]*?display:\s*flex/);
     assert.match(appStyles, /\.app-shell\s*\{[^}]*overflow-x:\s*clip/);
     assert.match(appStyles, /\.run-list\s*\{[^}]*max-width:\s*100%/);
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("objective preview creates no run and exact approved revision executes without replanning", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-objective-preview-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  config.runPolicy.requirePlanApproval = true;
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  let runId = "";
+  try {
+    const created = await fetch(`${dashboard.url}/api/objectives`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        outcome: "Local orchestrator fixture: create the exact approved result",
+        acceptanceCriteria: ["Create result.txt"],
+        constraints: ["Use the configured validator"],
+        projectPath: project,
+        repositoryIds: [],
+        risk: "medium",
+        autonomy: "supervised",
+        priority: "normal",
+        policyNotes: [],
+      }),
+    });
+    assert.equal(created.status, 201, await created.clone().text());
+    const objective = (await created.json()) as { objective: { id: string } };
+    const before = await fetch(`${dashboard.url}/api/runs`).then((response) => response.json() as Promise<{ runs: unknown[] }>);
+    assert.equal(before.runs.length, 0, "saving an objective draft must not create a run");
+
+    const proposed = await fetch(`${dashboard.url}/api/objectives/${objective.objective.id}/plans`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabledProviders: ["codex", "claude", "gemini"] }),
+    });
+    assert.equal(proposed.status, 201, await proposed.clone().text());
+    const proposal = (await proposed.json()) as { revision: { revision: number; plan: { summary: string } }; preview: { assignments: unknown[] } };
+    assert.equal(proposal.revision.revision, 1);
+    assert.equal(proposal.revision.plan.summary, "fixture plan");
+    assert.ok(proposal.preview.assignments.length > 0);
+    const afterPreview = await fetch(`${dashboard.url}/api/runs`).then((response) => response.json() as Promise<{ runs: unknown[] }>);
+    assert.equal(afterPreview.runs.length, 0, "plan preview must not create a run");
+
+    const started = await fetch(`${dashboard.url}/api/objectives/${objective.objective.id}/plans/1/start`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agents: 1, enabledProviders: ["codex", "claude", "gemini"] }),
+    });
+    assert.equal(started.status, 202, await started.clone().text());
+    runId = ((await started.json()) as { runId: string }).runId;
+    const getRun = () => fetch(`${dashboard.url}/api/runs/${runId}`).then((response) => response.json() as Promise<{
+      status: string;
+      objectiveId: string | null;
+      approvedPlanRevision: number | null;
+      plan: { summary: string } | null;
+      events: Array<{ kind: string }>;
+    }>);
+    const run = await poll(getRun, (value) => ["ready", "not_ready", "failed"].includes(value.status), 30_000);
+    assert.ok(["ready", "not_ready"].includes(run.status), JSON.stringify(run, null, 2));
+    assert.equal(run.objectiveId, objective.objective.id);
+    assert.equal(run.approvedPlanRevision, 1);
+    assert.equal(run.plan?.summary, "fixture plan");
+    assert.ok(run.events.some((event) => event.kind === "scheduler.started"), "approved plan must reach execution");
+    assert.ok(!run.events.some((event) => event.kind === "architect.started"), "execution must not replan an approved revision");
+  } finally {
+    await dashboard.close();
+    if (runId) {
+      const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
+      for (const worktree of [path.join(runRoot, "tasks", "one"), path.join(runRoot, "integration")]) {
+        await runProcess({ command: "git", args: ["worktree", "remove", "--force", worktree], cwd: project, timeoutMs: 30_000 });
+      }
+      await rm(runRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    }
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("cross-repository objective planning maps impact without starting an unsupported multi-repository run", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-cross-repository-plan-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  try {
+    const productResponse = await fetch(`${dashboard.url}/api/products`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "fixture-product",
+        name: "Fixture Product",
+        organizationUrl: "https://github.com/fixture-product",
+        description: "Cross-repository planning fixture",
+        repositories: [
+          {
+            id: "repo:core",
+            name: "core",
+            fullName: "fixture-product/core",
+            url: "https://github.com/fixture-product/core",
+            cloneUrl: "https://github.com/fixture-product/core.git",
+            defaultBranch: "main",
+            visibility: "public",
+            archived: false,
+            sizeKb: 100,
+            language: "TypeScript",
+            description: "Core product",
+            intelligence: { role: "module" },
+          },
+          {
+            id: "repo:docs",
+            name: "docs",
+            fullName: "fixture-product/docs",
+            url: "https://github.com/fixture-product/docs",
+            cloneUrl: "https://github.com/fixture-product/docs.git",
+            defaultBranch: "main",
+            visibility: "public",
+            archived: false,
+            sizeKb: 50,
+            language: null,
+            description: "Product documentation",
+            intelligence: { role: "documentation" },
+          },
+        ],
+      }),
+    });
+    assert.equal(productResponse.status, 201, await productResponse.clone().text());
+
+    const objectiveResponse = await fetch(`${dashboard.url}/api/objectives`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        outcome: "Cross repository fixture: implement and document the product change",
+        acceptanceCriteria: ["Implementation and documentation remain aligned"],
+        constraints: ["Plan before changing either repository"],
+        projectPath: project,
+        productId: "fixture-product",
+        repositoryIds: ["repo:core", "repo:docs"],
+        risk: "medium",
+        autonomy: "supervised",
+        priority: "normal",
+        policyNotes: [],
+      }),
+    });
+    assert.equal(objectiveResponse.status, 201, await objectiveResponse.clone().text());
+    const objective = await objectiveResponse.json() as { objective: { id: string } };
+
+    const planResponse = await fetch(`${dashboard.url}/api/objectives/${objective.objective.id}/plans`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabledProviders: ["codex", "claude", "gemini"] }),
+    });
+    assert.equal(planResponse.status, 201, await planResponse.clone().text());
+    const proposal = await planResponse.json() as {
+      revision: { revision: number; plan: { repositoryImpact: Array<{ repositoryId: string; disposition: string }>; integrationConditions: string[]; tasks: Array<{ repositoryIds: string[] }> } };
+      preview: { execution: { supported: boolean; reason: string } };
+    };
+    assert.deepEqual(
+      proposal.revision.plan.repositoryImpact.map((impact) => [impact.repositoryId, impact.disposition]),
+      [["repo:core", "affected"], ["repo:docs", "affected"]],
+    );
+    assert.deepEqual(proposal.revision.plan.tasks.flatMap((task) => task.repositoryIds).sort(), ["repo:core", "repo:docs"]);
+    assert.equal(proposal.revision.plan.integrationConditions.length, 1);
+    assert.equal(proposal.preview.execution.supported, false);
+    assert.match(proposal.preview.execution.reason, /register local checkouts|multi-repository/i);
+
+    const startResponse = await fetch(`${dashboard.url}/api/objectives/${objective.objective.id}/plans/1/start`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agents: 2, enabledProviders: ["codex", "claude", "gemini"] }),
+    });
+    assert.equal(startResponse.status, 409, await startResponse.clone().text());
+    const runs = await fetch(`${dashboard.url}/api/runs`).then((response) => response.json()) as { runs: unknown[] };
+    assert.equal(runs.runs.length, 0, "planning must not start a run before multi-repository execution exists");
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("DH-720 automatically fixes a repository-scoped finding and independently re-reviews the exact integration set", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-integration-set-"));
+  const core = await createRepository(path.join(root, "core"));
+  const docs = await createRepository(path.join(root, "docs"));
+  await git(core, ["remote", "add", "origin", "https://github.com/fixture-product/core.git"]);
+  await git(docs, ["remote", "add", "origin", "https://github.com/fixture-product/docs.git"]);
+  const coreBase = (await git(core, ["rev-parse", "HEAD"])).stdout.trim();
+  const docsBase = (await git(docs, ["rev-parse", "HEAD"])).stdout.trim();
+  const command = await createFakeCli(root);
+  await initializeProject(core);
+  const config = await loadConfig(core);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  config.reviewPolicy.reviewerCountByRisk.medium = 2;
+  config.reviewPolicy.minimumDistinctProvidersByRisk.medium = 2;
+  config.reviewPolicy.requireImplementorIndependenceByRisk.medium = true;
+  config.repository.validators["defect-free"] = { command: "node", args: ["-e", "const p=require('path');process.exit(!process.cwd().includes(p.sep+'tasks'+p.sep)&&require('fs').existsSync('needs-fix.txt')?1:0)"], timeoutMs: 60_000 };
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(core), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+  const dashboard = await startDashboard({ projectPath: core, port: 0, open: false });
+  type IntegrationSetFixture = { repositories: Array<{ repositoryId: string; localPath: string; baseCommit: string; headCommit: string; integrationBranch: string; integrationWorktreePath: string }> };
+  let runId = "";
+  let integrationSet: IntegrationSetFixture | null = null;
+  try {
+    const productResponse = await fetch(`${dashboard.url}/api/products`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "fixture-product",
+        name: "Fixture Product",
+        organizationUrl: "https://github.com/fixture-product",
+        description: "Two-repository execution fixture",
+        repositories: [
+          { id: "repo:core", name: "core", fullName: "fixture-product/core", url: "https://github.com/fixture-product/core", cloneUrl: "https://github.com/fixture-product/core.git", defaultBranch: "main", visibility: "public", archived: false, sizeKb: 100, language: "TypeScript", description: "Core product", intelligence: {} },
+          { id: "repo:docs", name: "docs", fullName: "fixture-product/docs", url: "https://github.com/fixture-product/docs", cloneUrl: "https://github.com/fixture-product/docs.git", defaultBranch: "main", visibility: "public", archived: false, sizeKb: 50, language: null, description: "Product documentation", intelligence: {} },
+        ],
+      }),
+    });
+    assert.equal(productResponse.status, 201, await productResponse.clone().text());
+    for (const [localPath, role] of [[core, "module"], [docs, "documentation"]] as const) {
+      const response = await fetch(`${dashboard.url}/api/products/fixture-product/repositories`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ localPath, role, expectedBranch: "main", owners: ["fixture"], dependencyRepositoryIds: [], governanceSources: ["README.md"], validators: role === "module" ? { "diff-check": "git diff --check", "defect-free": `node -e "const p=require('path');process.exit(!process.cwd().includes(p.sep+'tasks'+p.sep)&&require('fs').existsSync('needs-fix.txt')?1:0)"` } : { "diff-check": "git diff --check" } }),
+      });
+      assert.equal(response.status, 201, await response.clone().text());
+    }
+
+    const objectiveResponse = await fetch(`${dashboard.url}/api/objectives`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        outcome: "Cross repository fixture with automatic fixer: implement and document the product change",
+        acceptanceCriteria: ["Both repositories contain the approved result"],
+        constraints: ["Keep the primary checkouts unchanged"],
+        projectPath: core,
+        productId: "fixture-product",
+        repositoryIds: ["repo:core", "repo:docs"],
+        risk: "medium",
+        autonomy: "supervised",
+        priority: "normal",
+        policyNotes: [],
+      }),
+    });
+    assert.equal(objectiveResponse.status, 201, await objectiveResponse.clone().text());
+    const objective = await objectiveResponse.json() as { objective: { id: string } };
+    const planResponse = await fetch(`${dashboard.url}/api/objectives/${objective.objective.id}/plans`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabledProviders: ["codex", "claude", "gemini"] }),
+    });
+    assert.equal(planResponse.status, 201, await planResponse.clone().text());
+    const proposal = await planResponse.json() as { preview: { execution: { supported: boolean; reason: string } } };
+    assert.equal(proposal.preview.execution.supported, true, proposal.preview.execution.reason);
+
+    const startResponse = await fetch(`${dashboard.url}/api/objectives/${objective.objective.id}/plans/1/start`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agents: 2, enabledProviders: ["codex", "claude", "gemini"] }),
+    });
+    assert.equal(startResponse.status, 202, await startResponse.clone().text());
+    runId = ((await startResponse.json()) as { runId: string }).runId;
+    const run = await poll(
+      () => fetch(`${dashboard.url}/api/runs/${runId}`).then((response) => response.json() as Promise<{ status: string; finalReview: string | null }>),
+      (candidate) => ["ready", "not_ready", "failed"].includes(candidate.status),
+      45_000,
+    );
+    assert.equal(run.status, "ready", run.finalReview ?? "run did not become ready");
+    assert.match(run.finalReview ?? "", /repo:core .* -> .*repo:docs/s);
+
+    const integrationResponse = await fetch(`${dashboard.url}/api/runs/${runId}/integration-set`);
+    assert.equal(integrationResponse.status, 200, await integrationResponse.clone().text());
+    integrationSet = await integrationResponse.json() as IntegrationSetFixture;
+    assert.ok(integrationSet);
+    assert.equal(integrationSet.repositories.length, 2);
+    const byId = new Map(integrationSet.repositories.map((repository) => [repository.repositoryId, repository]));
+    assert.equal(byId.get("repo:core")?.baseCommit, coreBase);
+    assert.equal(byId.get("repo:docs")?.baseCommit, docsBase);
+    assert.notEqual(byId.get("repo:core")?.headCommit, coreBase);
+    assert.notEqual(byId.get("repo:docs")?.headCommit, docsBase);
+    assert.equal((await readFile(path.join(byId.get("repo:core")!.integrationWorktreePath, "result.txt"), "utf8")).replace(/\r\n/g, "\n"), "corrected by independent fixer\n");
+    assert.equal((await readFile(path.join(byId.get("repo:docs")!.integrationWorktreePath, "result.txt"), "utf8")).replace(/\r\n/g, "\n"), "created by worker\n");
+    await assert.rejects(readFile(path.join(byId.get("repo:core")!.integrationWorktreePath, "needs-fix.txt"), "utf8"));
+    await assert.rejects(readFile(path.join(core, "result.txt"), "utf8"));
+    await assert.rejects(readFile(path.join(docs, "result.txt"), "utf8"));
+    assert.equal((await git(core, ["status", "--porcelain"])).stdout.trim(), "");
+    assert.equal((await git(docs, ["status", "--porcelain"])).stdout.trim(), "");
+    const ledger = new Ledger(path.join(devHarmonicsDirectory(core), "devharmonics.db"));
+    try {
+      const reviews = ledger.listReviewReceipts(runId);
+      assert.equal(reviews.length, 4);
+      assert.ok(reviews.slice(0, 2).every((review) => review.invalidatedAt), "every receipt from the rejected multi-repository quorum must be retained but invalidated");
+      assert.ok(reviews.slice(0, 2).some((review) => review.verdict === "NOT_READY"), "the rejected quorum must retain its blocking review");
+      assert.ok(reviews.slice(2).every((review) => review.verdict === "READY" && review.invalidatedAt === null));
+      assert.equal(new Set(reviews.slice(2).map((review) => review.provider)).size, 2, "the replacement quorum must use distinct providers");
+      assert.notEqual(reviews[0]!.integrationSha256, reviews[2]!.integrationSha256);
+      const retained = ledger.getRun(runId);
+      const integrationTaskId = repositoryTaskIds("__integration__", ["repo:core"]).get("repo:core")!;
+      const repairTaskId = repositoryTaskIds("__review_fix_1", ["repo:core"]).get("repo:core")!;
+      assert.equal(retained?.tasks.find((task) => task.id === integrationTaskId)?.checks.find((check) => check.name === "defect-free")?.passed, false, "the initial repository validator must detect the defect marker");
+      assert.equal(retained?.tasks.find((task) => task.id === repairTaskId)?.status, "passed");
+      assert.ok(retained?.tasks.find((task) => task.id === repairTaskId)?.checks.filter((check) => check.name === "defect-free").some((check) => check.passed), "the fixed integration branch must pass the same repository validator");
+      assert.ok(retained?.events.some((event) => event.kind === "review.invalidated"));
+      assert.ok(retained?.events.some((event) => event.kind === "fixer.completed"));
+      assert.ok(retained?.events.some((event) => event.kind === "review.quorum_passed"));
+    } finally {
+      ledger.close();
+    }
+    const evidenceExport = await fetch(`${dashboard.url}/api/runs/${runId}/evidence/export`).then((response) => response.json()) as { evidence: { integrationSet: IntegrationSetFixture } };
+    assert.deepEqual(evidenceExport.evidence.integrationSet.repositories.map((repository) => repository.repositoryId), ["repo:core", "repo:docs"]);
+  } finally {
+    await dashboard.close();
+    if (integrationSet) {
+      for (const repository of integrationSet.repositories) {
+        const taskId = repository.repositoryId === "repo:core" ? "core" : "docs";
+        const repositoryRoot = repository.repositoryId === "repo:core" ? core : docs;
+        await runProcess({ command: "git", args: ["worktree", "remove", "--force", path.join(path.dirname(repository.integrationWorktreePath), "tasks", taskId)], cwd: repositoryRoot, timeoutMs: 30_000 });
+        if (repository.repositoryId === "repo:core") await runProcess({ command: "git", args: ["worktree", "remove", "--force", path.join(path.dirname(repository.integrationWorktreePath), "tasks", "__review_fix_1_repo-core")], cwd: repositoryRoot, timeoutMs: 30_000 });
+        await runProcess({ command: "git", args: ["worktree", "remove", "--force", repository.integrationWorktreePath], cwd: repositoryRoot, timeoutMs: 30_000 });
+      }
+    }
+    if (runId) await rm(path.join(os.tmpdir(), "devharmonics", runId), { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("Workbench creates a durable read-only discussion and converts it to an objective without starting a run", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-workbench-api-"));
+  const project = await createRepository(root);
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  try {
+    const pageText = await fetch(dashboard.url).then((response) => response.text());
+    assert.match(pageText, /Multi-model Workbench/);
+    assert.match(pageText, /Read-only by design/);
+
+    const createdResponse = await fetch(`${dashboard.url}/api/workbench`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectPath: project, title: "Explore a safe migration" }),
+    });
+    assert.equal(createdResponse.status, 201);
+    const created = await createdResponse.json() as { session: { id: string; mode: string } };
+    assert.equal(created.session.mode, "read_only");
+
+    const detail = await fetch(`${dashboard.url}/api/workbench/${created.session.id}`).then((response) => response.json()) as { messages: unknown[] };
+    assert.deepEqual(detail.messages, []);
+    const beforeRuns = await fetch(`${dashboard.url}/api/runs`).then((response) => response.json()) as { runs: unknown[] };
+    assert.equal(beforeRuns.runs.length, 0);
+
+    const convertedResponse = await fetch(`${dashboard.url}/api/workbench/${created.session.id}/convert`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        outcome: "Prepare the safe migration",
+        acceptanceCriteria: ["Migration plan is reviewable"],
+        constraints: ["Do not change the repository during discovery"],
+        projectPath: project,
+        repositoryIds: [],
+        risk: "medium",
+        autonomy: "supervised",
+        priority: "normal",
+        policyNotes: [],
+      }),
+    });
+    assert.equal(convertedResponse.status, 201);
+    const converted = await convertedResponse.json() as { objective: { id: string }; session: { objectiveId: string } };
+    assert.equal(converted.session.objectiveId, converted.objective.id);
+    const afterRuns = await fetch(`${dashboard.url}/api/runs`).then((response) => response.json()) as { runs: unknown[] };
+    assert.equal(afterRuns.runs.length, 0);
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("product registry inspects and retains a local repository without changing or running it", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-product-registry-api-"));
+  const project = await createRepository(root);
+  await writeFile(path.join(project, "local-note.txt"), "uncommitted\n", "utf8");
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  try {
+    const productResponse = await fetch(`${dashboard.url}/api/products`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "civicsuite", name: "CivicSuite", organizationUrl: "https://github.com/civicsuite", description: "Fixture product", repositories: [] }),
+    });
+    assert.equal(productResponse.status, 201);
+
+    const repositoryResponse = await fetch(`${dashboard.url}/api/products/civicsuite/repositories`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        localPath: project,
+        role: "umbrella",
+        expectedBranch: "main",
+        owners: ["product-platform"],
+        dependencyRepositoryIds: [],
+        governanceSources: ["README.md"],
+        validators: { test: "npm test" },
+      }),
+    });
+    assert.equal(repositoryResponse.status, 201);
+    const registered = await repositoryResponse.json() as { repository: { role: string; localPath: string; inspection: { dirty: boolean; currentBranch: string } } };
+    assert.equal(registered.repository.role, "umbrella");
+    assert.equal(registered.repository.localPath, path.resolve(project));
+    assert.equal(registered.repository.inspection.dirty, true);
+    assert.equal(registered.repository.inspection.currentBranch, "main");
+
+    const portfolio = await fetch(`${dashboard.url}/api/products`).then((response) => response.json()) as { products: Array<{ repositories: Array<{ owners: string[]; validators: Record<string, { command: string }> }> }> };
+    assert.deepEqual(portfolio.products[0]?.repositories[0]?.owners, ["product-platform"]);
+    assert.equal(portfolio.products[0]?.repositories[0]?.validators.test?.command, "npm");
+    const runs = await fetch(`${dashboard.url}/api/runs`).then((response) => response.json()) as { runs: unknown[] };
+    assert.equal(runs.runs.length, 0);
   } finally {
     await dashboard.close();
     await rm(root, { recursive: true, force: true });

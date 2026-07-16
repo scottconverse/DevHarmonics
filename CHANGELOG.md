@@ -4,6 +4,50 @@ All notable DevHarmonics changes are documented here.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-15
+
+### Added
+
+- Immutable source-backed product-intelligence snapshots over configured canonical repository files, retaining exact HEAD revisions, blob/content hashes, working-tree state, explicit subject-aware claims, cited contradictions, and missing/unsafe-source findings without modifying repositories.
+- Products-page **Scan intelligence** controls and planning-context injection of the latest bounded snapshot findings; Git tags are deliberately excluded as maturity evidence.
+- Multi-repository final review now performs first-use premium reviewer qualification before adaptive routing, closing a live-run sequencing gap that could leave an available model unschedulable for review.
+- A local product/repository registry that preserves multi-repository boundaries and records repository roles, owners, dependencies, validator commands, governance sources, branch/HEAD/remote identity, dirty state, and compatibility issues through read-only Git inspection.
+- Product-aware objective composition and cross-repository planning with explicit repository selection, affected/excluded impact rationale, repository-scoped tasks, required integration conditions, and fail-closed topology checks before execution.
+- The first DH-720 exact integration-set execution slice: one repository per task; isolated per-repository integration/task branches and worktrees pinned to retained base commits; concurrent work across repositories with serialized same-repository merges; repository-local validators and verification-integrity checks; aggregate context-only review; exact base/HEAD evidence in the ledger, export, API, and run UI; and no mutation of primary checkouts.
+- Configured multi-repository review quorums with implementor independence and distinct-provider requirements, exact repository-scoped finding assignment, automatic fixer tasks in the affected repository worktrees, repository-local revalidation, review-evidence invalidation, and mandatory independent re-review.
+- A durable, discussion-only Workbench for project questions and side-by-side consultation of selected qualified models, with exact provider/model/usage attribution and explicit conversion into a linked objective draft without starting a run.
+- Durable structured objective drafts and immutable plan revisions with approval rationale, exact-revision run linkage, and restart-safe persistence.
+- A two-step objective composer that previews task dependencies, repository scope, permissions, checks, proposed model assignments, and capacity before execution.
+- Bounded Ollama implementation through scoped `file.read`, `file.search`, and hash-checked `file.patch` tools inside the assigned worktree, with typed policy and execution receipts.
+- Mellum2 Instruct and Thinking profiles as separate local specialist upgrade tracks, with published capability provenance and no automatic download or activation.
+- A machine-checked local specialist benchmark covering strict structured output, contradiction detection, and requirement counting; Mellum2 scheduling requires this benchmark in addition to its role qualification.
+- A visible **Benchmark specialist** model action plus family, capability, parameter-size, and quantization details in the model fleet.
+
+### Changed
+
+- Google Antigravity is now represented as one subscription connection exposing Google, Anthropic, and OpenAI model vendors rather than being presented as synonymous with Gemini. The legacy `gemini` configuration key remains an internal compatibility alias.
+- Attempt and Workbench attribution now distinguishes the requested Antigravity model from runtime-verified actual identity; an unverified request is no longer reported as proof that the requested model executed.
+- Supported multi-repository plans can now start when all affected repositories have compatible local checkouts, every task targets exactly one repository, and explicit integration conditions are present. Resume reconstruction, cleanup, pushes/pull requests, and one task spanning repositories remain deferred and fail closed where policy requires them.
+- Narrow, low-risk single-scope implementation tasks can use the economy specialist lane; standard, high-risk, architectural, and release work retain stronger tier requirements.
+- Manual assignments and adaptive routing now enforce declared code, tool, vision, and structured-output capability needs.
+- Stale models are excluded from role selectors, and local family-tracked workers must pass bounded-tool qualification before promotion.
+- Routing model selectors are role-aware; incompatible existing choices remain visible as disabled warnings instead of appearing usable for roles they have not passed.
+
+### Fixed
+
+- Review receipts are now cryptographically bound to the exact plan, check evidence, task reports, diff, and repository base/HEAD set; the immutable reporter fails closed when retained evidence no longer matches.
+- Architect qualification now tries the next eligible exact model on the same provider before abandoning that provider.
+- Internal multi-repository integration and repair task IDs retain readable slugs plus collision-resistant repository hashes.
+- Cancellation and shutdown now settle every concurrent active attempt before returning.
+- Malformed JSON requests return a stable HTTP 400 response instead of an internal-server error.
+- Repository validators cannot escape their assigned worktree through a relative working directory.
+- OpenRouter spending gates now atomically reserve concurrent Workbench and run spend in the shared SQLite ledger. Durable lifecycle state and reservation-bound receipts reclaim expired pre-invocation leases and settle the final receipt atomically, while ambiguous invoked failures remain reserved. Unknown prices fail closed, and accepted API requests carry a hard completion-token ceiling used for their conservative maximum-cost reservation.
+- Landing-page manual links now open rendered documentation, the illustrated run console reflows on compact screens, and public architecture/identity copy matches the v0.5 multi-repository reviewer-quorum topology.
+- A task retry can no longer report success while an existing task-branch commit remains unmerged.
+- Antigravity quota exhaustion is scoped to the provider-reported **Gemini Models** or **Claude and GPT Models** group, so one exhausted group no longer cools the entire connection or blocks qualified fallback through the other group.
+- Approved objective runs execute the exact stored plan revision without invoking the architect again or depending on an in-memory approval callback.
+- Explicit local model assignment can no longer turn a read-only qualification into workspace-write authority.
+
 ## [0.4.0] - 2026-07-15
 
 ### Added
@@ -37,7 +81,7 @@ All notable DevHarmonics changes are documented here.
 - Compact run boards and metrics collapse to two columns, then one column, instead of forcing a four-column canvas.
 - Graceful server shutdown pauses and awaits active orchestrator work before closing SQLite, preventing cancellation callbacks from racing a closed ledger.
 
-## [0.3.0] - 2026-07-14
+## 0.3.0 - 2026-07-14
 
 ### Added
 
@@ -104,5 +148,5 @@ All notable DevHarmonics changes are documented here.
 - Detailed Antigravity browser-code handoff and multi-screen onboarding instructions.
 
 [0.1.0]: https://github.com/scottconverse/DevHarmonics/releases/tag/v0.1.0
+[0.5.0]: https://github.com/scottconverse/DevHarmonics/releases/tag/v0.5.0
 [0.4.0]: https://github.com/scottconverse/DevHarmonics/releases/tag/v0.4.0
-[0.3.0]: https://github.com/scottconverse/DevHarmonics/releases/tag/v0.3.0

@@ -1,4 +1,5 @@
 import type { ModelSelection, RuntimeAdapter } from "./runtime.js";
+import { parseReviewerResponse } from "./review.js";
 
 export interface DiffFileContext {
   path: string;
@@ -51,10 +52,14 @@ export async function runContextOnlyReview(input: {
   evidenceLabel?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
+  maxOutputTokens?: number;
   onChunk?: (receipt: ChunkReviewReceipt, index: number, total: number) => void;
 }): Promise<{ text: string; receipts: ChunkReviewReceipt[] }> {
   const receipts: ChunkReviewReceipt[] = [];
   const evidenceLabel = input.evidenceLabel?.trim() || "diff chunk";
+  const supportedSettings = new Set(input.adapter.connection.capabilities.modelSettings);
+  const boundedReviewSettings = Object.fromEntries(Object.entries({ temperature: 0, num_ctx: 8_192, num_predict: 512 })
+    .filter(([name]) => supportedSettings.has(name)));
   for (const [index, chunk] of input.chunks.entries()) {
     const prompt = `${input.contextHeader.trim()}
 
@@ -63,20 +68,19 @@ You are reviewing bounded ${evidenceLabel} ${index + 1} of ${input.chunks.length
 ${evidenceLabel.toUpperCase()}:
 ${chunk.content}
 
-Review only the supplied evidence against the stated goal and acceptance criteria. Flag contradictions, unsafe claims, or scope violations visible in this chunk; do not fail a chunk merely because a fact may appear in another chunk. Begin the first line with exactly READY or NOT READY and emit exactly one verdict. Do not write READY or NOT READY again after the first line. Then give concise evidence and any material risk. Do not request repository tools; every fact available to you is in this prompt.`;
+Review only the supplied evidence against the stated goal and acceptance criteria. Flag contradictions, unsafe claims, or scope violations visible in this chunk; do not fail a chunk merely because a fact may appear in another chunk. Begin the first line with exactly READY or NOT READY and emit exactly one verdict. Do not write READY or NOT READY again after the first line. Then give concise evidence and any material risk. Finish with exactly one fenced JSON object shaped as {"findings":[{"id":"stable-short-id","severity":"low|medium|high|critical","location":"repository-prefixed location such as repo:core/src/a.ts:7","rationale":"evidence-backed reason","suggestedCorrection":"bounded correction","disposition":"open"}]}. READY must use an empty findings array. Every NOT READY blocking finding must use the exact repository-prefixed location visible in the supplied evidence; if no exact location is supported, use null so DevHarmonics fails closed instead of guessing. Do not request repository tools; every fact available to you is in this prompt.`;
     const result = await input.adapter.invoke({
       role: "reviewer",
       prompt,
       cwd: input.cwd,
       permission: "read_only",
       timeoutMs: input.timeoutMs ?? 120_000,
+      ...(input.maxOutputTokens === undefined ? {} : { maxOutputTokens: input.maxOutputTokens }),
       model: {
         ...input.model,
         settings: {
           ...input.model.settings,
-          temperature: 0,
-          num_ctx: 8_192,
-          num_predict: 192,
+          ...boundedReviewSettings,
         },
       },
     }, input.signal ? { signal: input.signal } : {});
@@ -99,8 +103,17 @@ Review only the supplied evidence against the stated goal and acceptance criteri
   }
 
   const ready = receipts.every((receipt) => receipt.verdict === "READY");
+  const findings = receipts.flatMap((receipt) => parseReviewerResponse(receipt.response, {
+    provider: receipt.provider,
+    modelId: receipt.resolvedModelId,
+    connectionId: receipt.connectionId,
+  }).findings);
   const evidence = receipts.map((receipt) => {
-    const detail = receipt.response.replace(/^(?:READY|NOT READY)\b[:\s-]*/i, "").trim().slice(0, 1_200);
+    const detail = receipt.response
+      .replace(/^(?:READY|NOT READY)\b[:\s-]*/i, "")
+      .replace(/```json[\s\S]*?```/gi, "")
+      .trim()
+      .slice(0, 1_200);
     return `- ${receipt.label}: ${receipt.verdict}${detail ? ` — ${detail}` : ""}`;
   }).join("\n");
   return {
@@ -113,7 +126,11 @@ ${evidence}
 
 Material risks: ${ready ? "see the accepted chunk evidence; READY means the evidence package passed review, not that the target has no reported risks" : "one or more chunks require follow-up"}.
 
-Required follow-up: ${ready ? "review and prioritize any risks documented in the accepted evidence" : "inspect the NOT READY chunk receipts before integration"}.`,
+Required follow-up: ${ready ? "review and prioritize any risks documented in the accepted evidence" : "inspect the NOT READY chunk receipts before integration"}.
+
+\`\`\`json
+${JSON.stringify({ findings })}
+\`\`\``,
     receipts,
   };
 }

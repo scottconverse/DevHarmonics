@@ -16,6 +16,16 @@ import {
   type RunStatus,
 } from "./domain.js";
 import { redactText, redactValue } from "./redaction.js";
+import {
+  objectiveInputSchema,
+  planRevisionInputSchema,
+  repositoryInspectionSchema,
+  repositoryUpsertSchema,
+  workbenchMessageInputSchema,
+  workbenchSessionInputSchema,
+} from "./schemas.js";
+import type { ReviewFinding, StructuredReview } from "./review.js";
+import type { ProductIntelligenceSnapshot } from "./product-intelligence.js";
 import { aggregateModelPerformance, type ModelPerformanceObservation, type ModelPerformanceProfile } from "./model-performance.js";
 import { classifyWorkload } from "./model-intelligence.js";
 import {
@@ -29,13 +39,26 @@ import {
 } from "./registry.js";
 import type {
   CheckResult,
+  IntegrationRepositoryStatus,
+  IntegrationSetRecord,
+  IntegrationSetStatus,
+  ObjectiveInput,
+  ObjectiveRecord,
+  PlanRevisionRecord,
   PlannedTask,
   ProviderName,
   RunAutonomy,
   RunPlan,
+  RunObjectiveLink,
   RunSummary,
   TaskStatus,
+  ValidatorConfig,
+  WorkbenchMessageInput,
+  WorkbenchMessageRecord,
+  WorkbenchSessionInput,
+  WorkbenchSessionRecord,
 } from "./types.js";
+import { modelQuotaGroup, quotaResetAt } from "./antigravity.js";
 
 interface RunRow {
   id: string;
@@ -47,6 +70,9 @@ interface RunRow {
   final_review: string | null;
   resumed_from: string | null;
   autonomy: string;
+  objective_id: string | null;
+  approved_plan_revision: number | null;
+  plan_json: string | null;
 }
 
 interface TaskRow {
@@ -69,7 +95,7 @@ interface EventRow {
 }
 
 function healthState(failureKind: string): ConnectionHealthRecord["state"] {
-  if (failureKind === "quota_exhausted") return "quota_exhausted";
+  if (failureKind === "quota_exhausted" || failureKind === "quota_group_exhausted") return "quota_exhausted";
   if (failureKind === "rate_limited") return "rate_limited";
   if (failureKind === "authentication") return "authentication";
   if (failureKind === "incompatible") return "degraded";
@@ -79,7 +105,7 @@ function healthState(failureKind: string): ConnectionHealthRecord["state"] {
 function healthCooldownMs(failureKind: string, failures: number): number {
   const exponent = Math.max(0, Math.min(failures - 1, 8));
   if (failureKind === "authentication") return 0;
-  if (failureKind === "quota_exhausted") return Math.min(5 * 60 * 60_000, 15 * 60_000 * 2 ** exponent);
+  if (failureKind === "quota_exhausted" || failureKind === "quota_group_exhausted") return Math.min(5 * 60 * 60_000, 15 * 60_000 * 2 ** exponent);
   if (failureKind === "rate_limited") return Math.min(30 * 60_000, 60_000 * 2 ** exponent);
   if (failureKind === "incompatible") return 30 * 60_000;
   return Math.min(10 * 60_000, 30_000 * 2 ** exponent);
@@ -109,6 +135,20 @@ function mapModelHealth(row: Record<string, unknown>): ModelHealthRecord {
   };
 }
 
+function mapQuotaGroupHealth(row: Record<string, unknown>): QuotaGroupHealthRecord {
+  return {
+    connectionId: String(row.connection_id),
+    quotaGroupId: String(row.quota_group_id),
+    displayName: String(row.display_name),
+    state: String(row.state) as QuotaGroupHealthRecord["state"],
+    failureKind: row.failure_kind === null ? null : String(row.failure_kind),
+    consecutiveFailures: Number(row.consecutive_failures),
+    cooldownUntil: row.cooldown_until === null ? null : String(row.cooldown_until),
+    detail: String(row.detail),
+    lastCheckedAt: String(row.last_checked_at),
+  };
+}
+
 function isSubscriptionProvider(value: string): value is ProviderName {
   return value === "codex" || value === "claude" || value === "gemini";
 }
@@ -123,7 +163,57 @@ interface CheckRow {
   duration_ms: number;
 }
 
-export const LEDGER_SCHEMA_VERSION = 15;
+export const LEDGER_SCHEMA_VERSION = 26;
+
+export const REPOSITORY_ROLES = [
+  "umbrella",
+  "shared_platform",
+  "module",
+  "desktop",
+  "installer",
+  "documentation",
+  "release_truth",
+  "other",
+] as const;
+
+export type RepositoryRole = (typeof REPOSITORY_ROLES)[number];
+
+export interface RepositoryInspectionInput {
+  currentBranch: string | null;
+  headSha: string | null;
+  remoteUrl: string | null;
+  dirty: boolean;
+  compatibilityIssues: string[];
+  checkedAt?: string;
+}
+
+export interface RepositoryInspectionRecord extends Omit<RepositoryInspectionInput, "checkedAt"> {
+  checkedAt: string;
+}
+
+export interface RepositoryUpsertInput {
+  id: string;
+  productId: string;
+  name: string;
+  fullName: string;
+  url: string;
+  cloneUrl: string;
+  defaultBranch: string;
+  visibility: "public" | "private" | "internal" | "unknown";
+  archived: boolean;
+  sizeKb: number;
+  language: string | null;
+  description: string | null;
+  intelligence: Record<string, unknown>;
+  localPath: string | null;
+  role: RepositoryRole;
+  expectedBranch: string | null;
+  owners: string[];
+  dependencyRepositoryIds: string[];
+  validators: Record<string, ValidatorConfig>;
+  governanceSources: string[];
+  governanceRules: string[];
+}
 
 export interface RepositoryRecord {
   id: string;
@@ -133,12 +223,21 @@ export interface RepositoryRecord {
   url: string;
   cloneUrl: string;
   defaultBranch: string;
-  visibility: "public" | "private" | "internal";
+  visibility: RepositoryUpsertInput["visibility"];
   archived: boolean;
   sizeKb: number;
   language: string | null;
   description: string | null;
   intelligence: Record<string, unknown>;
+  localPath: string | null;
+  role: RepositoryRole;
+  expectedBranch: string | null;
+  owners: string[];
+  dependencyRepositoryIds: string[];
+  validators: Record<string, ValidatorConfig>;
+  governanceSources: string[];
+  governanceRules: string[];
+  inspection: RepositoryInspectionRecord | null;
   observedAt: string;
 }
 
@@ -153,7 +252,58 @@ export interface ProductRecord {
 }
 
 export interface ProductRegistration extends Omit<ProductRecord, "repositories" | "createdAt" | "updatedAt"> {
-  repositories: Array<Omit<RepositoryRecord, "productId" | "observedAt">>;
+  repositories: Array<Pick<RepositoryRecord,
+    "id" | "name" | "fullName" | "url" | "cloneUrl" | "defaultBranch" | "visibility" |
+    "archived" | "sizeKb" | "language" | "description" | "intelligence"
+  >>;
+}
+
+function sanitizedRemoteUrl(value: string | null): string | null {
+  if (value === null) return null;
+  try {
+    const parsed = new URL(value);
+    parsed.username = "";
+    parsed.password = "";
+    return parsed.toString();
+  } catch {
+    return redactText(value);
+  }
+}
+
+function repositoryRecordFromRow(row: Record<string, unknown>): RepositoryRecord {
+  const checkedAt = row.checked_at === null ? null : String(row.checked_at);
+  return {
+    id: String(row.id),
+    productId: String(row.product_id),
+    name: String(row.name),
+    fullName: String(row.full_name),
+    url: String(row.url),
+    cloneUrl: String(row.clone_url),
+    defaultBranch: String(row.default_branch),
+    visibility: String(row.visibility) as RepositoryRecord["visibility"],
+    archived: Boolean(row.archived),
+    sizeKb: Number(row.size_kb),
+    language: row.language === null ? null : String(row.language),
+    description: row.description === null ? null : String(row.description),
+    intelligence: JSON.parse(String(row.intelligence_json)) as Record<string, unknown>,
+    localPath: row.local_path === null ? null : String(row.local_path),
+    role: String(row.repository_role) as RepositoryRole,
+    expectedBranch: row.expected_branch === null ? null : String(row.expected_branch),
+    owners: JSON.parse(String(row.owners_json)) as string[],
+    dependencyRepositoryIds: JSON.parse(String(row.dependency_repository_ids_json)) as string[],
+    validators: JSON.parse(String(row.validators_json)) as Record<string, ValidatorConfig>,
+    governanceSources: JSON.parse(String(row.governance_sources_json)) as string[],
+    governanceRules: JSON.parse(String(row.governance_rules_json)) as string[],
+    inspection: checkedAt === null ? null : {
+      currentBranch: row.current_branch === null ? null : String(row.current_branch),
+      headSha: row.head_sha === null ? null : String(row.head_sha),
+      remoteUrl: row.remote_url === null ? null : String(row.remote_url),
+      dirty: Boolean(row.dirty),
+      compatibilityIssues: JSON.parse(String(row.compatibility_issues_json)) as string[],
+      checkedAt,
+    },
+    observedAt: String(row.observed_at),
+  };
 }
 
 export interface ConnectionHealthRecord {
@@ -168,6 +318,18 @@ export interface ConnectionHealthRecord {
 
 export interface ModelHealthRecord {
   modelId: string;
+  state: ConnectionHealthRecord["state"];
+  failureKind: string | null;
+  consecutiveFailures: number;
+  cooldownUntil: string | null;
+  detail: string;
+  lastCheckedAt: string;
+}
+
+export interface QuotaGroupHealthRecord {
+  connectionId: string;
+  quotaGroupId: string;
+  displayName: string;
   state: ConnectionHealthRecord["state"];
   failureKind: string | null;
   consecutiveFailures: number;
@@ -224,12 +386,55 @@ export interface InvocationReceiptInput {
   connectionId: string;
   requestedModelId?: string | null;
   resolvedModelId: string;
+  modelResolution?: string | null;
   inputTokens?: number | null;
   outputTokens?: number | null;
   costUsd?: number | null;
   durationMs?: number | null;
   workloadClass?: string | null;
   fallbackReason?: string | null;
+  paidSpendReservationId?: string | null;
+}
+
+export interface PaidSpendReservationInput {
+  scopeType: "run" | "workbench";
+  scopeId: string;
+  estimatedCostUsd: number;
+  perScopeLimitUsd: number;
+  monthlyLimitUsd: number;
+  expectedReceiptCount?: number;
+}
+
+export interface ToolPolicyReceiptInput {
+  runId: string;
+  taskId?: string | null;
+  attemptId?: number | null;
+  toolId: string;
+  actorRole: string;
+  stage: string;
+  sideEffect: string;
+  outcome: "allow" | "deny" | "require_approval";
+  reason: string;
+  request: Readonly<Record<string, unknown>>;
+  lockKeys: readonly string[];
+  approvalId?: string | null;
+}
+
+export interface ToolPolicyReceiptRecord {
+  id: number;
+  runId: string;
+  taskId: string | null;
+  attemptId: number | null;
+  toolId: string;
+  actorRole: string;
+  stage: string;
+  sideEffect: string;
+  outcome: ToolPolicyReceiptInput["outcome"];
+  reason: string;
+  request: Record<string, unknown>;
+  lockKeys: string[];
+  approvalId: string | null;
+  createdAt: string;
 }
 
 export interface BlackboardEntry {
@@ -242,12 +447,47 @@ export interface BlackboardEntry {
   createdAt: string;
 }
 
-export interface RunEvidencePackage {
+export interface ReviewReceiptRecord {
+  id: number;
+  runId: string;
+  round: number;
+  integrationSha256: string;
+  evidenceBinding: ReviewEvidenceBinding;
+  verdict: StructuredReview["verdict"];
+  provider: string;
+  modelId: string | null;
+  connectionId: string;
+  summary: string;
+  rawText: string;
+  findings: ReviewFinding[];
+  invalidatedAt: string | null;
+  invalidationReason: string | null;
+  createdAt: string;
+}
+
+export interface ReviewEvidenceBinding {
   version: 1;
+  autonomy: string;
+  planSha256: string;
+  taskReportsSha256: string;
+  diffSha256: string;
+  checksSha256: string;
+  repositories: Array<{
+    repositoryId: string;
+    baseCommit: string;
+    headCommit: string;
+  }>;
+}
+
+export interface RunEvidencePackage {
+  version: 4;
   generatedAt: string;
   run: RunSummary;
   attempts: Array<Record<string, unknown>>;
   blackboard: BlackboardEntry[];
+  toolReceipts: ToolPolicyReceiptRecord[];
+  reviews: ReviewReceiptRecord[];
+  integrationSet: IntegrationSetRecord | null;
   integritySha256: string;
 }
 
@@ -646,6 +886,300 @@ const MIGRATIONS: readonly LedgerMigration[] = [
       if (!columns.has("workload_class")) database.exec("ALTER TABLE invocation_receipts ADD COLUMN workload_class TEXT;");
     },
   },
+  {
+    version: 16,
+    name: "typed-tool-policy-receipts",
+    apply(database) {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS tool_policy_receipts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+          task_id TEXT,
+          attempt_id INTEGER REFERENCES attempts(id) ON DELETE SET NULL,
+          tool_id TEXT NOT NULL,
+          actor_role TEXT NOT NULL,
+          stage TEXT NOT NULL,
+          side_effect TEXT NOT NULL,
+          outcome TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          request_json TEXT NOT NULL,
+          lock_keys_json TEXT NOT NULL,
+          approval_id TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS tool_policy_receipts_run ON tool_policy_receipts(run_id, id);
+      `);
+    },
+  },
+  {
+    version: 17,
+    name: "structured-review-quorums",
+    apply(database) {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS review_receipts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+          round INTEGER NOT NULL,
+          integration_sha256 TEXT NOT NULL,
+          verdict TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          model_id TEXT,
+          connection_id TEXT NOT NULL,
+          summary TEXT NOT NULL,
+          raw_text TEXT NOT NULL,
+          invalidated_at TEXT,
+          invalidation_reason TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS review_findings (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          review_receipt_id INTEGER NOT NULL REFERENCES review_receipts(id) ON DELETE CASCADE,
+          finding_id TEXT NOT NULL,
+          severity TEXT NOT NULL,
+          location TEXT,
+          rationale TEXT NOT NULL,
+          suggested_correction TEXT NOT NULL,
+          disposition TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          UNIQUE(review_receipt_id, finding_id)
+        );
+        CREATE INDEX IF NOT EXISTS review_receipts_run ON review_receipts(run_id, round, id);
+        CREATE INDEX IF NOT EXISTS review_findings_receipt ON review_findings(review_receipt_id, id);
+      `);
+    },
+  },
+  {
+    version: 18,
+    name: "durable-objectives-and-plan-revisions",
+    apply(database) {
+      const runColumns = new Set(
+        (database.prepare("SELECT name FROM pragma_table_info('runs')").all() as unknown as Array<{ name: string }>).map((column) => column.name),
+      );
+      if (!runColumns.has("objective_id")) database.exec("ALTER TABLE runs ADD COLUMN objective_id TEXT REFERENCES objectives(id) ON DELETE SET NULL;");
+      if (!runColumns.has("approved_plan_revision")) database.exec("ALTER TABLE runs ADD COLUMN approved_plan_revision INTEGER;");
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS objectives (
+          id TEXT PRIMARY KEY,
+          outcome TEXT NOT NULL,
+          acceptance_criteria_json TEXT NOT NULL,
+          constraints_json TEXT NOT NULL,
+          project_path TEXT NOT NULL,
+          product_id TEXT,
+          repository_ids_json TEXT NOT NULL,
+          risk TEXT NOT NULL,
+          autonomy TEXT NOT NULL,
+          priority TEXT NOT NULL,
+          deadline TEXT,
+          policy_notes_json TEXT NOT NULL,
+          revision INTEGER NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS plan_revisions (
+          objective_id TEXT NOT NULL REFERENCES objectives(id) ON DELETE CASCADE,
+          revision INTEGER NOT NULL,
+          plan_json TEXT NOT NULL,
+          rationale TEXT NOT NULL,
+          approved INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          approved_at TEXT,
+          PRIMARY KEY (objective_id, revision)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS plan_revisions_one_approved
+          ON plan_revisions(objective_id) WHERE approved = 1;
+        CREATE INDEX IF NOT EXISTS objectives_updated_at ON objectives(updated_at DESC);
+      `);
+    },
+  },
+  {
+    version: 19,
+    name: "read-only-workbench-consultations",
+    apply(database) {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS workbench_sessions (
+          id TEXT PRIMARY KEY,
+          project_path TEXT NOT NULL,
+          title TEXT NOT NULL,
+          mode TEXT NOT NULL CHECK(mode = 'read_only'),
+          objective_id TEXT REFERENCES objectives(id) ON DELETE SET NULL,
+          converted_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS workbench_messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id TEXT NOT NULL REFERENCES workbench_sessions(id) ON DELETE CASCADE,
+          role TEXT NOT NULL,
+          content TEXT NOT NULL,
+          provider TEXT,
+          connection_id TEXT,
+          requested_model_id TEXT,
+          resolved_model_id TEXT,
+          status TEXT,
+          error TEXT,
+          input_tokens INTEGER,
+          output_tokens INTEGER,
+          cost_usd REAL,
+          duration_ms INTEGER,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS workbench_sessions_updated_at
+          ON workbench_sessions(updated_at DESC);
+        CREATE INDEX IF NOT EXISTS workbench_messages_session
+          ON workbench_messages(session_id, id);
+      `);
+    },
+  },
+  {
+    version: 20,
+    name: "local-repository-configuration-and-inspection",
+    apply(database) {
+      const columns = new Set(
+        (database.prepare("SELECT name FROM pragma_table_info('repositories')").all() as unknown as Array<{ name: string }>).map((column) => column.name),
+      );
+      const additions: Readonly<Record<string, string>> = {
+        local_path: "TEXT",
+        repository_role: "TEXT NOT NULL DEFAULT 'other'",
+        expected_branch: "TEXT",
+        owners_json: "TEXT NOT NULL DEFAULT '[]'",
+        dependency_repository_ids_json: "TEXT NOT NULL DEFAULT '[]'",
+        validators_json: "TEXT NOT NULL DEFAULT '{}'",
+        governance_sources_json: "TEXT NOT NULL DEFAULT '[]'",
+        governance_rules_json: "TEXT NOT NULL DEFAULT '[]'",
+        current_branch: "TEXT",
+        head_sha: "TEXT",
+        remote_url: "TEXT",
+        dirty: "INTEGER",
+        compatibility_issues_json: "TEXT NOT NULL DEFAULT '[]'",
+        checked_at: "TEXT",
+      };
+      for (const [name, definition] of Object.entries(additions)) {
+        if (!columns.has(name)) database.exec(`ALTER TABLE repositories ADD COLUMN ${name} ${definition};`);
+      }
+      database.exec("CREATE INDEX IF NOT EXISTS repositories_local_path ON repositories(local_path) WHERE local_path IS NOT NULL;");
+    },
+  },
+  {
+    version: 21,
+    name: "multi-repository-integration-sets",
+    apply(database) {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS integration_sets (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
+          product_id TEXT NOT NULL REFERENCES products(id) ON DELETE RESTRICT,
+          status TEXT NOT NULL,
+          integration_conditions_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS integration_set_repositories (
+          integration_set_id TEXT NOT NULL REFERENCES integration_sets(id) ON DELETE CASCADE,
+          repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE RESTRICT,
+          local_path TEXT NOT NULL,
+          base_commit TEXT NOT NULL,
+          integration_branch TEXT NOT NULL,
+          integration_worktree_path TEXT NOT NULL,
+          head_commit TEXT,
+          status TEXT NOT NULL,
+          error TEXT,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (integration_set_id, repository_id)
+        );
+        CREATE INDEX IF NOT EXISTS integration_set_repositories_status
+          ON integration_set_repositories(integration_set_id, status);
+      `);
+    },
+  },
+  {
+    version: 22,
+    name: "source-backed-product-intelligence",
+    apply(database) {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS product_intelligence_snapshots (
+          id TEXT PRIMARY KEY,
+          product_id TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+          status TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS product_intelligence_snapshots_product
+          ON product_intelligence_snapshots(product_id, created_at DESC);
+      `);
+    },
+  },
+  {
+    version: 23,
+    name: "provider-quota-groups-and-honest-model-resolution",
+    apply(database) {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS quota_group_health (
+          connection_id TEXT NOT NULL REFERENCES provider_connections(id) ON DELETE CASCADE,
+          quota_group_id TEXT NOT NULL,
+          display_name TEXT NOT NULL,
+          state TEXT NOT NULL,
+          failure_kind TEXT,
+          consecutive_failures INTEGER NOT NULL,
+          cooldown_until TEXT,
+          detail TEXT NOT NULL,
+          last_checked_at TEXT NOT NULL,
+          PRIMARY KEY (connection_id, quota_group_id)
+        );
+      `);
+      const receiptColumns = new Set(
+        (database.prepare("SELECT name FROM pragma_table_info('invocation_receipts')").all() as unknown as Array<{ name: string }>).map((column) => column.name),
+      );
+      if (!receiptColumns.has("model_resolution")) database.exec("ALTER TABLE invocation_receipts ADD COLUMN model_resolution TEXT;");
+    },
+  },
+  {
+    version: 24,
+    name: "review-evidence-bindings",
+    apply(database) {
+      const columns = new Set(
+        (database.prepare("SELECT name FROM pragma_table_info('review_receipts')").all() as unknown as Array<{ name: string }>).map((column) => column.name),
+      );
+      if (!columns.has("evidence_binding_json")) database.exec("ALTER TABLE review_receipts ADD COLUMN evidence_binding_json TEXT NOT NULL DEFAULT '{}';");
+    },
+  },
+  {
+    version: 25,
+    name: "atomic-paid-spend-reservations",
+    apply(database) {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS paid_spend_reservations (
+          id TEXT PRIMARY KEY,
+          scope_type TEXT NOT NULL CHECK(scope_type IN ('run', 'workbench')),
+          scope_id TEXT NOT NULL,
+          estimated_cost_usd REAL NOT NULL CHECK(estimated_cost_usd >= 0),
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS paid_spend_reservations_scope
+          ON paid_spend_reservations(scope_type, scope_id, expires_at);
+        CREATE INDEX IF NOT EXISTS paid_spend_reservations_month
+          ON paid_spend_reservations(created_at, expires_at);
+      `);
+    },
+  },
+  {
+    version: 26,
+    name: "paid-spend-reservation-lifecycle",
+    apply(database) {
+      const reservationColumns = new Set((database.prepare("SELECT name FROM pragma_table_info('paid_spend_reservations')").all() as unknown as Array<{ name: string }>).map((column) => column.name));
+      if (!reservationColumns.has("state")) database.exec("ALTER TABLE paid_spend_reservations ADD COLUMN state TEXT NOT NULL DEFAULT 'invoked' CHECK(state IN ('reserved', 'invoked'));");
+      if (!reservationColumns.has("expected_receipt_count")) database.exec("ALTER TABLE paid_spend_reservations ADD COLUMN expected_receipt_count INTEGER NOT NULL DEFAULT 1 CHECK(expected_receipt_count > 0);");
+      if (!reservationColumns.has("invoked_at")) database.exec("ALTER TABLE paid_spend_reservations ADD COLUMN invoked_at TEXT;");
+      const invocationColumns = new Set((database.prepare("SELECT name FROM pragma_table_info('invocation_receipts')").all() as unknown as Array<{ name: string }>).map((column) => column.name));
+      if (!invocationColumns.has("paid_spend_reservation_id")) database.exec("ALTER TABLE invocation_receipts ADD COLUMN paid_spend_reservation_id TEXT;");
+      const workbenchColumns = new Set((database.prepare("SELECT name FROM pragma_table_info('workbench_messages')").all() as unknown as Array<{ name: string }>).map((column) => column.name));
+      if (!workbenchColumns.has("paid_spend_reservation_id")) database.exec("ALTER TABLE workbench_messages ADD COLUMN paid_spend_reservation_id TEXT;");
+      database.exec(`
+        CREATE INDEX IF NOT EXISTS invocation_receipts_paid_reservation ON invocation_receipts(paid_spend_reservation_id);
+        CREATE INDEX IF NOT EXISTS workbench_messages_paid_reservation ON workbench_messages(paid_spend_reservation_id);
+      `);
+    },
+  },
 ];
 
 function summarizeGoal(goal: string, maxLength = 180): string {
@@ -655,7 +1189,7 @@ function summarizeGoal(goal: string, maxLength = 180): string {
 }
 
 const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
-  runs: ["id", "goal", "project_path", "status", "plan_json", "final_review", "resumed_from", "autonomy", "created_at", "updated_at"],
+  runs: ["id", "goal", "project_path", "status", "plan_json", "final_review", "resumed_from", "autonomy", "objective_id", "approved_plan_revision", "created_at", "updated_at"],
   tasks: [
     "run_id",
     "task_id",
@@ -754,12 +1288,29 @@ const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
   model_qualifications: ["id", "model_id", "fixture_version", "role", "passed", "score", "evidence_json", "created_at", "fingerprint"],
   connection_health: ["connection_id", "state", "failure_kind", "consecutive_failures", "cooldown_until", "detail", "last_checked_at"],
   model_health: ["model_id", "state", "failure_kind", "consecutive_failures", "cooldown_until", "detail", "last_checked_at"],
+  quota_group_health: ["connection_id", "quota_group_id", "display_name", "state", "failure_kind", "consecutive_failures", "cooldown_until", "detail", "last_checked_at"],
   blackboard_entries: ["id", "run_id", "task_id", "kind", "content", "source_attempt_id", "created_at"],
   products: ["id", "name", "organization_url", "description", "created_at", "updated_at"],
-  repositories: ["id", "product_id", "name", "full_name", "url", "clone_url", "default_branch", "visibility", "archived", "size_kb", "language", "description", "intelligence_json", "observed_at"],
+  repositories: [
+    "id", "product_id", "name", "full_name", "url", "clone_url", "default_branch", "visibility", "archived", "size_kb",
+    "language", "description", "intelligence_json", "observed_at", "local_path", "repository_role", "expected_branch", "owners_json",
+    "dependency_repository_ids_json", "validators_json", "governance_sources_json", "governance_rules_json", "current_branch",
+    "head_sha", "remote_url", "dirty", "compatibility_issues_json", "checked_at",
+  ],
   catalog_refreshes: ["provider", "status", "source", "model_count", "detail", "refreshed_at"],
   provider_catalog_models: ["id", "provider", "canonical_name", "display_name", "metadata_json", "first_seen_at", "last_seen_at", "missing_observations", "retired"],
-  invocation_receipts: ["id", "run_id", "task_id", "role", "provider", "connection_id", "requested_model_id", "resolved_model_id", "input_tokens", "output_tokens", "cost_usd", "duration_ms", "workload_class", "fallback_reason", "created_at"],
+  invocation_receipts: ["id", "run_id", "task_id", "role", "provider", "connection_id", "requested_model_id", "resolved_model_id", "model_resolution", "input_tokens", "output_tokens", "cost_usd", "duration_ms", "workload_class", "fallback_reason", "paid_spend_reservation_id", "created_at"],
+  tool_policy_receipts: ["id", "run_id", "task_id", "attempt_id", "tool_id", "actor_role", "stage", "side_effect", "outcome", "reason", "request_json", "lock_keys_json", "approval_id", "created_at"],
+  review_receipts: ["id", "run_id", "round", "integration_sha256", "evidence_binding_json", "verdict", "provider", "model_id", "connection_id", "summary", "raw_text", "invalidated_at", "invalidation_reason", "created_at"],
+  review_findings: ["id", "review_receipt_id", "finding_id", "severity", "location", "rationale", "suggested_correction", "disposition", "created_at"],
+  objectives: ["id", "outcome", "acceptance_criteria_json", "constraints_json", "project_path", "product_id", "repository_ids_json", "risk", "autonomy", "priority", "deadline", "policy_notes_json", "revision", "created_at", "updated_at"],
+  plan_revisions: ["objective_id", "revision", "plan_json", "rationale", "approved", "created_at", "approved_at"],
+  workbench_sessions: ["id", "project_path", "title", "mode", "objective_id", "converted_at", "created_at", "updated_at"],
+  workbench_messages: ["id", "session_id", "role", "content", "provider", "connection_id", "requested_model_id", "resolved_model_id", "status", "error", "input_tokens", "output_tokens", "cost_usd", "duration_ms", "paid_spend_reservation_id", "created_at"],
+  paid_spend_reservations: ["id", "scope_type", "scope_id", "estimated_cost_usd", "state", "expected_receipt_count", "invoked_at", "created_at", "expires_at"],
+  integration_sets: ["id", "run_id", "product_id", "status", "integration_conditions_json", "created_at", "updated_at"],
+  integration_set_repositories: ["integration_set_id", "repository_id", "local_path", "base_commit", "integration_branch", "integration_worktree_path", "head_commit", "status", "error", "updated_at"],
+  product_intelligence_snapshots: ["id", "product_id", "status", "snapshot_json", "created_at"],
   model_performance_policies: ["model_id", "ignored_before", "excluded", "updated_at"],
   schema_migrations: ["version", "name", "applied_at"],
 };
@@ -782,6 +1333,7 @@ export class Ledger {
     this.database = new DatabaseSync(filename);
     try {
       this.database.exec("PRAGMA foreign_keys = ON;");
+      this.database.exec("PRAGMA busy_timeout = 5000;");
       this.migrate(existed);
       this.database.exec("PRAGMA journal_mode = WAL;");
     } catch (error) {
@@ -798,15 +1350,260 @@ export class Ledger {
     return this.readSchemaVersion();
   }
 
-  createRun(goal: string, projectPath: string, resumedFrom: string | null = null, autonomy: RunAutonomy = "supervised"): string {
+  createWorkbenchSession(input: WorkbenchSessionInput): WorkbenchSessionRecord {
+    const session = workbenchSessionInputSchema.parse(input) as WorkbenchSessionInput;
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
+    this.database.prepare(`
+      INSERT INTO workbench_sessions (
+        id, project_path, title, mode, objective_id, converted_at, created_at, updated_at
+      ) VALUES (?, ?, ?, 'read_only', NULL, NULL, ?, ?)
+    `).run(id, session.projectPath, redactText(session.title), now, now);
+    return this.getWorkbenchSession(id)!;
+  }
+
+  getWorkbenchSession(id: string): WorkbenchSessionRecord | null {
+    const row = this.database.prepare("SELECT * FROM workbench_sessions WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    return row ? this.mapWorkbenchSession(row) : null;
+  }
+
+  listWorkbenchSessions(): WorkbenchSessionRecord[] {
+    const rows = this.database.prepare("SELECT * FROM workbench_sessions ORDER BY updated_at DESC, id").all() as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => this.mapWorkbenchSession(row));
+  }
+
+  appendWorkbenchMessage(input: WorkbenchMessageInput): WorkbenchMessageRecord {
+    const message = workbenchMessageInputSchema.parse(input) as WorkbenchMessageInput;
+    if (!this.getWorkbenchSession(message.sessionId)) {
+      throw new Error(`Workbench session '${message.sessionId}' was not found`);
+    }
+    const now = new Date().toISOString();
+    if (message.paidSpendReservationId) this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      const result = this.database.prepare(`
+        INSERT INTO workbench_messages (
+          session_id, role, content, provider, connection_id, requested_model_id,
+          resolved_model_id, status, error, input_tokens, output_tokens, cost_usd,
+          duration_ms, paid_spend_reservation_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        message.sessionId,
+        message.role,
+        redactText(message.content),
+        message.provider ?? null,
+        message.connectionId ?? null,
+        message.requestedModelId ?? null,
+        message.resolvedModelId ?? null,
+        message.status ?? null,
+        message.error == null ? null : redactText(message.error),
+        message.inputTokens ?? null,
+        message.outputTokens ?? null,
+        message.costUsd ?? null,
+        message.durationMs ?? null,
+        message.paidSpendReservationId ?? null,
+        now,
+      );
+      this.database.prepare("UPDATE workbench_sessions SET updated_at = ? WHERE id = ?").run(now, message.sessionId);
+      if (message.paidSpendReservationId) this.reconcilePaidSpendReservation(message.paidSpendReservationId);
+      const row = this.database.prepare("SELECT * FROM workbench_messages WHERE id = ?").get(Number(result.lastInsertRowid)) as Record<string, unknown>;
+      if (message.paidSpendReservationId) this.database.exec("COMMIT;");
+      return this.mapWorkbenchMessage(row);
+    } catch (error) {
+      if (message.paidSpendReservationId) this.database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  listWorkbenchMessages(sessionId: string): WorkbenchMessageRecord[] {
+    if (!this.getWorkbenchSession(sessionId)) {
+      throw new Error(`Workbench session '${sessionId}' was not found`);
+    }
+    const rows = this.database.prepare("SELECT * FROM workbench_messages WHERE session_id = ? ORDER BY id").all(sessionId) as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => this.mapWorkbenchMessage(row));
+  }
+
+  linkWorkbenchObjective(sessionId: string, objectiveId: string): WorkbenchSessionRecord {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const session = this.getWorkbenchSession(sessionId);
+      if (!session) throw new Error(`Workbench session '${sessionId}' was not found`);
+      const objective = this.getObjective(objectiveId);
+      if (!objective) throw new Error(`Objective '${objectiveId}' was not found`);
+      if (session.objectiveId && session.objectiveId !== objectiveId) {
+        throw new Error(`Workbench session '${sessionId}' is already linked to objective '${session.objectiveId}'`);
+      }
+      if (session.projectPath !== objective.projectPath) {
+        throw new Error("Workbench session and objective must use the same project path");
+      }
+      if (!session.objectiveId) {
+        const now = new Date().toISOString();
+        this.database.prepare(`
+          UPDATE workbench_sessions
+          SET objective_id = ?, converted_at = ?, updated_at = ?
+          WHERE id = ?
+        `).run(objectiveId, now, now, sessionId);
+      }
+      this.database.exec("COMMIT");
+      return this.getWorkbenchSession(sessionId)!;
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  createObjective(input: ObjectiveInput): ObjectiveRecord {
+    const objective = objectiveInputSchema.parse(input) as ObjectiveInput;
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    this.database.prepare(`
+      INSERT INTO objectives (
+        id, outcome, acceptance_criteria_json, constraints_json, project_path, product_id,
+        repository_ids_json, risk, autonomy, priority, deadline, policy_notes_json,
+        revision, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+    `).run(
+      id,
+      redactText(objective.outcome),
+      JSON.stringify(objective.acceptanceCriteria.map(redactText)),
+      JSON.stringify(objective.constraints.map(redactText)),
+      objective.projectPath,
+      objective.productId ?? null,
+      JSON.stringify(objective.repositoryIds),
+      objective.risk,
+      objective.autonomy,
+      objective.priority,
+      objective.deadline ?? null,
+      JSON.stringify(objective.policyNotes.map(redactText)),
+      now,
+      now,
+    );
+    return this.getObjective(id)!;
+  }
+
+  updateObjective(id: string, input: ObjectiveInput, expectedRevision: number): ObjectiveRecord {
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+      throw new Error("Expected objective revision must be a positive integer");
+    }
+    const objective = objectiveInputSchema.parse(input) as ObjectiveInput;
+    const result = this.database.prepare(`
+      UPDATE objectives SET
+        outcome = ?, acceptance_criteria_json = ?, constraints_json = ?, project_path = ?,
+        product_id = ?, repository_ids_json = ?, risk = ?, autonomy = ?, priority = ?,
+        deadline = ?, policy_notes_json = ?, revision = revision + 1, updated_at = ?
+      WHERE id = ? AND revision = ?
+    `).run(
+      redactText(objective.outcome),
+      JSON.stringify(objective.acceptanceCriteria.map(redactText)),
+      JSON.stringify(objective.constraints.map(redactText)),
+      objective.projectPath,
+      objective.productId ?? null,
+      JSON.stringify(objective.repositoryIds),
+      objective.risk,
+      objective.autonomy,
+      objective.priority,
+      objective.deadline ?? null,
+      JSON.stringify(objective.policyNotes.map(redactText)),
+      new Date().toISOString(),
+      id,
+      expectedRevision,
+    );
+    if (result.changes === 0) {
+      if (!this.getObjective(id)) throw new Error(`Objective '${id}' was not found`);
+      throw new Error(`Objective '${id}' revision conflict: expected revision ${expectedRevision}`);
+    }
+    return this.getObjective(id)!;
+  }
+
+  getObjective(id: string): ObjectiveRecord | null {
+    const row = this.database.prepare("SELECT * FROM objectives WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    return row ? this.mapObjective(row) : null;
+  }
+
+  listObjectives(): ObjectiveRecord[] {
+    const rows = this.database.prepare("SELECT * FROM objectives ORDER BY updated_at DESC, id").all() as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => this.mapObjective(row));
+  }
+
+  appendPlanRevision(objectiveId: string, plan: RunPlan, rationale: string): PlanRevisionRecord {
+    const parsed = planRevisionInputSchema.parse({ plan, rationale }) as { plan: RunPlan; rationale: string };
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      if (!this.getObjective(objectiveId)) throw new Error(`Objective '${objectiveId}' was not found`);
+      const row = this.database.prepare("SELECT COALESCE(MAX(revision), 0) AS revision FROM plan_revisions WHERE objective_id = ?").get(objectiveId) as { revision: number };
+      const revision = row.revision + 1;
+      const storedPlan = redactValue({
+        ...parsed.plan,
+        revision,
+        previousRevision: revision > 1 ? revision - 1 : null,
+      }) as RunPlan;
+      this.database.prepare(`
+        INSERT INTO plan_revisions (objective_id, revision, plan_json, rationale, approved, created_at, approved_at)
+        VALUES (?, ?, ?, ?, 0, ?, NULL)
+      `).run(objectiveId, revision, JSON.stringify(storedPlan), redactText(parsed.rationale), new Date().toISOString());
+      this.database.exec("COMMIT");
+      return this.getPlanRevision(objectiveId, revision)!;
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getPlanRevision(objectiveId: string, revision: number): PlanRevisionRecord | null {
+    const row = this.database.prepare("SELECT * FROM plan_revisions WHERE objective_id = ? AND revision = ?").get(objectiveId, revision) as Record<string, unknown> | undefined;
+    return row ? this.mapPlanRevision(row) : null;
+  }
+
+  listPlanRevisions(objectiveId: string): PlanRevisionRecord[] {
+    const rows = this.database.prepare("SELECT * FROM plan_revisions WHERE objective_id = ? ORDER BY revision").all(objectiveId) as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => this.mapPlanRevision(row));
+  }
+
+  approvePlanRevision(objectiveId: string, revision: number): PlanRevisionRecord {
+    if (!Number.isSafeInteger(revision) || revision < 1) throw new Error("Plan revision must be a positive integer");
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const candidate = this.database.prepare("SELECT 1 AS present FROM plan_revisions WHERE objective_id = ? AND revision = ?").get(objectiveId, revision);
+      if (!candidate) throw new Error(`Plan revision ${revision} for objective '${objectiveId}' was not found`);
+      this.database.prepare("UPDATE plan_revisions SET approved = 0, approved_at = NULL WHERE objective_id = ? AND approved = 1").run(objectiveId);
+      this.database.prepare("UPDATE plan_revisions SET approved = 1, approved_at = ? WHERE objective_id = ? AND revision = ?").run(new Date().toISOString(), objectiveId, revision);
+      this.database.exec("COMMIT");
+      return this.getPlanRevision(objectiveId, revision)!;
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  createRun(
+    goal: string,
+    projectPath: string,
+    resumedFrom: string | null = null,
+    autonomy: RunAutonomy = "supervised",
+    linkage: RunObjectiveLink | null = null,
+  ): string {
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    let approvedPlanJson: string | null = null;
+    if (linkage) {
+      const approved = this.database.prepare(`
+        SELECT plan_json FROM plan_revisions
+        WHERE objective_id = ? AND revision = ? AND approved = 1
+      `).get(linkage.objectiveId, linkage.approvedPlanRevision) as { plan_json: string } | undefined;
+      if (!approved) {
+        throw new Error(`Plan revision ${linkage.approvedPlanRevision} is not the approved plan revision for objective '${linkage.objectiveId}'`);
+      }
+      approvedPlanJson = approved.plan_json;
+    }
     this.database
       .prepare(
-        "INSERT INTO runs (id, goal, project_path, status, resumed_from, autonomy, created_at, updated_at) VALUES (?, ?, ?, 'planning', ?, ?, ?, ?)",
+        "INSERT INTO runs (id, goal, project_path, status, plan_json, resumed_from, autonomy, objective_id, approved_plan_revision, created_at, updated_at) VALUES (?, ?, ?, 'planning', ?, ?, ?, ?, ?, ?, ?)",
       )
-      .run(id, redactText(goal), projectPath, resumedFrom, autonomy, now, now);
-    this.addEvent(id, "run.created", resumedFrom ? "Recovery run created" : "Run created", { ...(resumedFrom ? { resumedFrom } : {}), autonomy });
+      .run(id, redactText(goal), projectPath, approvedPlanJson, resumedFrom, autonomy, linkage?.objectiveId ?? null, linkage?.approvedPlanRevision ?? null, now, now);
+    this.addEvent(id, "run.created", resumedFrom ? "Recovery run created" : "Run created", {
+      ...(resumedFrom ? { resumedFrom } : {}),
+      ...(linkage ? { objectiveId: linkage.objectiveId, approvedPlanRevision: linkage.approvedPlanRevision } : {}),
+      autonomy,
+    });
     return id;
   }
 
@@ -826,6 +1623,10 @@ export class Ledger {
     const safePlan: RunPlan = {
       summary: redactText(plan.summary),
       recommendedConcurrency: plan.recommendedConcurrency,
+      ...(plan.revision === undefined ? {} : { revision: plan.revision }),
+      ...(plan.previousRevision === undefined ? {} : { previousRevision: plan.previousRevision }),
+      repositoryImpact: (plan.repositoryImpact ?? []).map((impact) => ({ ...impact, rationale: redactText(impact.rationale) })),
+      integrationConditions: (plan.integrationConditions ?? []).map(redactText),
       tasks: plan.tasks.map((task) => ({
         ...task,
         title: redactText(task.title),
@@ -857,6 +1658,7 @@ export class Ledger {
         task.preferredProvider,
         JSON.stringify(redactValue({
           kind: task.kind ?? "implementation",
+          repositoryIds: task.repositoryIds ?? [],
           repositoryScope: task.repositoryScope ?? ["."],
           permission: task.permission ?? "workspace_write",
           risk: task.risk ?? "medium",
@@ -873,15 +1675,111 @@ export class Ledger {
     });
   }
 
-  addIntegrationTask(runId: string, checks: string[]): void {
+  createIntegrationSet(input: {
+    runId: string;
+    productId: string;
+    integrationConditions: string[];
+    repositories: Array<{
+      repositoryId: string;
+      localPath: string;
+      baseCommit: string;
+      integrationBranch: string;
+      integrationWorktreePath: string;
+    }>;
+  }): IntegrationSetRecord {
+    if (this.getIntegrationSet(input.runId)) throw new Error(`Run '${input.runId}' already has an integration set`);
+    if (!input.repositories.length) throw new Error("An integration set requires at least one repository");
+    if (new Set(input.repositories.map((repository) => repository.repositoryId)).size !== input.repositories.length) {
+      throw new Error("Integration set repository IDs must be unique");
+    }
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare(`
+        INSERT INTO integration_sets (id, run_id, product_id, status, integration_conditions_json, created_at, updated_at)
+        VALUES (?, ?, ?, 'preparing', ?, ?, ?)
+      `).run(id, input.runId, input.productId, JSON.stringify(input.integrationConditions.map((condition) => redactText(condition))), now, now);
+      const insert = this.database.prepare(`
+        INSERT INTO integration_set_repositories (
+          integration_set_id, repository_id, local_path, base_commit, integration_branch,
+          integration_worktree_path, head_commit, status, error, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', NULL, ?)
+      `);
+      for (const repository of input.repositories) {
+        insert.run(id, repository.repositoryId, repository.localPath, repository.baseCommit, repository.integrationBranch, repository.integrationWorktreePath, now);
+      }
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+    return this.getIntegrationSet(input.runId)!;
+  }
+
+  setIntegrationSetStatus(runId: string, status: IntegrationSetStatus): IntegrationSetRecord {
+    const now = new Date().toISOString();
+    const updated = this.database.prepare("UPDATE integration_sets SET status = ?, updated_at = ? WHERE run_id = ?").run(status, now, runId);
+    if (!updated.changes) throw new Error(`Run '${runId}' has no integration set`);
+    return this.getIntegrationSet(runId)!;
+  }
+
+  updateIntegrationSetRepository(
+    runId: string,
+    repositoryId: string,
+    input: { status: IntegrationRepositoryStatus; headCommit?: string | null; error?: string | null },
+  ): IntegrationSetRecord {
+    const set = this.getIntegrationSet(runId);
+    if (!set) throw new Error(`Run '${runId}' has no integration set`);
+    const current = set.repositories.find((repository) => repository.repositoryId === repositoryId);
+    if (!current) throw new Error(`Repository '${repositoryId}' is not part of the integration set`);
+    const now = new Date().toISOString();
+    this.database.prepare(`
+      UPDATE integration_set_repositories
+      SET status = ?, head_commit = ?, error = ?, updated_at = ?
+      WHERE integration_set_id = ? AND repository_id = ?
+    `).run(input.status, input.headCommit === undefined ? current.headCommit : input.headCommit, input.error === undefined ? current.error : input.error, now, set.id, repositoryId);
+    this.database.prepare("UPDATE integration_sets SET updated_at = ? WHERE id = ?").run(now, set.id);
+    return this.getIntegrationSet(runId)!;
+  }
+
+  getIntegrationSet(runId: string): IntegrationSetRecord | null {
+    const row = this.database.prepare("SELECT * FROM integration_sets WHERE run_id = ?").get(runId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    const repositories = this.database.prepare(`
+      SELECT * FROM integration_set_repositories WHERE integration_set_id = ? ORDER BY repository_id
+    `).all(String(row.id)) as unknown as Array<Record<string, unknown>>;
+    return {
+      id: String(row.id),
+      runId: String(row.run_id),
+      productId: String(row.product_id),
+      status: String(row.status) as IntegrationSetStatus,
+      integrationConditions: JSON.parse(String(row.integration_conditions_json)) as string[],
+      repositories: repositories.map((repository) => ({
+        repositoryId: String(repository.repository_id),
+        localPath: String(repository.local_path),
+        baseCommit: String(repository.base_commit),
+        integrationBranch: String(repository.integration_branch),
+        integrationWorktreePath: String(repository.integration_worktree_path),
+        headCommit: repository.head_commit === null ? null : String(repository.head_commit),
+        status: String(repository.status) as IntegrationRepositoryStatus,
+        error: repository.error === null ? null : String(repository.error),
+        updatedAt: String(repository.updated_at),
+      })),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
+  }
+
+  addIntegrationTask(runId: string, checks: string[], taskId = "__integration__", title = "Integration suite"): void {
     this.database
       .prepare(
         `INSERT INTO tasks
           (run_id, task_id, title, description, dependencies_json, checks_json, status, preferred_provider)
-         VALUES (?, '__integration__', 'Integration suite', 'Validate the combined integration branch', '[]', ?, 'queued', NULL)`,
+         VALUES (?, ?, ?, 'Validate the combined integration branch', '[]', ?, 'queued', NULL)`,
       )
-      .run(runId, JSON.stringify(checks));
-    this.addEvent(runId, "integration.queued", `Queued ${checks.length} integration validators`);
+      .run(runId, taskId, redactText(title), JSON.stringify(checks));
+    this.addEvent(runId, "integration.queued", `Queued ${checks.length} integration validators`, { taskId });
   }
 
   setRunStatus(runId: string, status: RunStatus, finalReview?: string): void {
@@ -1171,6 +2069,10 @@ export class Ledger {
       updatedAt: run.updated_at,
       finalReview: run.final_review,
       resumedFrom: run.resumed_from,
+      objectiveId: run.objective_id,
+      approvedPlanRevision: run.approved_plan_revision,
+      plan: run.plan_json ? JSON.parse(run.plan_json) as RunPlan : null,
+      integrationSet: this.getIntegrationSet(runId),
       tasks: tasks.map((task) => {
         const contract = JSON.parse(task.task_contract_json || "{}") as Partial<PlannedTask>;
         return {
@@ -1178,6 +2080,7 @@ export class Ledger {
           title: task.title,
           description: task.description,
           kind: contract.kind ?? "implementation",
+          repositoryIds: contract.repositoryIds ?? [],
           repositoryScope: contract.repositoryScope ?? ["."],
           permission: contract.permission ?? "workspace_write",
           risk: contract.risk ?? "medium",
@@ -1220,15 +2123,47 @@ export class Ledger {
       result_envelope_json: undefined,
     }));
     const blackboard = this.listBlackboardEntries(runId);
-    const canonical = JSON.stringify({ run, attempts: normalizedAttempts, blackboard });
+    const toolReceipts = this.listToolPolicyReceipts(runId);
+    const reviews = this.listReviewReceipts(runId);
+    const integrationSet = this.getIntegrationSet(runId);
+    const canonical = JSON.stringify({ run, attempts: normalizedAttempts, blackboard, toolReceipts, reviews, integrationSet });
     return {
-      version: 1,
+      version: 4,
       generatedAt: new Date().toISOString(),
       run,
       attempts: normalizedAttempts,
       blackboard,
+      toolReceipts,
+      reviews,
+      integrationSet,
       integritySha256: createHash("sha256").update(canonical).digest("hex"),
     };
+  }
+
+  addTask(runId: string, task: PlannedTask): void {
+    this.database.prepare(
+      `INSERT INTO tasks
+       (run_id, task_id, title, description, dependencies_json, checks_json, status, preferred_provider, task_contract_json)
+       VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+    ).run(
+      runId,
+      task.id,
+      redactText(task.title),
+      redactText(task.description),
+      JSON.stringify(task.dependencies),
+      JSON.stringify(task.checks),
+      task.preferredProvider,
+      JSON.stringify(redactValue({
+        kind: task.kind ?? "implementation",
+        repositoryIds: task.repositoryIds ?? [],
+        repositoryScope: task.repositoryScope ?? ["."],
+        permission: task.permission ?? "workspace_write",
+        risk: task.risk ?? "medium",
+        capabilityNeeds: task.capabilityNeeds ?? ["code"],
+        acceptanceCriteria: task.acceptanceCriteria ?? [],
+        expectedArtifacts: task.expectedArtifacts ?? [],
+      })),
+    );
   }
 
   listModelPerformanceProfiles(modelId?: string): ModelPerformanceProfile[] {
@@ -1354,6 +2289,88 @@ export class Ledger {
     return { modelId, ignoredBefore, excluded, updatedAt };
   }
 
+  upsertRepository(input: RepositoryUpsertInput): RepositoryRecord {
+    const repository = repositoryUpsertSchema.parse(input) as RepositoryUpsertInput;
+    const product = this.database.prepare("SELECT 1 AS present FROM products WHERE id = ?").get(repository.productId);
+    if (!product) throw new Error(`Product '${repository.productId}' was not found`);
+    const now = new Date().toISOString();
+    this.database.prepare(`
+      INSERT INTO repositories (
+        id, product_id, name, full_name, url, clone_url, default_branch, visibility,
+        archived, size_kb, language, description, intelligence_json, observed_at,
+        local_path, repository_role, expected_branch, owners_json, dependency_repository_ids_json,
+        validators_json, governance_sources_json, governance_rules_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        product_id = excluded.product_id, name = excluded.name, full_name = excluded.full_name,
+        url = excluded.url, clone_url = excluded.clone_url, default_branch = excluded.default_branch,
+        visibility = excluded.visibility, archived = excluded.archived, size_kb = excluded.size_kb,
+        language = excluded.language, description = excluded.description,
+        intelligence_json = excluded.intelligence_json, observed_at = excluded.observed_at,
+        local_path = excluded.local_path, repository_role = excluded.repository_role,
+        expected_branch = excluded.expected_branch, owners_json = excluded.owners_json,
+        dependency_repository_ids_json = excluded.dependency_repository_ids_json,
+        validators_json = excluded.validators_json, governance_sources_json = excluded.governance_sources_json,
+        governance_rules_json = excluded.governance_rules_json
+    `).run(
+      repository.id,
+      repository.productId,
+      redactText(repository.name),
+      repository.fullName,
+      repository.url,
+      sanitizedRemoteUrl(repository.cloneUrl),
+      repository.defaultBranch,
+      repository.visibility,
+      repository.archived ? 1 : 0,
+      repository.sizeKb,
+      repository.language,
+      repository.description === null ? null : redactText(repository.description),
+      JSON.stringify(redactValue(repository.intelligence)),
+      now,
+      repository.localPath,
+      repository.role,
+      repository.expectedBranch,
+      JSON.stringify(repository.owners.map(redactText)),
+      JSON.stringify(repository.dependencyRepositoryIds),
+      JSON.stringify(redactValue(repository.validators)),
+      JSON.stringify(repository.governanceSources),
+      JSON.stringify(repository.governanceRules.map(redactText)),
+    );
+    return this.getRepository(repository.id)!;
+  }
+
+  getRepository(repositoryId: string): RepositoryRecord | null {
+    const row = this.database.prepare("SELECT * FROM repositories WHERE id = ?").get(repositoryId) as Record<string, unknown> | undefined;
+    return row ? repositoryRecordFromRow(row) : null;
+  }
+
+  listRepositories(productId?: string): RepositoryRecord[] {
+    const rows = (productId
+      ? this.database.prepare("SELECT * FROM repositories WHERE product_id = ? ORDER BY name, id").all(productId)
+      : this.database.prepare("SELECT * FROM repositories ORDER BY product_id, name, id").all()) as unknown as Array<Record<string, unknown>>;
+    return rows.map(repositoryRecordFromRow);
+  }
+
+  recordRepositoryInspection(repositoryId: string, input: RepositoryInspectionInput): RepositoryRecord {
+    const inspection = repositoryInspectionSchema.parse(input) as RepositoryInspectionInput;
+    if (!this.getRepository(repositoryId)) throw new Error(`Repository '${repositoryId}' was not found`);
+    const checkedAt = inspection.checkedAt ?? new Date().toISOString();
+    this.database.prepare(`
+      UPDATE repositories SET current_branch = ?, head_sha = ?, remote_url = ?, dirty = ?,
+        compatibility_issues_json = ?, checked_at = ?
+      WHERE id = ?
+    `).run(
+      inspection.currentBranch,
+      inspection.headSha,
+      sanitizedRemoteUrl(inspection.remoteUrl),
+      inspection.dirty ? 1 : 0,
+      JSON.stringify(inspection.compatibilityIssues.map(redactText)),
+      checkedAt,
+      repositoryId,
+    );
+    return this.getRepository(repositoryId)!;
+  }
+
   upsertProduct(input: ProductRegistration): ProductRecord {
     const now = new Date().toISOString();
     this.database.exec("BEGIN IMMEDIATE");
@@ -1407,22 +2424,7 @@ export class Ledger {
       name: String(product.name),
       organizationUrl: String(product.organization_url),
       description: String(product.description),
-      repositories: repositories.map((item) => ({
-        id: String(item.id),
-        productId: String(item.product_id),
-        name: String(item.name),
-        fullName: String(item.full_name),
-        url: String(item.url),
-        cloneUrl: String(item.clone_url),
-        defaultBranch: String(item.default_branch),
-        visibility: String(item.visibility) as RepositoryRecord["visibility"],
-        archived: Boolean(item.archived),
-        sizeKb: Number(item.size_kb),
-        language: item.language === null ? null : String(item.language),
-        description: item.description === null ? null : String(item.description),
-        intelligence: JSON.parse(String(item.intelligence_json)) as Record<string, unknown>,
-        observedAt: String(item.observed_at),
-      })),
+      repositories: repositories.map(repositoryRecordFromRow),
       createdAt: String(product.created_at),
       updatedAt: String(product.updated_at),
     };
@@ -1582,6 +2584,93 @@ export class Ledger {
     if (!health) return true;
     if (["authentication", "unavailable"].includes(health.state)) return false;
     return !health.cooldownUntil || Date.parse(health.cooldownUntil) <= at.getTime();
+  }
+
+  recordQuotaGroupOutcome(
+    connectionId: string,
+    quotaGroupId: string,
+    displayName: string,
+    input: { success: boolean; failureKind?: string | null; detail?: string; cooldownUntil?: string | null },
+  ): QuotaGroupHealthRecord {
+    const connection = this.database.prepare("SELECT 1 AS present FROM provider_connections WHERE id = ?").get(connectionId);
+    if (!connection) throw new Error(`Provider connection '${connectionId}' was not found`);
+    const previous = this.getQuotaGroupHealth(connectionId, quotaGroupId);
+    const now = new Date();
+    // A provider-supplied quota reset is authoritative. A late success from an
+    // older in-flight request must not erase a newer exhaustion observation.
+    if (input.success && previous?.cooldownUntil && Date.parse(previous.cooldownUntil) > now.getTime()) return previous;
+    const failures = input.success ? 0 : (previous?.consecutiveFailures ?? 0) + 1;
+    const failureKind = input.success ? null : input.failureKind ?? "unknown";
+    const state = input.success ? "ready" : healthState(failureKind ?? "unknown");
+    const cooldownUntil = input.success
+      ? null
+      : input.cooldownUntil ?? (() => {
+          const cooldownMs = healthCooldownMs(failureKind ?? "unknown", failures);
+          return cooldownMs ? new Date(now.getTime() + cooldownMs).toISOString() : null;
+        })();
+    this.database.prepare(
+      `INSERT INTO quota_group_health
+       (connection_id, quota_group_id, display_name, state, failure_kind, consecutive_failures, cooldown_until, detail, last_checked_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(connection_id, quota_group_id) DO UPDATE SET display_name = excluded.display_name,
+         state = excluded.state, failure_kind = excluded.failure_kind, consecutive_failures = excluded.consecutive_failures,
+         cooldown_until = excluded.cooldown_until, detail = excluded.detail, last_checked_at = excluded.last_checked_at`,
+    ).run(connectionId, quotaGroupId, displayName, state, failureKind, failures, cooldownUntil, redactText(input.detail ?? (input.success ? "Invocation succeeded" : "Quota group unavailable")), now.toISOString());
+    return this.getQuotaGroupHealth(connectionId, quotaGroupId)!;
+  }
+
+  getQuotaGroupHealth(connectionId: string, quotaGroupId: string): QuotaGroupHealthRecord | null {
+    const row = this.database.prepare("SELECT * FROM quota_group_health WHERE connection_id = ? AND quota_group_id = ?").get(connectionId, quotaGroupId) as Record<string, unknown> | undefined;
+    return row ? mapQuotaGroupHealth(row) : null;
+  }
+
+  listQuotaGroupHealth(connectionId?: string): QuotaGroupHealthRecord[] {
+    const rows = (connectionId
+      ? this.database.prepare("SELECT * FROM quota_group_health WHERE connection_id = ? ORDER BY quota_group_id").all(connectionId)
+      : this.database.prepare("SELECT * FROM quota_group_health ORDER BY connection_id, quota_group_id").all()) as unknown as Array<Record<string, unknown>>;
+    return rows.map(mapQuotaGroupHealth);
+  }
+
+  isQuotaGroupEligible(connectionId: string, quotaGroupId: string, at = new Date()): boolean {
+    const health = this.getQuotaGroupHealth(connectionId, quotaGroupId);
+    if (!health) return true;
+    return !health.cooldownUntil || Date.parse(health.cooldownUntil) <= at.getTime();
+  }
+
+  reconcileLegacyAntigravityQuotaHealth(): number {
+    const rows = this.database.prepare(
+      `SELECT connection_id, model_id, error, finished_at
+       FROM attempts
+       WHERE connection_id = 'subscription-cli:gemini'
+         AND model_id IS NOT NULL
+         AND lower(error) LIKE '%individual quota reached%'
+       ORDER BY finished_at DESC`,
+    ).all() as unknown as Array<{ connection_id: string; model_id: string; error: string; finished_at: string | null }>;
+    const reconciled = new Set<string>();
+    const now = new Date();
+    for (const row of rows) {
+      const model = this.getModel(row.model_id);
+      const quotaGroup = modelQuotaGroup(model);
+      if (!quotaGroup || reconciled.has(quotaGroup.id)) continue;
+      reconciled.add(quotaGroup.id);
+      const observedAt = row.finished_at ? new Date(row.finished_at) : now;
+      const cooldownUntil = quotaResetAt(row.error, observedAt);
+      if (!cooldownUntil || Date.parse(cooldownUntil) <= now.getTime()) continue;
+      const current = this.getQuotaGroupHealth(row.connection_id, quotaGroup.id);
+      if (current && Date.parse(current.lastCheckedAt) >= observedAt.getTime()) continue;
+      this.recordQuotaGroupOutcome(row.connection_id, quotaGroup.id, quotaGroup.displayName, {
+        success: false,
+        failureKind: "quota_group_exhausted",
+        detail: row.error,
+        cooldownUntil,
+      });
+    }
+    if (reconciled.size) {
+      this.database.prepare(
+        "DELETE FROM connection_health WHERE connection_id = 'subscription-cli:gemini' AND lower(detail) LIKE '%individual quota reached%'",
+      ).run();
+    }
+    return reconciled.size;
   }
 
   addManualModel(input: ManualModelInput): ModelRecord {
@@ -1775,34 +2864,324 @@ export class Ledger {
     return Number(row.total);
   }
 
-  getMonthlySpendUsd(at = new Date()): number {
-    const start = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), 1)).toISOString();
-    const row = this.database.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS total FROM invocation_receipts WHERE created_at >= ?").get(start) as { total: number };
+  getWorkbenchSpendUsd(sessionId: string): number {
+    const row = this.database.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS total FROM workbench_messages WHERE session_id = ? AND status = 'complete'").get(sessionId) as { total: number };
     return Number(row.total);
   }
 
+  getMonthlySpendUsd(at = new Date()): number {
+    const start = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), 1)).toISOString();
+    const row = this.database.prepare(`
+      SELECT
+        (SELECT COALESCE(SUM(cost_usd), 0) FROM invocation_receipts WHERE created_at >= ?) +
+        (SELECT COALESCE(SUM(cost_usd), 0) FROM workbench_messages WHERE created_at >= ? AND status = 'complete') AS total
+    `).get(start, start) as { total: number };
+    return Number(row.total);
+  }
+
+  reservePaidSpend(input: PaidSpendReservationInput): string {
+    if (!input.scopeId.trim()) throw new Error("Paid-spend reservations require a scope identifier");
+    if (!Number.isFinite(input.estimatedCostUsd) || input.estimatedCostUsd < 0) throw new Error("Paid-spend estimates must be finite and non-negative");
+    if (!Number.isFinite(input.perScopeLimitUsd) || input.perScopeLimitUsd <= 0 || !Number.isFinite(input.monthlyLimitUsd) || input.monthlyLimitUsd <= 0) {
+      throw new Error("OpenRouter requires positive per-run and monthly spending limits");
+    }
+    const expectedReceiptCount = input.expectedReceiptCount ?? 1;
+    if (!Number.isSafeInteger(expectedReceiptCount) || expectedReceiptCount < 1) throw new Error("Paid-spend reservations require a positive expected receipt count");
+
+    const id = crypto.randomUUID();
+    const nowDate = new Date();
+    const now = nowDate.toISOString();
+    const monthStart = new Date(Date.UTC(nowDate.getUTCFullYear(), nowDate.getUTCMonth(), 1)).toISOString();
+    const expiresAt = new Date(nowDate.getTime() + 5 * 60_000).toISOString();
+    this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      this.database.prepare("DELETE FROM paid_spend_reservations WHERE state = 'reserved' AND expires_at <= ?").run(now);
+      this.reconcileAllPaidSpendReservations();
+      const actualScopeSpend = input.scopeType === "run"
+        ? this.database.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS total FROM invocation_receipts WHERE run_id = ?").get(input.scopeId) as { total: number }
+        : this.database.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS total FROM workbench_messages WHERE session_id = ? AND status = 'complete'").get(input.scopeId) as { total: number };
+      const reservedScopeSpend = this.database.prepare(
+        "SELECT COALESCE(SUM(estimated_cost_usd), 0) AS total FROM paid_spend_reservations WHERE scope_type = ? AND scope_id = ?",
+      ).get(input.scopeType, input.scopeId) as { total: number };
+      const actualMonthlySpend = this.database.prepare(`
+        SELECT
+          (SELECT COALESCE(SUM(cost_usd), 0) FROM invocation_receipts WHERE created_at >= ?) +
+          (SELECT COALESCE(SUM(cost_usd), 0) FROM workbench_messages WHERE created_at >= ? AND status = 'complete') AS total
+      `).get(monthStart, monthStart) as { total: number };
+      const reservedMonthlySpend = this.database.prepare(
+        "SELECT COALESCE(SUM(estimated_cost_usd), 0) AS total FROM paid_spend_reservations WHERE created_at >= ?",
+      ).get(monthStart) as { total: number };
+      const scopeCommitted = Number(actualScopeSpend.total) + Number(reservedScopeSpend.total);
+      const monthlyCommitted = Number(actualMonthlySpend.total) + Number(reservedMonthlySpend.total);
+      if (scopeCommitted + input.estimatedCostUsd > input.perScopeLimitUsd) {
+        throw new Error(`OpenRouter per-run limit would be exceeded ($${scopeCommitted.toFixed(4)} spent or reserved of $${input.perScopeLimitUsd.toFixed(2)})`);
+      }
+      if (monthlyCommitted + input.estimatedCostUsd > input.monthlyLimitUsd) {
+        throw new Error(`OpenRouter monthly limit would be exceeded ($${monthlyCommitted.toFixed(4)} spent or reserved of $${input.monthlyLimitUsd.toFixed(2)})`);
+      }
+      this.database.prepare(`
+        INSERT INTO paid_spend_reservations (id, scope_type, scope_id, estimated_cost_usd, state, expected_receipt_count, invoked_at, created_at, expires_at)
+        VALUES (?, ?, ?, ?, 'reserved', ?, NULL, ?, ?)
+      `).run(id, input.scopeType, input.scopeId, input.estimatedCostUsd, expectedReceiptCount, now, expiresAt);
+      this.database.exec("COMMIT;");
+      return id;
+    } catch (error) {
+      this.database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  releasePaidSpendReservation(id: string): void {
+    this.database.prepare("DELETE FROM paid_spend_reservations WHERE id = ?").run(id);
+  }
+
+  markPaidSpendInvoked(id: string): void {
+    const result = this.database.prepare("UPDATE paid_spend_reservations SET state = 'invoked', invoked_at = ? WHERE id = ? AND state = 'reserved'").run(new Date().toISOString(), id);
+    if (Number(result.changes) !== 1) throw new Error("Paid-spend reservation is missing or was already invoked");
+  }
+
+  settlePaidSpendReservation(id: string): boolean {
+    this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      const settled = this.reconcilePaidSpendReservation(id);
+      this.database.exec("COMMIT;");
+      return settled;
+    } catch (error) {
+      this.database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  private reconcileAllPaidSpendReservations(): void {
+    const rows = this.database.prepare("SELECT id FROM paid_spend_reservations WHERE state = 'invoked'").all() as unknown as Array<{ id: string }>;
+    for (const row of rows) this.reconcilePaidSpendReservation(row.id);
+  }
+
+  private reconcilePaidSpendReservation(id: string): boolean {
+    const reservation = this.database.prepare("SELECT scope_type, estimated_cost_usd, expected_receipt_count, state FROM paid_spend_reservations WHERE id = ?").get(id) as { scope_type: "run" | "workbench"; estimated_cost_usd: number; expected_receipt_count: number; state: string } | undefined;
+    if (!reservation) return true;
+    if (reservation.state !== "invoked") return false;
+    const receipts = reservation.scope_type === "run"
+      ? this.database.prepare("SELECT COUNT(*) AS count, COALESCE(SUM(cost_usd), 0) AS total FROM invocation_receipts WHERE paid_spend_reservation_id = ? AND cost_usd IS NOT NULL").get(id) as { count: number; total: number }
+      : this.database.prepare("SELECT COUNT(*) AS count, COALESCE(SUM(cost_usd), 0) AS total FROM workbench_messages WHERE paid_spend_reservation_id = ? AND status = 'complete' AND cost_usd IS NOT NULL").get(id) as { count: number; total: number };
+    if (Number(receipts.count) < Number(reservation.expected_receipt_count)) return false;
+    if (Number(receipts.total) > Number(reservation.estimated_cost_usd) + 1e-9) return false;
+    this.database.prepare("DELETE FROM paid_spend_reservations WHERE id = ?").run(id);
+    return true;
+  }
+
   recordInvocationReceipt(input: InvocationReceiptInput): void {
-    this.database.prepare(
-      `INSERT INTO invocation_receipts
-       (run_id, task_id, role, provider, connection_id, requested_model_id, resolved_model_id,
-        input_tokens, output_tokens, cost_usd, duration_ms, workload_class, fallback_reason, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    if (input.paidSpendReservationId) this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      this.database.prepare(
+        `INSERT INTO invocation_receipts
+         (run_id, task_id, role, provider, connection_id, requested_model_id, resolved_model_id, model_resolution,
+          input_tokens, output_tokens, cost_usd, duration_ms, workload_class, fallback_reason, paid_spend_reservation_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        input.runId,
+        input.taskId ?? null,
+        input.role,
+        input.provider,
+        input.connectionId,
+        input.requestedModelId ?? null,
+        input.resolvedModelId,
+        input.modelResolution ?? null,
+        input.inputTokens ?? null,
+        input.outputTokens ?? null,
+        input.costUsd ?? null,
+        input.durationMs ?? null,
+        input.workloadClass ?? (input.role === "reviewer" ? "complex:premium" : null),
+        input.fallbackReason ? redactText(input.fallbackReason) : null,
+        input.paidSpendReservationId ?? null,
+        new Date().toISOString(),
+      );
+      if (input.paidSpendReservationId) {
+        this.reconcilePaidSpendReservation(input.paidSpendReservationId);
+        this.database.exec("COMMIT;");
+      }
+    } catch (error) {
+      if (input.paidSpendReservationId) this.database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  recordProductIntelligenceSnapshot(snapshot: ProductIntelligenceSnapshot): ProductIntelligenceSnapshot {
+    if (!this.getProduct(snapshot.productId)) throw new Error(`Product '${snapshot.productId}' was not found`);
+    this.database.prepare(`
+      INSERT INTO product_intelligence_snapshots (id, product_id, status, snapshot_json, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(snapshot.id, snapshot.productId, snapshot.status, JSON.stringify(redactValue(snapshot)), snapshot.createdAt);
+    return this.latestProductIntelligenceSnapshot(snapshot.productId)!;
+  }
+
+  latestProductIntelligenceSnapshot(productId: string): ProductIntelligenceSnapshot | null {
+    const row = this.database.prepare(`
+      SELECT snapshot_json FROM product_intelligence_snapshots
+      WHERE product_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1
+    `).get(productId) as { snapshot_json: string } | undefined;
+    return row ? JSON.parse(row.snapshot_json) as ProductIntelligenceSnapshot : null;
+  }
+
+  recordToolPolicyReceipt(input: ToolPolicyReceiptInput): number {
+    const now = new Date().toISOString();
+    const safeReason = redactText(input.reason);
+    const safeRequest = redactValue(input.request) as Record<string, unknown>;
+    const result = this.database.prepare(
+      `INSERT INTO tool_policy_receipts
+       (run_id, task_id, attempt_id, tool_id, actor_role, stage, side_effect, outcome,
+        reason, request_json, lock_keys_json, approval_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       input.runId,
       input.taskId ?? null,
-      input.role,
-      input.provider,
-      input.connectionId,
-      input.requestedModelId ?? null,
-      input.resolvedModelId,
-      input.inputTokens ?? null,
-      input.outputTokens ?? null,
-      input.costUsd ?? null,
-      input.durationMs ?? null,
-      input.workloadClass ?? (input.role === "reviewer" ? "complex:premium" : null),
-      input.fallbackReason ? redactText(input.fallbackReason) : null,
-      new Date().toISOString(),
+      input.attemptId ?? null,
+      input.toolId,
+      input.actorRole,
+      input.stage,
+      input.sideEffect,
+      input.outcome,
+      safeReason,
+      JSON.stringify(safeRequest),
+      JSON.stringify([...input.lockKeys]),
+      input.approvalId ?? null,
+      now,
     );
+    const id = Number(result.lastInsertRowid);
+    const eventKind = input.outcome === "allow"
+      ? "tool.allowed"
+      : input.outcome === "deny"
+        ? "tool.denied"
+        : "tool.approval_required";
+    this.addEvent(input.runId, eventKind, `${input.toolId} ${input.outcome.replace("_", " ")}: ${safeReason}`, {
+      receiptId: id,
+      taskId: input.taskId ?? null,
+      attemptId: input.attemptId ?? null,
+      toolId: input.toolId,
+      actorRole: input.actorRole,
+      stage: input.stage,
+      sideEffect: input.sideEffect,
+      outcome: input.outcome,
+      lockKeys: [...input.lockKeys],
+      approvalId: input.approvalId ?? null,
+    });
+    return id;
+  }
+
+  listToolPolicyReceipts(runId: string): ToolPolicyReceiptRecord[] {
+    const rows = this.database.prepare(
+      "SELECT * FROM tool_policy_receipts WHERE run_id = ? ORDER BY id",
+    ).all(runId) as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      id: Number(row.id),
+      runId: String(row.run_id),
+      taskId: row.task_id === null ? null : String(row.task_id),
+      attemptId: row.attempt_id === null ? null : Number(row.attempt_id),
+      toolId: String(row.tool_id),
+      actorRole: String(row.actor_role),
+      stage: String(row.stage),
+      sideEffect: String(row.side_effect),
+      outcome: String(row.outcome) as ToolPolicyReceiptRecord["outcome"],
+      reason: String(row.reason),
+      request: JSON.parse(String(row.request_json)) as Record<string, unknown>,
+      lockKeys: JSON.parse(String(row.lock_keys_json)) as string[],
+      approvalId: row.approval_id === null ? null : String(row.approval_id),
+      createdAt: String(row.created_at),
+    }));
+  }
+
+  recordReviewReceipt(input: {
+    runId: string;
+    round: number;
+    integrationSha256: string;
+    evidenceBinding: ReviewEvidenceBinding;
+    review: StructuredReview;
+  }): number {
+    const now = new Date().toISOString();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.database.prepare(
+        `INSERT INTO review_receipts
+         (run_id, round, integration_sha256, evidence_binding_json, verdict, provider, model_id, connection_id,
+          summary, raw_text, invalidated_at, invalidation_reason, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
+      ).run(
+        input.runId,
+        input.round,
+        input.integrationSha256,
+        JSON.stringify(input.evidenceBinding),
+        input.review.verdict,
+        input.review.provider,
+        input.review.modelId,
+        input.review.connectionId,
+        redactText(input.review.summary),
+        redactText(input.review.rawText),
+        now,
+      );
+      const reviewId = Number(result.lastInsertRowid);
+      const insertFinding = this.database.prepare(
+        `INSERT INTO review_findings
+         (review_receipt_id, finding_id, severity, location, rationale, suggested_correction, disposition, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const finding of input.review.findings) {
+        insertFinding.run(
+          reviewId,
+          finding.id,
+          finding.severity,
+          finding.location,
+          redactText(finding.rationale),
+          redactText(finding.suggestedCorrection),
+          finding.disposition,
+          now,
+        );
+      }
+      this.database.exec("COMMIT");
+      return reviewId;
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  listReviewReceipts(runId: string): ReviewReceiptRecord[] {
+    const reviews = this.database.prepare(
+      "SELECT * FROM review_receipts WHERE run_id = ? ORDER BY round, id",
+    ).all(runId) as unknown as Array<Record<string, unknown>>;
+    const findFindings = this.database.prepare(
+      "SELECT * FROM review_findings WHERE review_receipt_id = ? ORDER BY id",
+    );
+    return reviews.map((review) => ({
+      id: Number(review.id),
+      runId: String(review.run_id),
+      round: Number(review.round),
+      integrationSha256: String(review.integration_sha256),
+      evidenceBinding: JSON.parse(String(review.evidence_binding_json)) as ReviewEvidenceBinding,
+      verdict: String(review.verdict) as StructuredReview["verdict"],
+      provider: String(review.provider),
+      modelId: review.model_id === null ? null : String(review.model_id),
+      connectionId: String(review.connection_id),
+      summary: String(review.summary),
+      rawText: String(review.raw_text),
+      invalidatedAt: review.invalidated_at === null ? null : String(review.invalidated_at),
+      invalidationReason: review.invalidation_reason === null ? null : String(review.invalidation_reason),
+      createdAt: String(review.created_at),
+      findings: (findFindings.all(Number(review.id)) as unknown as Array<Record<string, unknown>>).map((finding) => ({
+        id: String(finding.finding_id),
+        severity: String(finding.severity) as ReviewFinding["severity"],
+        location: finding.location === null ? null : String(finding.location),
+        rationale: String(finding.rationale),
+        suggestedCorrection: String(finding.suggested_correction),
+        disposition: String(finding.disposition) as ReviewFinding["disposition"],
+      })),
+    }));
+  }
+
+  invalidateReviewReceipts(runId: string, reason: string): number {
+    const result = this.database.prepare(
+      "UPDATE review_receipts SET invalidated_at = ?, invalidation_reason = ? WHERE run_id = ? AND invalidated_at IS NULL",
+    ).run(new Date().toISOString(), redactText(reason), runId);
+    return Number(result.changes);
   }
 
   listModels(connectionId?: string): ModelRecord[] {
@@ -1907,12 +3286,82 @@ export class Ledger {
       preferredProvider: row.preferred_provider,
       checks: JSON.parse(row.checks_json) as string[],
       kind: contract.kind ?? "implementation",
+      repositoryIds: contract.repositoryIds ?? [],
       repositoryScope: contract.repositoryScope ?? ["."],
       permission: contract.permission ?? "workspace_write",
       risk: contract.risk ?? "medium",
       capabilityNeeds: contract.capabilityNeeds ?? ["code"],
       acceptanceCriteria: contract.acceptanceCriteria ?? [],
       expectedArtifacts: contract.expectedArtifacts ?? [],
+    };
+  }
+
+  private mapObjective(row: Record<string, unknown>): ObjectiveRecord {
+    return {
+      id: String(row.id),
+      outcome: String(row.outcome),
+      acceptanceCriteria: JSON.parse(String(row.acceptance_criteria_json)) as string[],
+      constraints: JSON.parse(String(row.constraints_json)) as string[],
+      projectPath: String(row.project_path),
+      ...(row.product_id === null ? {} : { productId: String(row.product_id) }),
+      repositoryIds: JSON.parse(String(row.repository_ids_json)) as string[],
+      risk: String(row.risk) as ObjectiveRecord["risk"],
+      autonomy: parseRunAutonomy(String(row.autonomy)),
+      priority: String(row.priority) as ObjectiveRecord["priority"],
+      ...(row.deadline === null ? {} : { deadline: String(row.deadline) }),
+      policyNotes: JSON.parse(String(row.policy_notes_json)) as string[],
+      revision: Number(row.revision),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
+  }
+
+  private mapWorkbenchSession(row: Record<string, unknown>): WorkbenchSessionRecord {
+    if (String(row.mode) !== "read_only") {
+      throw new Error(`Workbench session '${String(row.id)}' has unsupported mode '${String(row.mode)}'`);
+    }
+    return {
+      id: String(row.id),
+      projectPath: String(row.project_path),
+      title: String(row.title),
+      mode: "read_only",
+      objectiveId: row.objective_id === null ? null : String(row.objective_id),
+      convertedAt: row.converted_at === null ? null : String(row.converted_at),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
+  }
+
+  private mapWorkbenchMessage(row: Record<string, unknown>): WorkbenchMessageRecord {
+    return {
+      id: Number(row.id),
+      sessionId: String(row.session_id),
+      role: String(row.role) as WorkbenchMessageRecord["role"],
+      content: String(row.content),
+      provider: row.provider === null ? null : String(row.provider),
+      connectionId: row.connection_id === null ? null : String(row.connection_id),
+      requestedModelId: row.requested_model_id === null ? null : String(row.requested_model_id),
+      resolvedModelId: row.resolved_model_id === null ? null : String(row.resolved_model_id),
+      status: row.status === null ? null : String(row.status) as WorkbenchMessageRecord["status"],
+      error: row.error === null ? null : String(row.error),
+      inputTokens: row.input_tokens === null ? null : Number(row.input_tokens),
+      outputTokens: row.output_tokens === null ? null : Number(row.output_tokens),
+      costUsd: row.cost_usd === null ? null : Number(row.cost_usd),
+      durationMs: row.duration_ms === null ? null : Number(row.duration_ms),
+      paidSpendReservationId: row.paid_spend_reservation_id === null ? null : String(row.paid_spend_reservation_id),
+      createdAt: String(row.created_at),
+    };
+  }
+
+  private mapPlanRevision(row: Record<string, unknown>): PlanRevisionRecord {
+    return {
+      objectiveId: String(row.objective_id),
+      revision: Number(row.revision),
+      plan: JSON.parse(String(row.plan_json)) as RunPlan,
+      rationale: String(row.rationale),
+      approved: Boolean(row.approved),
+      createdAt: String(row.created_at),
+      approvedAt: row.approved_at === null ? null : String(row.approved_at),
     };
   }
 

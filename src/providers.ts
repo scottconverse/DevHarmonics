@@ -220,7 +220,9 @@ abstract class CliProvider implements ProviderAdapter {
         resolvedModelId: request.model.requestedModelId ?? projection.modelId,
         resolution: request.model.requestedModelId === null
           ? "provider_default_unresolved"
-          : "concrete",
+          : this.name === "gemini"
+            ? "requested_unverified"
+            : "concrete",
       },
       text,
       stdout: result.stdout,

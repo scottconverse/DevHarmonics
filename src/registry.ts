@@ -3,6 +3,7 @@ import type { ProviderStatus } from "./doctor.js";
 import { VERSION } from "./product.js";
 import type { AuthenticationMode, RuntimeTransport } from "./runtime.js";
 import { inferModelProfile, profileMetadata, SUBSCRIPTION_COMPATIBILITY_MODELS } from "./model-intelligence.js";
+import { antigravityModelIdentity } from "./antigravity.js";
 
 export const MODEL_LIFECYCLES = [
   "known",
@@ -128,6 +129,7 @@ export function syncSubscriptionConnections(
         summary: status.summary,
         diagnostics: status.diagnostics,
         subscriptionOnly: status.subscriptionOnly,
+        ...(status.name === "gemini" ? { platform: "antigravity", legacyProviderKey: "gemini" } : {}),
       },
     });
     const runtimeModelIds: string[] = [];
@@ -149,7 +151,12 @@ export function syncSubscriptionConnections(
         verified: false,
         qualified: false,
         active: false,
-        metadata: { discoveredBy: `${status.name} CLI`, runtimeVersion: status.version, ...profileMetadata(profile) },
+        metadata: {
+          discoveredBy: status.name === "gemini" ? "Google Antigravity CLI" : `${status.name} CLI`,
+          runtimeVersion: status.version,
+          ...profileMetadata(profile),
+          ...(status.name === "gemini" ? antigravityModelIdentity(displayName) : {}),
+        },
       });
     }
     writer.reconcileDiscoveredModels?.(projection.connectionId, "runtime_discovery", runtimeModelIds, 3);

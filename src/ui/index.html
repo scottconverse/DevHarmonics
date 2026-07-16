@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>DevHarmonics</title>
-    <link rel="stylesheet" href="/app.css?v=0.4.0" />
+    <link rel="stylesheet" href="/app.css?v=0.5.0" />
   </head>
   <body>
     <div class="app-shell">
@@ -16,6 +16,7 @@
         <button id="new-run" class="primary full">＋ New run</button>
         <nav class="app-nav" aria-label="Application">
           <button class="nav-link active" data-view="runs">Runs</button>
+          <button class="nav-link" data-view="workbench">Workbench</button>
           <button class="nav-link" data-view="products">Products</button>
           <button class="nav-link" data-view="setup">Setup</button>
           <button class="nav-link" data-view="models">Models</button>
@@ -25,7 +26,7 @@
         <nav id="run-list" class="run-list" aria-label="Recent runs"></nav>
         <div class="sidebar-foot">
           <span class="security-dot"></span>
-          Subscription + local mode · paid API opt-in · v0.4.0
+          Subscription + local mode · paid API opt-in · v0.5.0
         </div>
       </aside>
 
@@ -50,12 +51,32 @@
           <label for="project-path">Project folder</label>
           <input id="project-path" class="input" spellcheck="false" />
 
+          <div class="objective-repository-picker">
+            <label for="objective-product">Product context <small>Optional</small></label>
+            <select id="objective-product" class="input"><option value="">Standalone repository</option></select>
+            <fieldset id="objective-repositories-field" class="hidden"><legend>Repositories in scope</legend><p class="field-help">Select every repository the architect must assess. Planning can span repositories; execution remains disabled until the affected set has a supported integration topology.</p><div id="objective-repositories" class="repository-picker-list"></div></fieldset>
+          </div>
+
           <label for="goal">What should the team accomplish?</label>
           <textarea
             id="goal"
             rows="5"
             placeholder="Example: Add CSV export to the customer report, cover it with tests, and verify the download in the browser."
           ></textarea>
+
+          <div class="objective-grid">
+            <label for="acceptance-criteria">Acceptance criteria <small>One observable result per line</small><textarea id="acceptance-criteria" rows="4" placeholder="CSV downloads with the selected filters&#10;Export is covered by an automated test"></textarea></label>
+            <label for="constraints">Constraints <small>One boundary per line</small><textarea id="constraints" rows="4" placeholder="Preserve the existing report API&#10;Do not add a paid dependency"></textarea></label>
+          </div>
+
+          <div class="objective-policy-grid">
+            <label for="objective-risk">Objective risk<select id="objective-risk" class="input"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option></select></label>
+            <label for="objective-priority">Priority<select id="objective-priority" class="input"><option value="low">Low</option><option value="normal" selected>Normal</option><option value="high">High</option><option value="urgent">Urgent</option></select></label>
+            <label for="objective-deadline">Deadline <small>Optional</small><input id="objective-deadline" class="input" type="datetime-local"></label>
+          </div>
+
+          <label for="policy-notes">Policy notes <small>Optional; one instruction per line</small></label>
+          <textarea id="policy-notes" rows="2" placeholder="Require an independent accessibility review"></textarea>
 
           <div class="composer-grid">
             <div>
@@ -98,8 +119,25 @@
 
           <div class="composer-actions">
             <p id="composer-error" class="error" role="alert"></p>
-            <button id="start-run" class="primary">Start verified run <span>→</span></button>
+            <button id="preview-plan" class="primary" type="button">Build plan preview <span>→</span></button>
           </div>
+          <section id="plan-preview" class="plan-preview hidden" aria-live="polite">
+            <div class="plan-preview-head">
+              <div><span class="step">02</span><div><p class="eyebrow">APPROVAL PREVIEW</p><h2 id="plan-preview-title">Review the proposed plan</h2></div></div>
+              <span id="plan-revision" class="status-pill"></span>
+            </div>
+            <p id="plan-summary" class="plan-summary"></p>
+            <div id="plan-metrics" class="metrics"></div>
+            <div id="plan-repository-impact" class="plan-repository-impact"></div>
+            <div id="plan-task-list" class="plan-task-list"></div>
+            <label for="revision-feedback">What should change?</label>
+            <textarea id="revision-feedback" rows="3" placeholder="Keep the first task, split browser verification from implementation, and restrict changes to src/reports."></textarea>
+            <div class="plan-actions">
+              <p id="plan-execution-note" class="muted">No repository write begins until you approve this exact revision.</p>
+              <button id="revise-plan" class="secondary" type="button">Revise plan</button>
+              <button id="approve-plan-start" class="primary" type="button">Approve revision &amp; start</button>
+            </div>
+          </section>
         </section>
 
         <section id="run-view" class="run-view hidden">
@@ -126,6 +164,12 @@
             <div class="metric"><span>Active agents</span><strong id="metric-active">0</strong></div>
           </div>
 
+          <section id="integration-set-panel" class="panel integration-set-panel hidden" aria-labelledby="integration-set-title">
+            <div class="panel-heading"><div><span class="step">IS</span><h3 id="integration-set-title">Exact integration set</h3></div><span id="integration-set-status" class="lifecycle"></span></div>
+            <p id="integration-set-conditions" class="muted"></p>
+            <div id="integration-set-repositories" class="integration-set-repositories"></div>
+          </section>
+
           <div id="board" class="board" aria-label="Task board"></div>
 
           <div class="lower-grid">
@@ -140,11 +184,84 @@
           </div>
         </section>
 
+        <section id="workbench-view" class="workspace-view hidden" aria-labelledby="workbench-title">
+          <div class="view-heading">
+            <div><p class="eyebrow">DISCUSSION-ONLY STUDIO</p><h2 id="workbench-title">Multi-model Workbench</h2></div>
+            <button id="new-workbench" class="secondary" type="button">New scratchpad</button>
+          </div>
+          <div class="workbench-boundary" role="note"><strong>Read-only by design.</strong><span>Workbench consultations cannot start a run or change a repository. Convert useful discussion into an objective draft when you are ready.</span></div>
+          <form id="workbench-new-form" class="panel workbench-new hidden">
+            <label for="workbench-project">Project folder</label>
+            <input id="workbench-project" class="input" spellcheck="false">
+            <label for="workbench-title-input">Scratchpad title</label>
+            <input id="workbench-title-input" class="input" placeholder="Release strategy comparison">
+            <div class="composer-actions"><p id="workbench-new-error" class="error" role="alert"></p><button class="primary" type="submit">Create scratchpad</button></div>
+          </form>
+          <div class="workbench-layout">
+            <aside class="panel workbench-sessions" aria-label="Workbench scratchpads"><div class="panel-heading"><h3>Scratchpads</h3><span id="workbench-count" class="muted"></span></div><div id="workbench-session-list" class="workbench-session-list"></div></aside>
+            <section class="panel workbench-main">
+              <div id="workbench-empty" class="empty-state">Create a scratchpad to ask project questions and compare qualified models.</div>
+              <div id="workbench-active" class="hidden">
+                <div class="panel-heading workbench-heading"><div><span class="step">W</span><div><h2 id="workbench-active-title"></h2><p id="workbench-active-project" class="muted"></p></div></div><span class="lifecycle qualified">discussion only</span></div>
+                <div id="workbench-messages" class="workbench-messages" aria-live="polite"></div>
+                <form id="workbench-consult-form" class="workbench-consult">
+                  <label for="workbench-question">Ask the selected models</label>
+                  <textarea id="workbench-question" rows="4" placeholder="Compare two safe approaches to this product decision. Inspect the repository when useful, and distinguish facts from inference."></textarea>
+                  <fieldset><legend>Models to compare</legend><div id="workbench-models" class="workbench-models"></div></fieldset>
+                  <div class="composer-actions"><p id="workbench-error" class="error" role="alert"></p><button id="workbench-consult" class="primary" type="submit">Consult selected models</button></div>
+                </form>
+                <details id="workbench-convert" class="workbench-convert">
+                  <summary>Convert this discussion into an objective draft</summary>
+                  <form id="workbench-convert-form">
+                    <label for="workbench-outcome">Outcome</label><textarea id="workbench-outcome" rows="3" required></textarea>
+                    <div class="objective-grid">
+                      <label for="workbench-criteria">Acceptance criteria <small>One per line</small><textarea id="workbench-criteria" rows="3"></textarea></label>
+                      <label for="workbench-constraints">Constraints <small>One per line</small><textarea id="workbench-constraints" rows="3"></textarea></label>
+                    </div>
+                    <div class="objective-policy-grid">
+                      <label for="workbench-risk">Risk<select id="workbench-risk" class="input"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option></select></label>
+                      <label for="workbench-priority">Priority<select id="workbench-priority" class="input"><option value="low">Low</option><option value="normal" selected>Normal</option><option value="high">High</option><option value="urgent">Urgent</option></select></label>
+                      <label for="workbench-autonomy">Run mode<select id="workbench-autonomy" class="input"><option value="observe">Observe only</option><option value="supervised" selected>Supervised</option><option value="bounded">Bounded autonomy</option></select></label>
+                    </div>
+                    <div class="composer-actions"><p class="muted">Creates a draft only. Planning and execution still require their own approval.</p><button class="primary" type="submit">Create objective draft</button></div>
+                  </form>
+                </details>
+              </div>
+            </section>
+          </div>
+        </section>
+
         <section id="products-view" class="workspace-view hidden" aria-labelledby="products-title">
           <div class="view-heading">
             <div><p class="eyebrow">PRODUCT OPERATIONS</p><h2 id="products-title">Product portfolio</h2></div>
-            <button id="refresh-products" class="secondary" type="button">Refresh portfolio</button>
+            <div class="evidence-actions"><button id="register-product" class="secondary" type="button">Register product</button><button id="add-local-repository" class="secondary" type="button">Add local repository</button><button id="refresh-products" class="secondary" type="button">Refresh portfolio</button></div>
           </div>
+          <form id="product-form" class="panel registry-form hidden">
+            <div class="panel-heading"><div><span class="step">P</span><h2>Register a product</h2></div><span class="muted">A product groups repositories without collapsing them into a monorepo.</span></div>
+            <div class="settings-grid">
+              <label>Product ID<input id="product-id" class="input" required placeholder="civicsuite"></label>
+              <label>Name<input id="product-name" class="input" required placeholder="CivicSuite"></label>
+              <label>Organization URL<input id="product-organization" class="input" required type="url" placeholder="https://github.com/civicsuite"></label>
+              <label>Description<input id="product-description" class="input" placeholder="Civic technology product suite"></label>
+            </div>
+            <div class="composer-actions"><p id="product-form-error" class="error" role="alert"></p><button class="primary" type="submit">Save product</button></div>
+          </form>
+          <form id="repository-form" class="panel registry-form hidden">
+            <div class="panel-heading"><div><span class="step">R</span><h2>Add a local repository</h2></div><span class="muted">DevHarmonics inspects Git state read-only and records compatibility issues.</span></div>
+            <div class="settings-grid">
+              <label>Product<select id="repository-product" class="input" required></select></label>
+              <label>Local folder<input id="repository-path" class="input" required spellcheck="false" placeholder="C:\\Users\\Scott\\Documents\\GitHub\\CivicSuite"></label>
+              <label>Repository role<select id="repository-role" class="input"><option value="umbrella">Umbrella</option><option value="shared_platform">Shared platform</option><option value="module" selected>Module</option><option value="desktop">Desktop</option><option value="installer">Installer</option><option value="documentation">Documentation</option><option value="release_truth">Release truth</option><option value="other">Other</option></select></label>
+              <label>Expected branch <small>Optional</small><input id="repository-branch" class="input" placeholder="main"></label>
+            </div>
+            <div class="objective-grid">
+              <label>Owners <small>One team or person per line</small><textarea id="repository-owners" rows="3"></textarea></label>
+              <label>Dependencies <small>One registered repository ID per line</small><textarea id="repository-dependencies" rows="3"></textarea></label>
+              <label>Canonical intelligence sources <small>Governance, architecture, status, version, compatibility, or release files; one path per line</small><textarea id="repository-governance" rows="3" placeholder="AGENTS.md&#10;README.md&#10;STATUS.md&#10;pyproject.toml"></textarea></label>
+              <label>Validator commands <small><code>name = command</code>, one per line</small><textarea id="repository-validators" rows="3" placeholder="test = npm test&#10;build = npm run build"></textarea></label>
+            </div>
+            <div class="composer-actions"><p id="repository-form-error" class="error" role="alert"></p><button class="primary" type="submit">Inspect &amp; register repository</button></div>
+          </form>
           <div id="product-summary" class="metrics"></div>
           <div id="product-list" class="product-list"></div>
           <div id="products-empty" class="panel empty-state product-empty">No products registered yet. An Observe pass can add a product and its repositories without cloning or changing them.</div>
@@ -231,11 +348,14 @@
         </section>
 
         <section id="evidence-view" class="workspace-view hidden" aria-labelledby="evidence-title">
-          <div class="view-heading"><div><p class="eyebrow">READ-ONLY REPORTER</p><h2 id="evidence-title">Run evidence</h2></div><button id="refresh-evidence" class="secondary" type="button">Refresh evidence</button></div>
+          <div class="view-heading"><div><p class="eyebrow">READ-ONLY REPORTER</p><h2 id="evidence-title">Run evidence</h2></div><div class="evidence-actions"><button id="refresh-evidence" class="secondary" type="button">Refresh evidence</button><button id="export-evidence" class="primary" type="button">Export JSON</button></div></div>
           <div id="evidence-empty" class="panel empty-state">Select a run to inspect its immutable execution receipts.</div>
           <div id="evidence-content" class="hidden">
             <div id="evidence-metrics" class="metrics"></div>
+            <section id="evidence-verdict" class="panel evidence-verdict" aria-live="polite"></section>
+            <section class="panel evidence-panel"><div class="panel-heading"><h3>Independent review receipts</h3><span id="evidence-review-count" class="muted"></span></div><div id="evidence-reviews" class="evidence-list"></div></section>
             <section class="panel evidence-panel"><div class="panel-heading"><h3>Integrity and attempts</h3><code id="evidence-hash"></code></div><div id="evidence-attempts" class="evidence-list"></div></section>
+            <section class="panel evidence-panel"><div class="panel-heading"><h3>Tool policy receipts</h3><span id="evidence-tool-count" class="muted"></span></div><div id="evidence-tools" class="evidence-list"></div></section>
           </div>
         </section>
       </main>
@@ -247,6 +367,6 @@
       <div id="drawer-content"></div>
     </aside>
 
-    <script src="/app.js?v=0.4.0"></script>
+    <script src="/app.js?v=0.5.0"></script>
   </body>
 </html>

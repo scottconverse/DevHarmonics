@@ -98,12 +98,26 @@ export function classifyWorkload(
 
   const simpleKind = task.kind === "diagnostic" || task.kind === "review";
   const simplePermission = task.permission === "read_only";
-  const narrowScope = (task.repositoryScope?.length ?? 1) <= 1 && (task.acceptanceCriteria?.length ?? 0) <= 2;
-  if (task.risk === "low" && narrowScope && (simpleKind || simplePermission)) {
+  const normalizedScopes = (task.repositoryScope ?? []).map((scope) => scope.trim().replaceAll("\\", "/").replace(/\/+$/, ""));
+  const narrowScope = normalizedScopes.length === 1
+    && Boolean(normalizedScopes[0])
+    && normalizedScopes[0] !== "."
+    && normalizedScopes[0] !== "/"
+    && !/[?*{}[\]]/.test(normalizedScopes[0]!)
+    && (task.acceptanceCriteria?.length ?? 0) <= 2;
+  const normalizedArtifacts = (task.expectedArtifacts ?? []).map((artifact) => artifact.trim().replaceAll("\\", "/").replace(/\/+$/, ""));
+  const exactSingleArtifact = normalizedArtifacts.length === 1 && normalizedArtifacts[0] === normalizedScopes[0];
+  const narrowBoundedImplementation = (task.kind === "implementation" || task.kind === "repair") && task.permission === "workspace_write" && exactSingleArtifact;
+  const lowRiskReadOnlyAnalysis = task.risk === "low" && simplePermission && simpleKind;
+  if (lowRiskReadOnlyAnalysis || (task.risk === "low" && narrowScope && narrowBoundedImplementation)) {
     return {
       complexity: "simple",
       requiredTier: "economy",
-      factors: ["low-risk task", simplePermission ? "read-only task" : `${task.kind} task`, "narrow repository scope"],
+      factors: [
+        "low-risk task",
+        narrowBoundedImplementation ? "narrow bounded implementation" : "read-only task",
+        ...(narrowScope ? ["narrow repository scope"] : [`${task.kind} workload`]),
+      ],
     };
   }
   return { complexity: "standard", requiredTier: "standard", factors: ["routine implementation workload"] };
@@ -169,6 +183,8 @@ export function profileMetadata(profile: ModelProfile): Record<string, unknown> 
 }
 
 function inferLocalProfile(model: Pick<ModelRecord, "metadata">, name: string): ModelProfile {
+  const mellum2 = mellum2LocalProfile(name);
+  if (mellum2) return mellum2;
   const benchmarkTier = model.metadata.benchmarkTier;
   const tier: ModelTier = isTier(benchmarkTier) ? benchmarkTier : "economy";
   const runtimeCapabilities = Array.isArray(model.metadata.capabilities)
@@ -189,6 +205,36 @@ function inferLocalProfile(model: Pick<ModelRecord, "metadata">, name: string): 
     reasoningEffort: runtimeCapabilities.includes("thinking") ? "medium" : null,
     confidence: isTier(benchmarkTier) ? "empirical" : "provisional",
     evidenceUrls: localEvidenceUrls(name),
+  };
+}
+
+function mellum2LocalProfile(name: string): ModelProfile | null {
+  if (!/mellum[\s_-]?2/.test(name)) return null;
+  const thinking = /thinking/.test(name);
+  const instruct = /instruct/.test(name);
+  return {
+    tier: thinking ? "standard" : "economy",
+    // Instruct and Thinking are independently qualified and upgraded. Keeping
+    // separate tracking families prevents a family upgrade from changing the
+    // reasoning contract behind the user's back.
+    family: thinking ? "mellum2-thinking" : instruct ? "mellum2-instruct" : "mellum2",
+    capabilities: [
+      "text",
+      "analysis",
+      "code",
+      "tools",
+      "structured-output",
+      "routing",
+      "context-preparation",
+      ...(thinking ? ["reasoning"] : []),
+    ],
+    source: thinking || instruct ? "catalog" : "runtime",
+    reasoningEffort: thinking ? "medium" : null,
+    confidence: thinking || instruct ? "official" : "provisional",
+    evidenceUrls: [
+      "https://huggingface.co/blog/JetBrains/mellum2-launch",
+      "https://arxiv.org/abs/2605.31268",
+    ],
   };
 }
 
@@ -243,6 +289,7 @@ function verifiedCatalogModel(
 }
 
 function localEvidenceUrls(name: string): string[] {
+  if (/mellum[\s_-]?2/.test(name)) return ["https://huggingface.co/blog/JetBrains/mellum2-launch", "https://arxiv.org/abs/2605.31268"];
   if (name.includes("nomic-embed-text")) return ["https://ollama.com/library/nomic-embed-text"];
   if (name.includes("minicpm-v")) return ["https://ollama.com/library/minicpm-v"];
   if (name.includes("qwen3-vl")) return ["https://ollama.com/library/qwen3-vl"];

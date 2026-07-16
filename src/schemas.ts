@@ -15,6 +15,7 @@ export const runPlanSchema = z
           title: z.string().min(1),
           description: z.string().min(1),
           dependencies: z.array(z.string()),
+          repositoryIds: z.array(z.string().trim().min(1).max(300)).default([]),
           preferredProvider: providerSchema.nullable(),
           checks: z.array(z.string()).min(1),
           kind: z.enum(["diagnostic", "implementation", "repair", "review", "release"]).default("implementation"),
@@ -27,6 +28,12 @@ export const runPlanSchema = z
         }),
       )
       .min(1),
+    repositoryImpact: z.array(z.object({
+      repositoryId: z.string().trim().min(1).max(300),
+      disposition: z.enum(["affected", "excluded"]),
+      rationale: z.string().trim().min(1).max(2_000),
+    })).max(500).optional(),
+    integrationConditions: z.array(z.string().trim().min(1).max(2_000)).max(200).default([]),
   })
   .superRefine((plan, context) => {
     const ids = new Set(plan.tasks.map((task) => task.id));
@@ -49,7 +56,89 @@ export const runPlanSchema = z
         }
       }
     }
-  });
+    const impactIds = new Set<string>();
+    const affectedIds = new Set<string>();
+    for (const impact of plan.repositoryImpact ?? []) {
+      if (impactIds.has(impact.repositoryId)) {
+        context.addIssue({
+          code: "custom",
+          path: ["repositoryImpact"],
+          message: `Repository impact IDs must be unique; found ${impact.repositoryId} more than once`,
+        });
+      }
+      impactIds.add(impact.repositoryId);
+      if (impact.disposition === "affected") affectedIds.add(impact.repositoryId);
+    }
+    if (plan.repositoryImpact !== undefined) {
+      for (const [taskIndex, task] of plan.tasks.entries()) {
+        for (const repositoryId of task.repositoryIds) {
+          if (!affectedIds.has(repositoryId)) {
+            context.addIssue({
+              code: "custom",
+              path: ["tasks", taskIndex, "repositoryIds"],
+              message: `Task ${task.id} repository ${repositoryId} must be represented as affected in repositoryImpact`,
+            });
+          }
+        }
+      }
+    }
+  })
+  .transform((plan) => ({ ...plan, repositoryImpact: plan.repositoryImpact ?? [] }));
+
+export const objectiveInputSchema = z.object({
+  outcome: z.string().trim().min(1).max(20_000),
+  acceptanceCriteria: z.array(z.string().trim().min(1).max(2_000)).max(200),
+  constraints: z.array(z.string().trim().min(1).max(2_000)).max(200),
+  projectPath: z.string().trim().min(1).max(4_096),
+  productId: z.string().trim().min(1).max(200).optional(),
+  repositoryIds: z.array(z.string().trim().min(1).max(300)).max(500),
+  risk: z.enum(["low", "medium", "high"]),
+  autonomy: z.enum(["observe", "supervised", "bounded"]),
+  priority: z.enum(["low", "normal", "high", "urgent"]),
+  deadline: z.string().datetime({ offset: true }).optional(),
+  policyNotes: z.array(z.string().trim().min(1).max(2_000)).max(200),
+});
+
+export const planRevisionInputSchema = z.object({
+  plan: runPlanSchema,
+  rationale: z.string().trim().min(1).max(10_000),
+});
+
+export const workbenchSessionInputSchema = z.object({
+  projectPath: z.string().trim().min(1).max(4_096),
+  title: z.string().trim().min(1).max(500),
+});
+
+export const workbenchMessageInputSchema = z.object({
+  sessionId: z.string().uuid(),
+  role: z.enum(["user", "assistant", "system"]),
+  content: z.string().trim().max(100_000),
+  provider: z.string().trim().min(1).max(200).nullable().optional(),
+  connectionId: z.string().trim().min(1).max(300).nullable().optional(),
+  requestedModelId: z.string().trim().min(1).max(300).nullable().optional(),
+  resolvedModelId: z.string().trim().min(1).max(300).nullable().optional(),
+  status: z.enum(["complete", "failed"]).nullable().optional(),
+  error: z.string().trim().max(20_000).nullable().optional(),
+  inputTokens: z.number().int().nonnegative().nullable().optional(),
+  outputTokens: z.number().int().nonnegative().nullable().optional(),
+  costUsd: z.number().nonnegative().nullable().optional(),
+  durationMs: z.number().int().nonnegative().nullable().optional(),
+  paidSpendReservationId: z.string().uuid().nullable().optional(),
+}).superRefine((message, context) => {
+  if (message.role === "assistant") {
+    if (!message.provider) context.addIssue({ code: "custom", path: ["provider"], message: "Assistant consultations require a provider" });
+    if (!message.status) context.addIssue({ code: "custom", path: ["status"], message: "Assistant consultations require a terminal status" });
+    if (message.status === "complete" && !message.resolvedModelId) context.addIssue({ code: "custom", path: ["resolvedModelId"], message: "Completed consultations require the resolved model ID" });
+    if (message.status === "failed" && !message.requestedModelId && !message.resolvedModelId) context.addIssue({ code: "custom", path: ["requestedModelId"], message: "Failed consultations require a requested or resolved model ID" });
+    if (message.status === "failed" && !message.error) context.addIssue({ code: "custom", path: ["error"], message: "Failed consultations require an error" });
+  } else {
+    const attributed = message.provider || message.connectionId || message.requestedModelId || message.resolvedModelId
+      || message.status || message.error || message.inputTokens != null || message.outputTokens != null
+      || message.costUsd != null || message.durationMs != null || message.paidSpendReservationId != null;
+    if (attributed) context.addIssue({ code: "custom", message: "Only assistant consultations may carry model execution attribution" });
+    if (!message.content) context.addIssue({ code: "custom", path: ["content"], message: "User and system messages require content" });
+  }
+});
 
 export const providerConfigSchema = z.object({
   enabled: z.boolean(),
@@ -105,13 +194,64 @@ export const productRegistrationSchema = z.object({
     url: z.string().url().max(500),
     cloneUrl: z.string().url().max(500),
     defaultBranch: z.string().min(1).max(200),
-    visibility: z.enum(["public", "private", "internal"]),
+    visibility: z.enum(["public", "private", "internal", "unknown"]),
     archived: z.boolean(),
     sizeKb: z.number().int().nonnegative(),
     language: z.string().max(100).nullable().default(null),
     description: z.string().max(2_000).nullable().default(null),
     intelligence: z.record(z.string(), z.unknown()).default({}),
   })).max(500),
+});
+
+export const repositoryRoleSchema = z.enum([
+  "umbrella",
+  "shared_platform",
+  "module",
+  "desktop",
+  "installer",
+  "documentation",
+  "release_truth",
+  "other",
+]);
+
+const repositoryValidatorSchema = z.object({
+  command: z.string().min(1).max(1_000),
+  args: z.array(z.string().max(2_000)).max(100),
+  timeoutMs: z.number().int().positive().max(3_600_000),
+  cwd: z.string().min(1).max(2_000).optional(),
+});
+
+export const repositoryUpsertSchema = z.object({
+  id: z.string().regex(/^[a-z0-9][a-z0-9:._\/-]*$/i).max(300),
+  productId: z.string().regex(/^[a-z0-9][a-z0-9:_-]*$/i).max(200),
+  name: z.string().min(1).max(200),
+  fullName: z.string().regex(/^[^/]+\/[^/]+$/).max(300),
+  url: z.string().url().max(500),
+  cloneUrl: z.string().min(1).max(500),
+  defaultBranch: z.string().min(1).max(200),
+  visibility: z.enum(["public", "private", "internal", "unknown"]),
+  archived: z.boolean(),
+  sizeKb: z.number().int().nonnegative(),
+  language: z.string().max(100).nullable().default(null),
+  description: z.string().max(2_000).nullable().default(null),
+  intelligence: z.record(z.string(), z.unknown()).default({}),
+  localPath: z.string().min(1).max(2_000).nullable().default(null),
+  role: repositoryRoleSchema.default("other"),
+  expectedBranch: z.string().min(1).max(200).nullable().default(null),
+  owners: z.array(z.string().min(1).max(200)).max(100).default([]),
+  dependencyRepositoryIds: z.array(z.string().regex(/^[a-z0-9][a-z0-9:._\/-]*$/i).max(300)).max(500).default([]),
+  validators: z.record(z.string().min(1).max(100), repositoryValidatorSchema).default({}),
+  governanceSources: z.array(z.string().min(1).max(2_000)).max(100).default([]),
+  governanceRules: z.array(z.string().min(1).max(2_000)).max(500).default([]),
+});
+
+export const repositoryInspectionSchema = z.object({
+  currentBranch: z.string().min(1).max(500).nullable(),
+  headSha: z.string().regex(/^[a-f0-9]{7,64}$/i).nullable(),
+  remoteUrl: z.string().min(1).max(2_000).nullable(),
+  dirty: z.boolean(),
+  compatibilityIssues: z.array(z.string().min(1).max(2_000)).max(500).default([]),
+  checkedAt: z.string().datetime({ offset: true }).optional(),
 });
 
 const concurrencySchema = z.object({
@@ -198,6 +338,17 @@ export const devHarmonicsConfigSchema = z.object({
     requirePlanApproval: z.boolean(),
     allowPaidApi: z.boolean(),
     allowExternalWrites: z.boolean(),
+  }),
+  reviewPolicy: z.object({
+    reviewerCountByRisk: z.object({ low: z.number().int().min(1).max(8), medium: z.number().int().min(1).max(8), high: z.number().int().min(1).max(8) }),
+    minimumDistinctProvidersByRisk: z.object({ low: z.number().int().min(1).max(4), medium: z.number().int().min(1).max(4), high: z.number().int().min(1).max(4) }),
+    requireImplementorIndependenceByRisk: z.object({ low: z.boolean(), medium: z.boolean(), high: z.boolean() }),
+    maxFixRounds: z.number().int().min(0).max(5),
+  }).default({
+    reviewerCountByRisk: { low: 1, medium: 1, high: 2 },
+    minimumDistinctProvidersByRisk: { low: 1, medium: 1, high: 2 },
+    requireImplementorIndependenceByRisk: { low: false, medium: true, high: true },
+    maxFixRounds: 2,
   }),
   routing: z.object({
     mode: z.enum(["adaptive", "manual"]).default("adaptive"),

@@ -387,6 +387,10 @@ test("orchestrator completes a verified run through fake subscription CLIs", asy
     assert.equal(run?.tasks[0]?.checks[0]?.passed, true);
     assert.equal(run?.tasks.find((task) => task.id === "__integration__")?.status, "passed");
     assert.match(run?.finalReview ?? "", /^READY/);
+    assert.equal(run?.delivery?.repositories.length, 1);
+    assert.equal(run?.delivery?.repositories[0]?.baseBranch, "main");
+    assert.equal(run?.delivery?.repositories[0]?.branch, `devharmonics/${runId.slice(0, 8)}`);
+    assert.notEqual(run?.delivery?.repositories[0]?.headCommit, run?.delivery?.repositories[0]?.baseCommit);
     const reviews = ledger.listReviewReceipts(runId);
     assert.equal(reviews.length, 1);
     assert.equal(reviews[0]!.verdict, "READY");
@@ -645,6 +649,12 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
     assert.match(pageText, /Assemble a verified agent team/);
     assert.match(pageText, /aria-label="Agent count"/);
     assert.match(pageText, /id="run-autonomy"/);
+    assert.match(pageText, /id="delivery-panel"/);
+    const appText = await fetch(`${dashboard.url}/app.js`).then((response) => response.text());
+    assert.match(appText, /create_draft_pr/);
+    assert.match(appText, /Approve &amp; push branch/);
+    assert.match(appText, /Approve &amp; create draft PR/);
+    assert.doesNotMatch(appText, /data-delivery-action=["']merge|action:\s*["']merge/i, "the delivery UI must expose no merge action");
     const bootstrap = await fetch(`${dashboard.url}/api/bootstrap`);
     const value = (await bootstrap.json()) as {
       product: { name: string; version: string };
@@ -764,7 +774,7 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
     assert.match(exportResponse.headers.get("content-disposition") ?? "", new RegExp(`attachment; filename="devharmonics-${runId}-evidence\\.json"`));
     const exportValue = await exportResponse.json() as { version: number; evidenceVersion: number; integritySha256: string; report: { runId: string } };
     assert.equal(exportValue.version, 1);
-    assert.equal(exportValue.evidenceVersion, 4);
+    assert.equal(exportValue.evidenceVersion, 5);
     assert.equal(exportValue.integritySha256, reportValue.evidenceHash);
     assert.equal(exportValue.report.runId, runId);
     const reporterMutation = await fetch(`${dashboard.url}/api/runs/${runId}/report`, {
@@ -841,7 +851,8 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
     assert.match(appStyles, /\.run-list\s*\{[^}]*max-width:\s*100%/);
   } finally {
     await dashboard.close();
-    await rm(root, { recursive: true, force: true });
+    // ponytail: Windows releases the just-closed SQLite handle asynchronously; retry rmdir on EBUSY.
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -1161,6 +1172,9 @@ test("DH-720 automatically fixes a repository-scoped finding and independently r
       assert.ok(retained?.events.some((event) => event.kind === "review.invalidated"));
       assert.ok(retained?.events.some((event) => event.kind === "fixer.completed"));
       assert.ok(retained?.events.some((event) => event.kind === "review.quorum_passed"));
+      assert.deepEqual(retained?.delivery?.repositories.map((repository) => repository.repositoryId), ["repo:core", "repo:docs"]);
+      assert.equal(retained?.delivery?.repositories.find((repository) => repository.repositoryId === "repo:core")?.baseCommit, coreBase);
+      assert.equal(retained?.delivery?.repositories.find((repository) => repository.repositoryId === "repo:docs")?.baseCommit, docsBase);
     } finally {
       ledger.close();
     }

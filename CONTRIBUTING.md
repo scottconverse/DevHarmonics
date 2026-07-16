@@ -13,4 +13,4 @@ Keep provider authentication outside tests. The integration suite uses fake prov
 
 Use focused commits, preserve safety boundaries, and update documentation and tests whenever observable behavior changes.
 
-No open-source license has been selected yet. Please do not assume public repository visibility grants reuse rights; license selection is a planned community discussion.
+DevHarmonics is licensed under the [Apache License 2.0](LICENSE). By submitting a contribution you agree that it is provided under those same terms, per section 5 of the license.

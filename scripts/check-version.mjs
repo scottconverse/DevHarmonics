@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,6 +44,11 @@ if (packageLock.version !== version || lockVersion !== version) {
 }
 checks += 1;
 
+if (packageLock.packages?.[""]?.license !== packageJson.license) {
+  failures.push(`package-lock.json: root package license must match package.json (${packageJson.license})`);
+}
+checks += 1;
+
 const productSpec = await readFile(path.join(root, "docs/PRODUCT_SPEC.md"), "utf8");
 const implementationPlan = await readFile(path.join(root, "docs/IMPLEMENTATION_PLAN.md"), "utf8");
 const changelog = await readFile(path.join(root, "CHANGELOG.md"), "utf8");
@@ -67,12 +73,17 @@ checks += 1;
 const expectedRepository = "git+https://github.com/scottconverse/DevHarmonics.git";
 if (
   packageJson.private !== true ||
-  packageJson.license !== "UNLICENSED" ||
+  packageJson.license !== "Apache-2.0" ||
   packageJson.repository?.url !== expectedRepository ||
   packageJson.homepage !== "https://scottconverse.github.io/DevHarmonics/" ||
   packageJson.bugs?.url !== "https://github.com/scottconverse/DevHarmonics/issues"
 ) {
-  failures.push("package.json: public repository coordinates or non-publishable licensing metadata are inconsistent");
+  failures.push("package.json: public repository coordinates or Apache-2.0 licensing metadata are inconsistent");
+}
+checks += 1;
+
+if (!existsSync(path.join(root, "LICENSE"))) {
+  failures.push("LICENSE: the Apache-2.0 license file is missing");
 }
 checks += 1;
 

@@ -223,6 +223,31 @@ export interface IntegrationSetRecord {
   updatedAt: string;
 }
 
+export type DeliveryRepositoryStatus = "prepared" | "branch_pushed" | "draft_pr_created" | "failed";
+
+export interface DeliveryRepositoryRecord {
+  runId: string;
+  repositoryId: string;
+  localPath: string;
+  baseBranch: string;
+  baseCommit: string;
+  headCommit: string;
+  branch: string;
+  remoteUrl: string | null;
+  status: DeliveryRepositoryStatus;
+  pullRequestUrl: string | null;
+  approvalId: string | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DeliveryHandoffRecord {
+  runId: string;
+  status: DeliveryRepositoryStatus;
+  repositories: DeliveryRepositoryRecord[];
+}
+
 export type WorkbenchMessageRole = "user" | "assistant" | "system";
 export type WorkbenchMessageStatus = "complete" | "failed";
 
@@ -291,6 +316,7 @@ export interface RunSummary {
   approvedPlanRevision: number | null;
   plan: RunPlan | null;
   integrationSet: IntegrationSetRecord | null;
+  delivery: DeliveryHandoffRecord | null;
   tasks: Array<{
     id: string;
     title: string;

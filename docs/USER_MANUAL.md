@@ -176,7 +176,18 @@ devharmonics/<run-prefix>
 
 DevHarmonics deliberately does not merge that branch into your checked-out branch. Review it with normal Git tools, run any additional checks, and merge it only when satisfied.
 
-A multi-repository run creates a separate integration branch and worktree for every affected repository. Use the **Exact integration set** card or exported evidence to copy the precise branch name and base-to-HEAD commit range for each repository. DevHarmonics does not push those branches, open pull requests, or merge them into any primary checkout.
+### Development builds after v0.5.1: approved delivery
+
+When a non-Observe run reaches **READY**, the **Approved delivery** card shows the exact base branch, base commit, reviewed HEAD commit, and delivery branch for each repository. External writes are off by default. To deliver through GitHub:
+
+1. Enable **Allow external writes** in Setup.
+2. Confirm **Approve & push branch** for the exact repository and HEAD shown. DevHarmonics pushes that exact commit without force-updating a conflicting remote branch.
+3. After the push succeeds, separately confirm **Approve & create draft PR**.
+4. Open the retained draft-PR link and perform normal human review. DevHarmonics exposes no merge action.
+
+Each confirmation creates its own external-write approval and tool-policy receipt. If the reviewed HEAD no longer matches the card, refresh instead of approving stale evidence. This development capability is planned for the v0.6 increment; it is not present in the tagged v0.5.1 release.
+
+A multi-repository run creates a separate integration branch and worktree for every affected repository. Use the **Exact integration set** card or exported evidence to copy the precise branch name and base-to-HEAD commit range for each repository. The tagged v0.5.1 release does not push those branches or open pull requests. Development builds after v0.5.1 can perform the separately approved delivery flow above. No version merges them into a primary checkout automatically.
 
 Useful commands:
 

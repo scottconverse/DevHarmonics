@@ -945,6 +945,18 @@ export class Orchestrator {
     const quorumText = `${finalQuorum.passed ? "READY" : "NOT READY"}\n\nReview quorum: ${finalQuorum.completedReviews}/${finalQuorum.requiredReviewers} completed across ${finalQuorum.distinctProviders} provider(s).${finalQuorum.reasons.length ? `\n${finalQuorum.reasons.join("\n")}` : "\nAll configured review gates passed."}\n\n${finalReviews.map((review, index) => `Reviewer ${index + 1} (${review.provider}${review.modelId ? ` / ${review.modelId}` : ""}): ${review.verdict.replace("_", " ")}\n${review.summary}`).join("\n\n")}`;
     this.ledger.addEvent(runId, finalQuorum.passed ? "review.quorum_passed" : "review.quorum_failed", finalQuorum.passed ? "Independent review quorum passed" : "Independent review quorum requires follow-up", { requirement: reviewPolicy, decision: finalQuorum, integrationSha256: finalReviewSha256 });
     const ready = !failed && finalQuorum.passed;
+    if (ready && autonomy !== "observe") {
+      const deliveryStatus = await worktrees.status();
+      this.ledger.prepareDeliveryRepository({
+        runId,
+        repositoryId: deliveryStatus.repositoryRoot,
+        localPath: deliveryStatus.repositoryRoot,
+        baseBranch: deliveryStatus.baseBranch,
+        baseCommit: deliveryStatus.baseCommit,
+        headCommit: deliveryStatus.headCommit,
+        branch: deliveryStatus.branch,
+      });
+    }
     this.ledger.setRunStatus(runId, ready ? "ready" : "not_ready", quorumText);
     this.ledger.addEvent(
       runId,
@@ -1304,6 +1316,20 @@ export class Orchestrator {
       }).join("; ")}\n\nReview quorum: ${reviewRound.decision.completedReviews}/${reviewRound.decision.requiredReviewers} completed across ${reviewRound.decision.distinctProviders} provider(s).${reviewRound.decision.reasons.length ? `\n${reviewRound.decision.reasons.join("\n")}` : "\nAll configured review gates passed."}\n\n${reviewRound.reviews.map((review, index) => `Reviewer ${index + 1} (${review.provider}${review.modelId ? ` / ${review.modelId}` : ""}): ${review.verdict.replace("_", " ")}\n${review.summary}`).join("\n\n")}`;
       this.ledger.addEvent(input.runId, reviewRound.decision.passed ? "review.quorum_passed" : "review.quorum_failed", reviewRound.decision.passed ? "Multi-repository review quorum passed" : "Multi-repository review quorum requires follow-up", { requirement, decision: reviewRound.decision, integrationSha256: finalReviewSha256, repositoryIds: affectedIds });
       this.ledger.setIntegrationSetStatus(input.runId, ready ? "ready" : "not_ready");
+      if (ready && input.autonomy !== "observe") {
+        const deliveryStatuses = await integration.status();
+        for (const repository of deliveryStatuses) {
+          this.ledger.prepareDeliveryRepository({
+            runId: input.runId,
+            repositoryId: repository.repositoryId,
+            localPath: repository.repositoryRoot,
+            baseBranch: repository.baseBranch,
+            baseCommit: repository.baseCommit,
+            headCommit: repository.headCommit,
+            branch: repository.branch,
+          });
+        }
+      }
       this.ledger.setRunStatus(input.runId, ready ? "ready" : "not_ready", finalReview);
       this.ledger.addEvent(input.runId, ready ? "run.ready" : "run.not_ready", ready ? "Multi-repository integration set passed final review" : "Multi-repository integration set requires follow-up", { repositoryIds: affectedIds, integrationSha256: finalReviewSha256 });
     } catch (error) {

@@ -39,6 +39,9 @@ import {
 } from "./registry.js";
 import type {
   CheckResult,
+  DeliveryHandoffRecord,
+  DeliveryRepositoryRecord,
+  DeliveryRepositoryStatus,
   IntegrationRepositoryStatus,
   IntegrationSetRecord,
   IntegrationSetStatus,
@@ -163,7 +166,7 @@ interface CheckRow {
   duration_ms: number;
 }
 
-export const LEDGER_SCHEMA_VERSION = 26;
+export const LEDGER_SCHEMA_VERSION = 27;
 
 export const REPOSITORY_ROLES = [
   "umbrella",
@@ -480,7 +483,7 @@ export interface ReviewEvidenceBinding {
 }
 
 export interface RunEvidencePackage {
-  version: 4;
+  version: 5;
   generatedAt: string;
   run: RunSummary;
   attempts: Array<Record<string, unknown>>;
@@ -488,6 +491,7 @@ export interface RunEvidencePackage {
   toolReceipts: ToolPolicyReceiptRecord[];
   reviews: ReviewReceiptRecord[];
   integrationSet: IntegrationSetRecord | null;
+  delivery: DeliveryHandoffRecord | null;
   integritySha256: string;
 }
 
@@ -1180,6 +1184,33 @@ const MIGRATIONS: readonly LedgerMigration[] = [
       `);
     },
   },
+  {
+    version: 27,
+    name: "approved-delivery-handoffs",
+    apply(database) {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS delivery_repositories (
+          run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+          repository_id TEXT NOT NULL,
+          local_path TEXT NOT NULL,
+          base_branch TEXT NOT NULL,
+          base_commit TEXT NOT NULL,
+          head_commit TEXT NOT NULL,
+          branch TEXT NOT NULL,
+          remote_url TEXT,
+          status TEXT NOT NULL CHECK(status IN ('prepared', 'branch_pushed', 'draft_pr_created', 'failed')),
+          pull_request_url TEXT,
+          approval_id TEXT,
+          error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (run_id, repository_id)
+        );
+        CREATE INDEX IF NOT EXISTS delivery_repositories_status
+          ON delivery_repositories(run_id, status);
+      `);
+    },
+  },
 ];
 
 function summarizeGoal(goal: string, maxLength = 180): string {
@@ -1308,6 +1339,7 @@ const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
   workbench_sessions: ["id", "project_path", "title", "mode", "objective_id", "converted_at", "created_at", "updated_at"],
   workbench_messages: ["id", "session_id", "role", "content", "provider", "connection_id", "requested_model_id", "resolved_model_id", "status", "error", "input_tokens", "output_tokens", "cost_usd", "duration_ms", "paid_spend_reservation_id", "created_at"],
   paid_spend_reservations: ["id", "scope_type", "scope_id", "estimated_cost_usd", "state", "expected_receipt_count", "invoked_at", "created_at", "expires_at"],
+  delivery_repositories: ["run_id", "repository_id", "local_path", "base_branch", "base_commit", "head_commit", "branch", "remote_url", "status", "pull_request_url", "approval_id", "error", "created_at", "updated_at"],
   integration_sets: ["id", "run_id", "product_id", "status", "integration_conditions_json", "created_at", "updated_at"],
   integration_set_repositories: ["integration_set_id", "repository_id", "local_path", "base_commit", "integration_branch", "integration_worktree_path", "head_commit", "status", "error", "updated_at"],
   product_intelligence_snapshots: ["id", "product_id", "status", "snapshot_json", "created_at"],
@@ -1771,6 +1803,104 @@ export class Ledger {
     };
   }
 
+  prepareDeliveryRepository(input: {
+    runId: string;
+    repositoryId: string;
+    localPath: string;
+    baseBranch: string;
+    baseCommit: string;
+    headCommit: string;
+    branch: string;
+  }): DeliveryRepositoryRecord {
+    if (!this.getRun(input.runId)) throw new Error(`Run '${input.runId}' was not found`);
+    for (const [name, value] of Object.entries(input)) {
+      if (!String(value).trim()) throw new Error(`Delivery ${name} cannot be empty`);
+    }
+    if (input.baseCommit === input.headCommit) throw new Error("Delivery requires a reviewed commit distinct from the base commit");
+    const existing = this.getDeliveryHandoff(input.runId)?.repositories.find((repository) => repository.repositoryId === input.repositoryId);
+    if (existing) {
+      const unchanged = existing.localPath === input.localPath && existing.baseBranch === input.baseBranch && existing.baseCommit === input.baseCommit
+        && existing.headCommit === input.headCommit && existing.branch === input.branch;
+      if (!unchanged) throw new Error(`Delivery evidence for '${input.repositoryId}' is immutable once prepared`);
+      return existing;
+    }
+    const now = new Date().toISOString();
+    this.database.prepare(`
+      INSERT INTO delivery_repositories (
+        run_id, repository_id, local_path, base_branch, base_commit, head_commit, branch,
+        remote_url, status, pull_request_url, approval_id, error, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'prepared', NULL, NULL, NULL, ?, ?)
+    `).run(input.runId, input.repositoryId, input.localPath, input.baseBranch, input.baseCommit, input.headCommit, input.branch, now, now);
+    this.addEvent(input.runId, "delivery.prepared", `${input.repositoryId}: reviewed branch ${input.branch} is ready for owner-approved delivery`, {
+      repositoryId: input.repositoryId,
+      baseBranch: input.baseBranch,
+      baseCommit: input.baseCommit,
+      headCommit: input.headCommit,
+      branch: input.branch,
+    });
+    return this.getDeliveryHandoff(input.runId)!.repositories.find((repository) => repository.repositoryId === input.repositoryId)!;
+  }
+
+  updateDeliveryRepository(
+    runId: string,
+    repositoryId: string,
+    input: {
+      status: DeliveryRepositoryStatus;
+      remoteUrl?: string | null;
+      pullRequestUrl?: string | null;
+      approvalId?: string | null;
+      error?: string | null;
+    },
+  ): DeliveryRepositoryRecord {
+    const current = this.getDeliveryHandoff(runId)?.repositories.find((repository) => repository.repositoryId === repositoryId);
+    if (!current) throw new Error(`Run '${runId}' has no prepared delivery for '${repositoryId}'`);
+    const now = new Date().toISOString();
+    this.database.prepare(`
+      UPDATE delivery_repositories
+      SET status = ?, remote_url = ?, pull_request_url = ?, approval_id = ?, error = ?, updated_at = ?
+      WHERE run_id = ? AND repository_id = ?
+    `).run(
+      input.status,
+      input.remoteUrl === undefined ? current.remoteUrl : input.remoteUrl,
+      input.pullRequestUrl === undefined ? current.pullRequestUrl : input.pullRequestUrl,
+      input.approvalId === undefined ? current.approvalId : input.approvalId,
+      input.error === undefined ? current.error : input.error == null ? null : redactText(input.error),
+      now,
+      runId,
+      repositoryId,
+    );
+    return this.getDeliveryHandoff(runId)!.repositories.find((repository) => repository.repositoryId === repositoryId)!;
+  }
+
+  getDeliveryHandoff(runId: string): DeliveryHandoffRecord | null {
+    const rows = this.database.prepare("SELECT * FROM delivery_repositories WHERE run_id = ? ORDER BY repository_id").all(runId) as unknown as Array<Record<string, unknown>>;
+    if (!rows.length) return null;
+    const repositories: DeliveryRepositoryRecord[] = rows.map((row) => ({
+      runId: String(row.run_id),
+      repositoryId: String(row.repository_id),
+      localPath: String(row.local_path),
+      baseBranch: String(row.base_branch),
+      baseCommit: String(row.base_commit),
+      headCommit: String(row.head_commit),
+      branch: String(row.branch),
+      remoteUrl: row.remote_url === null ? null : String(row.remote_url),
+      status: String(row.status) as DeliveryRepositoryStatus,
+      pullRequestUrl: row.pull_request_url === null ? null : String(row.pull_request_url),
+      approvalId: row.approval_id === null ? null : String(row.approval_id),
+      error: row.error === null ? null : String(row.error),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    }));
+    const status: DeliveryRepositoryStatus = repositories.some((repository) => repository.status === "failed")
+      ? "failed"
+      : repositories.every((repository) => repository.status === "draft_pr_created")
+        ? "draft_pr_created"
+        : repositories.every((repository) => ["branch_pushed", "draft_pr_created"].includes(repository.status))
+          ? "branch_pushed"
+          : "prepared";
+    return { runId, status, repositories };
+  }
+
   addIntegrationTask(runId: string, checks: string[], taskId = "__integration__", title = "Integration suite"): void {
     this.database
       .prepare(
@@ -2073,6 +2203,7 @@ export class Ledger {
       approvedPlanRevision: run.approved_plan_revision,
       plan: run.plan_json ? JSON.parse(run.plan_json) as RunPlan : null,
       integrationSet: this.getIntegrationSet(runId),
+      delivery: this.getDeliveryHandoff(runId),
       tasks: tasks.map((task) => {
         const contract = JSON.parse(task.task_contract_json || "{}") as Partial<PlannedTask>;
         return {
@@ -2126,9 +2257,10 @@ export class Ledger {
     const toolReceipts = this.listToolPolicyReceipts(runId);
     const reviews = this.listReviewReceipts(runId);
     const integrationSet = this.getIntegrationSet(runId);
-    const canonical = JSON.stringify({ run, attempts: normalizedAttempts, blackboard, toolReceipts, reviews, integrationSet });
+    const delivery = this.getDeliveryHandoff(runId);
+    const canonical = JSON.stringify({ run, attempts: normalizedAttempts, blackboard, toolReceipts, reviews, integrationSet, delivery });
     return {
-      version: 4,
+      version: 5,
       generatedAt: new Date().toISOString(),
       run,
       attempts: normalizedAttempts,
@@ -2136,6 +2268,7 @@ export class Ledger {
       toolReceipts,
       reviews,
       integrationSet,
+      delivery,
       integritySha256: createHash("sha256").update(canonical).digest("hex"),
     };
   }

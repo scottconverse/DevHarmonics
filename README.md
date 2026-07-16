@@ -39,6 +39,8 @@ Normal subscription and local-model use requires no model API keys. Each subscri
 - Ledger-boundary redaction of common credentials in prompts, outputs, errors, checks, reviews, and events
 - Active-run cancellation from the dashboard
 
+The development branch after v0.5.1 also includes owner-approved delivery for READY runs: the run board shows exact reviewed commits, separately confirms an exact-SHA GitHub branch push and draft pull-request creation, retains both receipts, and never merges automatically. This capability will ship with the v0.6 increment after its CivicSuite acceptance gates pass.
+
 ## Requirements
 
 - Windows, macOS, or Linux
@@ -218,4 +220,6 @@ The automated suite covers configuration, credential stripping, provider parsing
 
 ## Project status and licensing
 
-DevHarmonics v0.5.1 is an early public preview. The repository is public for evaluation and collaboration. No open-source license has been selected yet, so public visibility alone does not grant reuse rights. License selection is intentionally open for community discussion.
+DevHarmonics v0.5.1 is an early public preview. The repository is public for evaluation and collaboration.
+
+DevHarmonics is released under the [Apache License 2.0](LICENSE). You may use, modify, and redistribute it under that license's terms, which include a patent grant and require preserving attribution and change notices.

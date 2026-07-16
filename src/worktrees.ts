@@ -15,6 +15,7 @@ export class WorkspaceIsolationError extends Error {
 export interface WorktreePreflight {
   repositoryRoot: string;
   baseCommit: string;
+  baseBranch: string;
 }
 
 export interface WorktreeStatus extends WorktreePreflight {
@@ -30,6 +31,7 @@ export class WorktreeManager {
   private mergeQueue: Promise<void> = Promise.resolve();
   private baseCommitValue: string | null = null;
   private repositoryRootValue: string | null = null;
+  private baseBranchValue: string | null = null;
   private initialized = false;
 
   constructor(
@@ -66,12 +68,18 @@ export class WorktreeManager {
     if (root.exitCode !== 0 || !root.stdout.trim()) {
       throw new Error(`Could not resolve the repository root: ${root.stderr.trim() || "git rev-parse failed"}`);
     }
+    const branch = await this.git(this.projectPath, ["branch", "--show-current"]);
+    if (branch.exitCode !== 0 || !branch.stdout.trim()) {
+      throw new Error("DevHarmonics requires the target project to be on a named branch before starting a run");
+    }
     const result = {
       repositoryRoot: path.resolve(root.stdout.trim()),
       baseCommit: base.stdout.trim(),
+      baseBranch: branch.stdout.trim(),
     };
     this.baseCommitValue = result.baseCommit;
     this.repositoryRootValue = result.repositoryRoot;
+    this.baseBranchValue = result.baseBranch;
     return result;
   }
 
@@ -79,6 +87,7 @@ export class WorktreeManager {
     const verified = preflight ?? await this.preflight();
     this.baseCommitValue = verified.baseCommit;
     this.repositoryRootValue = verified.repositoryRoot;
+    this.baseBranchValue = verified.baseBranch;
     await mkdir(this.root, { recursive: true });
     const created = await this.git(this.projectPath, [
       "worktree",
@@ -139,10 +148,11 @@ export class WorktreeManager {
   }
 
   async status(): Promise<WorktreeStatus> {
-    if (!this.repositoryRootValue) throw new Error("Integration worktree has not been initialized or preflighted");
+    if (!this.repositoryRootValue || !this.baseBranchValue) throw new Error("Integration worktree has not been initialized or preflighted");
     return {
       repositoryRoot: this.repositoryRootValue,
       baseCommit: this.baseCommit,
+      baseBranch: this.baseBranchValue,
       headCommit: await this.resolveIntegrationHead(),
       branch: this.integrationBranch,
       path: this.integrationPath,

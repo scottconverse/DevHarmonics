@@ -809,8 +809,8 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
 
     const indexResponse = await fetch(`${dashboard.url}/`);
     const indexHtml = await indexResponse.text();
-    assert.match(indexHtml, /\/app\.css\?v=0\.5\.0/);
-    assert.match(indexHtml, /\/app\.js\?v=0\.5\.0/);
+    assert.match(indexHtml, /\/app\.css\?v=0\.5\.1/);
+    assert.match(indexHtml, /\/app\.js\?v=0\.5\.1/);
     assert.equal(indexResponse.headers.get("cache-control"), "no-store");
     assert.equal(indexResponse.headers.get("expires"), "0");
 

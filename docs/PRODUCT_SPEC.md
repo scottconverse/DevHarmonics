@@ -4,7 +4,7 @@ Document status: **Canonical product direction**
 Specification version: **1.10**
 Written: **2026-07-13**
 Revised: **2026-07-15**
-Current implementation baseline: **DevHarmonics v0.5.0**
+Current implementation baseline: **DevHarmonics v0.5.1**
 Google Doc: [DevHarmonics Canonical Product Specification](https://docs.google.com/document/d/1rd-_gqHHPZHhTkrULJR9tHcbAVUOGONsbuEFCV-8pRQ/edit?usp=drivesdk)
 
 Revision history: **v1.10 (2026-07-15)** — Reconciled the canonical baseline with the v0.5 verified-implementation line: durable objectives and exact plan approval, Workbench, bounded local-model write tools, product/repository intelligence, exact multi-repository integration sets, structured reviewer fix/re-review, and cryptographic review binding to the exact plan, checks, diff, and repository base/HEAD set. Locked the next capability sequence as approved branch/draft-PR delivery, a real single-repository CivicSuite implementation, live run steering, real provider/local fallback, a real cross-repository CivicSuite implementation, and reusable Git-versioned development workflows.
@@ -1038,7 +1038,7 @@ The moat is not access to any one model. It is the accumulated operational intel
 
 ## 14. Current baseline and delivery roadmap
 
-### 14.1 Current implementation baseline: v0.5.0
+### 14.1 Current implementation baseline: v0.5.1
 
 The current release already provides:
 

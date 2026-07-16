@@ -5,7 +5,7 @@ Plan version: **1.19**
 Written: **2026-07-14**
 Revised: **2026-07-15**
 Product specification baseline: **DevHarmonics Product Specification v1.10**
-Current implementation baseline: **DevHarmonics v0.5.0**
+Current implementation baseline: **DevHarmonics v0.5.1**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 
 Revision history: **v1.19 (2026-07-15)** — Reconciled the v0.5 release candidate with the implemented verified-development capabilities and locked the owner-approved next sequence: approved branch/draft-PR delivery; a real bounded single-repository CivicSuite implementation; live run steering; real provider/local fallback during that work; a real cross-repository CivicSuite implementation; and reusable Git-versioned development workflows. Restart reconstruction, cleanup, analytics, triggers, and campaign breadth remain in the plan but may not displace this capability sequence.
@@ -50,7 +50,7 @@ This plan converts the canonical product specification into an incremental engin
 
 The plan is intentionally designed around two facts:
 
-1. DevHarmonics v0.5.0 has a working subscription/local execution path, durable adaptive model fleet, verified local implementation, exact multi-repository integration foundations, and a passed CivicSuite Observe acceptance workflow.
+1. DevHarmonics v0.5.1 has a working subscription/local execution path, durable adaptive model fleet, verified local implementation, exact multi-repository integration foundations, and a passed CivicSuite Observe acceptance workflow.
 2. Scott needs the product to become useful on real work before every long-term capability is complete.
 
 The implementation therefore MUST evolve the current system without a big-bang rewrite. Every release increment must leave a working product, preserve durable evidence, and provide a safe rollback path.

@@ -1,6 +1,6 @@
 {
   "name": "devharmonics-local",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "Local-first, provider-neutral software factory for product owners managing AI agents as development teams.",
   "license": "UNLICENSED",

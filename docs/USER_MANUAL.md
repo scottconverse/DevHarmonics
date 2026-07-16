@@ -1,7 +1,7 @@
 # DevHarmonics User Manual
 
-Manual version: **0.5.0**<br>
-Product release: **v0.5.0**
+Manual version: **0.5.1**<br>
+Product release: **v0.5.1**
 
 DevHarmonics is a local-first, provider-neutral software factory for product owners managing AI agents as development teams. It turns one software-development objective into a planned, parallel, validated run across Codex, Claude Code, and the Google Antigravity model catalog. It runs locally and uses the subscription sessions cached by the providers' official command-line tools.
 
@@ -38,7 +38,7 @@ npm.cmd link
 devharmonics --version
 ```
 
-Expected version output is `DevHarmonics 0.5.0`.
+Expected version output is `DevHarmonics 0.5.1`.
 
 ## 3. Sign in to providers
 
@@ -312,7 +312,7 @@ Open the task drawer and inspect the exact command receipt. After bounded retrie
 
 ### A merge conflict stopped a task
 
-Git merge conflicts are not repaired automatically in v0.5.0. The automatic fixer addresses structured reviewer findings after integration; it does not guess through conflicting branch edits. Inspect the task and integration branches, resolve manually if appropriate, and start a new run for remaining work.
+Git merge conflicts are not repaired automatically in v0.5.1. The automatic fixer addresses structured reviewer findings after integration; it does not guess through conflicting branch edits. Inspect the task and integration branches, resolve manually if appropriate, and start a new run for remaining work.
 
 ### A provider is throttled
 
@@ -329,7 +329,7 @@ Reduce concurrency, use fewer providers, or wait for the subscription allowance 
 - Redaction is defense in depth, not a reason to place credentials in goals, prompts, repository files, or validator output. Treat the runtime directory as potentially sensitive.
 - When DevHarmonics upgrades an existing ledger schema, it creates a pre-migration `.sqlite` backup beside `devharmonics.db`. Keep that backup until the upgraded application and run history have been verified. Because it preserves data exactly as it existed before migration, it can contain values stored by an older version before ledger-boundary redaction was available.
 
-Report security issues using the private process in [SECURITY.md](../SECURITY.md), not a public issue or Discussion.
+Report security issues using the private process in [SECURITY.md](https://github.com/scottconverse/DevHarmonics/blob/main/SECURITY.md), not a public issue or Discussion.
 
 ## 13. Uninstall
 

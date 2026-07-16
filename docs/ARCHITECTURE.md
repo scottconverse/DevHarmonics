@@ -1,6 +1,6 @@
 # DevHarmonics Architecture
 
-Architecture version: **0.5.0**
+Architecture version: **0.5.1**
 
 DevHarmonics is a local-first, provider-neutral software factory for product owners managing AI agents as development teams. Its current architecture is a local orchestration layer over official subscription-authenticated coding-agent CLIs. It does not proxy provider HTTP APIs.
 
@@ -113,7 +113,7 @@ On a controlled server shutdown, the orchestrator pauses and aborts active runs,
 
 Prompts, provider output, validator stdout/stderr, errors, reviews, event messages, and event payloads are redacted before persistence. Migration backups are byte-consistent snapshots of pre-existing data, so a backup may contain sensitive values written by an older version and must be protected like the original ledger.
 
-## Deliberate non-features in v0.5.0
+## Deliberate non-features in v0.5.1
 
 - No general API-key configuration; OpenRouter OAuth is the only API transport and paid use remains separately opt-in
 - No remote DevHarmonics service

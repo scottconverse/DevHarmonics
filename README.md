@@ -2,7 +2,7 @@
 
 **One objective. A verified AI development crew.**
 
-Current release: **v0.5.0**
+Current release: **v0.5.1**
 
 **DevHarmonics is a local-first, provider-neutral software factory for product owners managing AI agents as development teams.**
 
@@ -218,4 +218,4 @@ The automated suite covers configuration, credential stripping, provider parsing
 
 ## Project status and licensing
 
-DevHarmonics v0.5.0 is an early public preview. The repository is public for evaluation and collaboration. No open-source license has been selected yet, so public visibility alone does not grant reuse rights. License selection is intentionally open for community discussion.
+DevHarmonics v0.5.1 is an early public preview. The repository is public for evaluation and collaboration. No open-source license has been selected yet, so public visibility alone does not grant reuse rights. License selection is intentionally open for community discussion.

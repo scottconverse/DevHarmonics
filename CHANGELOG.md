@@ -4,6 +4,12 @@ All notable DevHarmonics changes are documented here.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-15
+
+### Fixed
+
+- Corrected the published user manual's security-reporting link so it resolves to the repository's private-reporting instructions instead of a missing GitHub Pages path.
+
 ## [0.5.0] - 2026-07-15
 
 ### Added
@@ -148,5 +154,6 @@ All notable DevHarmonics changes are documented here.
 - Detailed Antigravity browser-code handoff and multi-screen onboarding instructions.
 
 [0.1.0]: https://github.com/scottconverse/DevHarmonics/releases/tag/v0.1.0
+[0.5.1]: https://github.com/scottconverse/DevHarmonics/releases/tag/v0.5.1
 [0.5.0]: https://github.com/scottconverse/DevHarmonics/releases/tag/v0.5.0
 [0.4.0]: https://github.com/scottconverse/DevHarmonics/releases/tag/v0.4.0

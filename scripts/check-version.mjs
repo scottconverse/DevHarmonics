@@ -16,6 +16,7 @@ const expectations = [
   ["docs/index.html", `data-product-version="${version}"`],
   ["docs/index.html", `href="USER_MANUAL.html">Manual`],
   ["docs/index.html", `href="USER_MANUAL.html">Read the user manual`],
+  ["docs/USER_MANUAL.md", `](https://github.com/scottconverse/DevHarmonics/blob/main/SECURITY.md)`],
   ["src/ui/index.html", `v${version}`],
   ["src/ui/index.html", `/app.css?v=${version}`],
   ["src/ui/index.html", `/app.js?v=${version}`],

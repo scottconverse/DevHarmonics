@@ -154,6 +154,10 @@ The agent count is not artificially capped. High settings can consume substantia
 
 The metrics show task count, passed checks, attempts, and currently active agents. Select a task to inspect its validator receipts. The activity panel records durable run events; refreshing the browser does not erase them.
 
+### Live feedback while work runs (development builds after v0.5.1)
+
+Every dashboard action acknowledges immediately: the button you pressed disables, shows a busy label with a small spinner, and announces an explicit done or failed result. A floating **activity strip** at the bottom of the screen lists everything DevHarmonics is doing right now — active run tasks with the responsible provider and model, plus local operations like fleet refreshes — and stays visible when you change screens, so navigation never hides work. Working tasks show how long they have been active; when a long provider call has produced no new events for several minutes, the card and strip say so ("quiet for 6m — the provider call may still be running") instead of pretending progress. These times are rebuilt from the durable ledger, so refreshing the page shows honest elapsed values, not reset ones. DevHarmonics does not draw percentage bars for work it cannot measure, and it never displays activity from tools running outside its own control plane. If you use reduced-motion settings, the spinner is replaced with a static indicator.
+
 For a multi-repository run, the **Exact integration set** card shows the overall set status and one card per affected repository, including its exact base-to-HEAD commit range and integration branch. Repository IDs also appear on task cards and in the task drawer so evidence cannot be mistaken for a monorepo change.
 
 For an Observe run, DevHarmonics stores the selected mode with the run, requires every planned task to be `diagnostic`, `read_only`, and `low` risk, and rejects a worker that asks for approval again or omits contracted path-and-line evidence. Accepted findings are retained in the evidence package and reviewed independently; an empty Git diff alone is not sufficient for success.

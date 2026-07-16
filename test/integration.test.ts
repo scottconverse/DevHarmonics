@@ -844,11 +844,24 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
     assert.match(appScript, /Qualified only for passing roles; failed roles remain unschedulable/);
     assert.match(appScript, /No current role qualification; not schedulable/);
 
+    // DH-632 visible operation feedback: shared acknowledgement helper, honest busy
+    // state, global activity surface, evidence-based elapsed/heartbeat, no fabricated progress.
+    assert.match(appScript, /function withOperation\(/, "DH-632 requires the shared operation acknowledgement helper");
+    assert.match(appScript, /aria-busy/, "DH-632 requires an accessible busy state on acknowledged controls");
+    assert.match(appScript, /function renderActivityStrip\(/, "DH-632 requires the global activity surface");
+    assert.match(appScript, /function operationElapsed\(/, "DH-632 requires evidence-based elapsed time");
+    assert.match(appScript, /quiet for/, "DH-632 requires heartbeat/stall wording for quiet long work");
+    assert.doesNotMatch(appScript, /aria-valuenow|<progress|progress-bar/i, "DH-632 forbids fabricated progress bars until a real measure exists");
+    assert.match(pageText, /id="activity-strip"/, "DH-632 requires the activity strip in the shell");
+    assert.match(pageText, /aria-live="polite"[^>]*id="activity-strip"|id="activity-strip"[^>]*aria-live="polite"/, "the activity strip must be a polite live region");
+
     const appStyles = await fetch(`${dashboard.url}/app.css?v=0.5.1`).then((response) => response.text());
     assert.match(appStyles, /@media \(max-width:\s*1200px\)[\s\S]*?\.board\s*\{\s*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
     assert.match(appStyles, /@media \(max-width:\s*950px\)[\s\S]*?\.run-list\s*\{[\s\S]*?display:\s*flex/);
     assert.match(appStyles, /\.app-shell\s*\{[^}]*overflow-x:\s*clip/);
     assert.match(appStyles, /\.run-list\s*\{[^}]*max-width:\s*100%/);
+    assert.match(appStyles, /\.op-spinner/, "DH-632 requires the busy indicator style");
+    assert.match(appStyles, /prefers-reduced-motion/, "DH-632 requires reduced-motion support");
   } finally {
     await dashboard.close();
     // ponytail: Windows releases the just-closed SQLite handle asynchronously; retry rmdir on EBUSY.

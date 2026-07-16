@@ -4,7 +4,7 @@ Document status: **Build-ready execution plan**
 Plan version: **1.21**
 Written: **2026-07-14**
 Revised: **2026-07-15**
-Product specification baseline: **DevHarmonics Product Specification v1.11**
+Product specification baseline: **DevHarmonics Product Specification v1.12**
 Current implementation baseline: **DevHarmonics v0.5.1**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 

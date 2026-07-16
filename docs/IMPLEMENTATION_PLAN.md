@@ -1,14 +1,16 @@
 # DevHarmonics Detailed Implementation Plan
 
 Document status: **Build-ready execution plan**
-Plan version: **1.21**
+Plan version: **1.22**
 Written: **2026-07-14**
-Revised: **2026-07-15**
+Revised: **2026-07-16**
 Product specification baseline: **DevHarmonics Product Specification v1.12**
 Current implementation baseline: **DevHarmonics v0.5.1**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 
-Revision history: **v1.21 (2026-07-15)** — Added DH-632 as a cross-cutting visible-operation-feedback requirement. Every DevHarmonics-owned asynchronous action must have immediate acknowledgement, truthful lifecycle and stage feedback, elapsed activity and heartbeat, durable refresh/navigation recovery, accessible success/failure/retry states, and evidence-based rather than fabricated progress. The first real CivicSuite implementation must deliver the feedback states it exercises, and every later workflow must extend the same contract instead of deferring a UI/UX retrofit.
+Revision history: **v1.22 (2026-07-16)** — Completed the first real bounded single-repository CivicSuite implementation (DH-740 pilot level 2): CivicCode's pinned CivicCore dependency, CI workflow, tests, and documentation were aligned from the v1.2.0 to the published v1.2.1 release wheel through the full objective → plan → approve → implement → validate → integrate → independent-review path, closing READY with a prepared exact-SHA delivery awaiting owner approval; the primary checkout was never modified. Implemented the first DH-632 wave exercised by that workflow: a shared operation acknowledgement helper across all dashboard actions (disabled/stateful controls, accessible busy state, honest indeterminate spinner, explicit done/failed end states with reasons), a global activity-strip live region that survives navigation, task-card elapsed/last-activity heartbeat with a truthful quiet-work warning reconstructed from durable ledger events, reduced-motion support, and deliberately no fabricated progress bars. Also adopted the Apache-2.0 license decision across the repository's license surfaces.
+
+Prior revision: **v1.21 (2026-07-15)** — Added DH-632 as a cross-cutting visible-operation-feedback requirement. Every DevHarmonics-owned asynchronous action must have immediate acknowledgement, truthful lifecycle and stage feedback, elapsed activity and heartbeat, durable refresh/navigation recovery, accessible success/failure/retry states, and evidence-based rather than fabricated progress. The first real CivicSuite implementation must deliver the feedback states it exercises, and every later workflow must extend the same contract instead of deferring a UI/UX retrofit.
 
 Prior revision: **v1.20 (2026-07-15)** — Implemented the approved branch/draft-PR delivery handoff: immutable exact reviewed repository coordinates, separate external-write approvals for an exact-SHA branch push and draft pull-request creation, retained policy receipts and results, ledger/evidence integration, and no merge surface. The first real bounded single-repository CivicSuite implementation is now next; later sequence items remain unchanged.
 
@@ -826,6 +828,8 @@ Acceptance:
 
 #### DH-632: Visible operation feedback — M
 
+Status: **First wave implemented in the v0.6 development line and proven against the first real CivicSuite run.** All dashboard-initiated actions acknowledge through one shared helper (disabled control, `aria-busy`, busy label, honest indeterminate spinner, explicit done/failed end states with the failure reason routed to the surface-local error area). A global activity strip — a polite live region fixed to the shell — keeps active run tasks and local operations visible across screen changes with the responsible provider/model identity, evidence-based elapsed time, and a "quiet for…" last-activity warning for long provider calls. Task cards carry the same elapsed/heartbeat feedback reconstructed from durable ledger events, so refresh/reconnection rebuilds live-state truthfully; a page-local request that died with its page is honestly absent rather than faked. Reduced-motion preferences disable the spinner animation. Progress bars remain deliberately unimplemented until a real stage sequence or completed/total measure exists. Remaining scope: per-stage lifecycle detail (implementing → validating → merging → reviewing) on cards, waiting-for-capacity/waiting-for-approval distinct visual states, and feedback for exports/settings surfaces not yet exercised by a real workflow.
+
 Deliverables:
 
 - a shared operation-state model for queued, starting, running, waiting-for-capacity, waiting-for-approval, retrying, blocked, stalled, succeeded, failed, and cancelled work;
@@ -998,6 +1002,8 @@ Acceptance:
 Remaining DH-730 scope: remote-only canonical-source acquisition; semantic compatibility-matrix parsing; explicit PostgreSQL/Ollama/Gemma dependency discovery; installer/Tauri architecture analysis; deeper governance reconciliation; and a complete release-truth workflow spanning refreshed umbrella, module, installer, and release surfaces.
 
 #### DH-740: CivicSuite pilot ladder — XL
+
+Status: **Level 2 passed on 2026-07-16.** The first real bounded single-repository implementation ran end to end on CivicCode: the objective aligned the pinned CivicCore shared-ingestion dependency, CI workflow, tests, and documentation from the v1.2.0 release wheel to the published v1.2.1 wheel (sha256 verified against the live release). A read-only Claude architect produced the approved plan revision; Claude workers completed both tasks first-try in isolated worktrees; pin, docs, and diff validators passed with receipts; integration merged serially; and an independent Codex reviewer returned READY under the configured quorum. The run retained a prepared exact-SHA delivery (branch `devharmonics/7f1c39f5`) that stops at the owner's external-write approval, and the registered primary checkout was never modified. Level 3 (resilient execution) is the next rung.
 
 Pilot levels:
 

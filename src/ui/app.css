@@ -353,3 +353,21 @@ pre { margin: 0; padding: 12px; overflow: auto; max-height: 280px; background: #
   .workbench-boundary { align-items: flex-start; flex-direction: column; }
   .board { grid-template-columns: 1fr; }
 }
+
+/* DH-632 visible operation feedback */
+.op-spinner { display: inline-block; width: 12px; height: 12px; margin-right: 7px; border-radius: 50%; border: 2px solid var(--border); border-top-color: var(--lime); animation: op-spin .8s linear infinite; vertical-align: -1px; }
+@keyframes op-spin { to { transform: rotate(360deg); } }
+.task-timing { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; color: var(--muted); font-size: 12px; }
+.op-quiet { color: var(--muted); }
+.op-quiet.warn { color: var(--amber); }
+.activity-strip { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 40; display: grid; gap: 6px; max-width: min(720px, calc(100vw - 28px)); max-height: 34vh; overflow-y: auto; padding: 10px 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 10px 34px rgba(0,0,0,.5); font-size: 12.5px; }
+.activity-strip.hidden { display: none; }
+.strip-item { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--muted); }
+.strip-item strong { color: var(--text); font-weight: 650; }
+.strip-item.succeeded { color: var(--lime); }
+.strip-item.succeeded strong { color: var(--lime); }
+.strip-item.failed { color: var(--red); }
+.strip-item.failed strong { color: var(--red); }
+@media (prefers-reduced-motion: reduce) {
+  .op-spinner { animation: none; border-top-color: var(--border); background: var(--lime); }
+}

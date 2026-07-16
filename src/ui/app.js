@@ -49,6 +49,159 @@ function escapeHtml(value = "") {
     .replaceAll("'", "&#039;");
 }
 
+// DH-632 visible operation feedback: one shared acknowledgement/lifecycle layer for
+// every DevHarmonics-owned asynchronous action. Local UI operations register here;
+// run tasks are projected into the same activity strip from durable ledger events,
+// so refresh/navigation reconstructs run feedback while a page-local fetch that died
+// with the page is honestly absent rather than faked.
+const OPERATION_QUIET_WARNING_MS = 5 * 60 * 1000;
+let operationSequence = 0;
+const operations = new Map();
+
+function beginOperation(label) {
+  const id = `op-${++operationSequence}`;
+  operations.set(id, { id, label, status: "running", startedAt: Date.now(), detail: "" });
+  renderActivityStrip();
+  return id;
+}
+
+function endOperation(id, status, detail = "") {
+  const operation = operations.get(id);
+  if (!operation) return;
+  operation.status = status;
+  operation.detail = detail;
+  operation.endedAt = Date.now();
+  renderActivityStrip();
+  const lingerMs = status === "failed" ? 12_000 : 4_000;
+  setTimeout(() => { operations.delete(id); renderActivityStrip(); }, lingerMs);
+}
+
+function operationElapsed(startedAt, now = Date.now()) {
+  const seconds = Math.max(0, Math.floor((now - startedAt) / 1000));
+  const minutes = Math.floor(seconds / 60);
+  return minutes ? `${minutes}m ${String(seconds % 60).padStart(2, "0")}s` : `${seconds}s`;
+}
+
+async function withOperation(button, label, action, { onError = showError, busyLabel = null } = {}) {
+  const id = beginOperation(label);
+  const restore = button ? { html: button.innerHTML } : null;
+  const hadFocus = Boolean(button) && document.activeElement === button;
+  if (button) {
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    if (busyLabel) button.innerHTML = `<span class="op-spinner" aria-hidden="true"></span>${escapeHtml(busyLabel)}`;
+    else button.insertAdjacentHTML("afterbegin", '<span class="op-spinner" aria-hidden="true"></span>');
+  }
+  try {
+    const result = await action();
+    endOperation(id, "succeeded");
+    return result;
+  } catch (error) {
+    endOperation(id, "failed", error.message);
+    try {
+      await onError(error.message);
+    } catch {
+      // the error surface itself failed; the strip already carries the failure
+    }
+    return undefined;
+  } finally {
+    if (button && restore) {
+      button.innerHTML = restore.html;
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+      // disabling the control dropped keyboard focus; give it back
+      if (hadFocus && button.isConnected && (document.activeElement === document.body || document.activeElement === null)) button.focus();
+    }
+  }
+}
+
+function taskActivityTimes(task, run) {
+  const events = run?.events || [];
+  let startedAt = null;
+  let lastActivityAt = null;
+  for (const event of events) {
+    if (event.data?.taskId !== task.id) continue;
+    const at = Date.parse(event.createdAt);
+    if (!Number.isFinite(at)) continue;
+    if (event.kind === "task.started") startedAt = at;
+    if (!lastActivityAt || at > lastActivityAt) lastActivityAt = at;
+  }
+  return { startedAt, lastActivityAt };
+}
+
+const ACTIVE_TASK_STATUSES = ["working", "verifying", "retry"];
+
+function activeRunOperations() {
+  const items = [];
+  for (const run of state.runs) {
+    if (!["planning", "running"].includes(run.status)) continue;
+    for (const task of run.tasks || []) {
+      if (!ACTIVE_TASK_STATUSES.includes(task.status)) continue;
+      const { startedAt, lastActivityAt } = taskActivityTimes(task, run);
+      items.push({ run, task, startedAt, lastActivityAt });
+    }
+    if (!(run.tasks || []).length) {
+      items.push({ run, task: null, startedAt: Date.parse(run.createdAt) || null, lastActivityAt: null });
+    }
+  }
+  return items;
+}
+
+function quietMarkup(lastActivityAt) {
+  if (!lastActivityAt) return "";
+  const quietMs = Date.now() - lastActivityAt;
+  const warn = quietMs >= OPERATION_QUIET_WARNING_MS;
+  // The ticking duration stays permanently aria-hidden so the polite live region
+  // never announces a clock; the warning note is separate, static text that is
+  // announced once when it appears.
+  return `<span class="op-quiet ${warn ? "warn" : ""}" data-quiet-since="${lastActivityAt}"><span class="op-quiet-time" aria-hidden="true">quiet for ${operationElapsed(lastActivityAt)}</span>${warn ? '<span class="op-quiet-note"> — the provider call may still be running</span>' : ""}</span>`;
+}
+
+let activityStripSignature = "";
+
+function renderActivityStrip() {
+  const strip = $("#activity-strip");
+  if (!strip) return;
+  const local = [...operations.values()].map((operation) => {
+    const stateLabel = operation.status === "running"
+      ? `<span class="op-spinner" aria-hidden="true"></span>working · <span data-elapsed-since="${operation.startedAt}" aria-hidden="true">${operationElapsed(operation.startedAt)}</span>`
+      : operation.status === "succeeded" ? "done" : `failed — ${escapeHtml(operation.detail || "see the error message")}`;
+    return `<div class="strip-item ${operation.status}"><strong>${escapeHtml(operation.label)}</strong><span>${stateLabel}</span></div>`;
+  });
+  const runItems = activeRunOperations().map(({ run, task, startedAt, lastActivityAt }) => {
+    const title = task ? task.title : "Planning";
+    const identity = task ? routingIdentity(taskRouting(run, task.id), task.provider) : "read-only architect";
+    const elapsed = startedAt ? `<span data-elapsed-since="${startedAt}" aria-hidden="true">${operationElapsed(startedAt)}</span>` : "";
+    return `<div class="strip-item running"><span class="op-spinner" aria-hidden="true"></span><strong>${escapeHtml(title)}</strong><span>${escapeHtml(identity)}</span><span>${task ? escapeHtml(task.status) : "planning"}${elapsed ? " · " : ""}${elapsed}</span>${quietMarkup(lastActivityAt)}</div>`;
+  });
+  const items = [...runItems, ...local];
+  // Re-render only when non-time content changes, so the polite live region
+  // announces state transitions rather than every SSE-driven refresh; ticking
+  // time spans stay aria-hidden and update in place via the interval below.
+  const signature = items.join("").replace(/data-(elapsed|quiet)-since="\d+"[^<]*/g, "").replace(/quiet for [^<]*/g, "");
+  if (signature === activityStripSignature) return;
+  activityStripSignature = signature;
+  strip.classList.toggle("hidden", !items.length);
+  strip.innerHTML = items.join("");
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const element of document.querySelectorAll("[data-elapsed-since]")) {
+    element.textContent = operationElapsed(Number(element.dataset.elapsedSince), now);
+  }
+  for (const element of document.querySelectorAll("[data-quiet-since]")) {
+    const lastActivityAt = Number(element.dataset.quietSince);
+    const warn = now - lastActivityAt >= OPERATION_QUIET_WARNING_MS;
+    element.classList.toggle("warn", warn);
+    const time = element.querySelector(".op-quiet-time");
+    if (time) time.textContent = `quiet for ${operationElapsed(lastActivityAt, now)}`;
+    if (warn && !element.querySelector(".op-quiet-note")) {
+      element.insertAdjacentHTML("beforeend", '<span class="op-quiet-note"> — the provider call may still be running</span>');
+    }
+  }
+}, 1_000);
+
 function providerDisplayName(provider) {
   return provider === "gemini" ? "Google Antigravity" : provider || "Unassigned";
 }
@@ -522,17 +675,11 @@ function renderProviders() {
 }
 
 async function refreshProviderStatus() {
-  const button = $("#refresh-provider-status");
-  button.disabled = true;
-  try {
+  await withOperation($("#refresh-provider-status"), "Refreshing sign-in status", async () => {
     state.bootstrap = await api("/api/bootstrap");
     renderProviders();
     showError("");
-  } catch (error) {
-    showError(error.message);
-  } finally {
-    button.disabled = false;
-  }
+  }, { busyLabel: "Refreshing sign-in status…" });
 }
 
 async function refreshRuns() {
@@ -554,6 +701,7 @@ async function refreshRuns() {
   rememberEventCursor(observedCursor);
   renderRunList();
   renderSelectedRun();
+  renderActivityStrip();
 }
 
 function connectEventStream() {
@@ -697,7 +845,13 @@ function renderBoard(run) {
 
 function taskCard(task, run) {
   const passed = task.checks.filter((check) => check.passed).length;
-  return `<button class="task-card ${task.status}" data-task-id="${escapeHtml(task.id)}"><strong>${escapeHtml(task.title)}</strong>${task.repositoryIds?.length ? `<small>${escapeHtml(task.repositoryIds.join(", "))}</small>` : ""}<div class="task-contract"><span>${escapeHtml(task.permission.replaceAll("_", " "))}</span><span>${escapeHtml(task.risk)} risk</span></div><div class="task-meta"><span class="provider-tag">${escapeHtml(routingIdentity(taskRouting(run, task.id), task.provider))}</span><span>${passed}/${task.checks.length} checks · ${task.attemptCount} tries</span></div></button>`;
+  let timing = "";
+  if (ACTIVE_TASK_STATUSES.includes(task.status)) {
+    const { startedAt, lastActivityAt } = taskActivityTimes(task, run);
+    const elapsed = startedAt ? `<span class="op-spinner" aria-hidden="true"></span>active <span data-elapsed-since="${startedAt}" aria-hidden="true">${operationElapsed(startedAt)}</span>` : `<span class="op-spinner" aria-hidden="true"></span>starting`;
+    timing = `<div class="task-timing">${elapsed}${quietMarkup(lastActivityAt)}</div>`;
+  }
+  return `<button class="task-card ${task.status}" data-task-id="${escapeHtml(task.id)}"><strong>${escapeHtml(task.title)}</strong>${task.repositoryIds?.length ? `<small>${escapeHtml(task.repositoryIds.join(", "))}</small>` : ""}<div class="task-contract"><span>${escapeHtml(task.permission.replaceAll("_", " "))}</span><span>${escapeHtml(task.risk)} risk</span></div><div class="task-meta"><span class="provider-tag">${escapeHtml(routingIdentity(taskRouting(run, task.id), task.provider))}</span><span>${passed}/${task.checks.length} checks · ${task.attemptCount} tries</span></div>${timing}</button>`;
 }
 
 function renderActivity(run) {
@@ -817,9 +971,8 @@ async function previewPlan({ revise = false } = {}) {
   const feedback = $("#revision-feedback").value.trim();
   if (revise && !feedback) return showError("Describe what should change before requesting another revision.");
   const button = revise ? $("#revise-plan") : $("#preview-plan");
-  button.disabled = true;
   showError("");
-  try {
+  await withOperation(button, revise ? "Requesting a plan revision" : "Asking the architect for a plan", async () => {
     const objective = await saveObjectiveDraft();
     const result = await api(`/api/objectives/${objective.id}/plans`, {
       method: "POST",
@@ -830,11 +983,7 @@ async function previewPlan({ revise = false } = {}) {
     state.planPreview = result.preview;
     renderPlanPreview();
     $("#revision-feedback").value = "";
-  } catch (error) {
-    showError(error.message);
-  } finally {
-    button.disabled = false;
-  }
+  }, { busyLabel: revise ? "Requesting revision…" : "Planning…" });
 }
 
 function renderPlanPreview() {
@@ -866,10 +1015,8 @@ async function approvePlanAndStart() {
   const enabledProviders = [...document.querySelectorAll('input[name="provider"]:checked')].map((input) => input.value);
   const mode = $("#agent-mode").value;
   const agents = mode === "auto" ? "auto" : Number($("#agent-count").value);
-  const button = $("#approve-plan-start");
-  button.disabled = true;
   showError("");
-  try {
+  await withOperation($("#approve-plan-start"), "Approving the plan and starting the run", async () => {
     const result = await api(`/api/objectives/${state.objective.id}/plans/${state.planRevision.revision}/start`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -878,11 +1025,7 @@ async function approvePlanAndStart() {
     state.composing = false;
     state.selectedRunId = result.runId;
     await refreshRuns();
-  } catch (error) {
-    showError(error.message);
-  } finally {
-    button.disabled = false;
-  }
+  }, { busyLabel: "Starting…" });
 }
 
 function showError(message) { $("#composer-error").textContent = message; }
@@ -917,21 +1060,15 @@ $("#refresh-provider-status").addEventListener("click", refreshProviderStatus);
 $("#cancel-run").addEventListener("click", async () => {
   const runId = state.selectedRunId;
   if (!runId) return;
-  const button = $("#cancel-run");
-  button.disabled = true;
   showError("");
-  try {
+  await withOperation($("#cancel-run"), "Cancelling the run", async () => {
     await api(`/api/runs/${runId}/cancel`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: "{}",
     });
     await refreshRuns();
-  } catch (error) {
-    showError(error.message);
-  } finally {
-    button.disabled = false;
-  }
+  }, { busyLabel: "Cancelling…" });
 });
 $("#new-run").addEventListener("click", showComposer);
 document.querySelector(".app-nav").addEventListener("click", async (event) => {
@@ -954,10 +1091,9 @@ $("#add-local-repository").addEventListener("click", () => {
 });
 $("#product-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const button = event.currentTarget.querySelector('button[type="submit"]');
-  button.disabled = true;
+  const form = event.currentTarget;
   $("#product-form-error").textContent = "";
-  try {
+  await withOperation(form.querySelector('button[type="submit"]'), "Registering the product", async () => {
     const result = await api("/api/products", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -969,23 +1105,18 @@ $("#product-form").addEventListener("submit", async (event) => {
         repositories: [],
       }),
     });
-    event.currentTarget.reset();
-    event.currentTarget.classList.add("hidden");
+    form.reset();
+    form.classList.add("hidden");
     await refreshProducts();
     $("#repository-product").value = result.product.id;
-  } catch (error) {
-    $("#product-form-error").textContent = error.message;
-  } finally {
-    button.disabled = false;
-  }
+  }, { onError: (message) => { $("#product-form-error").textContent = message; }, busyLabel: "Registering…" });
 });
 $("#repository-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const productId = $("#repository-product").value;
-  const button = event.currentTarget.querySelector('button[type="submit"]');
-  button.disabled = true;
+  const form = event.currentTarget;
   $("#repository-form-error").textContent = "";
-  try {
+  await withOperation(form.querySelector('button[type="submit"]'), "Attaching the local repository", async () => {
     await api(`/api/products/${encodeURIComponent(productId)}/repositories`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -999,54 +1130,39 @@ $("#repository-form").addEventListener("submit", async (event) => {
         validators: namedCommandsFrom("#repository-validators"),
       }),
     });
-    event.currentTarget.reset();
+    form.reset();
     $("#repository-role").value = "module";
-    event.currentTarget.classList.add("hidden");
+    form.classList.add("hidden");
     await refreshProducts();
-  } catch (error) {
-    $("#repository-form-error").textContent = error.message;
-  } finally {
-    button.disabled = false;
-  }
+  }, { onError: (message) => { $("#repository-form-error").textContent = message; }, busyLabel: "Inspecting…" });
 });
 $("#product-list").addEventListener("click", async (event) => {
   const scanButton = event.target.closest("[data-scan-product]");
+  const registryError = (message) => {
+    $("#repository-form-error").textContent = message;
+    $("#repository-form").classList.remove("hidden");
+  };
   if (scanButton) {
-    scanButton.disabled = true;
-    const original = scanButton.textContent;
-    scanButton.textContent = "Scanning…";
-    try {
+    await withOperation(scanButton, "Scanning product intelligence sources", async () => {
       await api(`/api/products/${encodeURIComponent(scanButton.dataset.scanProduct)}/intelligence`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: "{}",
       });
       await refreshProducts();
-    } catch (error) {
-      $("#repository-form-error").textContent = error.message;
-      $("#repository-form").classList.remove("hidden");
-    } finally {
-      scanButton.disabled = false;
-      scanButton.textContent = original;
-    }
+    }, { onError: registryError, busyLabel: "Scanning…" });
     return;
   }
   const button = event.target.closest("[data-refresh-repository]");
   if (!button) return;
-  button.disabled = true;
-  try {
+  await withOperation(button, "Re-inspecting the repository", async () => {
     await api(`/api/products/${encodeURIComponent(button.dataset.productId)}/repositories/${encodeURIComponent(button.dataset.refreshRepository)}/refresh`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: "{}",
     });
     await refreshProducts();
-  } catch (error) {
-    $("#repository-form-error").textContent = error.message;
-    $("#repository-form").classList.remove("hidden");
-  } finally {
-    button.disabled = false;
-  }
+  }, { onError: registryError, busyLabel: "Inspecting…" });
 });
 $("#new-workbench").addEventListener("click", () => {
   $("#workbench-project").value = state.bootstrap.defaultProject;
@@ -1057,10 +1173,8 @@ $("#new-workbench").addEventListener("click", () => {
 });
 $("#workbench-new-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const button = event.currentTarget.querySelector('button[type="submit"]');
-  button.disabled = true;
   $("#workbench-new-error").textContent = "";
-  try {
+  await withOperation(event.currentTarget.querySelector('button[type="submit"]'), "Creating the Workbench scratchpad", async () => {
     const result = await api("/api/workbench", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1068,11 +1182,7 @@ $("#workbench-new-form").addEventListener("submit", async (event) => {
     });
     $("#workbench-new-form").classList.add("hidden");
     await refreshWorkbench(result.session.id);
-  } catch (error) {
-    $("#workbench-new-error").textContent = error.message;
-  } finally {
-    button.disabled = false;
-  }
+  }, { onError: (message) => { $("#workbench-new-error").textContent = message; }, busyLabel: "Creating…" });
 });
 $("#workbench-session-list").addEventListener("click", async (event) => {
   const button = event.target.closest("[data-workbench-session]");
@@ -1085,11 +1195,8 @@ $("#workbench-consult-form").addEventListener("submit", async (event) => {
   const modelIds = [...document.querySelectorAll('input[name="workbench-model"]:checked')].map((input) => input.value);
   if (!question) return $("#workbench-error").textContent = "Ask a question first.";
   if (!modelIds.length) return $("#workbench-error").textContent = "Select at least one model.";
-  const button = $("#workbench-consult");
-  button.disabled = true;
-  button.textContent = `Consulting ${modelIds.length} model${modelIds.length === 1 ? "" : "s"}…`;
   $("#workbench-error").textContent = "";
-  try {
+  await withOperation($("#workbench-consult"), `Consulting ${modelIds.length} model${modelIds.length === 1 ? "" : "s"}`, async () => {
     await api(`/api/workbench/${state.workbenchSession.id}/consult`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1097,12 +1204,7 @@ $("#workbench-consult-form").addEventListener("submit", async (event) => {
     });
     $("#workbench-question").value = "";
     await refreshWorkbench(state.workbenchSession.id);
-  } catch (error) {
-    $("#workbench-error").textContent = error.message;
-  } finally {
-    button.disabled = false;
-    button.textContent = "Consult selected models";
-  }
+  }, { onError: (message) => { $("#workbench-error").textContent = message; }, busyLabel: `Consulting ${modelIds.length} model${modelIds.length === 1 ? "" : "s"}…` });
 });
 $("#workbench-convert-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -1118,9 +1220,7 @@ $("#workbench-convert-form").addEventListener("submit", async (event) => {
     priority: $("#workbench-priority").value,
     policyNotes: [`Source Workbench discussion: ${state.workbenchSession.id}`],
   };
-  const button = event.currentTarget.querySelector('button[type="submit"]');
-  button.disabled = true;
-  try {
+  await withOperation(event.currentTarget.querySelector('button[type="submit"]'), "Converting the discussion into an objective draft", async () => {
     const result = await api(`/api/workbench/${state.workbenchSession.id}/convert`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1137,11 +1237,7 @@ $("#workbench-convert-form").addEventListener("submit", async (event) => {
     $("#run-autonomy").value = result.objective.autonomy;
     $("#policy-notes").value = result.objective.policyNotes.join("\n");
     renderRunAutonomyHelp();
-  } catch (error) {
-    $("#workbench-error").textContent = error.message;
-  } finally {
-    button.disabled = false;
-  }
+  }, { onError: (message) => { $("#workbench-error").textContent = message; }, busyLabel: "Converting…" });
 });
 $("#refresh-evidence").addEventListener("click", refreshEvidence);
 $("#export-evidence").addEventListener("click", () => {
@@ -1157,66 +1253,48 @@ $("#export-evidence").addEventListener("click", () => {
 $("#pause-run").addEventListener("click", async () => {
   const runId = state.selectedRunId;
   if (!runId) return;
-  const button = $("#pause-run");
-  button.disabled = true;
-  try {
+  await withOperation($("#pause-run"), "Pausing the run", async () => {
     await api(`/api/runs/${runId}/pause`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     await refreshRuns();
-  } catch (error) {
-    showError(error.message);
-  } finally {
-    button.disabled = false;
-  }
+  }, { busyLabel: "Pausing…" });
 });
 $("#approve-run").addEventListener("click", async () => {
   const runId = state.selectedRunId;
   if (!runId) return;
-  const button = $("#approve-run");
-  button.disabled = true;
-  try {
+  await withOperation($("#approve-run"), "Approving the requested action", async () => {
     await api(`/api/runs/${runId}/approve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     await refreshRuns();
-  } catch (error) {
-    showError(error.message);
-  } finally {
-    button.disabled = false;
-  }
+  }, { busyLabel: "Approving…" });
 });
 $("#resume-run").addEventListener("click", async () => {
   const runId = state.selectedRunId;
   if (!runId) return;
-  const button = $("#resume-run");
-  button.disabled = true;
-  try {
+  await withOperation($("#resume-run"), "Resuming the run", async () => {
     const result = await api(`/api/runs/${runId}/resume`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     state.selectedRunId = result.runId;
     await refreshRuns();
-  } catch (error) {
-    showError(error.message);
-  } finally {
-    button.disabled = false;
-  }
+  }, { busyLabel: "Resuming…" });
 });
-$("#refresh-setup").addEventListener("click", async () => {
-  state.bootstrap = await api("/api/bootstrap");
-  renderProviders();
-  renderSettings();
-  await refreshFleet();
+$("#refresh-setup").addEventListener("click", async (event) => {
+  await withOperation(event.currentTarget, "Refreshing setup status", async () => {
+    state.bootstrap = await api("/api/bootstrap");
+    renderProviders();
+    renderSettings();
+    await refreshFleet();
+  }, { busyLabel: "Refreshing…" });
 });
 $("#refresh-models").addEventListener("click", async () => {
-  const button = $("#refresh-models");
-  button.disabled = true;
-  try {
-    const refreshed = await api("/api/catalog/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-    state.bootstrap = { ...state.bootstrap, config: refreshed.config, providers: refreshed.providers, ollama: refreshed.ollama, catalog: { refreshedAt: refreshed.refreshedAt, refreshes: refreshed.refreshes } };
-    await refreshFleet();
-    $("#model-message").textContent = `Fleet refreshed at ${new Date(refreshed.refreshedAt).toLocaleString()}.`;
-  } catch (error) {
-    $("#model-message").textContent = error.message;
-    await refreshFleet();
-  } finally {
-    button.disabled = false;
-  }
+  await withOperation($("#refresh-models"), "Refreshing the model fleet", async () => {
+    try {
+      const refreshed = await api("/api/catalog/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      state.bootstrap = { ...state.bootstrap, config: refreshed.config, providers: refreshed.providers, ollama: refreshed.ollama, catalog: { refreshedAt: refreshed.refreshedAt, refreshes: refreshed.refreshes } };
+      await refreshFleet();
+      $("#model-message").textContent = `Fleet refreshed at ${new Date(refreshed.refreshedAt).toLocaleString()}.`;
+    } catch (error) {
+      await refreshFleet();
+      throw error;
+    }
+  }, { onError: (message) => { $("#model-message").textContent = message; }, busyLabel: "Refreshing fleet…" });
 });
 
 $("#openrouter-connect").addEventListener("click", async () => {
@@ -1369,14 +1447,16 @@ $("#model-list").addEventListener("click", async (event) => {
   const excludePerformance = event.target.closest("[data-exclude-performance]");
   const button = qualify || qualifyLocalTools || qualifyBenchmark || activate || pin || track || exclude || resetPerformance || excludePerformance;
   if (!button) return;
-  button.disabled = true;
+  const operationLabel = qualify || qualifyLocalTools || qualifyBenchmark ? "Qualifying the model" : resetPerformance ? "Resetting the empirical baseline" : excludePerformance ? "Updating empirical-history policy" : "Updating the scheduling preference";
+  // Confirm before the operation begins, so cancelling never registers a
+  // started (let alone succeeded) operation.
+  if (resetPerformance && !window.confirm("Reset this model's empirical baseline? Existing attempt evidence stays in the ledger but will no longer affect its profile.")) return;
   let qualifiedModelId = null;
   let preferenceModelId = null;
-  try {
+  await withOperation(button, operationLabel, async () => {
     if (resetPerformance || excludePerformance) {
       const modelId = resetPerformance?.dataset.resetPerformance || excludePerformance.dataset.excludePerformance;
       const policy = state.performancePolicies.find((item) => item.modelId === modelId);
-      if (resetPerformance && !window.confirm("Reset this model's empirical baseline? Existing attempt evidence stays in the ledger but will no longer affect its profile.")) return;
       await api(`/api/model-performance/${encodeURIComponent(modelId)}/policy`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -1421,12 +1501,7 @@ $("#model-list").addEventListener("click", async (event) => {
       const preferenceModel = state.models.find((model) => model.id === preferenceModelId);
       $("#model-message").textContent = `${preferenceModel?.displayName || "Model"} scheduling preference updated.`;
     }
-  } catch (error) {
-    $("#model-message").textContent = error.message;
-    await refreshFleet();
-  } finally {
-    button.disabled = false;
-  }
+  }, { onError: async (message) => { $("#model-message").textContent = message; await refreshFleet(); } });
 });
 $("#run-list").addEventListener("click", (event) => {
   const button = event.target.closest("[data-run-id]");
@@ -1447,19 +1522,15 @@ $("#delivery-repositories").addEventListener("click", async (event) => {
   const action = button.dataset.deliveryAction;
   const label = action === "push_branch" ? "push this exact reviewed branch to GitHub" : "create a draft pull request for this exact reviewed branch";
   if (!window.confirm(`Approve DevHarmonics to ${label}? This is a separate external write. DevHarmonics will not merge it.`)) return;
-  button.disabled = true;
   $("#delivery-error").textContent = "";
-  try {
+  await withOperation(button, action === "push_branch" ? "Pushing the exact reviewed branch" : "Creating the draft pull request", async () => {
     await api(`/api/runs/${state.selectedRunId}/delivery`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ repositoryId: button.dataset.repositoryId, action, expectedHeadCommit: button.dataset.headCommit }),
     });
     await refreshRuns();
-  } catch (error) {
-    $("#delivery-error").textContent = error.message;
-    button.disabled = false;
-  }
+  }, { onError: (message) => { $("#delivery-error").textContent = message; }, busyLabel: action === "push_branch" ? "Pushing…" : "Creating draft PR…" });
 });
 $("#close-drawer").addEventListener("click", closeTask);
 $("#drawer-backdrop").addEventListener("click", closeTask);

@@ -7,6 +7,7 @@ All notable DevHarmonics changes are documented here.
 ### Added
 
 - Owner-approved delivery handoffs for READY runs. DevHarmonics retains each repository's exact reviewed base, HEAD, branch, and local path; requires one explicit external-write approval for an exact-SHA GitHub branch push and a separate approval for draft pull-request creation; records tool-policy receipts and resulting URLs in run evidence; and exposes no merge action.
+- DH-632 visible operation feedback, first wave. Every dashboard-initiated action now acknowledges immediately through one shared operation helper: the control disables, exposes an accessible busy state, shows a busy label and an honest indeterminate spinner, and reports explicit done/failed end states with the failure reason. A global activity strip (a polite live region) keeps active run tasks and local operations visible across screen changes, with the responsible provider/model, evidence-based elapsed time, and a "quiet for…" heartbeat warning when a long provider call has produced no events. Task cards show live elapsed/last-activity times reconstructed from durable ledger events, so refresh or reconnection rebuilds feedback truthfully. Progress bars remain deliberately absent until a real completed/total measure exists, and reduced-motion preferences replace animation with a static indicator.
 
 ### Changed
 

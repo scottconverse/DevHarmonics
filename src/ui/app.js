@@ -85,6 +85,7 @@ function operationElapsed(startedAt, now = Date.now()) {
 async function withOperation(button, label, action, { onError = showError, busyLabel = null } = {}) {
   const id = beginOperation(label);
   const restore = button ? { html: button.innerHTML } : null;
+  const hadFocus = Boolean(button) && document.activeElement === button;
   if (button) {
     button.disabled = true;
     button.setAttribute("aria-busy", "true");
@@ -97,13 +98,19 @@ async function withOperation(button, label, action, { onError = showError, busyL
     return result;
   } catch (error) {
     endOperation(id, "failed", error.message);
-    onError(error.message);
+    try {
+      await onError(error.message);
+    } catch {
+      // the error surface itself failed; the strip already carries the failure
+    }
     return undefined;
   } finally {
     if (button && restore) {
       button.innerHTML = restore.html;
       button.disabled = false;
       button.removeAttribute("aria-busy");
+      // disabling the control dropped keyboard focus; give it back
+      if (hadFocus && button.isConnected && (document.activeElement === document.body || document.activeElement === null)) button.focus();
     }
   }
 }
@@ -144,8 +151,13 @@ function quietMarkup(lastActivityAt) {
   if (!lastActivityAt) return "";
   const quietMs = Date.now() - lastActivityAt;
   const warn = quietMs >= OPERATION_QUIET_WARNING_MS;
-  return `<span class="op-quiet ${warn ? "warn" : ""}" data-quiet-since="${lastActivityAt}"${warn ? "" : ' aria-hidden="true"'}>quiet for ${operationElapsed(lastActivityAt)}${warn ? " — the provider call may still be running" : ""}</span>`;
+  // The ticking duration stays permanently aria-hidden so the polite live region
+  // never announces a clock; the warning note is separate, static text that is
+  // announced once when it appears.
+  return `<span class="op-quiet ${warn ? "warn" : ""}" data-quiet-since="${lastActivityAt}"><span class="op-quiet-time" aria-hidden="true">quiet for ${operationElapsed(lastActivityAt)}</span>${warn ? '<span class="op-quiet-note"> — the provider call may still be running</span>' : ""}</span>`;
 }
+
+let activityStripSignature = "";
 
 function renderActivityStrip() {
   const strip = $("#activity-strip");
@@ -163,6 +175,12 @@ function renderActivityStrip() {
     return `<div class="strip-item running"><span class="op-spinner" aria-hidden="true"></span><strong>${escapeHtml(title)}</strong><span>${escapeHtml(identity)}</span><span>${task ? escapeHtml(task.status) : "planning"}${elapsed ? " · " : ""}${elapsed}</span>${quietMarkup(lastActivityAt)}</div>`;
   });
   const items = [...runItems, ...local];
+  // Re-render only when non-time content changes, so the polite live region
+  // announces state transitions rather than every SSE-driven refresh; ticking
+  // time spans stay aria-hidden and update in place via the interval below.
+  const signature = items.join("").replace(/data-(elapsed|quiet)-since="\d+"[^<]*/g, "").replace(/quiet for [^<]*/g, "");
+  if (signature === activityStripSignature) return;
+  activityStripSignature = signature;
   strip.classList.toggle("hidden", !items.length);
   strip.innerHTML = items.join("");
 }
@@ -176,8 +194,11 @@ setInterval(() => {
     const lastActivityAt = Number(element.dataset.quietSince);
     const warn = now - lastActivityAt >= OPERATION_QUIET_WARNING_MS;
     element.classList.toggle("warn", warn);
-    if (warn) element.removeAttribute("aria-hidden");
-    element.textContent = `quiet for ${operationElapsed(lastActivityAt, now)}${warn ? " — the provider call may still be running" : ""}`;
+    const time = element.querySelector(".op-quiet-time");
+    if (time) time.textContent = `quiet for ${operationElapsed(lastActivityAt, now)}`;
+    if (warn && !element.querySelector(".op-quiet-note")) {
+      element.insertAdjacentHTML("beforeend", '<span class="op-quiet-note"> — the provider call may still be running</span>');
+    }
   }
 }, 1_000);
 
@@ -1427,13 +1448,15 @@ $("#model-list").addEventListener("click", async (event) => {
   const button = qualify || qualifyLocalTools || qualifyBenchmark || activate || pin || track || exclude || resetPerformance || excludePerformance;
   if (!button) return;
   const operationLabel = qualify || qualifyLocalTools || qualifyBenchmark ? "Qualifying the model" : resetPerformance ? "Resetting the empirical baseline" : excludePerformance ? "Updating empirical-history policy" : "Updating the scheduling preference";
+  // Confirm before the operation begins, so cancelling never registers a
+  // started (let alone succeeded) operation.
+  if (resetPerformance && !window.confirm("Reset this model's empirical baseline? Existing attempt evidence stays in the ledger but will no longer affect its profile.")) return;
   let qualifiedModelId = null;
   let preferenceModelId = null;
   await withOperation(button, operationLabel, async () => {
     if (resetPerformance || excludePerformance) {
       const modelId = resetPerformance?.dataset.resetPerformance || excludePerformance.dataset.excludePerformance;
       const policy = state.performancePolicies.find((item) => item.modelId === modelId);
-      if (resetPerformance && !window.confirm("Reset this model's empirical baseline? Existing attempt evidence stays in the ledger but will no longer affect its profile.")) return;
       await api(`/api/model-performance/${encodeURIComponent(modelId)}/policy`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },

@@ -847,10 +847,15 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
     // DH-632 visible operation feedback: shared acknowledgement helper, honest busy
     // state, global activity surface, evidence-based elapsed/heartbeat, no fabricated progress.
     assert.match(appScript, /function withOperation\(/, "DH-632 requires the shared operation acknowledgement helper");
-    assert.match(appScript, /aria-busy/, "DH-632 requires an accessible busy state on acknowledged controls");
+    assert.ok((appScript.match(/await withOperation\(/g) || []).length >= 15, "DH-632 requires the acknowledgement helper to wrap the dashboard actions, not exist as dead code");
+    assert.match(appScript, /withOperation\(\$\("#refresh-provider-status"\)/, "the sign-in refresh must acknowledge through the shared helper");
+    assert.match(appScript, /setAttribute\("aria-busy", "true"\)/, "DH-632 requires an accessible busy state on acknowledged controls");
     assert.match(appScript, /function renderActivityStrip\(/, "DH-632 requires the global activity surface");
+    assert.match(appScript, /renderActivityStrip\(\);/, "the activity strip must be rendered by live code paths");
     assert.match(appScript, /function operationElapsed\(/, "DH-632 requires evidence-based elapsed time");
+    assert.match(appScript, /\$\{quietMarkup\(lastActivityAt\)\}/, "the quiet heartbeat must be wired into rendered markup");
     assert.match(appScript, /quiet for/, "DH-632 requires heartbeat/stall wording for quiet long work");
+    assert.match(appScript, /class="op-quiet-time" aria-hidden="true"/, "the ticking quiet duration must stay outside the accessibility tree");
     assert.doesNotMatch(appScript, /aria-valuenow|<progress|progress-bar/i, "DH-632 forbids fabricated progress bars until a real measure exists");
     assert.match(pageText, /id="activity-strip"/, "DH-632 requires the activity strip in the shell");
     assert.match(pageText, /aria-live="polite"[^>]*id="activity-strip"|id="activity-strip"[^>]*aria-live="polite"/, "the activity strip must be a polite live region");

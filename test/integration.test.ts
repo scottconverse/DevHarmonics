@@ -851,7 +851,8 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
     assert.match(appStyles, /\.run-list\s*\{[^}]*max-width:\s*100%/);
   } finally {
     await dashboard.close();
-    await rm(root, { recursive: true, force: true });
+    // ponytail: Windows releases the just-closed SQLite handle asynchronously; retry rmdir on EBUSY.
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 

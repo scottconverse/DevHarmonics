@@ -649,7 +649,7 @@ function renderDelivery(run) {
     const created = repository.status === "draft_pr_created";
     return `<article class="integration-repository-card delivery-repository-card">
       <header><strong>${escapeHtml(repository.repositoryId)}</strong><span class="lifecycle ${created ? "qualified" : repository.status === "failed" ? "degraded" : ""}">${escapeHtml(repository.status.replaceAll("_", " "))}</span></header>
-      <code class="integration-commit-range">${escapeHtml(repository.baseBranch)}: ${escapeHtml(repository.baseCommit)} â†’ ${escapeHtml(repository.headCommit)}</code>
+      <code class="integration-commit-range">${escapeHtml(repository.baseBranch)}: ${escapeHtml(repository.baseCommit)} → ${escapeHtml(repository.headCommit)}</code>
       <code>${escapeHtml(repository.branch)}</code>
       ${repository.remoteUrl ? `<a href="${escapeHtml(repository.remoteUrl)}" target="_blank" rel="noreferrer">${escapeHtml(repository.remoteUrl)}</a>` : ""}
       ${repository.pullRequestUrl ? `<a href="${escapeHtml(repository.pullRequestUrl)}" target="_blank" rel="noreferrer">Open draft pull request</a>` : ""}

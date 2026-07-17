@@ -1,14 +1,16 @@
 # DevHarmonics Detailed Implementation Plan
 
 Document status: **Build-ready execution plan**
-Plan version: **1.22**
+Plan version: **1.23**
 Written: **2026-07-14**
 Revised: **2026-07-16**
 Product specification baseline: **DevHarmonics Product Specification v1.12**
 Current implementation baseline: **DevHarmonics v0.5.1**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 
-Revision history: **v1.22 (2026-07-16)** — Completed the first real bounded single-repository CivicSuite implementation (DH-740 pilot level 2): CivicCode's pinned CivicCore dependency, CI workflow, tests, and documentation were aligned from the v1.2.0 to the published v1.2.1 release wheel through the full objective → plan → approve → implement → validate → integrate → independent-review path, closing READY with a prepared exact-SHA delivery awaiting owner approval; the primary checkout was never modified. Implemented the first DH-632 wave exercised by that workflow: a shared operation acknowledgement helper across all dashboard actions (disabled/stateful controls, accessible busy state, honest indeterminate spinner, explicit done/failed end states with reasons), a global activity-strip live region that survives navigation, task-card elapsed/last-activity heartbeat with a truthful quiet-work warning reconstructed from durable ledger events, reduced-motion support, and deliberately no fabricated progress bars. Also adopted the Apache-2.0 license decision across the repository's license surfaces.
+Revision history: **v1.23 (2026-07-16)** — Added DH-825, an experimental Open Interpreter worker adapter, to the integrations roadmap by owner decision: provider-neutral access to local and alternative coding models (Ollama/LM Studio, Kimi, DeepSeek, Qwen/GLM), qualified per exact model + harness + pinned Open Interpreter version, with DevHarmonics retaining exclusive control over task contracts, Git, validation, evidence, and integration, and never collecting provider credentials. The adapter does not alter the locked capability sequence; Open Interpreter also becomes the first conformance target for the DH-820 ACP transport.
+
+Prior revision: **v1.22 (2026-07-16)** — Completed the first real bounded single-repository CivicSuite implementation (DH-740 pilot level 2): CivicCode's pinned CivicCore dependency, CI workflow, tests, and documentation were aligned from the v1.2.0 to the published v1.2.1 release wheel through the full objective → plan → approve → implement → validate → integrate → independent-review path, closing READY with a prepared exact-SHA delivery awaiting owner approval; the primary checkout was never modified. Implemented the first DH-632 wave exercised by that workflow: a shared operation acknowledgement helper across all dashboard actions (disabled/stateful controls, accessible busy state, honest indeterminate spinner, explicit done/failed end states with reasons), a global activity-strip live region that survives navigation, task-card elapsed/last-activity heartbeat with a truthful quiet-work warning reconstructed from durable ledger events, reduced-motion support, and deliberately no fabricated progress bars. Also adopted the Apache-2.0 license decision across the repository's license surfaces.
 
 Prior revision: **v1.21 (2026-07-15)** — Added DH-632 as a cross-cutting visible-operation-feedback requirement. Every DevHarmonics-owned asynchronous action must have immediate acknowledgement, truthful lifecycle and stage feedback, elapsed activity and heartbeat, durable refresh/navigation recovery, accessible success/failure/retry states, and evidence-based rather than fabricated progress. The first real CivicSuite implementation must deliver the feedback states it exercises, and every later workflow must extend the same contract instead of deferring a UI/UX retrofit.
 
@@ -1081,6 +1083,31 @@ Acceptance:
 - an ACP agent can plan or implement through the same task and result contracts;
 - unsupported capabilities fail closed;
 - the user can see which transport performed each attempt.
+
+#### DH-825: Experimental Open Interpreter worker adapter — M
+
+Status: **Roadmap, owner-approved 2026-07-16. Experimental; feature-flagged; does not displace the locked capability sequence.**
+
+Open Interpreter (github.com/openinterpreter/openinterpreter, Apache-2.0, a Rust Codex-fork agent runtime at 0.0.x) exposes many local and alternative coding models — Ollama and LM Studio without authentication, plus Kimi, DeepSeek, Qwen/GLM and others — behind one noninteractive CLI with newline-delimited JSON events, JSON-Schema-constrained results, sandbox modes, and an ACP mode. Its role in DevHarmonics is an optional leaf worker runtime under the scheduler: a "long tail of models" adapter. It is never the orchestrator, never embedded, and never a replacement for the first-class Codex, Claude Code, and Antigravity integrations.
+
+Deliverables:
+
+- an `OpenInterpreterCliAdapter` behind an explicit feature flag, initially supporting only `interpreter exec --json` with `--output-schema`, `--sandbox`, `--ephemeral`, and adapter-owned timeouts;
+- credential boundary preserved: DevHarmonics never requests, receives, stores, forwards, or displays provider secrets, and the dashboard gains no credential fields; the user configures authentication in Open Interpreter directly and DevHarmonics only detects readiness (the claimed Kimi subscription sign-in path must be verified at implementation time, not assumed);
+- worker fingerprint covering the pinned Open Interpreter version, provider, exact model ID, emulated harness, model-catalog revision, configuration profile, skills/MCP configuration, sandbox and permission policy, adapter version, and task-contract version — an emulated-harness change (for example Kimi + kimi-code versus Kimi + generic) is a different qualified worker;
+- Git-authority enforcement as evidence, not instruction: the adapter snapshots the assigned worktree's commit state before each attempt and fails the attempt if the worker created branches, commits, merges, resets, stashes, or worktrees, or wrote outside its assigned worktree; validators remain launched exclusively by DevHarmonics;
+- Open Interpreter's self-verification turn (`--verify`) is retained only as a worker claim and can never satisfy a check or gate;
+- network disabled unless the selected provider requires it and policy permits it; reviewers run read-only; no automatic fallback to another model or harness inside the adapter.
+
+Initial qualification targets: one Ollama local model, Kimi subscription (if the no-key sign-in verifies), and one inexpensive API-backed model for development testing — each through the standard anti-gaming qualification fixtures, admitted first to read-only analysis and secondary review, and graduated to mutating work only after repository-specific pilot qualification.
+
+Acceptance:
+
+- with the flag off, DevHarmonics behavior is byte-identical to today;
+- a qualified Open Interpreter worker completes a bounded change in its assigned worktree with schema-valid results and receipts, and a worker-created Git operation fails the attempt with a classified receipt;
+- reviewer-independence rules recognize Open Interpreter-backed model families as distinct providers for quorum diversity;
+- an Open Interpreter version bump invalidates prior qualification until requalification passes;
+- DH-820's later generic ACP adapter uses Open Interpreter as its first conformance target without inheriting adapter-specific assumptions.
 
 #### DH-830: OpenRouter and API runtime — L
 

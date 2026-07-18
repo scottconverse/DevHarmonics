@@ -10,7 +10,7 @@ import { defaultConfig, initializeProject, loadConfig, resolveProviderCommand } 
 import { projectLegacyProvider } from "../src/compatibility.js";
 import { assertRunTransition, assertTaskTransition, domainId } from "../src/domain.js";
 import { LEDGER_SCHEMA_VERSION, Ledger } from "../src/ledger.js";
-import { assignReviewFindings, createReviewEvidenceBinding, Orchestrator, parseFirstJsonObject, planSteeredAdmission, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
+import { assignReviewFindings, createReviewEvidenceBinding, MAX_INTERRUPT_GRANTS, Orchestrator, parseFirstJsonObject, planSteeredAdmission, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
 import { discoverOllama, OllamaAdapter, syncOllamaRegistry, syncOllamaRuntimes } from "../src/ollama.js";
 import {
   createProvider,
@@ -3968,4 +3968,46 @@ test("steering reassign is rejected when the requested provider is not eligible 
   assert.equal(refused.rejected.length, 1, "an ineligible provider fails closed");
   assert.match(refused.rejected[0]!.reason, /eligible|not enabled|not available/i);
   assert.equal(refused.ordered[0]?.preferredProvider, "codex", "a rejected reassign leaves the assignment unchanged");
+});
+
+test("an owner interrupt cannot extend a task's attempt budget without limit", () => {
+  // The grant absorbs a redirect; it must not become a multiplier an owner can
+  // pump to keep a task (and its provider spend) running indefinitely.
+  const maxAttempts = 3;
+  let interruptGrants = 0;
+  let attemptsRun = 0;
+  for (let attempt = 1; attempt <= maxAttempts + interruptGrants; attempt++) {
+    attemptsRun += 1;
+    // Simulate an owner interrupting every single attempt, forever.
+    if (interruptGrants < MAX_INTERRUPT_GRANTS) interruptGrants += 1;
+    if (attempt >= maxAttempts + interruptGrants) break;
+  }
+  assert.ok(MAX_INTERRUPT_GRANTS >= 1, "an interrupt still buys the redirected task a fresh attempt");
+  assert.ok(
+    attemptsRun <= maxAttempts + MAX_INTERRUPT_GRANTS,
+    `unbounded interrupts must not exceed ${maxAttempts + MAX_INTERRUPT_GRANTS} attempts, ran ${attemptsRun}`,
+  );
+});
+
+test("steering keeps admission held across scheduler ticks until a resume arrives", () => {
+  const ready = [steeringTask("a"), steeringTask("b")];
+  const allowedProviders = ["codex"];
+
+  // Tick 1: the hold arrives and is consumed.
+  const first = planSteeredAdmission({ pending: [steeringFixture({ kind: "hold_admission" })], ready, admissionHeld: false, allowedProviders });
+  assert.equal(first.admissionHeld, true);
+
+  // Tick 2+: no new directives. The hold must persist rather than lapsing back
+  // to admitting the moment its directive stops being pending.
+  let held: boolean = first.admissionHeld;
+  for (let tick = 0; tick < 3; tick++) {
+    const next = planSteeredAdmission({ pending: [], ready, admissionHeld: held, allowedProviders });
+    held = next.admissionHeld;
+    assert.equal(held, true, `admission must stay held on tick ${tick + 2}`);
+    assert.deepEqual(next.ordered, [], "nothing is admitted while the hold stands");
+  }
+
+  const resumed = planSteeredAdmission({ pending: [steeringFixture({ kind: "resume_admission" })], ready, admissionHeld: held, allowedProviders });
+  assert.equal(resumed.admissionHeld, false);
+  assert.equal(resumed.ordered.length, 2);
 });

@@ -1601,6 +1601,34 @@ export class Orchestrator {
     worktrees: WorktreeManager;
     signal: AbortSignal;
   }): Promise<TaskStatus> {
+    try {
+      return await this.runTaskAttempts(input);
+    } finally {
+      // DH-635: once a task stops running, any directive still waiting on it can
+      // never be applied. Every directive must end with a disposition, so give
+      // the leftovers an honest one rather than leaving them pending forever.
+      for (const leftover of this.ledger.pendingSteeringDirectives(input.runId, input.task.id)) {
+        this.ledger.resolveSteeringDirective(leftover.id, {
+          disposition: "rejected",
+          reason: leftover.kind === "interrupt"
+            ? "No attempt was in flight to interrupt; the task had already finished its provider invocation"
+            : "The task finished before this direction could be applied at an attempt boundary",
+        });
+      }
+    }
+  }
+
+  private async runTaskAttempts(input: {
+    runId: string;
+    goal: string;
+    task: PlannedTask;
+    constitution: string;
+    config: DevHarmonicsConfig;
+    providers: ProviderName[];
+    providerCursor: number;
+    worktrees: WorktreeManager;
+    signal: AbortSignal;
+  }): Promise<TaskStatus> {
     const taskWorktree = await input.worktrees.createTask(input.task.id);
     const taskPermission = input.task.permission ?? "workspace_write";
     let feedback = "";
@@ -1608,7 +1636,10 @@ export class Orchestrator {
     const excludedConnectionIds = new Set<string>();
 
     // DH-635: an interrupt costs one extra attempt so a redirected task is not
-    // punished by the retry budget it never consumed on its own behalf.
+    // punished by the retry budget it never consumed on its own behalf. The
+    // grant is capped: without a ceiling, repeated interrupts would extend a
+    // task's invocation budget without limit, which is exactly the spending
+    // boundary steering is forbidden from widening.
     let interruptGrants = 0;
     for (let attempt = 1; attempt <= input.config.application.retry.maxAttempts + interruptGrants; attempt++) {
       // Do not start a new attempt once cancelled; leave the 'cancelled' status
@@ -1867,7 +1898,12 @@ export class Orchestrator {
             ? `The owner interrupted your previous attempt. New direction: ${note}`
             : "The owner interrupted your previous attempt. Re-read the task contract and continue.";
           interruptDirective = null;
-          interruptGrants += 1;
+          if (interruptGrants < MAX_INTERRUPT_GRANTS) interruptGrants += 1;
+          if (attempt >= input.config.application.retry.maxAttempts + interruptGrants) {
+            this.ledger.setTaskStatus(input.runId, input.task.id, "failed");
+            this.ledger.addEvent(input.runId, "task.failed", `${input.task.title}: attempt budget exhausted after ${interruptGrants} interrupt grant(s)`);
+            return "failed";
+          }
           this.ledger.setTaskStatus(input.runId, input.task.id, "retry");
           continue;
         }
@@ -2358,6 +2394,13 @@ export class Orchestrator {
     });
   }
 }
+
+/**
+ * Extra attempts an owner's interrupts may add to one task. Bounded so that
+ * steering can redirect work without becoming an unbounded multiplier on the
+ * task's invocation budget.
+ */
+export const MAX_INTERRUPT_GRANTS = 2;
 
 /** Steering kinds the scheduler resolves at the task-admission boundary. */
 export const ADMISSION_STEERING_KINDS: readonly SteeringDirectiveRecord["kind"][] = [

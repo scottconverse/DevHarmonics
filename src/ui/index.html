@@ -187,6 +187,18 @@
                 <button id="steering-interrupt" class="secondary" type="button">Interrupt &amp; hand off</button>
               </div>
             </form>
+            <div class="steering-queue">
+              <label for="steering-provider">Reassign the selected task <small>Queued tasks only</small></label>
+              <div class="joined">
+                <select id="steering-provider" class="input"></select>
+                <button id="steering-reassign" class="secondary" type="button">Reassign</button>
+              </div>
+              <label for="steering-order">Admission order <small>Queued task IDs, highest priority first</small></label>
+              <div class="joined">
+                <input id="steering-order" class="input" spellcheck="false" placeholder="beta, alpha" />
+                <button id="steering-reprioritize" class="secondary" type="button">Set order</button>
+              </div>
+            </div>
             <div id="steering-directives" class="steering-directives"></div>
             <p id="steering-error" class="error" role="alert"></p>
           </section>

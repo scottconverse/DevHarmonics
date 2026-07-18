@@ -700,7 +700,9 @@ async function refreshRuns() {
     state.cursorInitialized = true;
   }
   rememberEventCursor(observedCursor);
-  if (state.selectedRunId && !state.steering[state.selectedRunId]) await refreshSteering(state.selectedRunId);
+  // Steering history must track the scheduler, not freeze at what this tab last
+  // posted: dispositions change when the run applies or rejects a directive.
+  if (state.selectedRunId) await refreshSteering(state.selectedRunId);
   renderRunList();
   renderSelectedRun();
   renderActivityStrip();
@@ -828,6 +830,23 @@ function renderSteering(run) {
   // Interrupting only means something while an attempt is actually in flight.
   const selectedTask = steerableTasks.find((task) => task.id === select.value);
   $("#steering-interrupt").disabled = !selectedTask || !["working", "verifying", "retry"].includes(selectedTask.status);
+
+  // Reassign and reprioritize act at the admission boundary, so they only apply
+  // to work that has not started. Offer them only when that is true.
+  const queued = steerableTasks.filter((task) => task.status === "queued");
+  const providerSelect = $("#steering-provider");
+  const previousProvider = providerSelect.value;
+  providerSelect.innerHTML = (state.bootstrap?.providers || [])
+    .filter((provider) => provider.available)
+    .map((provider) => `<option value="${escapeHtml(provider.name)}">${escapeHtml(providerDisplayName(provider.name))}</option>`)
+    .join("");
+  if ([...providerSelect.options].some((option) => option.value === previousProvider)) providerSelect.value = previousProvider;
+  const selectedIsQueued = Boolean(selectedTask && selectedTask.status === "queued");
+  providerSelect.disabled = !selectedIsQueued;
+  $("#steering-reassign").disabled = !selectedIsQueued || !providerSelect.options.length;
+  $("#steering-order").disabled = queued.length < 2;
+  $("#steering-order").placeholder = queued.length ? queued.map((task) => task.id).join(", ") : "No queued tasks";
+  $("#steering-reprioritize").disabled = queued.length < 2;
 
   renderSteeringDirectives(directives);
 }
@@ -1662,6 +1681,26 @@ $("#steering-interrupt").addEventListener("click", async (event) => {
   $("#steering-error").textContent = "";
   await submitSteering(event.currentTarget, runId, { kind: "interrupt", targetTaskId, payload: clarification ? { clarification } : {} }, "Interrupting the active attempt");
   $("#steering-clarification").value = "";
+});
+$("#steering-reassign").addEventListener("click", async (event) => {
+  const runId = state.selectedRunId;
+  const targetTaskId = $("#steering-task").value;
+  const provider = $("#steering-provider").value;
+  if (!runId || !targetTaskId || !provider) return;
+  $("#steering-error").textContent = "";
+  await submitSteering(event.currentTarget, runId, { kind: "reassign", targetTaskId, payload: { provider } }, `Reassigning ${targetTaskId}`);
+});
+$("#steering-reprioritize").addEventListener("click", async (event) => {
+  const runId = state.selectedRunId;
+  if (!runId) return;
+  const taskOrder = $("#steering-order").value.split(",").map((entry) => entry.trim()).filter(Boolean);
+  $("#steering-error").textContent = "";
+  if (!taskOrder.length) {
+    $("#steering-error").textContent = "List the queued task IDs in the order you want them admitted.";
+    return;
+  }
+  await submitSteering(event.currentTarget, runId, { kind: "reprioritize", targetTaskId: null, payload: { taskOrder } }, "Setting admission order");
+  $("#steering-order").value = "";
 });
 $("#steering-task").addEventListener("change", () => {
   const run = state.runs.find((item) => item.id === state.selectedRunId);

@@ -392,3 +392,6 @@ pre { margin: 0; padding: 12px; overflow: auto; max-height: 280px; background: #
 .steering-disposition.superseded { color: var(--muted); }
 .lifecycle.warn { color: var(--amber); }
 .lifecycle.pending { color: var(--blue); }
+.steering-queue { display: grid; gap: 6px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.steering-queue .joined { display: flex; gap: 8px; }
+.steering-queue .joined .input { flex: 1; min-width: 0; }

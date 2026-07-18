@@ -444,10 +444,22 @@ export const steeringPayloadSchema = z
   })
   .strict();
 
+const TASK_SCOPED_STEERING_KINDS = ["reassign", "clarify", "interrupt"] as const;
+
 export const steeringDirectiveInputSchema = z
   .object({
     kind: z.enum(["hold_admission", "resume_admission", "reprioritize", "reassign", "clarify", "interrupt"]),
     targetTaskId: z.string().min(1).max(200).nullable().default(null),
     payload: steeringPayloadSchema.default({}),
   })
-  .strict();
+  .strict()
+  // A task-scoped directive without a target could never be matched to a task,
+  // so it would be accepted and then sit pending forever. Refuse it up front.
+  .refine(
+    (value) => !(TASK_SCOPED_STEERING_KINDS as readonly string[]).includes(value.kind) || Boolean(value.targetTaskId),
+    { path: ["targetTaskId"], message: "This steering kind must name the task it applies to" },
+  )
+  .refine(
+    (value) => value.kind !== "reprioritize" || (value.payload.taskOrder?.length ?? 0) > 0,
+    { path: ["payload", "taskOrder"], message: "Reprioritising requires the task order to apply" },
+  );

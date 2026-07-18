@@ -1807,6 +1807,19 @@ test("owner steering interrupts a live attempt and hands off to an attributed co
     });
     assert.equal(escalation.status, 400, "steering cannot carry a permission field");
 
+    // A directive that names no task can never be matched to one, so it must be
+    // refused rather than accepted and left pending forever.
+    const untargeted = await fetch(`${dashboard.url}/api/runs/${runId}/steering`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind: "interrupt", targetTaskId: null, payload: {} }),
+    });
+    assert.equal(untargeted.status, 400, "a task-scoped directive must name its task");
+
+    // The hanging CLI is configured with a 60s timeout and this test asserts the
+    // interrupt lands far inside that window, so a second attempt appearing
+    // cannot be explained by the attempt timing out on its own.
+    const interruptedAt = Date.now();
     const interrupted = await fetch(`${dashboard.url}/api/runs/${runId}/steering`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1816,6 +1829,11 @@ test("owner steering interrupts a live attempt and hands off to an attributed co
 
     // The interrupt must terminate the hanging attempt and start a second one.
     await poll(getRun, (run) => (run.tasks.find((task) => task.id === "one")?.attemptCount ?? 0) >= 2, 30_000);
+    const elapsedMs = Date.now() - interruptedAt;
+    assert.ok(
+      elapsedMs < 20_000,
+      `the second attempt must follow the interrupt promptly (took ${elapsedMs}ms); a 60s provider timeout could not have produced it`,
+    );
     const afterInterrupt = await getRun();
     assert.ok(afterInterrupt.events.some((event) => event.kind === "steering.interrupted"), "the interrupt is recorded as run evidence");
     assert.notEqual(afterInterrupt.status, "cancelled", "interrupting one attempt must not cancel the run");
@@ -1872,8 +1890,25 @@ test("the steering panel reports requested admission changes honestly before the
     assert.match(appScript, /cannot change an answer already being written/, "the interrupt copy stays honest about what it does");
     assert.doesNotMatch(appScript, /inject|mid-response/i, "the UI never claims to inject direction into a running response");
 
+    // renderSteering once called ready(), a helper local to renderProviders, which
+    // threw on every render and silently froze the whole panel. Module-scope-only
+    // references are the property that keeps it renderable.
+    const steeringRender = appScript.slice(appScript.indexOf("function renderSteering("), appScript.indexOf("function renderSteeringDirectives("));
+    assert.ok(steeringRender.length > 0, "renderSteering must exist");
+    assert.doesNotMatch(steeringRender, /\bready\(/, "renderSteering must not call helpers scoped to another render function");
+    assert.match(steeringRender, /provider\.available/, "provider eligibility comes from the bootstrap payload");
+
+    // Every capability the plan claims for DH-635 must be reachable in the UI,
+    // not merely implemented in the backend.
+    for (const control of ["steering-hold", "steering-resume", "steering-clarify", "steering-interrupt", "steering-reassign", "steering-reprioritize"]) {
+      assert.match(appScript, new RegExp(`#${control}`), `${control} must be wired`);
+    }
+
     const page = await fetch(dashboard.url).then((response) => response.text());
     assert.match(page, /id="steering-panel"/);
+    for (const control of ["steering-hold", "steering-resume", "steering-interrupt", "steering-reassign", "steering-reprioritize", "steering-order", "steering-provider"]) {
+      assert.match(page, new RegExp(`id="${control}"`), `${control} must exist in the shell`);
+    }
     assert.match(page, /cannot change a task's permissions, risk, acceptance criteria, or repository scope/, "the panel states the containment boundary to the user");
   } finally {
     await dashboard.close();

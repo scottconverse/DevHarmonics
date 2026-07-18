@@ -4568,6 +4568,13 @@ test("every evidence form the diagnostic gate accepts is resolved by the citatio
     // outside the worktree, NOT merely because nothing is there — so both
     // targets really exist. Without this the containment check can be deleted
     // and the suite stays green.
+    // A directory and a filename that both contain spaces, inside the worktree.
+    const spaced = path.join(root, "dir with spaces");
+    await mkdir(spaced, { recursive: true });
+    await writeFile(path.join(spaced, "inside file.ts"), ["export const a = 1;", "export const b = 2;", ""].join("\n"), "utf8");
+    await mkdir(path.join(root, "sub dir"), { recursive: true });
+    await writeFile(path.join(root, "sub dir", "notes file.md"), ["first line", ""].join("\n"), "utf8");
+
     const neighbour = await mkdtemp(path.join(os.tmpdir(), "devharmonics-citation-neighbour-"));
     await writeFile(path.join(neighbour, "other.ts"), "export const y = 2;\n", "utf8");
     await writeFile(path.join(path.dirname(root), "outside.ts"), "export const z = 3;\n", "utf8");
@@ -4584,6 +4591,16 @@ test("every evidence form the diagnostic gate accepts is resolved by the citatio
       { text: `Broken at ${path.join(root, "src", "app.py")}:2 exactly.`, verifies: true, why: "an absolute path inside the worktree" },
       { text: `Broken at ${path.join(neighbour, "other.ts")}:1 exactly.`, verifies: false, why: "an absolute path to a real file outside the worktree" },
       { text: "Version 1.2.0 shipped and 3.4.5 followed, no files named.", verifies: true, why: "version strings are not citations" },
+      // An audit built a real repository under a path containing spaces and
+      // showed the citation was truncated to its last segment and then rejected
+      // as fabricated. Real repositories live under such paths.
+      { text: `Broken at ${path.join(spaced, "inside file.ts")}:2 exactly.`, verifies: true, why: "an absolute path containing spaces" },
+      { text: `Broken at ${path.join(spaced, "inside file.ts")}:99 exactly.`, verifies: false, why: "an absolute path with spaces, past the end of the file" },
+      { text: `See [the file](${path.join(spaced, "inside file.ts")}:2) for the claim.`, verifies: true, why: "a linked path containing spaces" },
+      { text: `See \`${path.join(spaced, "inside file.ts")}:2\` for the claim.`, verifies: true, why: "a backtick-quoted path containing spaces" },
+      { text: `See [notes](sub dir/notes file.md), line 1 for the claim.`, verifies: true, why: "a linked relative path containing spaces" },
+      { text: "See `sub dir/notes file.md`, line 1 for the claim.", verifies: true, why: "a backtick-quoted relative path containing spaces" },
+      { text: "See `sub dir/missing file.md`, line 1 for the claim.", verifies: false, why: "a quoted relative path with spaces that does not exist" },
     ];
 
     for (const item of cases) {

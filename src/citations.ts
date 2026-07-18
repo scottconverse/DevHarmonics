@@ -21,6 +21,10 @@ import path from "node:path";
  * evidence must be a form this module can resolve, which is only guaranteed if
  * there is exactly one extractor. That is `extractCitations`.
  *
+ * Known limit: a bare, undelimited, relative path containing spaces is not
+ * extracted, because `docs/my notes.md` cannot be distinguished from a filename
+ * followed by prose. Rooted and delimited forms cover the cases that occur.
+ *
  * It deliberately verifies existence rather than meaning. Whether a real line
  * supports the conclusion drawn from it is a review question; whether the line
  * exists at all is not.
@@ -54,8 +58,23 @@ const PATH_TOKEN = String.raw`(?:file:///)?(?:[A-Za-z]:[\\/]|\\\\[\w.-]+[\\/]|/)
 const BOUNDARY = String.raw`(?<![\w.\\/:-])`;
 const RANGE = String.raw`(\d+)(?:\s*[-–]\s*(\d+))?`;
 
+// Real repositories live under paths containing spaces, which the token above
+// cannot express. Spaces are admitted exactly where they are unambiguous.
+//
+// First: a path anchored at a root AND terminated by `:line`. Both ends are
+// required — the root says where it begins, the line number says where it ends —
+// so the spaces between them cannot swallow the surrounding prose.
+const ROOTED_PREFIX = String.raw`(?:file:///)?(?:[A-Za-z]:[\\/]|\\\\[^\\/:*?"<>|\r\n]+[\\/])`;
+const ROOTED_SPACED_PATH = String.raw`${ROOTED_PREFIX}[^:*?"<>|\r\n]*\.[A-Za-z][A-Za-z0-9]{0,7}`;
+// Second: any path a delimiter already bounds — a markdown link target, or a
+// backtick/quote span. The delimiter does the disambiguation, so relative and
+// POSIX paths with spaces are covered here.
+const DELIMITED_PATH = String.raw`[^\r\n"'\`\]\)]*\.[A-Za-z][A-Za-z0-9]{0,7}`;
+
+const ROOTED_SPACED_CITATION = new RegExp(`${BOUNDARY}(${ROOTED_SPACED_PATH}):${RANGE}`, "g");
 const DIRECT_CITATION = new RegExp(`${BOUNDARY}(${PATH_TOKEN}):${RANGE}`, "g");
-const LINKED_CITATION = new RegExp(`\\[[^\\]]*\\]\\(\\s*(${PATH_TOKEN})(?::${RANGE})?[^)]*\\)`, "g");
+const LINKED_CITATION = new RegExp(`\\[[^\\]]*\\]\\(\\s*(${DELIMITED_PATH})(?::${RANGE})?[^)]*\\)`, "g");
+const QUOTED_CITATION = new RegExp("[`\"'](" + DELIMITED_PATH + ")(?::" + RANGE + ")?[`\"']", "g");
 const BARE_PATH = new RegExp(`${BOUNDARY}(${PATH_TOKEN})`, "g");
 // The gate in `agents.ts` accepts a file mention with a line reference in nearby
 // prose, so this resolves that form too, pairing a path with the first line
@@ -95,8 +114,12 @@ export function extractCitations(text: string): ParsedCitation[] {
     }
   };
 
+  // Most specific first: a longer match claims its span, and every later pattern
+  // skips anything overlapping a span already claimed.
+  collect(ROOTED_SPACED_CITATION, 1, 2);
   collect(DIRECT_CITATION, 1, 2);
   collect(LINKED_CITATION, 1, 2);
+  collect(QUOTED_CITATION, 1, 2);
   collect(BARE_PATH, 1, 2);
 
   const seen = new Set<string>();

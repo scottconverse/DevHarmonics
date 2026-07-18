@@ -371,3 +371,23 @@ pre { margin: 0; padding: 12px; overflow: auto; max-height: 280px; background: #
 @media (prefers-reduced-motion: reduce) {
   .op-spinner { animation: none; border-top-color: var(--border); background: var(--lime); }
 }
+
+/* DH-635 live run steering */
+.steering-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.steering-form { display: grid; gap: 6px; margin-top: 10px; }
+.steering-form textarea { width: 100%; }
+.steering-directives { display: grid; gap: 8px; margin-top: 14px; }
+.steering-directive { border: 1px solid var(--border); border-left-width: 3px; border-radius: 10px; padding: 10px 12px; background: var(--panel-2); }
+.steering-directive.pending { border-left-color: var(--blue); }
+.steering-directive.applied { border-left-color: var(--lime); }
+.steering-directive.rejected { border-left-color: var(--red); }
+.steering-directive.superseded { border-left-color: var(--muted); opacity: .72; }
+.steering-directive-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.steering-directive p { margin: 6px 0 4px; }
+.steering-directive small { color: var(--muted); }
+.steering-disposition { border-radius: 999px; border: 1px solid var(--border); padding: 1px 9px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.steering-disposition.applied { color: var(--lime); }
+.steering-disposition.rejected { color: var(--red); }
+.steering-disposition.pending { color: var(--blue); }
+.steering-disposition.superseded { color: var(--muted); }
+.lifecycle.warn { color: var(--amber); }

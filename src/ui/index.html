@@ -170,6 +170,27 @@
             <div id="integration-set-repositories" class="integration-set-repositories"></div>
           </section>
 
+          <section id="steering-panel" class="panel integration-set-panel hidden" aria-labelledby="steering-title">
+            <div class="panel-heading"><div><span class="step">S</span><h3 id="steering-title">Steer this run</h3></div><span id="steering-admission" class="lifecycle"></span></div>
+            <p class="muted">Steering guides work inside the approved plan. It cannot change a task's permissions, risk, acceptance criteria, or repository scope.</p>
+            <div class="steering-actions">
+              <button id="steering-hold" class="secondary" type="button">Hold new tasks</button>
+              <button id="steering-resume" class="secondary" type="button">Resume admission</button>
+            </div>
+            <form id="steering-clarify-form" class="steering-form">
+              <label for="steering-task">Task</label>
+              <select id="steering-task" class="input"></select>
+              <label for="steering-clarification">Clarification <small>Applied at the next attempt boundary</small></label>
+              <textarea id="steering-clarification" rows="2" placeholder="Prefer the existing helper instead of adding a dependency."></textarea>
+              <div class="steering-actions">
+                <button id="steering-clarify" class="secondary" type="submit">Send clarification</button>
+                <button id="steering-interrupt" class="secondary" type="button">Interrupt &amp; hand off</button>
+              </div>
+            </form>
+            <div id="steering-directives" class="steering-directives"></div>
+            <p id="steering-error" class="error" role="alert"></p>
+          </section>
+
           <section id="delivery-panel" class="panel integration-set-panel hidden" aria-labelledby="delivery-title">
             <div class="panel-heading"><div><span class="step">D</span><h3 id="delivery-title">Approved delivery</h3></div><span id="delivery-status" class="lifecycle"></span></div>
             <p id="delivery-guidance" class="muted"></p>

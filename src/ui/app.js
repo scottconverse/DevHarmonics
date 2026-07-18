@@ -26,6 +26,7 @@ const state = {
   workbenchSessions: [],
   workbenchSession: null,
   workbenchMessages: [],
+  steering: {},
 };
 const $ = (selector) => document.querySelector(selector);
 
@@ -699,6 +700,7 @@ async function refreshRuns() {
     state.cursorInitialized = true;
   }
   rememberEventCursor(observedCursor);
+  if (state.selectedRunId && !state.steering[state.selectedRunId]) await refreshSteering(state.selectedRunId);
   renderRunList();
   renderSelectedRun();
   renderActivityStrip();
@@ -775,10 +777,90 @@ function renderSelectedRun() {
   $("#metric-attempts").textContent = run.tasks.reduce((sum, task) => sum + task.attemptCount, 0);
   $("#metric-active").textContent = run.tasks.filter((task) => ["working", "verifying", "retry"].includes(task.status)).length;
   renderIntegrationSet(run);
+  renderSteering(run);
   renderDelivery(run);
   renderBoard(run);
   renderActivity(run);
   renderVerdict(run);
+}
+
+const STEERABLE_RUN_STATUSES = ["planning", "running", "awaiting_approval", "paused"];
+
+function renderSteering(run) {
+  const panel = $("#steering-panel");
+  const steerable = STEERABLE_RUN_STATUSES.includes(run.status);
+  panel.classList.toggle("hidden", !steerable);
+  const directives = state.steering[run.id] || [];
+  if (!steerable) {
+    // A finished run's evidence is immutable; show history without controls.
+    if (directives.length) renderSteeringDirectives(directives);
+    return;
+  }
+
+  const held = [...directives]
+    .filter((directive) => ["hold_admission", "resume_admission"].includes(directive.kind) && directive.disposition === "applied")
+    .at(-1)?.kind === "hold_admission";
+  $("#steering-admission").textContent = held ? "Admission held" : "Admitting tasks";
+  $("#steering-admission").className = `lifecycle ${held ? "warn" : ""}`;
+  $("#steering-hold").disabled = held;
+  $("#steering-resume").disabled = !held;
+
+  const select = $("#steering-task");
+  const previous = select.value;
+  const steerableTasks = run.tasks.filter((task) => !task.id.startsWith("__"));
+  select.innerHTML = steerableTasks
+    .map((task) => `<option value="${escapeHtml(task.id)}">${escapeHtml(task.title)} — ${escapeHtml(task.status)}</option>`)
+    .join("");
+  if (steerableTasks.some((task) => task.id === previous)) select.value = previous;
+  // Interrupting only means something while an attempt is actually in flight.
+  const selectedTask = steerableTasks.find((task) => task.id === select.value);
+  $("#steering-interrupt").disabled = !selectedTask || !["working", "verifying", "retry"].includes(selectedTask.status);
+
+  renderSteeringDirectives(directives);
+}
+
+function renderSteeringDirectives(directives) {
+  const container = $("#steering-directives");
+  if (!directives.length) {
+    container.innerHTML = '<div class="empty-state">No steering has been requested for this run.</div>';
+    return;
+  }
+  container.innerHTML = [...directives]
+    .reverse()
+    .map((directive) => {
+      const detail = directive.payload?.clarification || directive.payload?.taskOrder?.join(" → ") || directive.payload?.provider || "";
+      return `<article class="steering-directive ${escapeHtml(directive.disposition)}">
+        <div class="steering-directive-head">
+          <strong>${escapeHtml(directive.kind.replaceAll("_", " "))}${directive.targetTaskId ? ` · ${escapeHtml(directive.targetTaskId)}` : ""}</strong>
+          <span class="steering-disposition ${escapeHtml(directive.disposition)}">${escapeHtml(directive.disposition)}</span>
+        </div>
+        ${detail ? `<p>${escapeHtml(detail)}</p>` : ""}
+        <small>${escapeHtml(directive.actor)} · ${new Date(directive.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${directive.dispositionReason ? ` · ${escapeHtml(directive.dispositionReason)}` : ""}${directive.appliedAttemptId ? ` · attempt ${directive.appliedAttemptId}` : ""}</small>
+      </article>`;
+    })
+    .join("");
+}
+
+async function refreshSteering(runId) {
+  if (!runId) return;
+  try {
+    const result = await api(`/api/runs/${runId}/steering`);
+    state.steering[runId] = result.directives;
+  } catch {
+    // Steering history is supplementary; a fetch failure must not blank the run view.
+  }
+}
+
+async function submitSteering(button, runId, body, label) {
+  await withOperation(button, label, async () => {
+    await api(`/api/runs/${runId}/steering`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    await refreshSteering(runId);
+    await refreshRuns();
+  }, { onError: (message) => { $("#steering-error").textContent = message; }, busyLabel: "Sending…" });
 }
 
 function renderDelivery(run) {
@@ -1531,6 +1613,46 @@ $("#delivery-repositories").addEventListener("click", async (event) => {
     });
     await refreshRuns();
   }, { onError: (message) => { $("#delivery-error").textContent = message; }, busyLabel: action === "push_branch" ? "Pushing…" : "Creating draft PR…" });
+});
+$("#steering-hold").addEventListener("click", async (event) => {
+  const runId = state.selectedRunId;
+  if (!runId) return;
+  $("#steering-error").textContent = "";
+  await submitSteering(event.currentTarget, runId, { kind: "hold_admission", targetTaskId: null, payload: {} }, "Holding task admission");
+});
+$("#steering-resume").addEventListener("click", async (event) => {
+  const runId = state.selectedRunId;
+  if (!runId) return;
+  $("#steering-error").textContent = "";
+  await submitSteering(event.currentTarget, runId, { kind: "resume_admission", targetTaskId: null, payload: {} }, "Resuming task admission");
+});
+$("#steering-clarify-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const runId = state.selectedRunId;
+  const clarification = $("#steering-clarification").value.trim();
+  const targetTaskId = $("#steering-task").value;
+  if (!runId || !targetTaskId) return;
+  $("#steering-error").textContent = "";
+  if (!clarification) {
+    $("#steering-error").textContent = "Describe the clarification before sending it.";
+    return;
+  }
+  await submitSteering($("#steering-clarify"), runId, { kind: "clarify", targetTaskId, payload: { clarification } }, "Sending clarification");
+  $("#steering-clarification").value = "";
+});
+$("#steering-interrupt").addEventListener("click", async (event) => {
+  const runId = state.selectedRunId;
+  const targetTaskId = $("#steering-task").value;
+  if (!runId || !targetTaskId) return;
+  const clarification = $("#steering-clarification").value.trim();
+  if (!window.confirm(`Interrupt the active attempt for '${targetTaskId}'? DevHarmonics stops that attempt, keeps its evidence, and starts a new attempt with your direction. It cannot change an answer already being written.`)) return;
+  $("#steering-error").textContent = "";
+  await submitSteering(event.currentTarget, runId, { kind: "interrupt", targetTaskId, payload: clarification ? { clarification } : {} }, "Interrupting the active attempt");
+  $("#steering-clarification").value = "";
+});
+$("#steering-task").addEventListener("change", () => {
+  const run = state.runs.find((item) => item.id === state.selectedRunId);
+  if (run) renderSteering(run);
 });
 $("#close-drawer").addEventListener("click", closeTask);
 $("#drawer-backdrop").addEventListener("click", closeTask);

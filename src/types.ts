@@ -348,11 +348,11 @@ export type SteeringDirectiveKind =
 export type SteeringDisposition = "pending" | "applied" | "rejected" | "superseded";
 
 export interface SteeringPayload {
-  clarification?: string;
-  taskOrder?: string[];
-  provider?: string;
-  modelId?: string;
-  reason?: string;
+  clarification?: string | undefined;
+  taskOrder?: string[] | undefined;
+  provider?: string | undefined;
+  modelId?: string | undefined;
+  reason?: string | undefined;
 }
 
 export interface SteeringDirectiveRecord {

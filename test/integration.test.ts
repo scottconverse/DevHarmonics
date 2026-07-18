@@ -1761,3 +1761,96 @@ test("cancel during validator verification marks task cancelled and avoids merge
     await rm(root, { recursive: true, force: true, maxRetries: 60, retryDelay: 250 });
   }
 });
+
+test("owner steering interrupts a live attempt and hands off to an attributed continuation", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-steering-e2e-"));
+  const project = await createRepository(root);
+  // A hanging CLI keeps attempt 1 genuinely in flight so the interrupt has to
+  // terminate a real child process rather than racing a fast fixture.
+  const hanging = await createHangingCli(root);
+  const fixture = await createFakeCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  config.runPolicy.requirePlanApproval = false;
+  config.connections.codex.command = hanging;
+  config.connections.claude.command = fixture;
+  config.connections.gemini.command = fixture;
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].timeoutMs = 60_000;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  let runId = "";
+  try {
+    const started = await fetch(`${dashboard.url}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ goal: "Create the fixture result", projectPath: project, agents: 1 }),
+    });
+    assert.equal(started.status, 202);
+    runId = ((await started.json()) as { runId: string }).runId;
+
+    const getRun = () => fetch(`${dashboard.url}/api/runs/${runId}`).then((response) => response.json() as Promise<{
+      status: string;
+      tasks: Array<{ id: string; status: string; attemptCount: number }>;
+      events: Array<{ kind: string }>;
+    }>);
+    await poll(getRun, (run) => run.tasks.some((task) => task.id === "one" && task.status === "working"), 30_000);
+
+    // Steering that tries to carry authority must be refused outright.
+    const escalation = await fetch(`${dashboard.url}/api/runs/${runId}/steering`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind: "clarify", targetTaskId: "one", payload: { clarification: "go", permission: "workspace_write" } }),
+    });
+    assert.equal(escalation.status, 400, "steering cannot carry a permission field");
+
+    const interrupted = await fetch(`${dashboard.url}/api/runs/${runId}/steering`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind: "interrupt", targetTaskId: "one", payload: { clarification: "Use the shorter approach" } }),
+    });
+    assert.equal(interrupted.status, 201);
+
+    // The interrupt must terminate the hanging attempt and start a second one.
+    await poll(getRun, (run) => (run.tasks.find((task) => task.id === "one")?.attemptCount ?? 0) >= 2, 30_000);
+    const afterInterrupt = await getRun();
+    assert.ok(afterInterrupt.events.some((event) => event.kind === "steering.interrupted"), "the interrupt is recorded as run evidence");
+    assert.notEqual(afterInterrupt.status, "cancelled", "interrupting one attempt must not cancel the run");
+
+    // The directive is applied and linked to the exact attempt it stopped.
+    const directives = await fetch(`${dashboard.url}/api/runs/${runId}/steering`).then((r) => r.json() as Promise<{
+      directives: Array<{ kind: string; disposition: string; appliedAttemptId: number | null; targetTaskId: string | null }>;
+    }>);
+    const applied = directives.directives.find((directive) => directive.kind === "interrupt");
+    assert.equal(applied?.disposition, "applied");
+    assert.equal(applied?.targetTaskId, "one");
+    assert.ok(applied?.appliedAttemptId, "an applied interrupt links to the attempt it stopped");
+
+    // The interrupted attempt is retained as evidence, not erased.
+    const evidence = await fetch(`${dashboard.url}/api/runs/${runId}/evidence`).then((r) => r.json() as Promise<{
+      attempts: Array<{ status: string; error: string | null }>;
+      blackboard: Array<{ kind: string; content: string }>;
+    }>);
+    assert.ok(evidence.attempts.some((attempt) => (attempt.error ?? "").includes("Interrupted by owner steering")), "the stopped attempt is retained");
+    assert.ok(evidence.blackboard.some((entry) => entry.kind === "handoff" && entry.content.includes("Owner interrupted")), "the continuation receives a handoff");
+  } finally {
+    await fetch(`${dashboard.url}/api/runs/${runId}/cancel`, { method: "POST", headers: { "content-type": "application/json" } }).catch(() => undefined);
+    await delay(500);
+    await dashboard.close();
+    if (runId) {
+      const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
+      for (const worktree of [path.join(runRoot, "tasks", "one"), path.join(runRoot, "integration")]) {
+        for (let attempt = 0; attempt < 60; attempt++) {
+          const result = await runProcess({ command: "git", args: ["worktree", "remove", "--force", worktree], cwd: project, timeoutMs: 30_000 });
+          if (result.exitCode === 0) break;
+          await delay(250);
+        }
+      }
+      await rm(runRoot, { recursive: true, force: true, maxRetries: 60, retryDelay: 250 });
+    }
+    await rm(root, { recursive: true, force: true, maxRetries: 60, retryDelay: 250 });
+  }
+});

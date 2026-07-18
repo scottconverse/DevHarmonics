@@ -19,7 +19,7 @@ import { observeLocalResources } from "./resources.js";
 import { inspectLocalRepository } from "./repository-intelligence.js";
 import { DeliveryService, type DeliveryAction } from "./delivery.js";
 import { scanProductIntelligence } from "./product-intelligence.js";
-import { manualModelSchema, objectiveInputSchema, productRegistrationSchema, workbenchSessionInputSchema } from "./schemas.js";
+import { manualModelSchema, objectiveInputSchema, productRegistrationSchema, steeringDirectiveInputSchema, workbenchSessionInputSchema } from "./schemas.js";
 import type { ObjectiveInput, ProviderName, RunRequest, WorkbenchMessageRecord } from "./types.js";
 import { inferModelProfile } from "./model-intelligence.js";
 import type { ModelRecord } from "./registry.js";
@@ -818,6 +818,48 @@ async function route(
       approval: { id: randomUUID(), kind: "external_write", approvedBy: "local-owner", approvedAt: new Date().toISOString() },
     });
     sendJson(response, 200, { delivery: result });
+    return;
+  }
+
+  const steeringMatch = url.pathname.match(/^\/api\/runs\/([a-f0-9-]+)\/steering$/i);
+  if (request.method === "GET" && steeringMatch?.[1]) {
+    const run = context.ledger.getRun(steeringMatch[1]);
+    sendJson(response, run ? 200 : 404, run ? { directives: context.ledger.listSteeringDirectives(steeringMatch[1]) } : { error: "Run not found" });
+    return;
+  }
+  if (request.method === "POST" && steeringMatch?.[1]) {
+    requireJsonRequest(request);
+    const parsed = steeringDirectiveInputSchema.safeParse(await readJson(request));
+    if (!parsed.success) {
+      // A rejected payload is the containment boundary doing its job: steering
+      // carries direction, never authority.
+      sendJson(response, 400, {
+        error: "Steering may guide work inside the approved task contract, but cannot change permissions, risk, acceptance criteria, or repository scope",
+        issues: parsed.error.issues,
+      });
+      return;
+    }
+    const run = context.ledger.getRun(steeringMatch[1]);
+    if (!run) {
+      sendJson(response, 404, { error: "Run not found" });
+      return;
+    }
+    if (parsed.data.targetTaskId && !run.tasks.some((task) => task.id === parsed.data.targetTaskId)) {
+      sendJson(response, 400, { error: `Run has no task '${parsed.data.targetTaskId}'` });
+      return;
+    }
+    try {
+      const directive = context.ledger.recordSteeringDirective({
+        runId: steeringMatch[1],
+        kind: parsed.data.kind,
+        targetTaskId: parsed.data.targetTaskId,
+        actor: "local-owner",
+        payload: parsed.data.payload,
+      });
+      sendJson(response, 201, { directive });
+    } catch (error) {
+      sendJson(response, 409, { error: error instanceof Error ? error.message : String(error) });
+    }
     return;
   }
 

@@ -1075,6 +1075,7 @@ export class Orchestrator {
       const pending = new Map(input.plan.tasks.map((task) => [task.id, task]));
       const active = new Map<string, Promise<void>>();
       let providerCursor = 0;
+      let admissionHeld = false;
       while (pending.size || active.size) {
         if (await settleActiveAttemptsIfAborted(input.signal, active.values())) return;
         for (const [taskId, task] of pending) {
@@ -1085,7 +1086,20 @@ export class Orchestrator {
             this.ledger.addEvent(input.runId, "task.blocked", `${task.title} blocked by a failed dependency`);
           }
         }
-        const ready = [...pending.values()].filter((task) => task.dependencies.every((dependency) => statuses.get(dependency) === "passed"));
+        const readyTasks = [...pending.values()].filter((task) => task.dependencies.every((dependency) => statuses.get(dependency) === "passed"));
+        // DH-635: a multi-repository run honours admission steering exactly like a
+        // single-repository one. Silently ignoring a directive here would be the
+        // false steering claim the acceptance criteria prohibit.
+        const steered = planSteeredAdmission({
+          pending: this.ledger.pendingSteeringDirectives(input.runId).filter((directive) => ADMISSION_STEERING_KINDS.includes(directive.kind)),
+          ready: readyTasks,
+          admissionHeld,
+          allowedProviders: input.workerProviders,
+        });
+        admissionHeld = steered.admissionHeld;
+        for (const item of steered.applied) this.ledger.resolveSteeringDirective(item.id, { disposition: "applied", reason: item.reason });
+        for (const item of steered.rejected) this.ledger.resolveSteeringDirective(item.id, { disposition: "rejected", reason: item.reason });
+        const ready = steered.ordered;
         while (active.size < concurrency && ready.length) {
           const task = ready.shift()!;
           pending.delete(task.id);
@@ -1114,6 +1128,8 @@ export class Orchestrator {
           active.set(task.id, taskPromise);
         }
         if (active.size) await Promise.race(active.values());
+        // Held on purpose: an idle queue under an owner hold is not a stuck graph.
+        else if (admissionHeld && pending.size) await delay(500);
         else if (pending.size) throw new Error("The cross-repository task graph cannot make progress; check for cyclic dependencies");
       }
       if (await settleActiveAttemptsIfAborted(input.signal, active.values())) return;

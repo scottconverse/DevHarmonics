@@ -696,6 +696,13 @@ Acceptance:
 
 #### DH-470: Verification-integrity and anti-shortcut gates — XL
 
+Refinement (2026-07-18, from a real run): a read-only diagnostic produces no repository change, so validators have nothing to judge and the report's own citations become the evidence. Those citations were only ever checked for shape — a regex confirmed something resembling `file.ext:12` was present — so a worker that invents well-formed citations passed. During the item-4 proving run a local model produced five reports citing files that do not exist, a line whose real content is unrelated, and a version string absent from the repository entirely; all five tasks recorded `passed read-only verification`. Only the independent reviewer caught it, and only because it re-inspected the repository itself rather than reading the reports.
+
+Citations are checkable facts and are now verified mechanically: each cited path must exist inside the assigned worktree and the cited line must exist within it. This is deterministic, needs no model, and costs milliseconds. Two consequences are recorded rather than assumed. First, verification establishes that a citation *resolves*, not that the cited line supports the conclusion drawn from it — that remains a review question, and a report citing a real line with misattributed content still verifies. Second, a report containing no citations at all has none to reject, and the existing gate only demands line evidence when a task's acceptance criteria ask for it, so a vacuous report can still pass; requiring evidence proportionate to the claim is remaining scope.
+
+The wider lesson for this milestone: where a workflow produces no artefact to validate, evidence integrity depends entirely on the report and the reviewer, and a context-only reviewer reading a plausible, well-formatted fabrication is unlikely to catch it. This is the same capability distinction recorded in DH-460.
+
+
 Deliverables:
 
 - capture expected-versus-actual test census, selection filters, skips, coverage, and changed test files;

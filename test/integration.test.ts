@@ -2013,7 +2013,15 @@ test("owner steering interrupts a live attempt and hands off to an attributed co
       tasks: Array<{ id: string; status: string; attemptCount: number }>;
       events: Array<{ kind: string }>;
     }>);
-    await poll(getRun, (run) => run.tasks.some((task) => task.id === "one" && task.status === "working"), 30_000);
+    // 'working' alone is no longer a precise precondition for "an attempt is
+    // live". A task is now marked working before first-use qualification, so
+    // that the interrupt the product offers at that moment is genuinely
+    // watched for. attemptCount only rises once qualification and routing are
+    // done and the provider invocation is about to start, so waiting on it is
+    // what this test actually means. Waiting on 'working' alone let the
+    // interrupt land in the qualification window under load, which exercised a
+    // different (also correct) code path and made this test intermittent.
+    await poll(getRun, (run) => run.tasks.some((task) => task.id === "one" && task.status === "working" && task.attemptCount >= 1), 30_000);
 
     // Steering that tries to carry authority must be refused outright.
     const escalation = await fetch(`${dashboard.url}/api/runs/${runId}/steering`, {

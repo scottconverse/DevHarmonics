@@ -38,7 +38,7 @@ import {
 } from "./types.js";
 import { invocationFailureScope, RuntimeInvocationError, type InvocationPermission, type RuntimeAdapter } from "./runtime.js";
 import { syncSubscriptionConnections } from "./registry.js";
-import { ModelRouter } from "./routing.js";
+import { ModelRouter, type RouteInput } from "./routing.js";
 import { observeLocalResources } from "./resources.js";
 import { evaluateToolRequest, type ToolStage } from "./policy.js";
 import { adjudicateReviewQuorum, parseReviewerResponse, reviewRequirement, type ReviewFinding, type ReviewQuorumDecision, type ReviewRequirement, type StructuredReview } from "./review.js";
@@ -160,7 +160,7 @@ export class Orchestrator {
     // local worker can carry the tasks, so a cooling subscription worker pool
     // must not refuse to plan work that local models can actually run.
     if (!availableProviders.length) throw new Error("No healthy provider is available to plan this objective");
-    if (!hasRunnableWorker({ ledger: this.ledger, subscriptionProviders: workerProviders })) {
+    if (!canRoute(this.ledger, workerClassProbe(config, workerProviders))) {
       throw new Error("No subscription worker is available and no qualified local worker can run this objective");
     }
 
@@ -468,15 +468,21 @@ export class Orchestrator {
     const availableProviders = configuredProviders.filter((name) =>
       this.ledger.isConnectionEligible(projectLegacyProvider(name).connectionId),
     );
-    if (!availableProviders.length) {
-      const health = this.ledger.listConnectionHealth().filter((item) => configuredProviders.some((name) => projectLegacyProvider(name).connectionId === item.connectionId));
-      throw new Error(`All enabled providers are unavailable or cooling down (${health.map((item) => `${item.connectionId}: ${item.state}${item.cooldownUntil ? ` until ${item.cooldownUntil}` : ""}`).join("; ")})`);
-    }
     const workerProviders = config.product.workers.filter((name) => availableProviders.includes(name));
-    // A cooling subscription pool does not stop the run when a qualified local
-    // worker can carry the tasks; local runtimes have no quota to wait out.
-    if (!hasRunnableWorker({ ledger: this.ledger, subscriptionProviders: workerProviders })) {
-      throw new Error("No subscription worker is available and no qualified local worker can run this objective");
+    // A cooling subscription pool does not stop an already-approved run when
+    // qualified local models can carry it: local runtimes have no quota window
+    // to wait out. This gate used to refuse on provider health alone, before
+    // local execution was ever considered. Both halves of a run must be
+    // routable — work no reviewer can review is not a run that can finish — and
+    // each half is asked of the router rather than inferred from a proxy.
+    const missingRole = !canRoute(this.ledger, workerClassProbe(config, workerProviders))
+      ? "worker"
+      : !canRoute(this.ledger, { role: "reviewer", config, fallbackProvider: availableProviders[0] ?? null, allowedProviders: availableProviders, permission: "read_only", task: null })
+        ? "reviewer"
+        : null;
+    if (missingRole) {
+      const health = this.ledger.listConnectionHealth().filter((item) => configuredProviders.some((name) => projectLegacyProvider(name).connectionId === item.connectionId));
+      throw new Error(`No subscription or qualified local ${missingRole} is available for this run (${health.map((item) => `${item.connectionId}: ${item.state}${item.cooldownUntil ? ` until ${item.cooldownUntil}` : ""}`).join("; ")})`);
     }
 
     const approvedObjective = request.objectiveLink ? this.ledger.getObjective(request.objectiveLink.objectiveId) : null;
@@ -930,10 +936,7 @@ export class Orchestrator {
     for (let fixRound = 1; !finalQuorum.passed && finalQuorum.openFindings.length && autonomy !== "observe" && fixRound <= config.reviewPolicy.maxFixRounds; fixRound++) {
       const reviewerSet = new Set(finalReviews.map((review) => review.provider));
       const fixerProviders = workerProviders.filter((provider) => !reviewerSet.has(provider));
-      if (!fixerProviders.length) {
-        this.ledger.addEvent(runId, "fixer.failed", "No implementor provider independent from the review quorum is available", { fixRound, reviewerProviders: [...reviewerSet] });
-        break;
-      }
+      const reviewerConnectionIds = this.connectionIdsForProviders(reviewerSet);
       const repairTask: PlannedTask = {
         id: `__review_fix_${fixRound}`,
         title: `Resolve review findings (round ${fixRound})`,
@@ -951,9 +954,27 @@ export class Orchestrator {
         acceptanceCriteria: finalQuorum.openFindings.map((finding) => finding.suggestedCorrection),
         expectedArtifacts: ["committed repair diff", "passing validator receipts"],
       };
+      // A repair needs an implementor independent of the quorum, not a
+      // *subscription* one. This gate derived its candidates from the
+      // subscription worker pool alone, so a run that had successfully fallen
+      // back to local execution still stopped dead at its own fix round.
+      // Connections belonging to a provider that reviewed are excluded by
+      // identity, so independence is preserved for local models too.
+      if (!fixerProviders.length && !canRoute(this.ledger, {
+        role: "worker",
+        config,
+        fallbackProvider: null,
+        allowedProviders: [],
+        permission: "workspace_write",
+        task: repairTask,
+        excludedConnectionIds: reviewerConnectionIds,
+      })) {
+        this.ledger.addEvent(runId, "fixer.failed", "No implementor independent from the review quorum is available", { fixRound, reviewerProviders: [...reviewerSet] });
+        break;
+      }
       this.ledger.addTask(runId, repairTask);
-      this.ledger.addEvent(runId, "fixer.started", `${fixerProviders[0]} is addressing ${finalQuorum.openFindings.length} open review finding(s)`, { fixRound, taskId: repairTask.id, findings: finalQuorum.openFindings.map((finding) => finding.id), excludedReviewerProviders: [...reviewerSet] });
-      const fixStatus = await this.executeTask({ runId, goal: request.goal, task: repairTask, constitution, config, providers: fixerProviders, providerCursor: providerCursor + fixRound, worktrees, signal });
+      this.ledger.addEvent(runId, "fixer.started", `${repairTask.preferredProvider ?? "a qualified local implementor"} is addressing ${finalQuorum.openFindings.length} open review finding(s)`, { fixRound, taskId: repairTask.id, findings: finalQuorum.openFindings.map((finding) => finding.id), excludedReviewerProviders: [...reviewerSet] });
+      const fixStatus = await this.executeTask({ runId, goal: request.goal, task: repairTask, constitution, config, providers: fixerProviders, providerCursor: providerCursor + fixRound, worktrees, signal, excludeConnectionIds: reviewerConnectionIds });
       if (fixStatus !== "passed") {
         this.ledger.addEvent(runId, "fixer.failed", `Review fixer round ${fixRound} did not pass its validators`, { fixRound, taskId: repairTask.id, status: fixStatus });
         break;
@@ -1250,10 +1271,7 @@ export class Orchestrator {
         }
         const reviewerProviders = new Set(reviewRound.reviews.map((review) => review.provider));
         const fixerProviders = input.workerProviders.filter((provider) => !reviewerProviders.has(provider));
-        if (!fixerProviders.length) {
-          this.ledger.addEvent(input.runId, "fixer.failed", "No implementor provider independent from the multi-repository review quorum is available", { fixRound, reviewerProviders: [...reviewerProviders] });
-          break;
-        }
+        const reviewerConnectionIds = this.connectionIdsForProviders(reviewerProviders);
 
         const repairTaskIds = repositoryTaskIds(`__review_fix_${fixRound}`, [...assignments.byRepository.keys()]);
         const repairs = [...assignments.byRepository.entries()].map(([repositoryId, findings], index) => {
@@ -1267,7 +1285,7 @@ export class Orchestrator {
             description: `Correct only these retained review findings in repository ${repositoryId}:\n${findings.map((finding) => `- ${finding.severity.toUpperCase()} ${finding.location ?? "location not supplied"}: ${finding.rationale}\n  Suggested correction: ${finding.suggestedCorrection}`).join("\n")}`,
             dependencies: [],
             repositoryIds: [repositoryId],
-            preferredProvider: fixerProviders[index % fixerProviders.length] ?? fixerProviders[0]!,
+            preferredProvider: fixerProviders.length ? fixerProviders[index % fixerProviders.length]! : null,
             checks: checks.length ? checks : ["diff-check"],
             kind: "repair",
             repositoryScope: repositoryScope.length ? repositoryScope : ["."],
@@ -1279,6 +1297,21 @@ export class Orchestrator {
           };
           return { repositoryId, context, manager: integration.manager(repositoryId), repairTask };
         });
+        // Same class as the single-repository gate: independence from the
+        // quorum is the requirement, not a subscription implementor. Every
+        // repository's repair must be routable, since they run together.
+        if (!fixerProviders.length && !repairs.every((repair) => canRoute(this.ledger, {
+          role: "worker",
+          config: repair.context.config,
+          fallbackProvider: null,
+          allowedProviders: [],
+          permission: "workspace_write",
+          task: repair.repairTask,
+          excludedConnectionIds: reviewerConnectionIds,
+        }))) {
+          this.ledger.addEvent(input.runId, "fixer.failed", "No implementor independent from the multi-repository review quorum is available", { fixRound, reviewerProviders: [...reviewerProviders] });
+          break;
+        }
         for (const repair of repairs) {
           this.ledger.addTask(input.runId, repair.repairTask);
           this.ledger.addEvent(input.runId, "fixer.started", `${repair.repairTask.preferredProvider} is addressing ${assignments.byRepository.get(repair.repositoryId)!.length} finding(s) in ${repair.repositoryId}`, { fixRound, taskId: repair.repairTask.id, repositoryId: repair.repositoryId });
@@ -1295,6 +1328,7 @@ export class Orchestrator {
             providerCursor: providerCursor + fixRound + index,
             worktrees: repair.manager,
             signal: input.signal,
+            excludeConnectionIds: reviewerConnectionIds,
           }),
         })));
         if (repairStatuses.some(({ status }) => status !== "passed")) {
@@ -1612,6 +1646,11 @@ export class Orchestrator {
     };
   }
 
+  /** Every connection belonging to one of these providers, for identity-based exclusion. */
+  private connectionIdsForProviders(providers: ReadonlySet<string>): Set<string> {
+    return new Set(this.ledger.listConnections().filter((connection) => providers.has(connection.provider)).map((connection) => connection.id));
+  }
+
   private async executeTask(input: {
     runId: string;
     goal: string;
@@ -1622,6 +1661,8 @@ export class Orchestrator {
     providerCursor: number;
     worktrees: WorktreeManager;
     signal: AbortSignal;
+    /** Connections this task must not use, e.g. the reviewers a repair must stay independent of. */
+    excludeConnectionIds?: ReadonlySet<string>;
   }): Promise<TaskStatus> {
     try {
       return await this.runTaskAttempts(input);
@@ -1650,12 +1691,13 @@ export class Orchestrator {
     providerCursor: number;
     worktrees: WorktreeManager;
     signal: AbortSignal;
+    excludeConnectionIds?: ReadonlySet<string>;
   }): Promise<TaskStatus> {
     const taskWorktree = await input.worktrees.createTask(input.task.id);
     const taskPermission = input.task.permission ?? "workspace_write";
     let feedback = "";
     const excludedModelIds = new Set<string>();
-    const excludedConnectionIds = new Set<string>();
+    const excludedConnectionIds = new Set<string>(input.excludeConnectionIds ?? []);
 
     // DH-635: an interrupted attempt consumes the approved retry budget exactly
     // like any other attempt. Granting extra attempts for interrupts would let
@@ -1684,14 +1726,6 @@ export class Orchestrator {
         appliedClarifications.push(directive);
       }
       const eligibleProviders = input.providers.filter((name) => this.ledger.isConnectionEligible(projectLegacyProvider(name).connectionId));
-      // A cooling subscription is not the end of the run when a qualified local
-      // worker is available: local runtimes have no quota window to wait out.
-      // Only stop when nothing at all can run.
-      if (!hasRunnableWorker({ ledger: this.ledger, subscriptionProviders: eligibleProviders })) {
-        this.ledger.setTaskStatus(input.runId, input.task.id, "failed");
-        this.ledger.addEvent(input.runId, "task.failed", `${input.task.title}: no subscription connection is available and no qualified local worker can take over`);
-        return "failed";
-      }
       // Null when every subscription connection is cooling and only qualified
       // local workers remain; selectWorker cannot index an empty pool.
       const fallbackProvider = eligibleProviders.length
@@ -1734,7 +1768,7 @@ export class Orchestrator {
         this.ledger.setTaskStatus(input.runId, input.task.id, "failed");
         return "failed";
       }
-      const routing = new ModelRouter(this.ledger).route({
+      const routeAttempt = new ModelRouter(this.ledger).tryRoute({
         role: "worker",
         config: input.config,
         fallbackProvider,
@@ -1744,6 +1778,24 @@ export class Orchestrator {
         excludedModelIds,
         excludedConnectionIds,
       });
+      // Nothing can take this task right now. That is a task-level outcome, not
+      // a run-level crash: a cooling window can reopen, so it settles and
+      // retries like any other provider failure. Routing used to sit outside
+      // this handling behind a liveness predicate that only approximated it, so
+      // a guess that disagreed with the router threw out of executeTask and
+      // failed the entire run instead of settling one task.
+      if ("reason" in routeAttempt) {
+        this.ledger.addEvent(input.runId, "task.provider_failed", `${input.task.title}: ${routeAttempt.reason}`, { taskId: input.task.id });
+        if (attempt < input.config.application.retry.maxAttempts) {
+          this.ledger.setTaskStatus(input.runId, input.task.id, "retry");
+          await delay(input.config.application.retry.backoffMs);
+          continue;
+        }
+        this.ledger.setTaskStatus(input.runId, input.task.id, "failed");
+        this.ledger.addEvent(input.runId, "task.failed", `${input.task.title}: no subscription connection is available and no qualified local worker can take over`);
+        return "failed";
+      }
+      const routing = routeAttempt.decision;
       if (!(PROVIDERS as readonly string[]).includes(routing.provider) && routing.provider !== "ollama" && taskPermission === "workspace_write") {
         throw new Error(`Worker model '${routing.model.requestedModelId}' cannot write until the local tool policy engine is enabled`);
       }
@@ -2451,28 +2503,52 @@ export class Orchestrator {
 }
 
 /**
- * Whether any worker can still run a task, counting qualified local models and
- * not only subscription connections.
+ * Whether this exact shape of work can be routed to a model right now.
  *
- * The attempt loop used to fail a task the moment no subscription connection was
- * eligible, which skipped the router — the only place a local model is
- * considered — and made local fallback reachable in routing but unreachable in
- * practice. Local runtimes have no quota to exhaust, so they are exactly what
- * should keep work alive when a subscription window closes.
+ * Asks the router the question execution will ask, rather than approximating it.
+ * The predicate this replaced checked generic lifecycle flags and answered both
+ * true and false incorrectly: it kept a task alive for a local model qualified
+ * only as an architect (routing then threw out of the attempt and failed the
+ * run), and refused a manually assigned inactive local model that the router
+ * would in fact have selected.
  */
-export function hasRunnableWorker(input: {
-  ledger: Pick<Ledger, "listConnections" | "listModels" | "isConnectionEligible" | "isModelEligible">;
-  subscriptionProviders: readonly string[];
-}): boolean {
-  if (input.subscriptionProviders.length > 0) return true;
-  return input.ledger
-    .listConnections()
-    .filter((connection) => connection.transport === "local" && input.ledger.isConnectionEligible(connection.id))
-    .some((connection) =>
-      input.ledger
-        .listModels(connection.id)
-        .some((model) => model.qualified && !model.qualificationStale && model.active && !model.excluded && !model.retired && input.ledger.isModelEligible(model.id)),
-    );
+export function canRoute(ledger: Ledger, input: RouteInput): boolean {
+  return "decision" in new ModelRouter(ledger).tryRoute(input);
+}
+
+/**
+ * "Some worker class can run something" — the only honest question at planning
+ * and run start, where no specific task exists yet.
+ *
+ * Deliberately the most permissive worker shape. A plan that turns out to need
+ * more than this settles at the task that needs it, which is where the
+ * task-level answer lives. The weaker pre-plan answer must never be reused as a
+ * task-level one: they are different questions.
+ */
+export function workerClassProbe(config: DevHarmonicsConfig, workerProviders: readonly ProviderName[]): RouteInput {
+  return {
+    role: "worker",
+    config,
+    fallbackProvider: workerProviders[0] ?? null,
+    allowedProviders: workerProviders,
+    permission: "read_only",
+    // The most permissive worker shape there is. A low-risk read-only
+    // diagnostic classifies to the lowest tier, so this asks "can anything take
+    // worker work at all?". Passing no task instead classifies as standard
+    // tier, which would refuse to plan or start work that small local models can
+    // genuinely run — the same false-negative class this replaced.
+    task: {
+      id: "__worker_class_probe",
+      title: "worker availability probe",
+      description: "worker availability probe",
+      dependencies: [],
+      preferredProvider: null,
+      checks: [],
+      kind: "diagnostic",
+      permission: "read_only",
+      risk: "low",
+    },
+  };
 }
 
 /** Steering kinds the scheduler resolves at the task-admission boundary. */

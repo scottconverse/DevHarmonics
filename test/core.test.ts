@@ -11,7 +11,7 @@ import { defaultConfig, initializeProject, loadConfig, resolveProviderCommand } 
 import { projectLegacyProvider } from "../src/compatibility.js";
 import { assertRunTransition, assertTaskTransition, domainId } from "../src/domain.js";
 import { LEDGER_SCHEMA_VERSION, Ledger } from "../src/ledger.js";
-import { assignReviewFindings, createReviewEvidenceBinding, hasRunnableWorker, Orchestrator, parseFirstJsonObject, planSteeredAdmission, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
+import { assignReviewFindings, canRoute, createReviewEvidenceBinding, Orchestrator, workerClassProbe, parseFirstJsonObject, planSteeredAdmission, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
 import { extractCitations, verifyReportCitations } from "../src/citations.js";
 import { discoverOllama, OllamaAdapter, qualifyOllamaModel, syncOllamaRegistry, syncOllamaRuntimes } from "../src/ollama.js";
 import {
@@ -4335,7 +4335,7 @@ test("an exhausted output budget is reported as a budget failure, not model inco
   }
 });
 
-test("a qualified local worker keeps a task alive when every subscription connection is cooling", async () => {
+test("worker liveness is decided by the router itself, not by a proxy that disagrees with it", async () => {
   // Found by the v0.6 item-4 fallback proving run. The attempt loop guards on
   // input.providers, which only ever holds subscription providers, so once the
   // last subscription connection cools the task is failed with "all eligible
@@ -4357,14 +4357,43 @@ test("a qualified local worker keeps a task alive when every subscription connec
     assert.equal(localEligible, true, "the local runtime is still usable");
 
     // The decision the attempt loop has to make: with no subscription connection
-    // usable, is there still somewhere to run? A qualified, active local model
-    // means yes, and the task must not be failed for lack of a subscription.
-    const localCandidates = ledger.listModels("local:ollama").filter((model) => model.qualified && model.active && !model.excluded && !model.retired);
-    assert.ok(localCandidates.length > 0, "a qualified active local worker exists");
+    // usable, is there still somewhere to run? That question is only answered
+    // honestly by the router. A predicate that checked generic lifecycle flags
+    // instead — qualified, active, not excluded — disagreed with routing in both
+    // directions, and an audit proved both. Each case below is one of those.
+    const config = structuredClone(defaultConfig);
+    const noSubscription = () => workerClassProbe(config, []);
+    const modelId = "ollama:worker:7b";
+
+    // False positive: qualified and active, but only for the architect role. The
+    // old predicate said the task could run; routing then threw out of the
+    // attempt and failed the whole run instead of settling one task.
+    ledger.recordModelQualification({ modelId, fixtureVersion: "test", role: "architect", passed: true, score: 1, evidence: {} });
+    assert.equal(ledger.getModel(modelId)?.qualified, true, "the model is qualified in the generic sense the old predicate checked");
+    assert.equal(canRoute(ledger, noSubscription()), false, "a model qualified only as architect cannot take worker work");
+
+    // Qualified for analysis: it can carry read-only worker work.
+    ledger.recordModelQualification({ modelId, fixtureVersion: "test", role: "analysis", passed: true, score: 1, evidence: {} });
+    assert.equal(canRoute(ledger, noSubscription()), true, "a cooling subscription must not end the task while a qualified local worker is available");
+    // ...but not a write: that needs the local tool qualification, which the
+    // generic predicate had no way to see.
     assert.equal(
-      hasRunnableWorker({ ledger, subscriptionProviders: subscriptionEligible ? ["claude"] : [] }),
+      canRoute(ledger, { ...noSubscription(), permission: "workspace_write" }),
+      false,
+      "an analysis-qualified local model cannot be treated as a writer",
+    );
+
+    // False negative: an inactive model that is manually assigned. Routing
+    // honours explicit assignment without requiring active, so refusing here
+    // would refuse a model the router would in fact have selected.
+    ledger.setModelPreference(modelId, { active: false });
+    assert.equal(canRoute(ledger, noSubscription()), false, "an inactive model is not picked up by ordinary selection");
+    const assigned = structuredClone(defaultConfig);
+    assigned.routing.worker.modelId = modelId;
+    assert.equal(
+      canRoute(ledger, workerClassProbe(assigned, [])),
       true,
-      "a cooling subscription must not end the task while a qualified local worker is available",
+      "a manually assigned local model routes even while inactive, so liveness must say so too",
     );
   } finally {
     ledger.close();

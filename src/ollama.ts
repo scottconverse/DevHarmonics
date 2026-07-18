@@ -328,7 +328,17 @@ export function boundedThinkingSettings(
   return { ...settings, num_predict: Math.max(requested, UNDISABLEABLE_THINKING_BUDGET) };
 }
 
-/** Enough for a `low` GPT-OSS trace plus a short exact answer. */
+/**
+ * Output budget for a model whose trace cannot be turned off.
+ *
+ * A project heuristic, NOT a documented Ollama guarantee: Ollama specifies which
+ * `think` values a model accepts, but not how many tokens a `low` trace costs.
+ * Chosen as comfortably more than the 16 tokens an exact-answer fixture needs
+ * while staying bounded. If a model is observed spending its whole budget on
+ * reasoning again, this is the number to revisit — the classification of that
+ * failure as retryable `context_overflow` rather than incompatibility is what
+ * keeps such a model from being durably excluded in the meantime.
+ */
 const UNDISABLEABLE_THINKING_BUDGET = 512;
 
 export async function qualifyOllamaModel(

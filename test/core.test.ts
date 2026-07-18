@@ -24,6 +24,7 @@ import {
   RuntimeInvocationError,
   classifyInvocationFailure,
   invocationFailureScope,
+  isAbortError,
   type InvocationEvent,
 } from "../src/runtime.js";
 import type { DevHarmonicsConfig, PlannedTask, RunPlan, SteeringDirectiveRecord } from "../src/types.js";
@@ -4385,6 +4386,62 @@ test("an exhausted output budget is reported as a budget failure, not model inco
     );
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("interrupting a first-use qualification leaves the model's health untouched", async () => {
+  // An audit found this in the fix for the interrupt window: the abort signal
+  // reached the probe, but qualification caught EVERY throw and turned it into
+  // passed:false. That was persisted as a failed qualification and recorded as
+  // 'incompatible', which carries a 30-minute cooldown — so exercising the
+  // owner's interrupt could make the only local worker ineligible for its own
+  // retry and for later runs. An interrupt is a control action, not evidence
+  // about a model.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-abort-health-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    ledger.upsertConnection({ id: "local:ollama", provider: "ollama", transport: "local", authentication: "local_none", displayName: "Ollama", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "local", capacity: "available", adapterVersion: "test", runtimeVersion: "test", metadata: { baseUrl: "http://127.0.0.1:11434" } });
+    const modelId = "ollama:worker:7b";
+    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "local:ollama", canonicalName: "worker:7b", displayName: "worker:7b", source: "runtime_discovery", lifecycle: "known", visible: true, verified: false, qualified: false, active: false, metadata: { capabilities: ["completion"] } });
+
+    const controller = new AbortController();
+    let probeStarted = false;
+    // A probe that never answers on its own — only the abort ends it, which is
+    // what a real first-use qualification against a live model looks like.
+    const blocked = ensureSchedulerCandidateQualified({
+      ledger,
+      config: structuredClone(defaultConfig),
+      cwd: root,
+      role: "worker",
+      preferredProvider: "ollama",
+      permission: "read_only",
+      // A low-risk read-only diagnostic classifies to the lowest tier, which is
+      // what a small local model can actually be selected for.
+      task: { id: "probe", title: "Inspect", description: "Inspect", dependencies: [], preferredProvider: null, checks: [], kind: "diagnostic", permission: "read_only", risk: "low" },
+      signal: controller.signal,
+      qualify: () => new Promise((_resolve, reject) => {
+        probeStarted = true;
+        controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true });
+      }),
+    });
+    for (let tick = 0; tick < 200 && !probeStarted; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(probeStarted, true, "the probe is genuinely in flight before the interrupt");
+
+    controller.abort();
+    await assert.rejects(blocked, (error: unknown) => isAbortError(error), "an aborted probe surfaces as an abort, not as a verdict");
+
+    // The point of the test: nothing about the model was concluded.
+    const after = ledger.getModel(modelId);
+    assert.equal(after?.qualified, false, "the model is no more qualified than before");
+    assert.deepEqual(
+      ledger.listModelQualifications(modelId).filter((item) => !item.passed),
+      [],
+      "an interrupt must not be persisted as a failed qualification",
+    );
+    assert.equal(ledger.isModelEligible(modelId), true, "an interrupt must not cool the model out of scheduling");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 

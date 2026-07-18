@@ -36,7 +36,7 @@ import {
   type SteeringDirectiveRecord,
   type TaskStatus,
 } from "./types.js";
-import { invocationFailureScope, RuntimeInvocationError, type InvocationPermission, type RuntimeAdapter } from "./runtime.js";
+import { invocationFailureScope, isAbortError, RuntimeInvocationError, type InvocationPermission, type RuntimeAdapter } from "./runtime.js";
 import { syncSubscriptionConnections } from "./registry.js";
 import { ModelRouter, type RouteInput } from "./routing.js";
 import { observeLocalResources } from "./resources.js";
@@ -1783,20 +1783,34 @@ export class Orchestrator {
       // Scheduler-time qualification checks a subscription candidate. With no
       // subscription connection left there is nothing for it to check, and the
       // router selects among already-qualified local models instead.
-      const qualification = fallbackProvider
-        ? await ensureSchedulerCandidateQualified({
-            ledger: this.ledger,
-            config: input.config,
-            cwd: taskWorktree.path,
-            role: "worker",
-            preferredProvider: fallbackProvider,
-            permission: taskPermission,
-            task: input.task,
-            excludedModelIds,
-            excludedConnectionIds,
-            signal: attemptAbort.signal,
-          })
-        : null;
+      // An aborted probe throws rather than returning a verdict, so that a
+      // control action is never mistaken for evidence about the model. Whether
+      // this attempt owns the abort is decided immediately below; either way the
+      // model's health is left untouched.
+      let qualification: Awaited<ReturnType<typeof ensureSchedulerCandidateQualified>> = null;
+      try {
+        qualification = fallbackProvider
+          ? await ensureSchedulerCandidateQualified({
+              ledger: this.ledger,
+              config: input.config,
+              cwd: taskWorktree.path,
+              role: "worker",
+              preferredProvider: fallbackProvider,
+              permission: taskPermission,
+              task: input.task,
+              excludedModelIds,
+              excludedConnectionIds,
+              signal: attemptAbort.signal,
+            })
+          : null;
+      } catch (error) {
+        if (!isAbortError(error)) throw error;
+        // Inconclusive, not failed. If this attempt was the one aborted, the
+        // cancel/interrupt handling below owns it; if another attempt aborted a
+        // probe this one had joined, this attempt simply has no qualification
+        // result and lets the router choose among already-qualified models.
+        qualification = null;
+      }
       this.recordSchedulerQualification(input.runId, qualification, "worker", input.task.id);
       // A cancel raised during qualification must not be followed by a task
       // transition: the task is already 'cancelled', and asking it to go to

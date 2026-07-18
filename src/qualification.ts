@@ -7,7 +7,7 @@ import type { ConnectionRecord, ModelRecord } from "./registry.js";
 import { qualifyOllamaModel, qualifyOllamaSpecialistModel, qualifyOllamaToolModel } from "./ollama.js";
 import { createRuntimeAdapter } from "./providers.js";
 import type { AgentRole, DevHarmonicsConfig, PlannedTask, ProviderName } from "./types.js";
-import type { InvocationPermission, RuntimeAdapter } from "./runtime.js";
+import { isAbortError, type InvocationPermission, type RuntimeAdapter } from "./runtime.js";
 import { modelQuotaGroup } from "./antigravity.js";
 
 export type QualificationRole = "general" | "architect" | "worker" | "reviewer" | "analysis" | "benchmark" | "local_tools";
@@ -32,6 +32,21 @@ export interface SchedulerQualificationResult {
   passed: boolean;
   activated: boolean;
   reason: string;
+}
+
+/** Rejects as soon as `signal` aborts, without disturbing `flight` itself. */
+async function raceAbort<T>(flight: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return flight;
+  // A rejected flight that nobody is left to observe would be an unhandled
+  // rejection, so the loser is always consumed.
+  flight.catch(() => {});
+  return Promise.race([
+    flight,
+    new Promise<never>((_resolve, reject) => {
+      if (signal.aborted) return reject(signal.reason);
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }),
+  ]);
 }
 
 export async function ensureSchedulerCandidateQualified(input: {
@@ -73,7 +88,11 @@ export async function ensureSchedulerCandidateQualified(input: {
   const probe = async (role: QualificationRole): Promise<QualificationOutcome> => {
     const flightKey = `${refreshed.id}\u0000${fingerprint}\u0000${role}`;
     const existing = qualificationFlights.get(flightKey);
-    if (existing) return existing;
+    // Joining an in-flight probe must not mean inheriting its lifetime: this
+    // caller's own abort has to release it without cancelling a probe another
+    // attempt still needs, and that probe's abort must not become this caller's
+    // verdict on the model.
+    if (existing) return raceAbort(existing, input.signal);
     const flight = (async (): Promise<QualificationOutcome> => {
       try {
         const probed = await (input.qualify
@@ -81,6 +100,15 @@ export async function ensureSchedulerCandidateQualified(input: {
           : qualifyRuntimeModel({ model: refreshed, connection, config: input.config, cwd: input.cwd, role, signal: input.signal }));
         return { ...probed, role };
       } catch (error) {
+        // An aborted probe is the owner stopping the attempt, not evidence about
+        // the model. Recording it as a failed qualification would durably mark a
+        // capable model unqualified and exclude it from scheduling — the exact
+        // misclassification this module was fixed to stop. Thrown rather than
+        // swallowed so it cannot be mistaken for a result, and thrown on the
+        // error's own identity rather than this caller's signal, because a
+        // concurrent caller sharing the same in-flight probe must not record a
+        // failure for an abort it did not request.
+        if (isAbortError(error)) throw error;
         return {
           fixtureVersion: qualificationFixtureVersion(connection.transport, role),
           role,

@@ -11,7 +11,7 @@ import { defaultConfig, initializeProject, loadConfig, resolveProviderCommand } 
 import { projectLegacyProvider } from "../src/compatibility.js";
 import { assertRunTransition, assertTaskTransition, domainId } from "../src/domain.js";
 import { LEDGER_SCHEMA_VERSION, Ledger } from "../src/ledger.js";
-import { assignReviewFindings, createReviewEvidenceBinding, Orchestrator, parseFirstJsonObject, planSteeredAdmission, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
+import { assignReviewFindings, createReviewEvidenceBinding, hasRunnableWorker, Orchestrator, parseFirstJsonObject, planSteeredAdmission, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
 import { discoverOllama, OllamaAdapter, qualifyOllamaModel, syncOllamaRegistry, syncOllamaRuntimes } from "../src/ollama.js";
 import {
   createProvider,
@@ -4305,5 +4305,42 @@ test("an exhausted output budget is reported as a budget failure, not model inco
     );
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("a qualified local worker keeps a task alive when every subscription connection is cooling", async () => {
+  // Found by the v0.6 item-4 fallback proving run. The attempt loop guards on
+  // input.providers, which only ever holds subscription providers, so once the
+  // last subscription connection cools the task is failed with "all eligible
+  // providers are cooling down or unavailable" — without ever asking the router,
+  // which is the only place a local model is considered. Local fallback was
+  // therefore reachable in routing and unreachable in practice.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-local-fallback-guard-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    ledger.upsertConnection({ id: "subscription-cli:claude", provider: "claude", transport: "subscription_cli", authentication: "subscription", displayName: "Claude", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "unknown", capacity: "unknown", adapterVersion: "test", runtimeVersion: "test", metadata: {} });
+    ledger.upsertConnection({ id: "local:ollama", provider: "ollama", transport: "local", authentication: "local_none", displayName: "Ollama", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "local", capacity: "available", adapterVersion: "test", runtimeVersion: "test", metadata: { baseUrl: "http://127.0.0.1:11434" } });
+    ledger.upsertDiscoveredModel({ id: "ollama:worker:7b", connectionId: "local:ollama", canonicalName: "worker:7b", displayName: "worker:7b", source: "runtime_discovery", lifecycle: "active", visible: true, verified: true, qualified: true, active: true, metadata: { capabilities: ["completion"] } });
+
+    // The subscription connection runs out; the local runtime is untouched.
+    ledger.recordConnectionOutcome("subscription-cli:claude", { success: false, failureKind: "quota_exhausted", detail: "usage limit reached" });
+
+    const subscriptionEligible = ledger.isConnectionEligible("subscription-cli:claude");
+    const localEligible = ledger.isConnectionEligible("local:ollama");
+    assert.equal(localEligible, true, "the local runtime is still usable");
+
+    // The decision the attempt loop has to make: with no subscription connection
+    // usable, is there still somewhere to run? A qualified, active local model
+    // means yes, and the task must not be failed for lack of a subscription.
+    const localCandidates = ledger.listModels("local:ollama").filter((model) => model.qualified && model.active && !model.excluded && !model.retired);
+    assert.ok(localCandidates.length > 0, "a qualified active local worker exists");
+    assert.equal(
+      hasRunnableWorker({ ledger, subscriptionProviders: subscriptionEligible ? ["claude"] : [] }),
+      true,
+      "a cooling subscription must not end the task while a qualified local worker is available",
+    );
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });

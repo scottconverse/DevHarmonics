@@ -1666,16 +1666,19 @@ export class Orchestrator {
         appliedClarifications.push(directive);
       }
       const eligibleProviders = input.providers.filter((name) => this.ledger.isConnectionEligible(projectLegacyProvider(name).connectionId));
-      if (!eligibleProviders.length) {
+      // A cooling subscription is not the end of the run when a qualified local
+      // worker is available: local runtimes have no quota window to wait out.
+      // Only stop when nothing at all can run.
+      if (!hasRunnableWorker({ ledger: this.ledger, subscriptionProviders: eligibleProviders })) {
         this.ledger.setTaskStatus(input.runId, input.task.id, "failed");
-        this.ledger.addEvent(input.runId, "task.failed", `${input.task.title}: all eligible providers are cooling down or unavailable`);
+        this.ledger.addEvent(input.runId, "task.failed", `${input.task.title}: no subscription connection is available and no qualified local worker can take over`);
         return "failed";
       }
-      const fallbackProvider = this.selectWorker(
-        input.task,
-        eligibleProviders,
-        input.providerCursor + attempt - 1,
-      );
+      // Null when every subscription connection is cooling and only qualified
+      // local workers remain; selectWorker cannot index an empty pool.
+      const fallbackProvider = eligibleProviders.length
+        ? this.selectWorker(input.task, eligibleProviders, input.providerCursor + attempt - 1)
+        : null;
       // The attempt begins here, and scheduler-time qualification is part of it:
       // the task is genuinely being worked on before a model is finally chosen.
       // Saying so keeps the status honest and, because every failure path from
@@ -1684,17 +1687,22 @@ export class Orchestrator {
       // queued -> retry, which the state machine rejects, failing the whole run.
       // The provider is filled in below once routing resolves it.
       this.ledger.setTaskStatus(input.runId, input.task.id, "working");
-      const qualification = await ensureSchedulerCandidateQualified({
-        ledger: this.ledger,
-        config: input.config,
-        cwd: taskWorktree.path,
-        role: "worker",
-        preferredProvider: fallbackProvider,
-        permission: taskPermission,
-        task: input.task,
-        excludedModelIds,
-        excludedConnectionIds,
-      });
+      // Scheduler-time qualification checks a subscription candidate. With no
+      // subscription connection left there is nothing for it to check, and the
+      // router selects among already-qualified local models instead.
+      const qualification = fallbackProvider
+        ? await ensureSchedulerCandidateQualified({
+            ledger: this.ledger,
+            config: input.config,
+            cwd: taskWorktree.path,
+            role: "worker",
+            preferredProvider: fallbackProvider,
+            permission: taskPermission,
+            task: input.task,
+            excludedModelIds,
+            excludedConnectionIds,
+          })
+        : null;
       this.recordSchedulerQualification(input.runId, qualification, "worker", input.task.id);
       if (qualification?.attempted && !qualification.passed) {
         excludedModelIds.add(qualification.modelId);
@@ -2405,6 +2413,31 @@ export class Orchestrator {
       return !quotaGroup || this.ledger.isQuotaGroupEligible(connectionId, quotaGroup.id);
     });
   }
+}
+
+/**
+ * Whether any worker can still run a task, counting qualified local models and
+ * not only subscription connections.
+ *
+ * The attempt loop used to fail a task the moment no subscription connection was
+ * eligible, which skipped the router — the only place a local model is
+ * considered — and made local fallback reachable in routing but unreachable in
+ * practice. Local runtimes have no quota to exhaust, so they are exactly what
+ * should keep work alive when a subscription window closes.
+ */
+export function hasRunnableWorker(input: {
+  ledger: Pick<Ledger, "listConnections" | "listModels" | "isConnectionEligible" | "isModelEligible">;
+  subscriptionProviders: readonly string[];
+}): boolean {
+  if (input.subscriptionProviders.length > 0) return true;
+  return input.ledger
+    .listConnections()
+    .filter((connection) => connection.transport === "local" && input.ledger.isConnectionEligible(connection.id))
+    .some((connection) =>
+      input.ledger
+        .listModels(connection.id)
+        .some((model) => model.qualified && !model.qualificationStale && model.active && !model.excluded && !model.retired && input.ledger.isModelEligible(model.id)),
+    );
 }
 
 /** Steering kinds the scheduler resolves at the task-admission boundary. */

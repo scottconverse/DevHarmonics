@@ -37,7 +37,13 @@ export interface RoutingScoreBreakdown {
 interface RouteInput {
   role: AgentRole;
   config: DevHarmonicsConfig;
-  fallbackProvider: ProviderName;
+  /**
+   * Preferred subscription provider, or null when no subscription connection is
+   * usable and only local runtimes remain. Null is a legitimate state, not an
+   * error: local models carry no subscription quota and are selected on their
+   * own qualification.
+   */
+  fallbackProvider: ProviderName | null;
   allowedProviders: readonly string[];
   permission: InvocationPermission;
   task?: PlannedTask | null;

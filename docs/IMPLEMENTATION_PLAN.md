@@ -1,14 +1,16 @@
 # DevHarmonics Detailed Implementation Plan
 
 Document status: **Build-ready execution plan**
-Plan version: **1.24**
+Plan version: **1.25**
 Written: **2026-07-14**
 Revised: **2026-07-16**
 Product specification baseline: **DevHarmonics Product Specification v1.12**
 Current implementation baseline: **DevHarmonics v0.5.1**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 
-Revision history: **v1.24 (2026-07-18)** — Implemented DH-635 live run steering, the third item in the locked capability sequence: durable steering directives with full disposition and attempt linkage, admission-boundary hold/resume/reprioritise/reassign across both scheduler loops, attempt-boundary clarifications, and interrupt-and-handoff that retains evidence. Containment of scope, permission, spending, and acceptance authority is structural, and every directive ends with a disposition. Remaining sequence items are unchanged: real provider/local fallback during a CivicSuite task, a real cross-repository CivicSuite implementation, then Git-versioned reusable workflows.
+Revision history: **v1.25 (2026-07-18)** — Refined DH-460 with reviewer capability tiers (context, executing, falsifying) after DH-635's review produced direct evidence that a large same-family context-review quorum missed both critical defects that a single executing-and-falsifying reviewer found. Quorum policy gains a required-tier dimension, review receipts record the tier and the evidence produced, and a quorum met only by context reviewers must be reported as unfalsified rather than as a passed independent review.
+
+Prior revision: **v1.24 (2026-07-18)** — Implemented DH-635 live run steering, the third item in the locked capability sequence: durable steering directives with full disposition and attempt linkage, admission-boundary hold/resume/reprioritise/reassign across both scheduler loops, attempt-boundary clarifications, and interrupt-and-handoff that retains evidence. Containment of scope, permission, spending, and acceptance authority is structural, and every directive ends with a disposition. Remaining sequence items are unchanged: real provider/local fallback during a CivicSuite task, a real cross-repository CivicSuite implementation, then Git-versioned reusable workflows.
 
 Prior revision: **v1.23 (2026-07-16)** — Added DH-825, an experimental Open Interpreter worker adapter, to the integrations roadmap by owner decision: provider-neutral access to local and alternative coding models (Ollama/LM Studio, Kimi, DeepSeek, Qwen/GLM), qualified per exact model + harness + pinned Open Interpreter version, with DevHarmonics retaining exclusive control over task contracts, Git, validation, evidence, and integration, and never collecting provider credentials. The adapter does not alter the locked capability sequence; Open Interpreter also becomes the first conformance target for the DH-820 ACP transport.
 
@@ -664,9 +666,21 @@ Acceptance:
 
 #### DH-460: Adversarial review quorum and fixer loop — L
 
+Refinement (2026-07-18, from observed evidence): reviewer independence must be graded by **capability**, not only by provider or model diversity. DH-635's review produced a direct comparison. Fifteen same-family reviewers reading the diff, each with an independent verification pass, raised ten findings of which nine were real — and missed both critical defects. A single different-vendor reviewer with execution access found both, because it did things reading cannot do: it extracted a disputed loop calculation into a standalone script and ran it to show an interrupt could widen a task's invocation budget; it wrote direct ledger probes and drove a live dashboard over HTTP to reproduce directives that stayed pending forever; and it reverted a fix inside a disposable worktree to demonstrate that the accompanying tests stayed green, proving they could not fail.
+
+Reviewer capability therefore has three distinct tiers, and the ledger should record which tier produced each review rather than treating all independent reviewers as equivalent:
+
+1. **Context review** — reads the task contract, diff, and evidence. What DevHarmonics performs today. Finds contradictions, missing cases, and unsupported claims.
+2. **Executing review** — additionally builds and runs the candidate, runs its checks, and writes fresh probes against it. Distinguishes what the code claims from what it does.
+3. **Falsifying review** — additionally mutates the candidate to test whether its own verification can fail, and reports any guard whose removal leaves the suite green.
+
+A tier-1 reviewer cannot substitute for tier 3 no matter how many of them are convened, because the failure they miss is a property of the evidence rather than of the code. Quorum policy should express a required tier by risk — high-risk and release-boundary work requiring a falsifying reviewer — and a quorum satisfied only by tier-1 reviewers must be reported as such rather than as a passed independent review. This also constrains scheduling: a falsifying reviewer needs an isolated worktree, a build, and the ability to run and revert, which is a materially different resource profile from a read-only context reviewer.
+
 Deliverables:
 
-- configure reviewer count, independence, provider/model diversity, and required expertise by risk;
+- configure reviewer count, independence, provider/model diversity, **required reviewer capability tier**, and required expertise by risk;
+- record the capability tier and the evidence each reviewer actually produced (commands run, probes written, mutations attempted) on the review receipt;
+- report a quorum met only by context reviewers as an unfalsified result rather than a passed independent review;
 - provide reviewers the task contract, diff, relevant source, and evidence without inheriting implementor reasoning as fact;
 - normalize findings with severity, location, rationale, suggested correction, and disposition;
 - adjudicate disagreements, assign an independent fixer, and require bounded re-review after changes.

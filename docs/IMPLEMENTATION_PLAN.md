@@ -1,14 +1,16 @@
 # DevHarmonics Detailed Implementation Plan
 
 Document status: **Build-ready execution plan**
-Plan version: **1.27**
+Plan version: **1.28**
 Written: **2026-07-14**
 Revised: **2026-07-18**
 Product specification baseline: **DevHarmonics Product Specification v1.12**
 Current implementation baseline: **DevHarmonics v0.5.1**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 
-Revision history: **v1.27 (2026-07-18)** — Recorded two rules that an independent audit of the item-4 fixes established, both in the same shape: a second implementation of a decision drifts from the first, and the gap between them is the defect. DH-470 now states that an evidence gate and its verifier must share one grammar, after the citation verifier turned out to be bypassable by writing the evidence in a form the gate accepted but the verifier could not parse. DH-330 now states that code needing to know whether work can run must ask the component that will run it, after a liveness predicate that re-derived routing eligibility was proven wrong in both directions. Scope and the locked sequence are unchanged.
+Revision history: **v1.28 (2026-07-18)** — Recorded two further rules from the second audit round of the item-4 fixes, both learned by getting them wrong first: a control action (interrupt, cancel) is never evidence about a model, and a gate should refuse on the requirement an operation actually has rather than on a proxy for it. Both are in DH-330. Scope and the locked sequence are unchanged.
+
+**v1.27 (2026-07-18)** — Recorded two rules that an independent audit of the item-4 fixes established, both in the same shape: a second implementation of a decision drifts from the first, and the gap between them is the defect. DH-470 now states that an evidence gate and its verifier must share one grammar, after the citation verifier turned out to be bypassable by writing the evidence in a form the gate accepted but the verifier could not parse. DH-330 now states that code needing to know whether work can run must ask the component that will run it, after a liveness predicate that re-derived routing eligibility was proven wrong in both directions. Scope and the locked sequence are unchanged.
 
 **v1.26 (2026-07-18)** — Promoted the approval inbox from an implicit bullet inside DH-600 to DH-645, a named work package scheduled immediately after the locked capability sequence, after the first real CivicSuite delivery showed an owner decision sitting unsurfaced in the product. DH-645 covers the approval inbox, a program-scope view across products and runs, delivered-versus-observed reconciliation against the external forge, and an exportable status page that does not depend on the DevHarmonics ledger or on DevHarmonics running. The locked sequence is unchanged.
 
@@ -502,6 +504,14 @@ Refinement (2026-07-18, from a real run and the independent audit of its fix): l
 The first fix answered the question with a predicate that checked generic model lifecycle flags. The audit proved that predicate wrong in both directions: it kept a task alive for a model qualified only as an architect, and routing then threw out of the attempt and failed the entire run; and it refused a manually assigned inactive model that the router would in fact have selected, because explicit assignment does not require `active`.
 
 The rule this establishes: **when code needs to know whether work can run, it must ask the component that will run it.** A predicate that re-derives eligibility from underlying state is a second implementation of routing, and it will drift from the first. `ModelRouter.tryRoute` now returns a decision or a typed reason, so every gate asks the exact question execution will ask; a genuine error is still raised rather than being swallowed as "cannot route". Route failure inside a task settles that task rather than failing the run, because a cooling window can reopen.
+
+Second refinement (2026-07-18, from the independent audit of the fix above): two further rules, both learned by getting them wrong first.
+
+**A control action is not evidence.** Threading an abort signal into first-use qualification made interrupt and cancel real, but qualification caught every throw and turned it into a failed result. An owner interrupt was therefore persisted as a failed qualification and recorded as `incompatible`, which carries a thirty-minute cooldown — so exercising the product's own interrupt could make the only local worker ineligible for its own retry. This is the same durable misclassification that made truncated output mark capable models incompatible, re-entered through a different door. An abort now propagates on the error's own identity, judged by what the error IS rather than by which caller is asking, so a concurrent caller sharing an in-flight probe cannot record a failure for an abort it did not request.
+
+**Refuse on the requirement, not on the proxy.** Planning genuinely requires a subscription: no local model is architect-qualified, so without one there is nothing that can produce a plan. That refusal is correct and is now documented in the code as a deliberate, narrow exception. Everything downstream — starting an approved run, executing its tasks, repairing, and reviewing — was refusing on the same subscription facts even though an approved plan needs no architect. A signed-out subscription is now an input to routing rather than a gate in front of it. The general form: state the requirement the operation actually has, and let the component that satisfies it answer.
+
+A third, smaller lesson worth keeping: marking a task `working` before qualification is what makes an interrupt honest, but it also means `working` no longer implies a provider invocation is in flight. Any check that meant the latter must say so — a stale precondition of exactly this kind turned into an intermittent test failure rather than an obvious one.
 
 Deliverables:
 

@@ -46,6 +46,13 @@ export interface InvocationRequest {
   permission: InvocationPermission;
   timeoutMs: number | null;
   maxOutputTokens?: number;
+  /**
+   * Ask a reasoning-capable runtime not to emit a separate thinking channel for
+   * this call. Set it where the caller needs a short exact answer within a small
+   * token budget — reasoning would otherwise consume the budget and leave no
+   * answer. Runtimes without the capability ignore it.
+   */
+  disableThinking?: boolean;
   model: ModelSelection;
 }
 

@@ -222,6 +222,11 @@ export class OllamaAdapter implements RuntimeAdapter {
           stream: false,
           messages: [{ role: "user", content: request.prompt }],
           options: request.model.settings,
+          // Thinking-capable models spend the output budget on their reasoning
+          // channel before writing any answer, so a caller that needs a bounded
+          // exact response must be able to turn reasoning off. Omitted entirely
+          // unless asked, so models without the capability are unaffected.
+          ...(request.disableThinking ? { think: false } : {}),
         }),
       });
     } catch (error) {
@@ -239,12 +244,30 @@ export class OllamaAdapter implements RuntimeAdapter {
       throw new RuntimeInvocationError(`Ollama returned HTTP ${response.status}: ${raw}`, response.status === 404 ? "incompatible" : "process_failed", this.connection.id, response.status, response.status !== 404);
     }
     const value = JSON.parse(raw) as {
-      message?: { content?: string };
+      message?: { content?: string; thinking?: string };
+      done_reason?: string;
       prompt_eval_count?: number;
       eval_count?: number;
     };
     const text = value.message?.content?.trim() ?? "";
-    if (!text) throw new RuntimeInvocationError("Ollama returned no assistant content", "incompatible", this.connection.id, 0, false);
+    if (!text) {
+      const thinking = value.message?.thinking?.trim() ?? "";
+      // An answer truncated by the token limit is a budget problem, not proof the
+      // model cannot do the work. Classifying it 'incompatible' would durably and
+      // wrongly exclude a capable model from scheduling, so separate the two.
+      if (value.done_reason === "length" || thinking) {
+        throw new RuntimeInvocationError(
+          thinking
+            ? `Ollama spent its output budget on reasoning and returned no answer (${thinking.length} characters of reasoning, stop reason '${value.done_reason ?? "unknown"}'). Raise num_predict or disable thinking for this call.`
+            : `Ollama truncated the response before any answer was produced (stop reason '${value.done_reason ?? "unknown"}'). Raise num_predict for this call.`,
+          "context_overflow",
+          this.connection.id,
+          0,
+          true,
+        );
+      }
+      throw new RuntimeInvocationError("Ollama returned no assistant content", "incompatible", this.connection.id, 0, false);
+    }
     const durationMs = Date.now() - startedAt;
     options.onEvent?.({ type: "stdout", text, at: new Date().toISOString() });
     options.onEvent?.({ type: "completed", exitCode: 0, durationMs, at: new Date().toISOString() });
@@ -288,6 +311,7 @@ export async function qualifyOllamaModel(
     cwd,
     permission: "read_only",
     timeoutMs: 2 * 60_000,
+    disableThinking: true,
     model: { requestedModelId: domainId("Model", modelId), alias: modelName ?? null, settings: { temperature: 0, num_predict: 16 } },
   });
   const passed = result.text.trim() === "DEVHARMONICS_QUALIFIED";
@@ -333,6 +357,7 @@ export async function qualifyOllamaSpecialistModel(
     cwd,
     permission: "read_only",
     timeoutMs: 2 * 60_000,
+    disableThinking: true,
     model: { requestedModelId: domainId("Model", modelId), alias: modelName ?? null, settings: { temperature: 0, num_predict: 128 } },
   });
   let parsed: Record<string, unknown> | null = null;
@@ -385,6 +410,7 @@ export async function qualifyOllamaToolModel(
         cwd: root,
         permission: "workspace_write",
         timeoutMs: 2 * 60_000,
+        disableThinking: true,
         model: { requestedModelId: domainId("Model", modelId), alias: modelName ?? null, settings: { temperature: 0, num_predict: 512 } },
       },
       worktreePath: root,

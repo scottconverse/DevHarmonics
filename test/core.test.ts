@@ -12,7 +12,7 @@ import { projectLegacyProvider } from "../src/compatibility.js";
 import { assertRunTransition, assertTaskTransition, domainId } from "../src/domain.js";
 import { LEDGER_SCHEMA_VERSION, Ledger } from "../src/ledger.js";
 import { assignReviewFindings, createReviewEvidenceBinding, Orchestrator, parseFirstJsonObject, planSteeredAdmission, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
-import { discoverOllama, OllamaAdapter, syncOllamaRegistry, syncOllamaRuntimes } from "../src/ollama.js";
+import { discoverOllama, OllamaAdapter, qualifyOllamaModel, syncOllamaRegistry, syncOllamaRuntimes } from "../src/ollama.js";
 import {
   createProvider,
   extractClaudeText,
@@ -4220,5 +4220,90 @@ test("a task finishing dispositions direction recorded moments earlier", async (
   } finally {
     ledger.close();
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test("a thinking local model qualifies instead of being marked incompatible", async () => {
+  // Reproduces a real blocker found running the live Ollama fleet: the analysis
+  // fixture caps num_predict at 16, a thinking model spends that entire budget
+  // on its reasoning channel, and the adapter — reading only message.content —
+  // reported "no assistant content" and classified the model 'incompatible'.
+  // Every thinking-capable model was therefore permanently unqualifiable,
+  // including Mellum2 Thinking, which the plan names as a local specialist.
+  let sawThinkDisabled: boolean | undefined;
+  const server = createServer(async (request, response) => {
+    response.setHeader("Content-Type", "application/json");
+    if (request.url === "/api/version") return response.end(JSON.stringify({ version: "fixture-1" }));
+    if (request.url === "/api/tags") return response.end(JSON.stringify({ models: [{ name: "thinker:12b" }] }));
+    if (request.url === "/api/show") return response.end(JSON.stringify({ capabilities: ["completion", "thinking"] }));
+    if (request.url === "/api/chat" && request.method === "POST") {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      const parsed = JSON.parse(body) as { think?: boolean; options?: { num_predict?: number } };
+      sawThinkDisabled = parsed.think === false;
+      // Faithful to real Ollama: with thinking on and a small budget the answer
+      // channel comes back empty and the stop reason is the token limit.
+      if (parsed.think === false) {
+        return response.end(JSON.stringify({ message: { role: "assistant", content: "DEVHARMONICS_QUALIFIED", thinking: "" }, done_reason: "stop", prompt_eval_count: 20, eval_count: 6 }));
+      }
+      return response.end(JSON.stringify({ message: { role: "assistant", content: "", thinking: "weighing the request" }, done_reason: "length", prompt_eval_count: 20, eval_count: 16 }));
+    }
+    response.statusCode = 404;
+    response.end(JSON.stringify({ error: "not found" }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-thinking-qual-"));
+  try {
+    const outcome = await qualifyOllamaModel("ollama:thinker:12b", root, baseUrl, "local:ollama", "thinker:12b");
+    assert.equal(sawThinkDisabled, true, "the qualification fixture asks the runtime not to spend its budget on reasoning");
+    assert.equal(outcome.passed, true, "a thinking-capable model must be able to pass analysis qualification");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test("an exhausted output budget is reported as a budget failure, not model incompatibility", async () => {
+  // Classification matters: 'incompatible' is a durable statement that the model
+  // cannot do the work, and it excludes the model from scheduling. A truncated
+  // response is a configuration problem and must not be recorded as incapacity.
+  const server = createServer(async (request, response) => {
+    response.setHeader("Content-Type", "application/json");
+    if (request.url === "/api/version") return response.end(JSON.stringify({ version: "fixture-1" }));
+    if (request.url === "/api/tags") return response.end(JSON.stringify({ models: [{ name: "thinker:12b" }] }));
+    if (request.url === "/api/show") return response.end(JSON.stringify({ capabilities: ["completion", "thinking"] }));
+    if (request.url === "/api/chat" && request.method === "POST") {
+      return response.end(JSON.stringify({ message: { role: "assistant", content: "", thinking: "still reasoning" }, done_reason: "length", prompt_eval_count: 10, eval_count: 16 }));
+    }
+    response.statusCode = 404;
+    response.end(JSON.stringify({ error: "not found" }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const adapter = new OllamaAdapter(`http://127.0.0.1:${address.port}`);
+  try {
+    await assert.rejects(
+      () => adapter.invoke({
+        role: "worker",
+        prompt: "anything",
+        cwd: os.tmpdir(),
+        permission: "read_only",
+        timeoutMs: 30_000,
+        model: { requestedModelId: domainId("Model", "ollama:thinker:12b"), alias: "thinker:12b", settings: { temperature: 0, num_predict: 16 } },
+      }),
+      (error: unknown) => {
+        const failure = error as { kind?: string; message?: string };
+        assert.notEqual(failure.kind, "incompatible", "a truncated answer must not be recorded as model incapacity");
+        assert.equal(failure.kind, "context_overflow", "it is an output-budget failure");
+        assert.match(String(failure.message), /budget|truncat|reasoning/i, "the message explains what actually happened");
+        return true;
+      },
+    );
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });

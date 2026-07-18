@@ -12,6 +12,7 @@ import { projectLegacyProvider } from "../src/compatibility.js";
 import { assertRunTransition, assertTaskTransition, domainId } from "../src/domain.js";
 import { LEDGER_SCHEMA_VERSION, Ledger } from "../src/ledger.js";
 import { assignReviewFindings, createReviewEvidenceBinding, hasRunnableWorker, Orchestrator, parseFirstJsonObject, planSteeredAdmission, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
+import { verifyReportCitations } from "../src/citations.js";
 import { discoverOllama, OllamaAdapter, qualifyOllamaModel, syncOllamaRegistry, syncOllamaRuntimes } from "../src/ollama.js";
 import {
   createProvider,
@@ -3140,7 +3141,20 @@ test("read-only task contracts survive persistence and never cross the commit bo
     const result = await (orchestrator as any).executeTask({
       runId, goal: "Observe", task: ledger.getTask(runId, task.id), constitution: "test", config,
       providers: ["codex"], providerCursor: 0,
-      worktrees: { createTask: async () => ({ path: root, branch: "observe" }), assertPrimaryClean: async () => { isolationChecks++; }, commitTask: async () => { committed = true; return false; }, mergeTask: async () => undefined },
+      // The stub worker cites STATUS.md:7 and README.md:1, so the worktree it is
+      // given must actually contain them: a diagnostic report is now rejected
+      // when its citations do not resolve, and a fixture citing files that do
+      // not exist would not survive a real run either.
+      worktrees: {
+        createTask: async () => {
+          await writeFile(path.join(root, "STATUS.md"), ["1", "2", "3", "4", "5", "6", "version 1.0.3", ""].join("\n"), "utf8");
+          await writeFile(path.join(root, "README.md"), ["version 1.0.4", ""].join("\n"), "utf8");
+          return { path: root, branch: "observe" };
+        },
+        assertPrimaryClean: async () => { isolationChecks++; },
+        commitTask: async () => { committed = true; return false; },
+        mergeTask: async () => undefined,
+      },
       signal: new AbortController().signal,
     });
     assert.equal(result, "passed");
@@ -3229,7 +3243,20 @@ test("Antigravity Gemini quota exhaustion falls back to the Claude and GPT quota
     config.application.retry.backoffMs = 1;
     config.product.workers = ["gemini"];
     config.repository.validators = { pass: { command: process.execPath, args: ["-e", "process.exit(0)"], timeoutMs: 5_000 } };
-    const outcome = await (orchestrator as any).executeTask({ runId, goal: "Observe", task, constitution: "test", config, providers: ["gemini"], providerCursor: 0, worktrees: { createTask: async () => ({ path: root, branch: "fixture" }), assertPrimaryClean: async () => undefined, commitTask: async () => false, mergeTask: async () => undefined }, signal: new AbortController().signal }).catch((error: unknown) => error);
+    // The stub worker cites README.md:7 and ARCHITECTURE.md:12, so those lines
+    // must genuinely exist in the worktree it is handed: a diagnostic report is
+    // now rejected when its citations do not resolve.
+    const observeWorktrees = {
+      createTask: async () => {
+        await writeFile(path.join(root, "README.md"), ["1", "2", "3", "4", "5", "6", "compatibility finding", ""].join("\n"), "utf8");
+        await writeFile(path.join(root, "ARCHITECTURE.md"), [...Array.from({ length: 12 }, (_, index) => `line ${index + 1}`), ""].join("\n"), "utf8");
+        return { path: root, branch: "fixture" };
+      },
+      assertPrimaryClean: async () => undefined,
+      commitTask: async () => false,
+      mergeTask: async () => undefined,
+    };
+    const outcome = await (orchestrator as any).executeTask({ runId, goal: "Observe", task, constitution: "test", config, providers: ["gemini"], providerCursor: 0, worktrees: observeWorktrees, signal: new AbortController().signal }).catch((error: unknown) => error);
     assert.equal(outcome, "passed", JSON.stringify({ invoked, events: ledger.getRun(runId)?.events, models: ledger.listModels(connectionId).map((model) => ({ id: model.id, active: model.active, qualified: model.qualified, stale: model.qualificationStale, health: ledger.getModelHealth(model.id), quota: model.metadata.quotaGroup })) }));
     assert.deepEqual(invoked, ["Gemini 3.5 Flash (Medium)", "GPT-OSS 120B (Medium)"]);
     assert.notEqual(ledger.getConnectionHealth(connectionId)?.state, "quota_exhausted");
@@ -4341,6 +4368,42 @@ test("a qualified local worker keeps a task alive when every subscription connec
     );
   } finally {
     ledger.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test("a diagnostic report citing files that do not exist is rejected as unverifiable", async () => {
+  // A local model produced five reports whose path:line citations were entirely
+  // invented — non-existent files, empty lines, unrelated content — and every
+  // task passed, because the diagnostic gate only checked that citations LOOKED
+  // like citations. Only the independent reviewer caught it, after a full run.
+  // Citations are mechanically checkable, so check them.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-citations-"));
+  try {
+    await writeFile(path.join(root, "README.md"), "line one\nline two\nline three\n", "utf8");
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "src", "app.py"), "import os\nVERSION = '1.2.0'\n", "utf8");
+
+    const genuine = await verifyReportCitations(root, "Found the pin at src/app.py:2 and context in README.md:1.");
+    assert.deepEqual(genuine.unverifiable, [], "citations that resolve to real lines verify cleanly");
+    assert.equal(genuine.checked.length, 2, "both citations were checked");
+
+    // The exact shapes observed in the real run.
+    const fabricated = await verifyReportCitations(
+      root,
+      "Evidence: config.yaml:3 states the version, user_manual.md:2 confirms it, and README.md:99 repeats it.",
+    );
+    const bad = fabricated.unverifiable.map((item) => item.citation).sort();
+    assert.deepEqual(bad, ["README.md:99", "config.yaml:3", "user_manual.md:2"], "missing files and out-of-range lines are all unverifiable");
+    assert.ok(
+      fabricated.unverifiable.every((item) => item.reason.length > 0),
+      "each rejection explains itself so the owner can see what was wrong",
+    );
+    // A report with no citations at all is not this check's business.
+    const none = await verifyReportCitations(root, "No citations here, just prose.");
+    assert.deepEqual(none.checked, []);
+    assert.deepEqual(none.unverifiable, []);
+  } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });

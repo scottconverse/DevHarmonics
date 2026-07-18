@@ -21,6 +21,7 @@ import {
   workerPrompt,
 } from "./prompts.js";
 import { chunkDiffFiles, runContextOnlyReview, type ReviewChunk } from "./local-review.js";
+import { describeUnverifiableCitations, verifyReportCitations } from "./citations.js";
 import {
   PROVIDERS,
   type CheckResult,
@@ -1849,7 +1850,24 @@ export class Orchestrator {
             ? feedback
             : null;
         const normalizedResult = normalizeAgentResult("worker", result.text);
-        const diagnosticIssue = taskPermission === "read_only" ? validateDiagnosticResult(input.task, result.text) : null;
+        // A read-only task changes nothing, so validators have no repository
+        // state to judge and the report's own citations are the evidence. Check
+        // that they resolve to real lines in the assigned worktree: a worker
+        // that invents well-formed citations otherwise passes on fabricated
+        // findings, which a real run demonstrated. This verifies that cited
+        // lines exist, not that they support the conclusion — that stays a
+        // review question.
+        const citationIssue = taskPermission === "read_only"
+          ? await (async () => {
+              const verification = await verifyReportCitations(taskWorktree.path, result.text);
+              return verification.unverifiable.length
+                ? `the diagnostic report cites evidence that does not exist: ${describeUnverifiableCitations(verification)}`
+                : null;
+            })()
+          : null;
+        const diagnosticIssue = taskPermission === "read_only"
+          ? validateDiagnosticResult(input.task, result.text) ?? citationIssue
+          : null;
         this.ledger.finishAttempt(attemptId, diagnosticIssue ? "rejected" : "completed", result.text, diagnosticIssue ?? "", {
           modelId: result.model.resolvedModelId,
           modelResolution: result.model.resolution,

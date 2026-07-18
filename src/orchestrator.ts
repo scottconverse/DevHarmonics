@@ -1738,6 +1738,36 @@ export class Orchestrator {
       // qualification failure on the first attempt previously asked for
       // queued -> retry, which the state machine rejects, failing the whole run.
       // The provider is filled in below once routing resolves it.
+      // DH-635 interrupt: a per-attempt controller chained to the run signal, so
+      // an owner can stop THIS attempt without cancelling the run. Interruption
+      // is an explicit stop-and-hand-off; DevHarmonics never claims to have
+      // injected direction into a response already in flight.
+      //
+      // It is installed BEFORE the task is marked 'working', because that status
+      // is exactly what makes the ledger accept an interrupt and the dashboard
+      // offer the button. Installing it later left a window — first-use model
+      // qualification, which can take as long as a real invocation — where the
+      // product accepted an interrupt that nothing was watching for, and the
+      // directive could only affect a later attempt.
+      const attemptAbort = new AbortController();
+      const propagateRunAbort = () => attemptAbort.abort();
+      input.signal.addEventListener("abort", propagateRunAbort, { once: true });
+      let interruptDirective: SteeringDirectiveRecord | null = null;
+      const interruptWatch = setInterval(() => {
+        const pendingInterrupt = this.ledger
+          .pendingSteeringDirectives(input.runId, input.task.id)
+          .find((directive) => directive.kind === "interrupt");
+        if (pendingInterrupt) {
+          interruptDirective = pendingInterrupt;
+          attemptAbort.abort();
+        }
+      }, 500);
+      // Idempotent, so every early exit between here and the attempt's own
+      // try/finally can release the watcher without tracking which already did.
+      const releaseAttemptWatch = (): void => {
+        clearInterval(interruptWatch);
+        input.signal.removeEventListener("abort", propagateRunAbort);
+      };
       this.ledger.setTaskStatus(input.runId, input.task.id, "working");
       // Scheduler-time qualification checks a subscription candidate. With no
       // subscription connection left there is nothing for it to check, and the
@@ -1753,13 +1783,51 @@ export class Orchestrator {
             task: input.task,
             excludedModelIds,
             excludedConnectionIds,
+            signal: attemptAbort.signal,
           })
         : null;
       this.recordSchedulerQualification(input.runId, qualification, "worker", input.task.id);
+      // A cancel raised during qualification must not be followed by a task
+      // transition: the task is already 'cancelled', and asking it to go to
+      // 'retry' or 'working' from there is an illegal transition that fails the
+      // run. cancelRun owns the status from this point.
+      if (input.signal.aborted) {
+        releaseAttemptWatch();
+        return "cancelled";
+      }
+      // An interrupt raised during qualification stopped the probe rather than a
+      // provider invocation, so it is honoured at the attempt boundary and said
+      // so plainly. No attempt record exists yet to attribute it to.
+      if (interruptDirective) {
+        const directive = interruptDirective as SteeringDirectiveRecord;
+        const note = directive.payload.clarification?.trim();
+        this.ledger.resolveSteeringDirective(directive.id, {
+          disposition: "applied",
+          reason: `Interrupted attempt ${attempt} during model qualification, before any provider invocation`,
+        });
+        this.ledger.addEvent(input.runId, "steering.interrupted", `${input.task.title}: attempt ${attempt} interrupted during model qualification`, {
+          taskId: input.task.id,
+          directiveId: directive.id,
+        });
+        feedback = note
+          ? `The owner interrupted your previous attempt. New direction: ${note}`
+          : "The owner interrupted your previous attempt. Re-read the task contract and continue.";
+        interruptDirective = null;
+        releaseAttemptWatch();
+        if (attempt >= input.config.application.retry.maxAttempts) {
+          this.ledger.setTaskStatus(input.runId, input.task.id, "failed");
+          this.ledger.addEvent(input.runId, "task.failed", `${input.task.title}: the owner's interruption used the task's last attempt`);
+          return "failed";
+        }
+        this.ledger.setTaskStatus(input.runId, input.task.id, "retry");
+        await delay(input.config.application.retry.backoffMs);
+        continue;
+      }
       if (qualification?.attempted && !qualification.passed) {
         excludedModelIds.add(qualification.modelId);
         feedback = `Model qualification failed: ${qualification.provider} candidate '${qualification.modelId}' did not pass the ${qualification.role} fixture.`;
         this.ledger.addEvent(input.runId, "task.provider_failed", feedback, { taskId: input.task.id, modelId: qualification.modelId, failureKind: "incompatible" });
+        releaseAttemptWatch();
         if (attempt < input.config.application.retry.maxAttempts) {
           this.ledger.setTaskStatus(input.runId, input.task.id, "retry");
           await delay(input.config.application.retry.backoffMs);
@@ -1786,6 +1854,7 @@ export class Orchestrator {
       // failed the entire run instead of settling one task.
       if ("reason" in routeAttempt) {
         this.ledger.addEvent(input.runId, "task.provider_failed", `${input.task.title}: ${routeAttempt.reason}`, { taskId: input.task.id });
+        releaseAttemptWatch();
         if (attempt < input.config.application.retry.maxAttempts) {
           this.ledger.setTaskStatus(input.runId, input.task.id, "retry");
           await delay(input.config.application.retry.backoffMs);
@@ -1842,23 +1911,6 @@ export class Orchestrator {
         });
       }
 
-      // DH-635 interrupt: a per-attempt controller chained to the run signal, so
-      // an owner can stop THIS attempt without cancelling the run. Interruption
-      // is an explicit stop-and-hand-off; DevHarmonics never claims to have
-      // injected direction into a response already in flight.
-      const attemptAbort = new AbortController();
-      const propagateRunAbort = () => attemptAbort.abort();
-      input.signal.addEventListener("abort", propagateRunAbort, { once: true });
-      let interruptDirective: SteeringDirectiveRecord | null = null;
-      const interruptWatch = setInterval(() => {
-        const pendingInterrupt = this.ledger
-          .pendingSteeringDirectives(input.runId, input.task.id)
-          .find((directive) => directive.kind === "interrupt");
-        if (pendingInterrupt) {
-          interruptDirective = pendingInterrupt;
-          attemptAbort.abort();
-        }
-      }, 500);
 
       let paidSpendReservation: PaidSpendReservation | null = null;
       let paidInvocationStarted = false;

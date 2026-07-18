@@ -13,7 +13,7 @@ import { assertRunTransition, assertTaskTransition, domainId } from "../src/doma
 import { LEDGER_SCHEMA_VERSION, Ledger } from "../src/ledger.js";
 import { assignReviewFindings, canRoute, createReviewEvidenceBinding, Orchestrator, workerClassProbe, parseFirstJsonObject, planSteeredAdmission, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
 import { extractCitations, verifyReportCitations } from "../src/citations.js";
-import { discoverOllama, OllamaAdapter, qualifyOllamaModel, syncOllamaRegistry, syncOllamaRuntimes } from "../src/ollama.js";
+import { boundedThinkingSettings, discoverOllama, minimalThinking, OllamaAdapter, qualifyOllamaModel, syncOllamaRegistry, syncOllamaRuntimes } from "../src/ollama.js";
 import {
   createProvider,
   extractClaudeText,
@@ -4287,6 +4287,59 @@ test("a thinking local model qualifies instead of being marked incompatible", as
     const outcome = await qualifyOllamaModel("ollama:thinker:12b", root, baseUrl, "local:ollama", "thinker:12b");
     assert.equal(sawThinkDisabled, true, "the qualification fixture asks the runtime not to spend its budget on reasoning");
     assert.equal(outcome.passed, true, "a thinking-capable model must be able to pass analysis qualification");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test("a model whose thinking cannot be disabled still qualifies", async () => {
+  // GPT-OSS ignores `think: false` outright — Ollama documents that it accepts
+  // only "low", "medium" or "high" and that its trace cannot be fully disabled.
+  // Sending a boolean therefore left it reasoning against the fixture's 16-token
+  // budget, spending all of it on the trace and returning no answer, so a
+  // supported thinking model was permanently unqualifiable. This server behaves
+  // the way the documentation says the real one does.
+  // https://docs.ollama.com/capabilities/thinking
+  let sawThink: unknown;
+  let sawBudget: number | undefined;
+  const server = createServer(async (request, response) => {
+    response.setHeader("Content-Type", "application/json");
+    if (request.url === "/api/version") return response.end(JSON.stringify({ version: "fixture-1" }));
+    if (request.url === "/api/tags") return response.end(JSON.stringify({ models: [{ name: "gpt-oss:20b" }] }));
+    if (request.url === "/api/show") return response.end(JSON.stringify({ capabilities: ["completion", "thinking"] }));
+    if (request.url === "/api/chat" && request.method === "POST") {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      const parsed = JSON.parse(body) as { think?: unknown; options?: { num_predict?: number } };
+      sawThink = parsed.think;
+      sawBudget = parsed.options?.num_predict;
+      const level = typeof parsed.think === "string" ? parsed.think : null;
+      // A boolean is ignored: the model reasons anyway. So does a level — the
+      // trace is always emitted — but a level plus room for it leaves an answer.
+      const trace = level === "low" ? "brief trace" : "a much longer deliberation";
+      const budget = parsed.options?.num_predict ?? 0;
+      if (budget < trace.length) {
+        return response.end(JSON.stringify({ message: { role: "assistant", content: "", thinking: trace }, done_reason: "length", prompt_eval_count: 20, eval_count: budget }));
+      }
+      return response.end(JSON.stringify({ message: { role: "assistant", content: "DEVHARMONICS_QUALIFIED", thinking: trace }, done_reason: "stop", prompt_eval_count: 20, eval_count: 8 }));
+    }
+    response.statusCode = 404;
+    response.end(JSON.stringify({ error: "not found" }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-undisableable-thinking-"));
+  try {
+    const outcome = await qualifyOllamaModel("ollama:gpt-oss:20b", root, baseUrl, "local:ollama", "gpt-oss:20b");
+    assert.equal(sawThink, "low", "a model that ignores booleans is asked for its shortest supported trace instead");
+    assert.ok((sawBudget ?? 0) > 16, `an always-on trace needs budget for the trace and the answer, got ${String(sawBudget)}`);
+    assert.equal(outcome.passed, true, "a model whose thinking cannot be disabled must still be able to qualify");
+    // Models that can disable thinking are untouched: still a boolean, still bounded.
+    assert.equal(minimalThinking("qwen2.5:7b"), false);
+    assert.deepEqual(boundedThinkingSettings("qwen2.5:7b", { temperature: 0, num_predict: 16 }), { temperature: 0, num_predict: 16 });
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });

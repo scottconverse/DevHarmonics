@@ -12,6 +12,7 @@ import {
   type InvocationOptions,
   type InvocationRequest,
   type InvocationResult,
+  type ModelSettingValue,
   type ProviderConnection,
   type RuntimeAdapter,
   type RuntimeMetadata,
@@ -221,12 +222,12 @@ export class OllamaAdapter implements RuntimeAdapter {
           model,
           stream: false,
           messages: [{ role: "user", content: request.prompt }],
-          options: request.model.settings,
+          options: request.disableThinking ? boundedThinkingSettings(model, request.model.settings) : request.model.settings,
           // Thinking-capable models spend the output budget on their reasoning
           // channel before writing any answer, so a caller that needs a bounded
           // exact response must be able to turn reasoning off. Omitted entirely
           // unless asked, so models without the capability are unaffected.
-          ...(request.disableThinking ? { think: false } : {}),
+          ...(request.disableThinking ? { think: minimalThinking(model) } : {}),
         }),
       });
     } catch (error) {
@@ -297,12 +298,46 @@ export class OllamaAdapter implements RuntimeAdapter {
   }
 }
 
+/**
+ * The `think` value that minimizes reasoning for this model.
+ *
+ * Most models accept `false` and stop reasoning entirely. GPT-OSS does not: it
+ * accepts only `low`, `medium`, or `high`, its trace cannot be fully disabled,
+ * and a boolean is ignored outright. Sending `false` therefore left it
+ * reasoning against whatever output budget the caller set — with the 16-token
+ * budget the qualification fixtures use, it spent all of it on the trace and
+ * returned no answer, so a supported thinking model could never qualify.
+ * https://docs.ollama.com/capabilities/thinking
+ */
+export function minimalThinking(modelName: string): "low" | false {
+  return /(?:^|[/:_-])gpt-oss/i.test(modelName) ? "low" : false;
+}
+
+/**
+ * Output budget for a call that asked to disable thinking but cannot.
+ *
+ * A model whose trace is always emitted needs room for the trace *and* the
+ * answer; the caller's bound was chosen for the answer alone.
+ */
+export function boundedThinkingSettings(
+  modelName: string,
+  settings: Readonly<Record<string, ModelSettingValue>>,
+): Readonly<Record<string, ModelSettingValue>> {
+  if (minimalThinking(modelName) === false) return settings;
+  const requested = typeof settings.num_predict === "number" ? settings.num_predict : 0;
+  return { ...settings, num_predict: Math.max(requested, UNDISABLEABLE_THINKING_BUDGET) };
+}
+
+/** Enough for a `low` GPT-OSS trace plus a short exact answer. */
+const UNDISABLEABLE_THINKING_BUDGET = 512;
+
 export async function qualifyOllamaModel(
   modelId: string,
   cwd: string,
   baseUrl = DEFAULT_OLLAMA_URL,
   connectionId = "local:ollama",
   modelName?: string,
+  signal?: AbortSignal,
 ) {
   const adapter = new OllamaAdapter(baseUrl, connectionId);
   const result = await adapter.invoke({
@@ -339,6 +374,7 @@ export async function qualifyOllamaSpecialistModel(
   baseUrl = DEFAULT_OLLAMA_URL,
   connectionId = "local:ollama",
   modelName?: string,
+  signal?: AbortSignal,
 ) {
   const adapter = new OllamaAdapter(baseUrl, connectionId);
   const result = await adapter.invoke({
@@ -394,6 +430,7 @@ export async function qualifyOllamaToolModel(
   baseUrl = DEFAULT_OLLAMA_URL,
   connectionId = "local:ollama",
   modelName?: string,
+  signal?: AbortSignal | undefined,
 ) {
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-local-tool-qualification-"));
   const fixturePath = path.join(root, "fixture.txt");
@@ -416,6 +453,7 @@ export async function qualifyOllamaToolModel(
       worktreePath: root,
       repositoryScope: ["fixture.txt"],
       maxSteps: 6,
+      signal,
       authorize: (request) => ({ outcome: ["file.read", "file.patch"].includes(request.toolId) ? "allow" : "deny", reason: "bounded qualification fixture", lockKeys: request.targetPaths }),
     });
     const finalContent = await readFile(fixturePath, "utf8");

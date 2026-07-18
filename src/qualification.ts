@@ -44,6 +44,14 @@ export async function ensureSchedulerCandidateQualified(input: {
   task?: PlannedTask | null;
   excludedModelIds?: ReadonlySet<string>;
   excludedConnectionIds?: ReadonlySet<string>;
+  /**
+   * Aborts an in-flight qualification probe. First-use qualification can take
+   * as long as a real invocation, so a cancel or an owner interrupt raised
+   * during it has to reach it — otherwise the run is already cancelled by the
+   * time an unabortable probe returns, and the caller asks for a transition out
+   * of a terminal state.
+   */
+  signal?: AbortSignal | undefined;
   qualify?: (input: { model: ModelRecord; connection: ConnectionRecord; role: QualificationRole }) => Promise<QualificationOutcome>;
 }): Promise<SchedulerQualificationResult | null> {
   const selected = selectSchedulerQualificationCandidate(input);
@@ -70,7 +78,7 @@ export async function ensureSchedulerCandidateQualified(input: {
       try {
         const probed = await (input.qualify
           ? input.qualify({ model: refreshed, connection, role })
-          : qualifyRuntimeModel({ model: refreshed, connection, config: input.config, cwd: input.cwd, role }));
+          : qualifyRuntimeModel({ model: refreshed, connection, config: input.config, cwd: input.cwd, role, signal: input.signal }));
         return { ...probed, role };
       } catch (error) {
         return {
@@ -248,16 +256,17 @@ export async function qualifyRuntimeModel(input: {
   config: DevHarmonicsConfig;
   cwd: string;
   role?: QualificationRole;
+  signal?: AbortSignal | undefined;
 }) {
   const role = input.role ?? "general";
   if (input.connection.transport === "local") {
     if (input.connection.provider !== "ollama") throw new Error(`No qualification adapter exists for local provider '${input.connection.provider}'`);
     const baseUrl = typeof input.connection.metadata.baseUrl === "string" ? input.connection.metadata.baseUrl : undefined;
     return role === "local_tools"
-      ? qualifyOllamaToolModel(input.model.id, baseUrl, input.connection.id, input.model.canonicalName)
+      ? qualifyOllamaToolModel(input.model.id, baseUrl, input.connection.id, input.model.canonicalName, input.signal)
       : role === "benchmark"
-        ? qualifyOllamaSpecialistModel(input.model.id, input.cwd, baseUrl, input.connection.id, input.model.canonicalName)
-      : qualifyOllamaModel(input.model.id, input.cwd, baseUrl, input.connection.id, input.model.canonicalName);
+        ? qualifyOllamaSpecialistModel(input.model.id, input.cwd, baseUrl, input.connection.id, input.model.canonicalName, input.signal)
+      : qualifyOllamaModel(input.model.id, input.cwd, baseUrl, input.connection.id, input.model.canonicalName, input.signal);
   }
 
   if (!isSubscriptionProvider(input.connection.provider)) {
@@ -268,7 +277,7 @@ export async function qualifyRuntimeModel(input: {
     ...input.config.connections[provider],
     command: resolveProviderCommand(provider, input.config.connections[provider].command),
   });
-  return qualifyWithAdapter({ adapter, model: input.model, cwd: input.cwd, role, provider });
+  return qualifyWithAdapter({ adapter, model: input.model, cwd: input.cwd, role, provider, signal: input.signal });
 }
 
 export async function qualifyWithAdapter(input: {
@@ -277,6 +286,7 @@ export async function qualifyWithAdapter(input: {
   cwd: string;
   role: QualificationRole;
   provider: string;
+  signal?: AbortSignal | undefined;
 }) {
   const fixture = qualificationFixture(input.role);
   const result = await input.adapter.invoke({
@@ -291,7 +301,7 @@ export async function qualifyWithAdapter(input: {
       alias: input.model.canonicalName,
       settings: input.provider === "gemini" ? {} : input.provider === "openrouter" ? {} : { effort: "low" },
     },
-  });
+  }, input.signal ? { signal: input.signal } : undefined);
   const passed = fixture.accept(result.text);
   return {
     fixtureVersion: qualificationFixtureVersion(input.adapter.connection.transport, input.role),

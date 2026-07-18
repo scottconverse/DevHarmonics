@@ -143,6 +143,13 @@ export class Orchestrator {
     const config = await loadConfig(projectPath);
     const constitution = await loadConstitution(projectPath);
     const configuredProviders = this.availableProviders(config, input.enabledProviders);
+    // DELIBERATE, NARROW EXCEPTION: planning is the one operation that genuinely
+    // requires a subscription. No local model is architect-qualified, so without
+    // a signed-in subscription there is nothing that can produce a plan, and
+    // refusing here is honest rather than a subscription-only reflex. Everything
+    // downstream — starting an approved run, executing its tasks, repairing, and
+    // reviewing — is gated on an exact route instead, so a local fleet can carry
+    // work a subscription planned. Do not copy these two refusals past planning.
     if (!configuredProviders.length) throw new Error("No subscription-backed providers are enabled");
 
     const providerStatuses = await inspectProviders(config, projectPath);
@@ -451,7 +458,6 @@ export class Orchestrator {
     this.ledger.setRunAutonomy(runId, autonomy);
     const constitution = await loadConstitution(projectPath);
     const configuredProviders = this.availableProviders(config, request.enabledProviders);
-    if (!configuredProviders.length) throw new Error("No subscription-backed providers are enabled");
 
     const providerStatuses = await inspectProviders(config, projectPath);
     syncSubscriptionConnections(this.ledger, providerStatuses);
@@ -459,22 +465,27 @@ export class Orchestrator {
     const unavailable = providerStatuses.filter(
       (provider) => configuredProviders.includes(provider.name) && !provider.available,
     );
-    if (unavailable.length) {
-      const instructions = unavailable
-        .map((provider) => `${provider.name}: ${provider.summary}${provider.authenticated ? "" : `; run '${provider.loginCommand}'`}`)
-        .join("; ");
-      throw new Error(`Provider sign-in required before this run (${instructions}), then refresh and retry.`);
-    }
+    // A signed-out subscription is not a usable provider, so it is removed from
+    // the pool rather than being allowed to fail an invocation later. This is
+    // the same fact the old gate refused on — it is now an input to routing
+    // instead of a refusal in front of it.
     const availableProviders = configuredProviders.filter((name) =>
-      this.ledger.isConnectionEligible(projectLegacyProvider(name).connectionId),
+      !unavailable.some((provider) => provider.name === name)
+      && this.ledger.isConnectionEligible(projectLegacyProvider(name).connectionId),
     );
     const workerProviders = config.product.workers.filter((name) => availableProviders.includes(name));
-    // A cooling subscription pool does not stop an already-approved run when
-    // qualified local models can carry it: local runtimes have no quota window
-    // to wait out. This gate used to refuse on provider health alone, before
-    // local execution was ever considered. Both halves of a run must be
-    // routable — work no reviewer can review is not a run that can finish — and
-    // each half is asked of the router rather than inferred from a proxy.
+    // Planning requires a subscription architect, because no local model is
+    // architect-qualified. Starting an ALREADY-APPROVED plan does not: the plan
+    // exists, and qualified local models can carry the work and review it. So a
+    // run is gated on whether its roles can actually be routed, and nothing
+    // else. Refusing first on "no subscription configured" or "a configured
+    // subscription is signed out" was a subscription-only refusal standing in
+    // front of exactly the question the router can answer — an audit found
+    // three of that class, and this was the last one.
+    //
+    // Both halves must route: work no reviewer can review is not a run that can
+    // finish. Sign-in and health details are reported as the REASON when a role
+    // cannot be routed, rather than as a gate before asking.
     const missingRole = !canRoute(this.ledger, workerClassProbe(config, workerProviders))
       ? "worker"
       : !canRoute(this.ledger, { role: "reviewer", config, fallbackProvider: availableProviders[0] ?? null, allowedProviders: availableProviders, permission: "read_only", task: null })
@@ -482,7 +493,15 @@ export class Orchestrator {
         : null;
     if (missingRole) {
       const health = this.ledger.listConnectionHealth().filter((item) => configuredProviders.some((name) => projectLegacyProvider(name).connectionId === item.connectionId));
-      throw new Error(`No subscription or qualified local ${missingRole} is available for this run (${health.map((item) => `${item.connectionId}: ${item.state}${item.cooldownUntil ? ` until ${item.cooldownUntil}` : ""}`).join("; ")})`);
+      const signIn = unavailable
+        .map((provider) => `${provider.name}: ${provider.summary}${provider.authenticated ? "" : `; run '${provider.loginCommand}'`}`)
+        .join("; ");
+      const detail = [
+        ...(configuredProviders.length ? [] : ["no subscription-backed provider is enabled"]),
+        ...(signIn ? [`sign-in required — ${signIn}`] : []),
+        ...health.map((item) => `${item.connectionId}: ${item.state}${item.cooldownUntil ? ` until ${item.cooldownUntil}` : ""}`),
+      ].join("; ");
+      throw new Error(`No subscription or qualified local ${missingRole} is available for this run (${detail || "no eligible connection"})`);
     }
 
     const approvedObjective = request.objectiveLink ? this.ledger.getObjective(request.objectiveLink.objectiveId) : null;

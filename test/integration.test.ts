@@ -1021,6 +1021,17 @@ test("a run whose subscription worker is exhausted falls back to a qualified loc
     ledger.recordConnectionOutcome("subscription-cli:codex", { success: false, failureKind: "quota_exhausted", detail: "usage limit reached" });
     assert.equal(ledger.isConnectionEligible("subscription-cli:codex"), false, "the only subscription worker is cooling");
 
+    // The subscription worker is not merely cooling — it is SIGNED OUT, which
+    // run start used to refuse on outright, before asking whether anything could
+    // actually run. An approved run needs no architect, so a qualified local
+    // fleet must be able to carry it. Planning keeps that refusal deliberately;
+    // starting an approved run does not.
+    const signedOut = await createFakeCli(await mkdtemp(path.join(os.tmpdir(), "devharmonics-signed-out-")), false);
+    const signedOutConfig = structuredClone(config);
+    signedOutConfig.connections.codex.command = signedOut;
+    await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(signedOutConfig, null, 2)}
+`, "utf8");
+
     const before = localInvocations;
     runId = await new Orchestrator(ledger).run({ goal: "Audit fixture without changing it", projectPath: project, autonomy: "observe", agents: 1 });
     const run = ledger.getRun(runId);
@@ -1030,6 +1041,78 @@ test("a run whose subscription worker is exhausted falls back to a qualified loc
     const task = run?.tasks.find((item) => item.id === "observe");
     assert.equal(task?.status, "passed", `the local model must be able to complete the task: ${JSON.stringify(run?.events?.map((event) => event.message))}`);
     assert.equal(run?.status, "ready", JSON.stringify(run?.finalReview));
+  } finally {
+    ledger.close();
+    await new Promise<void>((resolve) => ollama.close(() => resolve()));
+    if (runId) {
+      const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
+      await runProcess({ command: "git", args: ["worktree", "prune"], cwd: project, timeoutMs: 30_000 });
+      await rm(runRoot, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+    }
+    await rm(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+  }
+});
+
+test("a task no model can route settles the task instead of crashing the run", async () => {
+  // The pre-plan gate and the per-task question are different questions, and an
+  // audit showed the suite could not tell whether the code still knew that.
+  // Here they genuinely diverge: an analysis-qualified local model satisfies the
+  // read-only worker-class probe at run start, but cannot take a workspace_write
+  // task, which needs the local tool qualification. Routing therefore fails
+  // INSIDE the attempt. It must settle that task honestly; it used to throw out
+  // of executeTask and fail the whole run.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-route-settle-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  const ollama = createServer(async (request, response) => {
+    response.setHeader("Content-Type", "application/json");
+    if (request.url === "/api/version") return response.end(JSON.stringify({ version: "fixture-1" }));
+    if (request.url === "/api/tags") return response.end(JSON.stringify({ models: [{ name: "local-analyst:7b" }] }));
+    if (request.url === "/api/show") return response.end(JSON.stringify({ capabilities: ["completion"] }));
+    response.statusCode = 404;
+    response.end(JSON.stringify({ error: "not found" }));
+  });
+  await new Promise<void>((resolve) => ollama.listen(0, "127.0.0.1", resolve));
+  const address = ollama.address();
+  assert.ok(address && typeof address === "object");
+
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  config.runPolicy.requirePlanApproval = false;
+  config.localRuntimes.ollama = [{ id: "fixture", displayName: "Fixture runtime", baseUrl: `http://127.0.0.1:${address.port}`, enabled: true }];
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}
+`, "utf8");
+
+  const ledger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  let runId = "";
+  try {
+    await syncOllamaRuntimes(ledger, config.localRuntimes.ollama);
+    const localModel = ledger.listModels("local:ollama:fixture")[0];
+    assert.ok(localModel);
+    // Qualified for ANALYSIS only — read-only work, never writes.
+    ledger.recordModelQualification({ modelId: localModel.id, fixtureVersion: "local-analysis-v1", role: "analysis", passed: true, score: 1, evidence: {}, fingerprint: localModel.qualificationFingerprint });
+    ledger.setModelPreference(localModel.id, { active: true });
+    ledger.upsertConnection({ id: "subscription-cli:codex", provider: "codex", transport: "subscription_cli", authentication: "subscription", displayName: "Codex", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "unknown", capacity: "unknown", adapterVersion: "test", runtimeVersion: "test", metadata: {} });
+    ledger.recordConnectionOutcome("subscription-cli:codex", { success: false, failureKind: "quota_exhausted", detail: "usage limit reached" });
+
+    // The run must START — the worker class exists — and then settle the task it
+    // cannot route, rather than dying.
+    runId = await new Orchestrator(ledger).run({ goal: "Local orchestrator fixture", projectPath: project, agents: 1 });
+    const run = ledger.getRun(runId);
+    const task = run?.tasks.find((item) => item.id === "one");
+    assert.ok(["failed", "blocked"].includes(task?.status ?? ""), `the unroutable task settles honestly, got '${task?.status}'`);
+    assert.ok(
+      !(run?.events ?? []).some((event) => /Invalid task status transition/.test(event.message)),
+      "settling must not go through an illegal transition",
+    );
+    assert.ok(
+      (run?.events ?? []).some((event) => /No eligible model or provider default is available/.test(event.message)),
+      `the run must record why nothing could take the task: ${JSON.stringify((run?.events ?? []).map((event) => event.message))}`,
+    );
   } finally {
     ledger.close();
     await new Promise<void>((resolve) => ollama.close(() => resolve()));

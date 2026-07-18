@@ -1,14 +1,16 @@
 # DevHarmonics Detailed Implementation Plan
 
 Document status: **Build-ready execution plan**
-Plan version: **1.25**
+Plan version: **1.26**
 Written: **2026-07-14**
 Revised: **2026-07-16**
 Product specification baseline: **DevHarmonics Product Specification v1.12**
 Current implementation baseline: **DevHarmonics v0.5.1**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 
-Revision history: **v1.25 (2026-07-18)** — Refined DH-460 with reviewer capability tiers (context, executing, falsifying) after DH-635's review produced direct evidence that a large same-family context-review quorum missed both critical defects that a single executing-and-falsifying reviewer found. Quorum policy gains a required-tier dimension, review receipts record the tier and the evidence produced, and a quorum met only by context reviewers must be reported as unfalsified rather than as a passed independent review.
+Revision history: **v1.26 (2026-07-18)** — Promoted the approval inbox from an implicit bullet inside DH-600 to DH-645, a named work package scheduled immediately after the locked capability sequence, after the first real CivicSuite delivery showed an owner decision sitting unsurfaced in the product. DH-645 covers the approval inbox, a program-scope view across products and runs, delivered-versus-observed reconciliation against the external forge, and an exportable status page that does not depend on the DevHarmonics ledger or on DevHarmonics running. The locked sequence is unchanged.
+
+Prior revision: **v1.25 (2026-07-18)** — Refined DH-460 with reviewer capability tiers (context, executing, falsifying) after DH-635's review produced direct evidence that a large same-family context-review quorum missed both critical defects that a single executing-and-falsifying reviewer found. Quorum policy gains a required-tier dimension, review receipts record the tier and the evidence produced, and a quorum met only by context reviewers must be reported as unfalsified rather than as a passed independent review.
 
 Prior revision: **v1.24 (2026-07-18)** — Implemented DH-635 live run steering, the third item in the locked capability sequence: durable steering directives with full disposition and attempt linkage, admission-boundary hold/resume/reprioritise/reassign across both scheduler loops, attempt-boundary clarifications, and interrupt-and-handoff that retains evidence. Containment of scope, permission, spending, and acceptance authority is structural, and every directive ends with a disposition. Remaining sequence items are unchanged: real provider/local fallback during a CivicSuite task, a real cross-repository CivicSuite implementation, then Git-versioned reusable workflows.
 
@@ -909,6 +911,29 @@ Acceptance:
 - Workbench interaction cannot silently change a repository;
 - converted objectives retain source context without inheriting unapproved actions;
 - users can compare selected models.
+
+#### DH-645: Approval inbox and program status — M
+
+Status: **Named work package, owner-approved 2026-07-18. Scheduled immediately after the locked capability sequence; it does not displace any sequence item.**
+
+The target architecture names a "product cockpit and approval inbox" as the top layer, and `Approval` is a primary domain entity, but no inbox exists. Every surface today is scoped to one run, so an owner learns that something needs them only by opening the right run — or by being told. The first real CivicSuite delivery demonstrated the gap concretely: a READY run held a prepared delivery awaiting the owner's external-write approval, and nothing in the product surfaced it. For a product whose thesis is that the owner directs a crew and owns the consequential decisions, the owner having no queue of decisions is a structural gap rather than a missing convenience.
+
+An important boundary distinguishes this from a general dashboard. DevHarmonics' own ledger is written by the system being observed, so a status view sourced only from it can restate what DevHarmonics believes and cannot detect where that belief is wrong. The distinctive contribution is therefore not activity display but **reconciliation**: DevHarmonics is the only component holding both the local run record and the external result of what it delivered, and disagreement between them is the signal worth surfacing.
+
+Deliverables:
+
+- an approval inbox listing every decision genuinely waiting on the owner — plan approvals, external-write and draft-PR approvals, paid-spend confirmations, blocked runs awaiting direction — with the exact evidence each decision rests on and a direct route to act;
+- a program view spanning products and runs rather than one run, distinguishing work that is moving from work that is waiting, retrying, stalled, or finished, using the DH-632 heartbeat evidence at program scope;
+- delivered-versus-observed reconciliation for external results DevHarmonics produced: whether a pushed branch still exists at the reviewed commit, whether a draft pull request is still open, and whether its checks passed, with disagreement between the ledger and the observed remote state reported as an explicit finding rather than silently reconciled;
+- an exportable standalone status page that reads the external forge directly in the owner's browser and does not depend on DevHarmonics running or on the DevHarmonics ledger, so that the owner retains an independent view of delivered work when the control plane is off.
+
+Acceptance:
+
+- an owner can see, without opening a run, every decision waiting on them and what each one would authorise;
+- an approval acted on from the inbox is indistinguishable in evidence and policy from the same approval given in its run surface — the inbox is a route to the decision, never a second, weaker gate;
+- an item leaves the inbox only when it is genuinely resolved, and an expired or superseded request states which;
+- a delivered result whose remote state has diverged — branch deleted, pull request closed, checks failed — is reported as a divergence, and DevHarmonics never presents its own ledger record as confirmation of external state it has not observed;
+- the exported status page renders correct current information with DevHarmonics stopped, and contains no value written by an agent.
 
 #### DH-650: Analytics — M
 

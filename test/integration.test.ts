@@ -1927,3 +1927,65 @@ test("the steering panel reports requested admission changes honestly before the
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
+
+test("a first-attempt qualification failure retries the task instead of crashing the run", async () => {
+  // Found by a real fallback proving run against an exhausted subscription.
+  // Scheduler-time qualification runs before the task is marked 'working', so
+  // its failure path asked for queued -> retry, which the task state machine
+  // forbids. The thrown transition failed the entire RUN — exactly when a
+  // provider is degraded and resilience matters most.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-qual-retry-"));
+  const project = await createRepository(root);
+  // Authenticates and reports a version like a healthy CLI, but never returns
+  // the qualification marker, so every worker qualification attempt fails.
+  const script = path.join(root, "unqualifiable.mjs");
+  await writeFile(script, `const args = process.argv.slice(2);
+if (args.includes("--version")) { console.log("1.0 fixture"); process.exit(0); }
+if ((args[0] === "auth" && args[1] === "status") || args[0] === "models" || (args[0] === "login" && args[1] === "status")) { console.log("Authenticated fixture"); process.exit(0); }
+console.log("I am unable to comply with that request.");
+process.exit(0);
+`, "utf8");
+  const unqualifiable = path.join(root, "unqualifiable.cmd");
+  await writeFile(unqualifiable, `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`, "utf8");
+  const fixture = await createFakeCli(root);
+
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  config.runPolicy.requirePlanApproval = false;
+  config.connections.codex.command = unqualifiable;
+  config.connections.claude.command = fixture;
+  config.connections.gemini.command = fixture;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+  const ledger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  let runId = "";
+  try {
+    runId = await new Orchestrator(ledger).run({ goal: "Create the fixture result", projectPath: project, agents: 1 });
+    const run = ledger.getRun(runId);
+    // The run may legitimately end not-ready — no worker could be qualified —
+    // but it must not die on an internal state-machine violation.
+    assert.doesNotMatch(
+      `${run?.finalReview ?? ""}`,
+      /Invalid task status transition/,
+      "a failed qualification must not crash the run with an invalid transition",
+    );
+    assert.ok(
+      !(run?.events ?? []).some((event) => event.kind === "run.failed" && /Invalid task status transition/.test(event.message)),
+      "no invalid-transition failure event",
+    );
+    // The task itself must reach an honest terminal state.
+    const task = run?.tasks.find((item) => item.id !== "__integration__");
+    assert.ok(["failed", "blocked", "passed"].includes(task?.status ?? ""), `task settled, got '${task?.status}'`);
+  } finally {
+    ledger.close();
+    if (runId) {
+      const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
+      await runProcess({ command: "git", args: ["worktree", "prune"], cwd: project, timeoutMs: 30_000 });
+      await rm(runRoot, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+    }
+    await rm(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+  }
+});

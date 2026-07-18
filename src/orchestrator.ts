@@ -1676,6 +1676,14 @@ export class Orchestrator {
         eligibleProviders,
         input.providerCursor + attempt - 1,
       );
+      // The attempt begins here, and scheduler-time qualification is part of it:
+      // the task is genuinely being worked on before a model is finally chosen.
+      // Saying so keeps the status honest and, because every failure path from
+      // this point transitions to 'retry', keeps those transitions legal — a
+      // qualification failure on the first attempt previously asked for
+      // queued -> retry, which the state machine rejects, failing the whole run.
+      // The provider is filled in below once routing resolves it.
+      this.ledger.setTaskStatus(input.runId, input.task.id, "working");
       const qualification = await ensureSchedulerCandidateQualified({
         ledger: this.ledger,
         config: input.config,

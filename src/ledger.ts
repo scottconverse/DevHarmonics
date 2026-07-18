@@ -1960,6 +1960,33 @@ export class Ledger {
     return (rows as Record<string, unknown>[]).map(toSteeringDirectiveRecord);
   }
 
+  /**
+   * DH-635. Disposition every directive that can no longer be applied, in one
+   * statement. Any path that ends work — a run terminalising, a cancellation, a
+   * pause, a task blocked by a failed dependency — must call this, or the ledger
+   * would keep asserting an operation is still pending when no execution path
+   * for it exists. `taskId` scopes the sweep to one task; omit it to sweep the
+   * whole run (including run-scoped admission directives).
+   */
+  dispositionUnreachableSteering(runId: string, input: { reason: string; taskId?: string }): number {
+    const now = new Date().toISOString();
+    const result = input.taskId
+      ? this.database
+          .prepare("UPDATE steering_directives SET disposition = 'rejected', disposition_reason = ?, updated_at = ? WHERE run_id = ? AND disposition = 'pending' AND target_task_id = ?")
+          .run(input.reason, now, runId, input.taskId)
+      : this.database
+          .prepare("UPDATE steering_directives SET disposition = 'rejected', disposition_reason = ?, updated_at = ? WHERE run_id = ? AND disposition = 'pending'")
+          .run(input.reason, now, runId);
+    const swept = Number(result.changes ?? 0);
+    if (swept > 0) {
+      this.addEvent(runId, "steering.rejected", `${swept} steering directive(s) could no longer be applied: ${input.reason}`, {
+        taskId: input.taskId ?? null,
+        count: swept,
+      });
+    }
+    return swept;
+  }
+
   /** Pending directives the scheduler should consider at its next safe boundary. */
   pendingSteeringDirectives(runId: string, targetTaskId?: string | null): SteeringDirectiveRecord[] {
     return this.listSteeringDirectives(runId, { disposition: "pending" }).filter((directive) =>
@@ -2049,6 +2076,9 @@ export class Ledger {
         "UPDATE runs SET status = ?, final_review = COALESCE(?, final_review), updated_at = ? WHERE id = ?",
       )
       .run(status, finalReview === undefined ? null : redactText(finalReview), new Date().toISOString(), runId);
+    if (["ready", "not_ready", "failed", "cancelled"].includes(status)) {
+      this.dispositionUnreachableSteering(runId, { reason: `The run finished as ${status.replaceAll("_", " ")} before this direction could be applied` });
+    }
   }
 
   cancelRun(runId: string): boolean {
@@ -2070,6 +2100,7 @@ export class Ledger {
       )
       .run(now, runId);
     this.addEvent(runId, "run.cancelled", "Run cancelled");
+    this.dispositionUnreachableSteering(runId, { reason: "The run was cancelled before this direction could be applied" });
     return true;
   }
 
@@ -2140,6 +2171,11 @@ export class Ledger {
       this.database.prepare("UPDATE tasks SET status = 'paused', updated_at = ? WHERE run_id = ? AND status IN ('queued', 'working', 'verifying', 'retry')").run(now, runId);
       this.database.prepare("UPDATE attempts SET status = 'interrupted', error = ?, finished_at = ? WHERE run_id = ? AND status = 'running'").run(redactText(reason), now, runId);
       this.addEvent(runId, "run.paused", reason);
+      // Recovery starts a NEW run rather than restarting this one, so directives
+      // left pending here would never be reachable again.
+      this.database
+        .prepare("UPDATE steering_directives SET disposition = 'rejected', disposition_reason = ?, updated_at = ? WHERE run_id = ? AND disposition = 'pending'")
+        .run("The run was paused before this direction could be applied; recovery continues in a new run", now, runId);
       this.database.exec("COMMIT");
       return true;
     } catch (error) {

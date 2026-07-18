@@ -827,9 +827,12 @@ function renderSteering(run) {
     .map((task) => `<option value="${escapeHtml(task.id)}">${escapeHtml(task.title)} — ${escapeHtml(task.status)}</option>`)
     .join("");
   if (steerableTasks.some((task) => task.id === previous)) select.value = previous;
-  // Interrupting only means something while an attempt is actually in flight.
+  // Only 'working' means a provider invocation is actually in flight. 'verifying'
+  // runs DevHarmonics' own validators and 'retry' is a backoff gap — offering
+  // interrupt there would invite the owner to stop work that is not running, and
+  // would instead abort a later replacement attempt.
   const selectedTask = steerableTasks.find((task) => task.id === select.value);
-  $("#steering-interrupt").disabled = !selectedTask || !["working", "verifying", "retry"].includes(selectedTask.status);
+  $("#steering-interrupt").disabled = selectedTask?.status !== "working";
 
   // Reassign and reprioritize act at the admission boundary, so they only apply
   // to work that has not started. Offer them only when that is true.

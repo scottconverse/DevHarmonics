@@ -609,6 +609,7 @@ export class Orchestrator {
           pending.delete(taskId);
           this.ledger.setTaskStatus(runId, taskId, "blocked");
           this.ledger.addEvent(runId, "task.blocked", `${task.title} blocked by a failed dependency`);
+          this.ledger.dispositionUnreachableSteering(runId, { taskId, reason: "The task was blocked by a failed dependency and will not run" });
         }
       }
 
@@ -621,6 +622,7 @@ export class Orchestrator {
       const steered = planSteeredAdmission({
         pending: this.ledger.pendingSteeringDirectives(runId).filter((directive) => ADMISSION_STEERING_KINDS.includes(directive.kind)),
         ready: readyTasks,
+        queued: [...pending.values()],
         admissionHeld,
         allowedProviders: workerProviders,
       });
@@ -1084,6 +1086,7 @@ export class Orchestrator {
             pending.delete(taskId);
             this.ledger.setTaskStatus(input.runId, taskId, "blocked");
             this.ledger.addEvent(input.runId, "task.blocked", `${task.title} blocked by a failed dependency`);
+            this.ledger.dispositionUnreachableSteering(input.runId, { taskId, reason: "The task was blocked by a failed dependency and will not run" });
           }
         }
         const readyTasks = [...pending.values()].filter((task) => task.dependencies.every((dependency) => statuses.get(dependency) === "passed"));
@@ -1093,6 +1096,7 @@ export class Orchestrator {
         const steered = planSteeredAdmission({
           pending: this.ledger.pendingSteeringDirectives(input.runId).filter((directive) => ADMISSION_STEERING_KINDS.includes(directive.kind)),
           ready: readyTasks,
+          queued: [...pending.values()],
           admissionHeld,
           allowedProviders: input.workerProviders,
         });
@@ -1635,13 +1639,12 @@ export class Orchestrator {
     const excludedModelIds = new Set<string>();
     const excludedConnectionIds = new Set<string>();
 
-    // DH-635: an interrupt costs one extra attempt so a redirected task is not
-    // punished by the retry budget it never consumed on its own behalf. The
-    // grant is capped: without a ceiling, repeated interrupts would extend a
-    // task's invocation budget without limit, which is exactly the spending
-    // boundary steering is forbidden from widening.
-    let interruptGrants = 0;
-    for (let attempt = 1; attempt <= input.config.application.retry.maxAttempts + interruptGrants; attempt++) {
+    // DH-635: an interrupted attempt consumes the approved retry budget exactly
+    // like any other attempt. Granting extra attempts for interrupts would let
+    // steering widen a task's invocation — and therefore paid-spend — authority,
+    // which is precisely what steering must never do. Changing how many attempts
+    // a task may spend is a plan decision, not a steering one.
+    for (let attempt = 1; attempt <= input.config.application.retry.maxAttempts; attempt++) {
       // Do not start a new attempt once cancelled; leave the 'cancelled' status
       // for ledger.cancelRun to own rather than marking the task 'failed'.
       if (input.signal.aborted) return "cancelled";
@@ -1898,10 +1901,11 @@ export class Orchestrator {
             ? `The owner interrupted your previous attempt. New direction: ${note}`
             : "The owner interrupted your previous attempt. Re-read the task contract and continue.";
           interruptDirective = null;
-          if (interruptGrants < MAX_INTERRUPT_GRANTS) interruptGrants += 1;
-          if (attempt >= input.config.application.retry.maxAttempts + interruptGrants) {
+          if (attempt >= input.config.application.retry.maxAttempts) {
+            // The owner spent the task's remaining attempts on redirection. Say so
+            // plainly rather than quietly buying more provider invocations.
             this.ledger.setTaskStatus(input.runId, input.task.id, "failed");
-            this.ledger.addEvent(input.runId, "task.failed", `${input.task.title}: attempt budget exhausted after ${interruptGrants} interrupt grant(s)`);
+            this.ledger.addEvent(input.runId, "task.failed", `${input.task.title}: the approved attempt budget was exhausted by owner interrupts`);
             return "failed";
           }
           this.ledger.setTaskStatus(input.runId, input.task.id, "retry");
@@ -2395,13 +2399,6 @@ export class Orchestrator {
   }
 }
 
-/**
- * Extra attempts an owner's interrupts may add to one task. Bounded so that
- * steering can redirect work without becoming an unbounded multiplier on the
- * task's invocation budget.
- */
-export const MAX_INTERRUPT_GRANTS = 2;
-
 /** Steering kinds the scheduler resolves at the task-admission boundary. */
 export const ADMISSION_STEERING_KINDS: readonly SteeringDirectiveRecord["kind"][] = [
   "hold_admission",
@@ -2424,16 +2421,28 @@ export function planSteeredAdmission(input: {
   ready: PlannedTask[];
   admissionHeld: boolean;
   allowedProviders: readonly string[];
+  /**
+   * Every task still awaiting admission, including those whose dependencies are
+   * not satisfied yet. Without it a directive aimed at a legitimately queued
+   * task would be rejected merely for being early. Defaults to `ready` so
+   * existing callers keep their behaviour.
+   */
+  queued?: PlannedTask[];
 }): {
   admissionHeld: boolean;
   ordered: PlannedTask[];
   applied: Array<{ id: string; reason: string }>;
   rejected: Array<{ id: string; reason: string }>;
+  deferred: Array<{ id: string; reason: string }>;
 } {
   let admissionHeld = input.admissionHeld;
   let ordered = [...input.ready];
+  const queuedIds = new Set((input.queued ?? input.ready).map((task) => task.id));
   const applied: Array<{ id: string; reason: string }> = [];
   const rejected: Array<{ id: string; reason: string }> = [];
+  // A directive aimed at a task that is queued but not yet admissible stays
+  // pending: it is early, not wrong, and will apply when the task is admitted.
+  const deferred: Array<{ id: string; reason: string }> = [];
 
   for (const directive of input.pending) {
     if (directive.kind === "hold_admission") {
@@ -2449,11 +2458,19 @@ export function planSteeredAdmission(input: {
     if (directive.kind === "reprioritize") {
       const requested = directive.payload.taskOrder ?? [];
       const admissible = new Set(ordered.map((task) => task.id));
-      const missing = requested.filter((id) => !admissible.has(id));
-      if (missing.length) {
+      const unknown = requested.filter((id) => !queuedIds.has(id));
+      if (unknown.length) {
         rejected.push({
           id: directive.id,
-          reason: `Cannot prioritise ${missing.join(", ")}: unknown, already running, or dependencies are not satisfied`,
+          reason: `Cannot prioritise ${unknown.join(", ")}: not waiting for admission in this run`,
+        });
+        continue;
+      }
+      const notYetReady = requested.filter((id) => !admissible.has(id));
+      if (notYetReady.length) {
+        deferred.push({
+          id: directive.id,
+          reason: `Waiting for ${notYetReady.join(", ")} to become admissible`,
         });
         continue;
       }
@@ -2463,14 +2480,20 @@ export function planSteeredAdmission(input: {
       continue;
     }
     if (directive.kind === "reassign") {
-      const target = ordered.find((task) => task.id === directive.targetTaskId);
-      if (!target) {
-        rejected.push({ id: directive.id, reason: `Cannot reassign '${directive.targetTaskId}': it is not waiting for admission` });
-        continue;
-      }
       const provider = directive.payload.provider;
       if (!provider || !input.allowedProviders.includes(provider)) {
         rejected.push({ id: directive.id, reason: `Provider '${provider ?? "unset"}' is not an eligible worker for this run` });
+        continue;
+      }
+      if (!queuedIds.has(directive.targetTaskId ?? "")) {
+        rejected.push({ id: directive.id, reason: `Cannot reassign '${directive.targetTaskId}': it is not waiting for admission` });
+        continue;
+      }
+      const target = ordered.find((task) => task.id === directive.targetTaskId);
+      if (!target) {
+        // Queued, but its dependencies have not finished. Hold the directive so
+        // it lands when the task is actually admitted.
+        deferred.push({ id: directive.id, reason: `Waiting for '${directive.targetTaskId}' dependencies before reassigning` });
         continue;
       }
       ordered = ordered.map((task) => (task.id === target.id ? { ...task, preferredProvider: provider as PlannedTask["preferredProvider"] } : task));
@@ -2480,7 +2503,7 @@ export function planSteeredAdmission(input: {
     // clarify and interrupt are attempt-scoped; the task loop consumes them.
   }
 
-  return { admissionHeld, ordered: admissionHeld ? [] : ordered, applied, rejected };
+  return { admissionHeld, ordered: admissionHeld ? [] : ordered, applied, rejected, deferred };
 }
 
 export function assignReviewFindings(

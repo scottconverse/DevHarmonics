@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -10,7 +11,7 @@ import { defaultConfig, initializeProject, loadConfig, resolveProviderCommand } 
 import { projectLegacyProvider } from "../src/compatibility.js";
 import { assertRunTransition, assertTaskTransition, domainId } from "../src/domain.js";
 import { LEDGER_SCHEMA_VERSION, Ledger } from "../src/ledger.js";
-import { assignReviewFindings, createReviewEvidenceBinding, MAX_INTERRUPT_GRANTS, Orchestrator, parseFirstJsonObject, planSteeredAdmission, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
+import { assignReviewFindings, createReviewEvidenceBinding, Orchestrator, parseFirstJsonObject, planSteeredAdmission, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
 import { discoverOllama, OllamaAdapter, syncOllamaRegistry, syncOllamaRuntimes } from "../src/ollama.js";
 import {
   createProvider,
@@ -24,7 +25,7 @@ import {
   invocationFailureScope,
   type InvocationEvent,
 } from "../src/runtime.js";
-import type { DevHarmonicsConfig, PlannedTask, SteeringDirectiveRecord } from "../src/types.js";
+import type { DevHarmonicsConfig, PlannedTask, RunPlan, SteeringDirectiveRecord } from "../src/types.js";
 import { manualModelSchema, objectiveInputSchema, runPlanSchema, steeringPayloadSchema } from "../src/schemas.js";
 import { runProcess, subscriptionEnvironment } from "../src/process.js";
 import { REDACTED, redactText } from "../src/redaction.js";
@@ -3942,8 +3943,8 @@ test("steering reprioritizes queued tasks but cannot bypass dependencies", () =>
     admissionHeld: false,
     allowedProviders: ["codex"],
   });
-  assert.equal(blocked.rejected.length, 1, "naming a task that is not admissible is rejected, not silently ignored");
-  assert.match(blocked.rejected[0]!.reason, /not ready|dependenc|unknown/i);
+  assert.equal(blocked.rejected.length, 1, "naming a task that is not in this run is rejected, not silently ignored");
+  assert.match(blocked.rejected[0]!.reason, /not waiting for admission/i);
   assert.deepEqual(blocked.ordered.map((task) => task.id), ["a", "b"], "a rejected reorder leaves the queue untouched");
 });
 
@@ -3970,23 +3971,22 @@ test("steering reassign is rejected when the requested provider is not eligible 
   assert.equal(refused.ordered[0]?.preferredProvider, "codex", "a rejected reassign leaves the assignment unchanged");
 });
 
-test("an owner interrupt cannot extend a task's attempt budget without limit", () => {
-  // The grant absorbs a redirect; it must not become a multiplier an owner can
-  // pump to keep a task (and its provider spend) running indefinitely.
-  const maxAttempts = 3;
-  let interruptGrants = 0;
-  let attemptsRun = 0;
-  for (let attempt = 1; attempt <= maxAttempts + interruptGrants; attempt++) {
-    attemptsRun += 1;
-    // Simulate an owner interrupting every single attempt, forever.
-    if (interruptGrants < MAX_INTERRUPT_GRANTS) interruptGrants += 1;
-    if (attempt >= maxAttempts + interruptGrants) break;
+test("steering never widens a task's approved attempt budget", () => {
+  // The old implementation granted extra attempts per interrupt, which widened
+  // the invocation (and therefore paid-spend) authority the plan approved.
+  // Interrupted attempts must be spent from the same budget as any other.
+  // Tests run from dist/, so resolve the source from the project root.
+  const source = readFileSync(path.join(process.cwd(), "src", "orchestrator.ts"), "utf8");
+  const loopHeaders = [...source.matchAll(/for \(let attempt = 1; attempt <= ([^;]+);/g)].map((match) => match[1]!.trim());
+  assert.ok(loopHeaders.length > 0, "the attempt loop must exist");
+  for (const bound of loopHeaders) {
+    assert.equal(
+      bound,
+      "input.config.application.retry.maxAttempts",
+      "the attempt ceiling must be the approved retry budget with nothing added to it",
+    );
   }
-  assert.ok(MAX_INTERRUPT_GRANTS >= 1, "an interrupt still buys the redirected task a fresh attempt");
-  assert.ok(
-    attemptsRun <= maxAttempts + MAX_INTERRUPT_GRANTS,
-    `unbounded interrupts must not exceed ${maxAttempts + MAX_INTERRUPT_GRANTS} attempts, ran ${attemptsRun}`,
-  );
+  assert.doesNotMatch(source, /interruptGrants/, "no grant mechanism may reintroduce budget widening");
 });
 
 test("steering keeps admission held across scheduler ticks until a resume arrives", () => {
@@ -4010,4 +4010,100 @@ test("steering keeps admission held across scheduler ticks until a resume arrive
   const resumed = planSteeredAdmission({ pending: [steeringFixture({ kind: "resume_admission" })], ready, admissionHeld: held, allowedProviders });
   assert.equal(resumed.admissionHeld, false);
   assert.equal(resumed.ordered.length, 2);
+});
+
+test("no steering directive can remain pending once no execution path for it exists", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-steering-terminal-sweep-"));
+  const plan: RunPlan = {
+    summary: "Two tasks",
+    recommendedConcurrency: 1,
+    tasks: [
+      { id: "alpha", title: "Alpha", description: "Work", dependencies: [], preferredProvider: "codex", checks: ["diff-check"] },
+      { id: "beta", title: "Beta", description: "Work", dependencies: [], preferredProvider: "codex", checks: ["diff-check"] },
+    ],
+  } as unknown as RunPlan;
+  const pendingCount = (ledger: Ledger, runId: string) =>
+    ledger.listSteeringDirectives(runId).filter((directive) => directive.disposition === "pending").length;
+
+  // Each terminalising path must sweep directives it can no longer honour.
+  for (const [label, terminalise] of [
+    ["cancellation", (ledger: Ledger, runId: string) => { ledger.cancelRun(runId); }],
+    ["a run finishing", (ledger: Ledger, runId: string) => { ledger.setRunStatus(runId, "not_ready", "NOT READY"); }],
+    ["a pause", (ledger: Ledger, runId: string) => { ledger.pauseRun(runId); }],
+  ] as const) {
+    const ledger = new Ledger(path.join(root, `${label.replaceAll(" ", "-")}.db`));
+    try {
+      const runId = ledger.createRun(`Terminal via ${label}`, root);
+      ledger.savePlan(runId, plan);
+      ledger.recordSteeringDirective({ runId, kind: "hold_admission", targetTaskId: null, actor: "local-owner", payload: {} });
+      ledger.recordSteeringDirective({ runId, kind: "clarify", targetTaskId: "alpha", actor: "local-owner", payload: { clarification: "later" } });
+      assert.equal(pendingCount(ledger, runId), 2, `${label}: directives start pending`);
+
+      terminalise(ledger, runId);
+
+      assert.equal(pendingCount(ledger, runId), 0, `${label} must leave no directive pending`);
+      for (const directive of ledger.listSteeringDirectives(runId)) {
+        assert.equal(directive.disposition, "rejected", `${label}: unreachable directives are rejected`);
+        assert.ok(directive.dispositionReason, `${label}: a rejection explains itself`);
+      }
+    } finally {
+      ledger.close();
+    }
+  }
+
+  // A task-scoped sweep leaves other tasks' directives alone.
+  const ledger = new Ledger(path.join(root, "scoped.db"));
+  try {
+    const runId = ledger.createRun("Scoped sweep", root);
+    ledger.savePlan(runId, plan);
+    const alpha = ledger.recordSteeringDirective({ runId, kind: "clarify", targetTaskId: "alpha", actor: "local-owner", payload: { clarification: "a" } });
+    const beta = ledger.recordSteeringDirective({ runId, kind: "clarify", targetTaskId: "beta", actor: "local-owner", payload: { clarification: "b" } });
+    ledger.dispositionUnreachableSteering(runId, { taskId: "alpha", reason: "Alpha was blocked by a failed dependency" });
+    const directives = ledger.listSteeringDirectives(runId);
+    assert.equal(directives.find((item) => item.id === alpha.id)?.disposition, "rejected");
+    assert.equal(directives.find((item) => item.id === beta.id)?.disposition, "pending", "another task's direction is untouched");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test("steering a queued task whose dependencies are unmet waits instead of being rejected", () => {
+  // 'beta' is legitimately queued but not yet admissible. Rejecting direction
+  // aimed at it would refuse a capability the product claims for queued tasks.
+  const ready = [steeringTask("alpha")];
+  const queued = [steeringTask("alpha"), steeringTask("beta", ["alpha"])];
+
+  const early = planSteeredAdmission({
+    pending: [steeringFixture({ kind: "reassign", targetTaskId: "beta", payload: { provider: "claude" } })],
+    ready,
+    queued,
+    admissionHeld: false,
+    allowedProviders: ["codex", "claude"],
+  });
+  assert.equal(early.rejected.length, 0, "an early directive is not a wrong one");
+  assert.equal(early.applied.length, 0, "and it has not taken effect yet either");
+  assert.equal(early.deferred.length, 1, "it waits for the task to become admissible");
+
+  // Once beta is admissible the same directive applies.
+  const later = planSteeredAdmission({
+    pending: [steeringFixture({ kind: "reassign", targetTaskId: "beta", payload: { provider: "claude" } })],
+    ready: [steeringTask("beta")],
+    queued: [steeringTask("beta")],
+    admissionHeld: false,
+    allowedProviders: ["codex", "claude"],
+  });
+  assert.equal(later.applied.length, 1);
+  assert.equal(later.ordered[0]?.preferredProvider, "claude");
+
+  // A task that is not queued at all is still a genuine error.
+  const unknown = planSteeredAdmission({
+    pending: [steeringFixture({ kind: "reassign", targetTaskId: "ghost", payload: { provider: "claude" } })],
+    ready,
+    queued,
+    admissionHeld: false,
+    allowedProviders: ["codex", "claude"],
+  });
+  assert.equal(unknown.rejected.length, 1);
+  assert.equal(unknown.deferred.length, 0);
 });

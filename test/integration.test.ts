@@ -1893,6 +1893,18 @@ test("the steering panel reports requested admission changes honestly before the
     // renderSteering once called ready(), a helper local to renderProviders, which
     // threw on every render and silently froze the whole panel. Module-scope-only
     // references are the property that keeps it renderable.
+    // Which states are steerable is one rule owned by the ledger and served to
+    // the browser. A second hard-coded copy in the UI is what let the paused-run
+    // rule drift between layers, so the copy must not come back.
+    const bootstrap = await fetch(`${dashboard.url}/api/bootstrap`).then((response) => response.json()) as {
+      steering: { steerableRunStatuses: string[]; steerableTaskStatuses: string[] };
+    };
+    assert.deepEqual(bootstrap.steering.steerableRunStatuses, ["planning", "running", "awaiting_approval"], "the server publishes the steerable run states");
+    assert.ok(!bootstrap.steering.steerableRunStatuses.includes("paused"), "a paused run is never steerable: recovery continues in a new run");
+    assert.deepEqual(bootstrap.steering.steerableTaskStatuses, ["queued", "working", "verifying", "retry"], "the server publishes the steerable task states");
+    assert.match(appScript, /state\.bootstrap\?\.steering\?\.steerableRunStatuses/, "the browser reads the served rule");
+    assert.doesNotMatch(appScript, /const STEERABLE_RUN_STATUSES\s*=\s*\[/, "the browser must not keep its own copy of the rule");
+
     const steeringRender = appScript.slice(appScript.indexOf("function renderSteering("), appScript.indexOf("function renderSteeringDirectives("));
     assert.ok(steeringRender.length > 0, "renderSteering must exist");
     assert.doesNotMatch(steeringRender, /\bready\(/, "renderSteering must not call helpers scoped to another render function");

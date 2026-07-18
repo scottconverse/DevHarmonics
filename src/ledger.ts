@@ -1411,6 +1411,8 @@ export interface ModelPerformancePolicyRecord {
 export class Ledger {
   private readonly database: DatabaseSync;
   private readonly filename: string;
+  /** Depth counter making writeAtomically reentrant; see that method. */
+  private openWriteTransactions = 0;
 
   constructor(filename: string) {
     mkdirSync(path.dirname(filename), { recursive: true });
@@ -1913,8 +1915,7 @@ export class Ledger {
     // Validation and insertion share one transaction. Checking run/task state in
     // a separate statement would let a task finish in the gap and leave the new
     // directive with no consumer — a directive stuck pending forever.
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
+    this.writeAtomically(() => {
       const run = this.database.prepare("SELECT status FROM runs WHERE id = ?").get(input.runId) as { status: string } | undefined;
       if (!run) throw new Error(`Run '${input.runId}' was not found`);
       if (!STEERABLE_RUN_STATUSES.includes(run.status)) {
@@ -1950,11 +1951,7 @@ export class Ledger {
            VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)`,
         )
         .run(id, input.runId, input.kind, input.targetTaskId, input.actor, JSON.stringify(payload), now, now);
-      this.database.exec("COMMIT");
-    } catch (error) {
-      this.database.exec("ROLLBACK");
-      throw error;
-    }
+    });
     this.addEvent(input.runId, "steering.requested", `${input.actor} requested ${input.kind}${input.targetTaskId ? ` for ${input.targetTaskId}` : ""}`, {
       directiveId: id,
       kind: input.kind,
@@ -1992,6 +1989,29 @@ export class Ledger {
       ? this.database.prepare("SELECT * FROM steering_directives WHERE run_id = ? AND disposition = ? ORDER BY created_at ASC").all(runId, options.disposition)
       : this.database.prepare("SELECT * FROM steering_directives WHERE run_id = ? ORDER BY created_at ASC").all(runId);
     return (rows as Record<string, unknown>[]).map(toSteeringDirectiveRecord);
+  }
+
+  /**
+   * Run `work` inside one write transaction. Reentrant: a nested call joins the
+   * transaction its caller already opened instead of raising SQLite's
+   * "cannot start a transaction within a transaction". This keeps atomic
+   * operations composable — steering disposition, for instance, has to be able
+   * to run both standalone and inside a task-status transition.
+   */
+  private writeAtomically<T>(work: () => T): T {
+    if (this.openWriteTransactions > 0) return work();
+    this.database.exec("BEGIN IMMEDIATE");
+    this.openWriteTransactions += 1;
+    try {
+      const result = work();
+      this.database.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    } finally {
+      this.openWriteTransactions -= 1;
+    }
   }
 
   /**
@@ -2144,16 +2164,29 @@ export class Ledger {
     status: TaskStatus,
     provider?: string,
   ): void {
-    const row = this.database
-      .prepare("SELECT status FROM tasks WHERE run_id = ? AND task_id = ?")
-      .get(runId, taskId) as { status: string } | undefined;
-    if (!row) throw new Error(`Task '${taskId}' was not found in run '${runId}'`);
-    assertTaskTransition(parseTaskStatus(row.status), status);
-    this.database
-      .prepare(
-        "UPDATE tasks SET status = ?, provider = COALESCE(?, provider), updated_at = ? WHERE run_id = ? AND task_id = ?",
-      )
-      .run(status, provider ?? null, new Date().toISOString(), runId, taskId);
+    this.writeAtomically(() => {
+      const row = this.database
+        .prepare("SELECT status FROM tasks WHERE run_id = ? AND task_id = ?")
+        .get(runId, taskId) as { status: string } | undefined;
+      if (!row) throw new Error(`Task '${taskId}' was not found in run '${runId}'`);
+      assertTaskTransition(parseTaskStatus(row.status), status);
+      this.database
+        .prepare(
+          "UPDATE tasks SET status = ?, provider = COALESCE(?, provider), updated_at = ? WHERE run_id = ? AND task_id = ?",
+        )
+        .run(status, provider ?? null, new Date().toISOString(), runId, taskId);
+      // DH-635: a task that has just finished can no longer consume direction.
+      // Sweeping inside this transaction closes both interleavings — direction
+      // recorded before the transition is dispositioned here, and direction
+      // attempted after it is refused by recordSteeringDirective, which cannot
+      // observe a half-applied transition.
+      if (!STEERABLE_TASK_STATUSES.includes(status)) {
+        this.dispositionUnreachableSteering(runId, {
+          taskId,
+          reason: `The task finished as '${status}' before this direction could be applied`,
+        });
+      }
+    });
   }
 
   startAttempt(

@@ -4174,3 +4174,51 @@ test("the ledger refuses steering that could never be consumed", async () => {
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
+
+test("a task finishing dispositions direction recorded moments earlier", async () => {
+  // The mirror of the admission race: the directive is committed legally while
+  // the task is still working, and the task then completes. Nothing can deliver
+  // it, so it must not sit pending for the rest of the run's life.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-steering-late-finish-"));
+  const plan: RunPlan = {
+    summary: "Two tasks",
+    recommendedConcurrency: 2,
+    tasks: [
+      { id: "alpha", title: "Alpha", description: "Work", dependencies: [], preferredProvider: "codex", checks: ["diff-check"] },
+      { id: "beta", title: "Beta", description: "Work", dependencies: [], preferredProvider: "codex", checks: ["diff-check"] },
+    ],
+  } as unknown as RunPlan;
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    const runId = ledger.createRun("Late finish", root);
+    ledger.savePlan(runId, plan);
+    ledger.setTaskStatus(runId, "alpha", "working", "codex");
+    ledger.setTaskStatus(runId, "beta", "working", "codex");
+
+    const directive = ledger.recordSteeringDirective({
+      runId, kind: "clarify", targetTaskId: "alpha", actor: "local-owner", payload: { clarification: "just in time" },
+    });
+    assert.equal(directive.disposition, "pending", "it is legal at the moment it is recorded");
+
+    // alpha completes while beta keeps the run alive.
+    ledger.setTaskStatus(runId, "alpha", "verifying");
+    ledger.setTaskStatus(runId, "alpha", "passed");
+
+    const settled = ledger.getSteeringDirective(directive.id);
+    assert.equal(settled?.disposition, "rejected", "the directive is dispositioned when its task finishes");
+    assert.ok(settled?.dispositionReason, "and the rejection explains itself");
+
+    // A directive for the still-running task is untouched.
+    const betaDirective = ledger.recordSteeringDirective({
+      runId, kind: "clarify", targetTaskId: "beta", actor: "local-owner", payload: { clarification: "keep going" },
+    });
+    assert.equal(ledger.getSteeringDirective(betaDirective.id)?.disposition, "pending", "an active task's direction still stands");
+
+    // A task that fails must sweep too, not only one that passes.
+    ledger.setTaskStatus(runId, "beta", "failed");
+    assert.equal(ledger.getSteeringDirective(betaDirective.id)?.disposition, "rejected", "a failed task dispositions its direction as well");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});

@@ -786,14 +786,16 @@ function renderSelectedRun() {
   renderVerdict(run);
 }
 
-// A paused run is not steerable: recovery continues in a new run, so direction
-// recorded against this one would never reach a worker. Mirrors the ledger's
-// STEERABLE_RUN_STATUSES.
-const STEERABLE_RUN_STATUSES = ["planning", "running", "awaiting_approval"];
+// Which runs and tasks can still be steered is the ledger's rule, served in the
+// bootstrap payload. The browser must never keep its own copy: a duplicated
+// list is exactly how the paused-run rule drifted between layers before. If the
+// payload is somehow unavailable, steer nothing rather than guess.
+const steerableRunStatuses = () => state.bootstrap?.steering?.steerableRunStatuses ?? [];
+const steerableTaskStatuses = () => state.bootstrap?.steering?.steerableTaskStatuses ?? [];
 
 function renderSteering(run) {
   const panel = $("#steering-panel");
-  const steerable = STEERABLE_RUN_STATUSES.includes(run.status);
+  const steerable = steerableRunStatuses().includes(run.status);
   panel.classList.toggle("hidden", !steerable);
   const directives = state.steering[run.id] || [];
   if (!steerable) {
@@ -825,7 +827,9 @@ function renderSteering(run) {
 
   const select = $("#steering-task");
   const previous = select.value;
-  const steerableTasks = run.tasks.filter((task) => !task.id.startsWith("__"));
+  // Finished tasks are excluded by the same rule the ledger enforces, so the
+  // panel never offers direction the server would refuse.
+  const steerableTasks = run.tasks.filter((task) => !task.id.startsWith("__") && steerableTaskStatuses().includes(task.status));
   select.innerHTML = steerableTasks
     .map((task) => `<option value="${escapeHtml(task.id)}">${escapeHtml(task.title)} — ${escapeHtml(task.status)}</option>`)
     .join("");

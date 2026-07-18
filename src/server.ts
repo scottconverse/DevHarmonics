@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { initializeProject, loadConfig, saveConfig, devHarmonicsDirectory } from "./config.js";
 import { inspectProviders } from "./doctor.js";
-import { Ledger } from "./ledger.js";
+import { Ledger, STEERABLE_RUN_STATUSES, STEERABLE_TASK_STATUSES } from "./ledger.js";
 import { Orchestrator } from "./orchestrator.js";
 import { ModelCatalogCoordinator } from "./catalog.js";
 import { modelQualificationFingerprint } from "./model-fingerprint.js";
@@ -102,6 +102,10 @@ async function route(
       providers,
       ollama,
       catalog: { refreshedAt, refreshes: context.ledger.listCatalogRefreshes() },
+      // The browser must not keep its own copy of these rules: a duplicated
+      // steerable-status list is what let the paused-run defect drift between
+      // layers. The ledger owns them and serves them.
+      steering: { steerableRunStatuses: STEERABLE_RUN_STATUSES, steerableTaskStatuses: STEERABLE_TASK_STATUSES },
     });
     return;
   }

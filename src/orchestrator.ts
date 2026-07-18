@@ -752,9 +752,14 @@ export class Orchestrator {
       repositories: [{ repositoryId: integrationStatus.repositoryRoot, baseCommit: integrationStatus.baseCommit, headCommit: integrationStatus.headCommit }],
     });
     const integrationReviewSha256 = integrationReviewEvidence.sha256;
+    // Null when no subscription provider is available at all. Planning still
+    // refuses an empty provider list, so this is defensive rather than a live
+    // defect — but the previous `availableProviders[0]!` produced `undefined`
+    // typed as a ProviderName, which is a lie the compiler cannot catch and the
+    // exact hazard class an audit flagged elsewhere on this path.
     const reviewerName = availableProviders.includes(config.product.reviewer)
       ? config.product.reviewer
-      : availableProviders[0]!;
+      : availableProviders[0] ?? null;
     const reviewerProviders = this.openRouterEligible(config) ? [...availableProviders, "openrouter"] : availableProviders;
     const implementationProviders = [...new Set(
       (this.ledger.getRun(runId)?.tasks ?? [])
@@ -774,9 +779,11 @@ export class Orchestrator {
     let reviewerFallbackReason: string | null = null;
     let lastReviewerError: Error | null = null;
     for (let reviewAttempt = 1; reviewAttempt <= config.application.retry.maxAttempts; reviewAttempt++) {
-      const reviewerStart = reviewerProviders.indexOf(reviewerName);
+      const reviewerStart = reviewerName ? reviewerProviders.indexOf(reviewerName) : -1;
       const qualificationProviders = reviewerProviders.map((_, index) => reviewerProviders[(Math.max(0, reviewerStart) + reviewAttempt - 1 + index) % reviewerProviders.length]!);
-      let reviewerFallbackProvider = qualificationProviders[0]!;
+      // No subscription candidate to qualify leaves the router to choose among
+      // already-qualified local reviewers, exactly as the worker path does.
+      let reviewerFallbackProvider: ProviderName | null = (qualificationProviders[0] ?? null) as ProviderName | null;
       for (const qualificationProvider of qualificationProviders) {
         const qualification = await ensureSchedulerCandidateQualified({ ledger: this.ledger, config, cwd: worktrees.integrationPath, role: "reviewer", preferredProvider: qualificationProvider, permission: "read_only", excludedModelIds: excludedReviewerModels, excludedConnectionIds: excludedReviewerConnections });
         this.recordSchedulerQualification(runId, qualification, "reviewer");
@@ -787,7 +794,7 @@ export class Orchestrator {
           continue;
         }
         if (qualification?.passed) {
-          reviewerFallbackProvider = qualification.provider;
+          reviewerFallbackProvider = qualification.provider as ProviderName;
           break;
         }
       }
@@ -796,7 +803,7 @@ export class Orchestrator {
         reviewerDecision = router.route({
           role: "reviewer",
           config,
-          fallbackProvider: reviewerFallbackProvider as ProviderName,
+          fallbackProvider: reviewerFallbackProvider,
           allowedProviders: reviewerProviders,
           permission: "read_only",
           excludedModelIds: excludedReviewerModels,
@@ -1433,7 +1440,8 @@ export class Orchestrator {
     runId: string;
     reviewSlot: number;
     requiredReviewers: number;
-    reviewerName: ProviderName;
+    /** Null when only qualified local reviewers remain; the router then chooses among them. */
+    reviewerName: ProviderName | null;
     reviewerProviders: readonly string[];
     implementationProviders: readonly string[];
     excludedReviewerModels: Set<string>;
@@ -1458,9 +1466,11 @@ export class Orchestrator {
     let lastError: Error | null = null;
     let fallbackReason: string | null = null;
     for (let reviewAttempt = 1; reviewAttempt <= input.config.application.retry.maxAttempts; reviewAttempt++) {
-      const start = input.reviewerProviders.indexOf(input.reviewerName);
+      const start = input.reviewerName ? input.reviewerProviders.indexOf(input.reviewerName) : -1;
       const qualificationProviders = input.reviewerProviders.map((_, index) => input.reviewerProviders[(Math.max(0, start) + input.reviewSlot + reviewAttempt - 2 + index) % input.reviewerProviders.length]!);
-      let fallbackProvider = qualificationProviders[0]!;
+      // Null with no subscription candidate left: the router chooses among the
+      // already-qualified local reviewers instead of indexing an empty pool.
+      let fallbackProvider: ProviderName | null = (qualificationProviders[0] ?? null) as ProviderName | null;
       for (const provider of qualificationProviders) {
         const qualification = await ensureSchedulerCandidateQualified({
           ledger: this.ledger,
@@ -1480,7 +1490,7 @@ export class Orchestrator {
           continue;
         }
         if (qualification?.passed) {
-          fallbackProvider = qualification.provider;
+          fallbackProvider = qualification.provider as ProviderName;
           break;
         }
       }
@@ -1596,7 +1606,8 @@ export class Orchestrator {
     integrationSha256: string;
     evidenceBinding: ReviewEvidenceBinding;
     requirement: ReviewRequirement;
-    reviewerName: ProviderName;
+    /** Null when only qualified local reviewers remain; the router then chooses among them. */
+    reviewerName: ProviderName | null;
     reviewerProviders: readonly string[];
     implementationProviders: readonly string[];
     config: DevHarmonicsConfig;
@@ -1861,7 +1872,10 @@ export class Orchestrator {
           continue;
         }
         this.ledger.setTaskStatus(input.runId, input.task.id, "failed");
-        this.ledger.addEvent(input.runId, "task.failed", `${input.task.title}: no subscription connection is available and no qualified local worker can take over`);
+        // Say why routing actually refused rather than asserting a cause. An
+        // exhausted subscription is the common case, not the only one: an
+        // assigned model can be missing, or unqualified for the role.
+        this.ledger.addEvent(input.runId, "task.failed", `${input.task.title}: no model could take this task (${routeAttempt.reason})`);
         return "failed";
       }
       const routing = routeAttempt.decision;

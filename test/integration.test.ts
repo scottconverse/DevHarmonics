@@ -11,6 +11,7 @@ import { initializeProject, loadConfig, devHarmonicsDirectory } from "../src/con
 import { inspectProviders } from "../src/doctor.js";
 import { Ledger } from "../src/ledger.js";
 import { Orchestrator, repositoryTaskIds } from "../src/orchestrator.js";
+import { syncOllamaRuntimes } from "../src/ollama.js";
 import { runProcess } from "../src/process.js";
 import { startDashboard } from "../src/server.js";
 
@@ -107,7 +108,10 @@ if (process.argv.includes("--version")) {
   else if (process.argv.includes("--output-format")) console.log(JSON.stringify({result:review}));
   else console.log(review);
 } else if (input.includes("diagnostic investigator")) {
-  console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"README.md:1 contains the heading Fixture. This directly satisfies the assigned diagnostic criterion, and the read-only inspection identified no contradictory heading elsewhere. No files were changed."}}));
+  const report = input.includes("Fabricated fixture")
+    ? "config.yaml:3 states the fixture version, user_manual.md:2 confirms it, and README.md:99 repeats the same value. These three sources agree with each other, and the read-only inspection found no contradictory statement anywhere else in the repository."
+    : "README.md:1 contains the heading Fixture. This directly satisfies the assigned diagnostic criterion, and the read-only inspection identified no contradictory heading elsewhere. No files were changed.";
+  console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:report}}));
 } else if (input.includes("Correct only these retained review findings")) {
   if (existsSync("needs-fix.txt")) unlinkSync("needs-fix.txt");
   writeFileSync("result.txt", "corrected by independent fixer\\n", "utf8");
@@ -954,6 +958,135 @@ test("objective preview creates no run and exact approved revision executes with
       await rm(runRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
     await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("a run whose subscription worker is exhausted falls back to a qualified local model", async () => {
+  // The central claim of the local-fallback work, end to end. Every gate on the
+  // path — objective planning, run start, and the attempt loop — used to refuse
+  // on subscription health alone, before local execution was ever considered,
+  // so fallback was reachable in routing and unreachable in practice. An audit
+  // showed the production wiring could be removed with the suite still green.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-local-fallback-e2e-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  let localInvocations = 0;
+  const ollama = createServer(async (request, response) => {
+    response.setHeader("Content-Type", "application/json");
+    if (request.url === "/api/version") return response.end(JSON.stringify({ version: "fixture-1" }));
+    if (request.url === "/api/tags") return response.end(JSON.stringify({ models: [{ name: "local-analyst:7b" }] }));
+    if (request.url === "/api/show") return response.end(JSON.stringify({ capabilities: ["completion"] }));
+    if (request.url === "/api/chat" && request.method === "POST") {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      localInvocations += 1;
+      const parsed = JSON.parse(body) as { messages?: Array<{ content?: string }> };
+      const prompt = parsed.messages?.[0]?.content ?? "";
+      const text = prompt.includes("qualification fixture")
+        ? "DEVHARMONICS_QUALIFIED"
+        : "README.md:1 contains the heading Fixture. This directly satisfies the assigned diagnostic criterion, and the read-only inspection identified no contradictory heading elsewhere. No files were changed.";
+      return response.end(JSON.stringify({ message: { role: "assistant", content: text }, done_reason: "stop", prompt_eval_count: 20, eval_count: 12 }));
+    }
+    response.statusCode = 404;
+    response.end(JSON.stringify({ error: "not found" }));
+  });
+  await new Promise<void>((resolve) => ollama.listen(0, "127.0.0.1", resolve));
+  const address = ollama.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  config.runPolicy.requirePlanApproval = false;
+  config.localRuntimes.ollama = [{ id: "fixture", displayName: "Fixture runtime", baseUrl, enabled: true }];
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}
+`, "utf8");
+
+  const ledger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  let runId = "";
+  try {
+    // Register and qualify the local fleet the way a prior run would have, then
+    // exhaust the only subscription worker. Nothing but the local model is left
+    // that can carry a task.
+    await syncOllamaRuntimes(ledger, config.localRuntimes.ollama);
+    const localModel = ledger.listModels("local:ollama:fixture")[0];
+    assert.ok(localModel, `the fixture runtime registered no model: ${JSON.stringify(ledger.listConnections().map((item) => item.id))}`);
+    ledger.recordModelQualification({ modelId: localModel.id, fixtureVersion: "local-analysis-v1", role: "analysis", passed: true, score: 1, evidence: {}, fingerprint: localModel.qualificationFingerprint });
+    ledger.setModelPreference(localModel.id, { active: true });
+    ledger.upsertConnection({ id: "subscription-cli:codex", provider: "codex", transport: "subscription_cli", authentication: "subscription", displayName: "Codex", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "unknown", capacity: "unknown", adapterVersion: "test", runtimeVersion: "test", metadata: {} });
+    ledger.recordConnectionOutcome("subscription-cli:codex", { success: false, failureKind: "quota_exhausted", detail: "usage limit reached" });
+    assert.equal(ledger.isConnectionEligible("subscription-cli:codex"), false, "the only subscription worker is cooling");
+
+    const before = localInvocations;
+    runId = await new Orchestrator(ledger).run({ goal: "Audit fixture without changing it", projectPath: project, autonomy: "observe", agents: 1 });
+    const run = ledger.getRun(runId);
+    // The run must not be refused before it starts, and the task must not be
+    // failed for lack of a subscription.
+    assert.ok(localInvocations > before, "the local runtime carried the work");
+    const task = run?.tasks.find((item) => item.id === "observe");
+    assert.equal(task?.status, "passed", `the local model must be able to complete the task: ${JSON.stringify(run?.events?.map((event) => event.message))}`);
+    assert.equal(run?.status, "ready", JSON.stringify(run?.finalReview));
+  } finally {
+    ledger.close();
+    await new Promise<void>((resolve) => ollama.close(() => resolve()));
+    if (runId) {
+      const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
+      await runProcess({ command: "git", args: ["worktree", "prune"], cwd: project, timeoutMs: 30_000 });
+      await rm(runRoot, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+    }
+    await rm(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+  }
+});
+
+test("a diagnostic whose citations do not resolve is rejected by the run, not just by the checker", async () => {
+  // The citation verifier had unit coverage, but nothing proved it was WIRED:
+  // an audit showed the gate could be deleted from executeTask and the suite
+  // would stay green. This is the end-to-end claim — a worker that invents
+  // well-formed citations must not produce a ready run. The positive case is
+  // the observe run above, whose report cites README.md:1 and passes.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-fabricated-citations-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  config.runPolicy.requirePlanApproval = false;
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}
+`, "utf8");
+
+  const ledger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  let runId = "";
+  try {
+    runId = await new Orchestrator(ledger).run({ goal: "Fabricated fixture audit", projectPath: project, autonomy: "observe", agents: 1 });
+    const run = ledger.getRun(runId);
+    assert.notEqual(run?.status, "ready", `a run built on citations that do not exist must not be ready: ${JSON.stringify(run?.tasks)}`);
+    const task = run?.tasks.find((item) => item.id === "observe");
+    assert.ok(["failed", "blocked"].includes(task?.status ?? ""), `the fabricating task must not pass, got '${task?.status}'`);
+    const rejections = (run?.events ?? []).filter((event) => /cites evidence that does not exist/.test(event.message));
+    assert.ok(rejections.length > 0, `the run must say the citations did not resolve: ${JSON.stringify((run?.events ?? []).map((event) => event.message))}`);
+    // ...and it must name what was wrong, not merely that something was.
+    assert.match(rejections[0]!.message, /config\.yaml:3|user_manual\.md:2|README\.md:99/);
+    // The report never becomes a finding other agents can build on.
+    const evidence = ledger.getRunEvidence(runId);
+    assert.ok(
+      !(evidence?.blackboard ?? []).some((entry) => entry.kind === "finding" && entry.content.includes("config.yaml")),
+      "a rejected report must not be recorded as a finding",
+    );
+  } finally {
+    ledger.close();
+    if (runId) {
+      const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
+      await runProcess({ command: "git", args: ["worktree", "prune"], cwd: project, timeoutMs: 30_000 });
+      await rm(runRoot, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+    }
+    await rm(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
   }
 });
 

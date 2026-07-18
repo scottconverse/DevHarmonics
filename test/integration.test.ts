@@ -1854,3 +1854,29 @@ test("owner steering interrupts a live attempt and hands off to an attributed co
     await rm(root, { recursive: true, force: true, maxRetries: 60, retryDelay: 250 });
   }
 });
+
+test("the steering panel reports requested admission changes honestly before they take effect", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-steering-ui-"));
+  const project = await createRepository(root);
+  await initializeProject(project);
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  try {
+    const appScript = await fetch(`${dashboard.url}/app.js`).then((response) => response.text());
+    // A directive is only in force once the scheduler consumes it, so a merely
+    // requested hold must never render as an applied one.
+    assert.match(appScript, /Hold requested/, "a pending hold is reported as requested, not as held");
+    assert.match(appScript, /takes effect at the next admission boundary/, "the panel says when a request takes effect");
+    assert.match(appScript, /admissionState === "held" \|\| admissionState === "holding"/, "hold is disabled while its own request is still in flight");
+    assert.match(appScript, /admissionState === "admitting" \|\| admissionState === "resuming"/, "resume is disabled while its own request is still in flight");
+    // The interrupt confirmation must not promise mid-response injection.
+    assert.match(appScript, /cannot change an answer already being written/, "the interrupt copy stays honest about what it does");
+    assert.doesNotMatch(appScript, /inject|mid-response/i, "the UI never claims to inject direction into a running response");
+
+    const page = await fetch(dashboard.url).then((response) => response.text());
+    assert.match(page, /id="steering-panel"/);
+    assert.match(page, /cannot change a task's permissions, risk, acceptance criteria, or repository scope/, "the panel states the containment boundary to the user");
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});

@@ -797,13 +797,26 @@ function renderSteering(run) {
     return;
   }
 
-  const held = [...directives]
-    .filter((directive) => ["hold_admission", "resume_admission"].includes(directive.kind) && directive.disposition === "applied")
-    .at(-1)?.kind === "hold_admission";
-  $("#steering-admission").textContent = held ? "Admission held" : "Admitting tasks";
-  $("#steering-admission").className = `lifecycle ${held ? "warn" : ""}`;
-  $("#steering-hold").disabled = held;
-  $("#steering-resume").disabled = !held;
+  // Admission has three honest states, not two: a directive is only in force
+  // once the scheduler consumes it at its next admission boundary. Reporting a
+  // requested hold as "held" would claim an effect that has not happened yet.
+  const admissionDirectives = directives.filter((directive) => ["hold_admission", "resume_admission"].includes(directive.kind));
+  const held = admissionDirectives.filter((directive) => directive.disposition === "applied").at(-1)?.kind === "hold_admission";
+  const requested = admissionDirectives.filter((directive) => directive.disposition === "pending").at(-1) ?? null;
+  const admissionState = requested
+    ? requested.kind === "hold_admission" ? "holding" : "resuming"
+    : held ? "held" : "admitting";
+  const admissionLabel = {
+    holding: "Hold requested — takes effect at the next admission boundary",
+    resuming: "Resume requested — takes effect at the next admission boundary",
+    held: "Admission held",
+    admitting: "Admitting tasks",
+  }[admissionState];
+  $("#steering-admission").textContent = admissionLabel;
+  $("#steering-admission").className = `lifecycle ${admissionState === "held" ? "warn" : admissionState === "admitting" ? "" : "pending"}`;
+  // Never leave a control that would only queue a duplicate of what is already in flight.
+  $("#steering-hold").disabled = admissionState === "held" || admissionState === "holding";
+  $("#steering-resume").disabled = admissionState === "admitting" || admissionState === "resuming";
 
   const select = $("#steering-task");
   const previous = select.value;

@@ -391,3 +391,4 @@ pre { margin: 0; padding: 12px; overflow: auto; max-height: 280px; background: #
 .steering-disposition.pending { color: var(--blue); }
 .steering-disposition.superseded { color: var(--muted); }
 .lifecycle.warn { color: var(--amber); }
+.lifecycle.pending { color: var(--blue); }

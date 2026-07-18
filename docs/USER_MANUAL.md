@@ -162,6 +162,17 @@ For a multi-repository run, the **Exact integration set** card shows the overall
 
 For an Observe run, DevHarmonics stores the selected mode with the run, requires every planned task to be `diagnostic`, `read_only`, and `low` risk, and rejects a worker that asks for approval again or omits contracted path-and-line evidence. Accepted findings are retained in the evidence package and reviewed independently; an empty Git diff alone is not sufficient for success.
 
+### Steer a run while it is working (development builds after v0.5.1)
+
+The **Steer this run** panel lets you redirect live work without opening an agent terminal. Nothing you do here loses completed evidence.
+
+- **Hold new tasks** stops DevHarmonics starting anything new while tasks already running finish normally. **Resume admission** releases the queue. The panel distinguishes a request you just made from one the scheduler has actually applied, so you always know whether a hold is in force yet.
+- **Reassign** moves a queued task to a different signed-in provider, and **Set order** chooses which queued tasks are admitted first. Both apply only to work that has not started, and neither can start a task whose dependencies are unfinished.
+- **Send clarification** delivers extra direction to one task. It is applied at that task's next attempt boundary rather than mid-answer, and the record shows exactly which attempt received it.
+- **Interrupt & hand off** stops the attempt a task is currently running, keeps that partial attempt as evidence, and starts a fresh attempt carrying your direction. DevHarmonics does not claim to change an answer already being written — it stops and hands off, which is why the button is only available while an attempt is genuinely in flight. Repeated interrupts on one task are capped so they cannot extend its provider usage without limit.
+
+Steering guides work inside the plan you approved. It cannot change a task's permissions, risk, acceptance criteria, or repository scope, and it cannot enable external writes or paid API use — those remain plan and policy decisions. Every steering request is recorded with who made it, what it targeted, and whether it was applied, rejected, or superseded by a later request, so a run's history explains every redirection after the fact.
+
 ## 7. Cancel a run
 
 Select an active run and click **Cancel run**. DevHarmonics stops scheduling new tasks, aborts active provider processes, and marks live tasks and the run as cancelled. Already-created branches, worktrees, commits, and ledger receipts remain available for inspection.

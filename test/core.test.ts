@@ -12,7 +12,7 @@ import { projectLegacyProvider } from "../src/compatibility.js";
 import { assertRunTransition, assertTaskTransition, domainId } from "../src/domain.js";
 import { LEDGER_SCHEMA_VERSION, Ledger } from "../src/ledger.js";
 import { assignReviewFindings, createReviewEvidenceBinding, hasRunnableWorker, Orchestrator, parseFirstJsonObject, planSteeredAdmission, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
-import { verifyReportCitations } from "../src/citations.js";
+import { extractCitations, verifyReportCitations } from "../src/citations.js";
 import { discoverOllama, OllamaAdapter, qualifyOllamaModel, syncOllamaRegistry, syncOllamaRuntimes } from "../src/ollama.js";
 import {
   createProvider,
@@ -4403,6 +4403,87 @@ test("a diagnostic report citing files that do not exist is rejected as unverifi
     const none = await verifyReportCitations(root, "No citations here, just prose.");
     assert.deepEqual(none.checked, []);
     assert.deepEqual(none.unverifiable, []);
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test("every evidence form the diagnostic gate accepts is resolved by the citation verifier", async () => {
+  // An audit proved the verifier was bypassable: the gate in agents.ts accepted
+  // `[missing.md](missing.md), line 2` as evidence, but the verifier's own
+  // narrower pattern found zero citations in it, so a fabricated finding written
+  // in that shape passed unchecked. Range ends were discarded, empty files
+  // counted as one line, `../` traversal was silently stripped, and a legitimate
+  // absolute path inside the worktree was rejected. Each row below is one of
+  // those proven evasions.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-citation-forms-"));
+  try {
+    await writeFile(path.join(root, "README.md"), "line one\nline two\nline three\n", "utf8");
+    await writeFile(path.join(root, "empty.md"), "", "utf8");
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "src", "app.py"), "import os\nVERSION = '1.2.0'\n", "utf8");
+    // A decoy with the same basename as the traversal target, to prove the
+    // traversal is rejected rather than quietly resolved against the decoy.
+    await writeFile(path.join(root, "outside.ts"), "export const x = 1;\n", "utf8");
+    // The traversal and absolute-path rows must fail because the cited path is
+    // outside the worktree, NOT merely because nothing is there — so both
+    // targets really exist. Without this the containment check can be deleted
+    // and the suite stays green.
+    const neighbour = await mkdtemp(path.join(os.tmpdir(), "devharmonics-citation-neighbour-"));
+    await writeFile(path.join(neighbour, "other.ts"), "export const y = 2;\n", "utf8");
+    await writeFile(path.join(path.dirname(root), "outside.ts"), "export const z = 3;\n", "utf8");
+
+    const cases: Array<{ text: string; verifies: boolean; why: string }> = [
+      { text: "Found the pin at src/app.py:2 and context in README.md:1.", verifies: true, why: "plain path:line" },
+      { text: "See [README.md](README.md), line 2 for the claim.", verifies: true, why: "linked path with nearby line" },
+      { text: "See [missing.md](missing.md), line 2 for the claim.", verifies: false, why: "linked form naming a file that does not exist" },
+      { text: "The evidence is in [empty.md](empty.md), line 1.", verifies: false, why: "a line cited in an empty file" },
+      { text: "Range README.md:1-2 covers it.", verifies: true, why: "a range fully inside the file" },
+      { text: "Range README.md:2-999 covers it.", verifies: false, why: "a range whose end is past the file" },
+      { text: "Range README.md:3-1 covers it.", verifies: false, why: "a backwards range" },
+      { text: "Broken at ../outside.ts:1 upstream.", verifies: false, why: "traversal outside the worktree" },
+      { text: `Broken at ${path.join(root, "src", "app.py")}:2 exactly.`, verifies: true, why: "an absolute path inside the worktree" },
+      { text: `Broken at ${path.join(neighbour, "other.ts")}:1 exactly.`, verifies: false, why: "an absolute path to a real file outside the worktree" },
+      { text: "Version 1.2.0 shipped and 3.4.5 followed, no files named.", verifies: true, why: "version strings are not citations" },
+    ];
+
+    for (const item of cases) {
+      const verification = await verifyReportCitations(root, item.text);
+      assert.equal(
+        verification.unverifiable.length === 0,
+        item.verifies,
+        `${item.why}: ${JSON.stringify(item.text)} produced ${JSON.stringify(verification.unverifiable)}`,
+      );
+    }
+
+    // The gate and the verifier must agree on what counts as evidence. Any form
+    // the gate passes must produce at least one citation for the verifier to
+    // resolve — that equivalence is the whole defence against this class.
+    const gated = {
+      id: "t-citation-parity",
+      title: "Inspect evidence",
+      description: "Inspect evidence",
+      dependencies: [],
+      preferredProvider: null,
+      checks: ["test"],
+      kind: "diagnostic" as const,
+      permission: "read_only" as const,
+      risk: "low" as const,
+      acceptanceCriteria: ["Every finding cites a repository-relative file path and line number"],
+    };
+    const padding = " This report is long enough to clear the minimum length required of a diagnostic report body.";
+    for (const item of cases) {
+      const text = item.text + padding;
+      if (validateDiagnosticResult(gated, text) === null) {
+        assert.ok(
+          extractCitations(text).length > 0,
+          `the gate accepted ${JSON.stringify(item.text)} as evidence but the verifier found nothing to check`,
+        );
+      }
+    }
+
+    await rm(neighbour, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    await rm(path.join(path.dirname(root), "outside.ts"), { force: true, maxRetries: 10, retryDelay: 100 });
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }

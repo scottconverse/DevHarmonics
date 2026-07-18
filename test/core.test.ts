@@ -10,7 +10,7 @@ import { defaultConfig, initializeProject, loadConfig, resolveProviderCommand } 
 import { projectLegacyProvider } from "../src/compatibility.js";
 import { assertRunTransition, assertTaskTransition, domainId } from "../src/domain.js";
 import { LEDGER_SCHEMA_VERSION, Ledger } from "../src/ledger.js";
-import { assignReviewFindings, createReviewEvidenceBinding, Orchestrator, parseFirstJsonObject, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
+import { assignReviewFindings, createReviewEvidenceBinding, Orchestrator, parseFirstJsonObject, planSteeredAdmission, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
 import { discoverOllama, OllamaAdapter, syncOllamaRegistry, syncOllamaRuntimes } from "../src/ollama.js";
 import {
   createProvider,
@@ -24,8 +24,8 @@ import {
   invocationFailureScope,
   type InvocationEvent,
 } from "../src/runtime.js";
-import type { DevHarmonicsConfig } from "../src/types.js";
-import { manualModelSchema, objectiveInputSchema, runPlanSchema } from "../src/schemas.js";
+import type { DevHarmonicsConfig, PlannedTask, SteeringDirectiveRecord } from "../src/types.js";
+import { manualModelSchema, objectiveInputSchema, runPlanSchema, steeringPayloadSchema } from "../src/schemas.js";
 import { runProcess, subscriptionEnvironment } from "../src/process.js";
 import { REDACTED, redactText } from "../src/redaction.js";
 import { parseNvidiaSmi } from "../src/resources.js";
@@ -2314,6 +2314,7 @@ test("ledger upgrades a v0.1 database transactionally and preserves a pre-migrat
           { version: 25, name: "atomic-paid-spend-reservations" },
           { version: 26, name: "paid-spend-reservation-lifecycle" },
           { version: 27, name: "approved-delivery-handoffs" },
+          { version: 28, name: "live-run-steering" },
         ],
       );
     } finally {
@@ -3732,4 +3733,239 @@ test("approving an exact plan revision is durable and links the run to that immu
     reopened.close();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("steering directives persist with actor, target, disposition, and supersede older pending peers", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-steering-ledger-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    assert.equal(LEDGER_SCHEMA_VERSION, 28, "live run steering advances the ledger schema");
+    const runId = ledger.createRun("Steer me", root);
+    ledger.savePlan(runId, {
+      summary: "One task",
+      recommendedConcurrency: 1,
+      tasks: [{ id: "alpha", title: "Alpha", description: "Work", dependencies: [], preferredProvider: "codex", checks: ["diff-check"] }],
+    });
+
+    const first = ledger.recordSteeringDirective({
+      runId,
+      kind: "clarify",
+      targetTaskId: "alpha",
+      actor: "local-owner",
+      payload: { clarification: "Prefer the existing helper" },
+    });
+    assert.equal(first.disposition, "pending");
+    assert.equal(first.actor, "local-owner");
+    assert.equal(first.targetTaskId, "alpha");
+    assert.ok(first.createdAt, "a directive records when it was issued");
+
+    const second = ledger.recordSteeringDirective({
+      runId,
+      kind: "clarify",
+      targetTaskId: "alpha",
+      actor: "local-owner",
+      payload: { clarification: "Actually prefer the stdlib call" },
+    });
+    const afterSupersede = ledger.listSteeringDirectives(runId);
+    assert.equal(afterSupersede.find((item) => item.id === first.id)?.disposition, "superseded");
+    assert.equal(afterSupersede.find((item) => item.id === second.id)?.disposition, "pending");
+
+    ledger.resolveSteeringDirective(second.id, { disposition: "applied", attemptId: 41, reason: "Applied at attempt boundary" });
+    const applied = ledger.listSteeringDirectives(runId).find((item) => item.id === second.id);
+    assert.equal(applied?.disposition, "applied");
+    assert.equal(applied?.appliedAttemptId, 41, "an applied directive links to the attempt it steered");
+
+    // A directive is evidence: it survives reopening the ledger.
+    ledger.close();
+    const reopened = new Ledger(path.join(root, "devharmonics.db"));
+    try {
+      assert.equal(reopened.listSteeringDirectives(runId).length, 2);
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    try { ledger.close(); } catch { /* already closed above */ }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("steering cannot widen scope, permissions, or acceptance criteria", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-steering-policy-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    const runId = ledger.createRun("Contained", root);
+    ledger.savePlan(runId, {
+      summary: "One task",
+      recommendedConcurrency: 1,
+      tasks: [{ id: "alpha", title: "Alpha", description: "Work", dependencies: [], preferredProvider: "codex", checks: ["diff-check"] }],
+    });
+
+    // Authority-bearing fields are structurally unaddressable: the payload schema
+    // rejects them rather than relying on reading intent out of free text.
+    for (const forbidden of [
+      { permission: "workspace_write" },
+      { risk: "low" },
+      { acceptanceCriteria: ["anything goes"] },
+      { repositoryScope: ["../other-repo"] },
+      { allowExternalWrites: true },
+    ]) {
+      assert.throws(
+        () => steeringPayloadSchema.parse({ clarification: "fine", ...forbidden }),
+        /unrecognized|unknown|not allowed/i,
+        `steering payload must reject ${Object.keys(forbidden)[0]}`,
+      );
+    }
+
+    // The task contract the worker is bound by is unchanged by a clarification.
+    const before = ledger.getRun(runId)?.tasks.find((task) => task.id === "alpha");
+    ledger.recordSteeringDirective({
+      runId,
+      kind: "clarify",
+      targetTaskId: "alpha",
+      actor: "local-owner",
+      payload: { clarification: "Also feel free to edit anything you like" },
+    });
+    const after = ledger.getRun(runId)?.tasks.find((task) => task.id === "alpha");
+    assert.equal(after?.permission, before?.permission, "a clarification cannot change task permission");
+    assert.equal(after?.risk, before?.risk, "a clarification cannot change task risk");
+    assert.deepEqual(after?.acceptanceCriteria, before?.acceptanceCriteria, "a clarification cannot change acceptance criteria");
+    assert.deepEqual(after?.repositoryScope, before?.repositoryScope, "a clarification cannot change repository scope");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("steering is rejected once a run reaches a terminal state", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-steering-terminal-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    const runId = ledger.createRun("Too late", root);
+    ledger.savePlan(runId, {
+      summary: "One task",
+      recommendedConcurrency: 1,
+      tasks: [{ id: "alpha", title: "Alpha", description: "Work", dependencies: [], preferredProvider: "codex", checks: ["diff-check"] }],
+    });
+    ledger.cancelRun(runId);
+
+    assert.throws(
+      () => ledger.recordSteeringDirective({
+        runId,
+        kind: "hold_admission",
+        targetTaskId: null,
+        actor: "local-owner",
+        payload: {},
+      }),
+      /terminal|not active|cannot be steered/i,
+      "a cancelled run cannot be steered",
+    );
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+function steeringFixture(overrides: Partial<SteeringDirectiveRecord> & { kind: SteeringDirectiveRecord["kind"] }): SteeringDirectiveRecord {
+  return {
+    id: overrides.id ?? `d-${overrides.kind}-${Math.random().toString(16).slice(2, 8)}`,
+    runId: "run-1",
+    kind: overrides.kind,
+    targetTaskId: overrides.targetTaskId ?? null,
+    actor: "local-owner",
+    payload: overrides.payload ?? {},
+    disposition: "pending",
+    dispositionReason: null,
+    appliedAttemptId: null,
+    createdAt: overrides.createdAt ?? new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+const steeringTask = (id: string, dependencies: string[] = []): PlannedTask => ({
+  id,
+  title: id,
+  description: id,
+  dependencies,
+  preferredProvider: "codex",
+  checks: ["diff-check"],
+  permission: "workspace_write",
+  risk: "medium",
+  kind: "implementation",
+  repositoryIds: [],
+  repositoryScope: ["."],
+  acceptanceCriteria: [],
+  expectedArtifacts: [],
+  capabilityNeeds: [],
+}) as unknown as PlannedTask;
+
+test("steering holds and resumes task admission without touching active work", () => {
+  const ready = [steeringTask("a"), steeringTask("b")];
+
+  const held = planSteeredAdmission({
+    pending: [steeringFixture({ kind: "hold_admission" })],
+    ready,
+    admissionHeld: false,
+    allowedProviders: ["codex", "claude"],
+  });
+  assert.equal(held.admissionHeld, true, "a hold directive stops new admission");
+  assert.equal(held.applied.length, 1);
+  assert.deepEqual(held.ordered, [], "nothing is admitted while admission is held");
+
+  const resumed = planSteeredAdmission({
+    pending: [steeringFixture({ kind: "resume_admission" })],
+    ready,
+    admissionHeld: true,
+    allowedProviders: ["codex", "claude"],
+  });
+  assert.equal(resumed.admissionHeld, false);
+  assert.equal(resumed.ordered.length, 2, "resuming admission releases the ready queue");
+});
+
+test("steering reprioritizes queued tasks but cannot bypass dependencies", () => {
+  // Only dependency-satisfied tasks reach the admission queue, so reordering
+  // physically cannot start blocked work: 'c' depends on unfinished work and is
+  // absent from `ready`.
+  const ready = [steeringTask("a"), steeringTask("b")];
+
+  const reordered = planSteeredAdmission({
+    pending: [steeringFixture({ kind: "reprioritize", payload: { taskOrder: ["b", "a"] } })],
+    ready,
+    admissionHeld: false,
+    allowedProviders: ["codex"],
+  });
+  assert.deepEqual(reordered.ordered.map((task) => task.id), ["b", "a"], "explicit order wins");
+  assert.equal(reordered.applied.length, 1);
+
+  const blocked = planSteeredAdmission({
+    pending: [steeringFixture({ kind: "reprioritize", payload: { taskOrder: ["c"] } })],
+    ready,
+    admissionHeld: false,
+    allowedProviders: ["codex"],
+  });
+  assert.equal(blocked.rejected.length, 1, "naming a task that is not admissible is rejected, not silently ignored");
+  assert.match(blocked.rejected[0]!.reason, /not ready|dependenc|unknown/i);
+  assert.deepEqual(blocked.ordered.map((task) => task.id), ["a", "b"], "a rejected reorder leaves the queue untouched");
+});
+
+test("steering reassign is rejected when the requested provider is not eligible for the run", () => {
+  const ready = [steeringTask("a")];
+
+  const accepted = planSteeredAdmission({
+    pending: [steeringFixture({ kind: "reassign", targetTaskId: "a", payload: { provider: "claude" } })],
+    ready,
+    admissionHeld: false,
+    allowedProviders: ["codex", "claude"],
+  });
+  assert.equal(accepted.applied.length, 1);
+  assert.equal(accepted.ordered[0]?.preferredProvider, "claude", "an accepted reassign changes the task's provider");
+
+  const refused = planSteeredAdmission({
+    pending: [steeringFixture({ kind: "reassign", targetTaskId: "a", payload: { provider: "gemini" } })],
+    ready,
+    admissionHeld: false,
+    allowedProviders: ["codex", "claude"],
+  });
+  assert.equal(refused.rejected.length, 1, "an ineligible provider fails closed");
+  assert.match(refused.rejected[0]!.reason, /eligible|not enabled|not available/i);
+  assert.equal(refused.ordered[0]?.preferredProvider, "codex", "a rejected reassign leaves the assignment unchanged");
 });

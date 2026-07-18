@@ -54,6 +54,10 @@ import type {
   RunPlan,
   RunObjectiveLink,
   RunSummary,
+  SteeringDirectiveKind,
+  SteeringDirectiveRecord,
+  SteeringDisposition,
+  SteeringPayload,
   TaskStatus,
   ValidatorConfig,
   WorkbenchMessageInput,
@@ -166,7 +170,7 @@ interface CheckRow {
   duration_ms: number;
 }
 
-export const LEDGER_SCHEMA_VERSION = 27;
+export const LEDGER_SCHEMA_VERSION = 28;
 
 export const REPOSITORY_ROLES = [
   "umbrella",
@@ -1211,6 +1215,29 @@ const MIGRATIONS: readonly LedgerMigration[] = [
       `);
     },
   },
+  {
+    version: 28,
+    name: "live-run-steering",
+    apply(database) {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS steering_directives (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+          kind TEXT NOT NULL CHECK(kind IN ('hold_admission', 'resume_admission', 'reprioritize', 'reassign', 'clarify', 'interrupt')),
+          target_task_id TEXT,
+          actor TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          disposition TEXT NOT NULL CHECK(disposition IN ('pending', 'applied', 'rejected', 'superseded')),
+          disposition_reason TEXT,
+          applied_attempt_id INTEGER,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS steering_directives_run
+          ON steering_directives(run_id, disposition);
+      `);
+    },
+  },
 ];
 
 function summarizeGoal(goal: string, maxLength = 180): string {
@@ -1344,8 +1371,25 @@ const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
   integration_set_repositories: ["integration_set_id", "repository_id", "local_path", "base_commit", "integration_branch", "integration_worktree_path", "head_commit", "status", "error", "updated_at"],
   product_intelligence_snapshots: ["id", "product_id", "status", "snapshot_json", "created_at"],
   model_performance_policies: ["model_id", "ignored_before", "excluded", "updated_at"],
+  steering_directives: ["id", "run_id", "kind", "target_task_id", "actor", "payload_json", "disposition", "disposition_reason", "applied_attempt_id", "created_at", "updated_at"],
   schema_migrations: ["version", "name", "applied_at"],
 };
+
+function toSteeringDirectiveRecord(row: Record<string, unknown>): SteeringDirectiveRecord {
+  return {
+    id: String(row.id),
+    runId: String(row.run_id),
+    kind: String(row.kind) as SteeringDirectiveKind,
+    targetTaskId: row.target_task_id == null ? null : String(row.target_task_id),
+    actor: String(row.actor),
+    payload: JSON.parse(String(row.payload_json)) as SteeringPayload,
+    disposition: String(row.disposition) as SteeringDisposition,
+    dispositionReason: row.disposition_reason == null ? null : String(row.disposition_reason),
+    appliedAttemptId: row.applied_attempt_id == null ? null : Number(row.applied_attempt_id),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
 
 export interface ModelPerformancePolicyRecord {
   modelId: string;
@@ -1839,6 +1883,88 @@ export class Ledger {
       branch: input.branch,
     });
     return this.getDeliveryHandoff(input.runId)!.repositories.find((repository) => repository.repositoryId === input.repositoryId)!;
+  }
+
+  /**
+   * DH-635. A steering directive is durable evidence, not a transient command:
+   * it records who asked, what they targeted, and how it was dispositioned, so a
+   * run's history explains every redirection after the fact. Terminal runs
+   * refuse steering — a finished run's evidence is immutable.
+   */
+  recordSteeringDirective(input: {
+    runId: string;
+    kind: SteeringDirectiveKind;
+    targetTaskId: string | null;
+    actor: string;
+    payload: SteeringPayload;
+  }): SteeringDirectiveRecord {
+    const run = this.database.prepare("SELECT status FROM runs WHERE id = ?").get(input.runId) as { status: string } | undefined;
+    if (!run) throw new Error(`Run '${input.runId}' was not found`);
+    if (["ready", "not_ready", "failed", "cancelled"].includes(run.status)) {
+      throw new Error(`Run '${input.runId}' is in terminal state '${run.status}' and cannot be steered`);
+    }
+    const now = new Date().toISOString();
+    const id = crypto.randomUUID();
+    // A newer directive of the same kind against the same target replaces any
+    // still-pending peer, so the scheduler never applies stale direction.
+    this.database
+      .prepare(
+        `UPDATE steering_directives SET disposition = 'superseded', disposition_reason = ?, updated_at = ?
+         WHERE run_id = ? AND kind = ? AND disposition = 'pending'
+           AND ((target_task_id IS NULL AND ? IS NULL) OR target_task_id = ?)`,
+      )
+      .run("Superseded by a newer directive", now, input.runId, input.kind, input.targetTaskId, input.targetTaskId);
+    const payload = redactValue(input.payload) as SteeringPayload;
+    this.database
+      .prepare(
+        `INSERT INTO steering_directives (id, run_id, kind, target_task_id, actor, payload_json, disposition, disposition_reason, applied_attempt_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)`,
+      )
+      .run(id, input.runId, input.kind, input.targetTaskId, input.actor, JSON.stringify(payload), now, now);
+    this.addEvent(input.runId, "steering.requested", `${input.actor} requested ${input.kind}${input.targetTaskId ? ` for ${input.targetTaskId}` : ""}`, {
+      directiveId: id,
+      kind: input.kind,
+      taskId: input.targetTaskId,
+    });
+    return this.getSteeringDirective(id)!;
+  }
+
+  resolveSteeringDirective(
+    id: string,
+    input: { disposition: Exclude<SteeringDisposition, "pending">; reason?: string; attemptId?: number },
+  ): SteeringDirectiveRecord | null {
+    const existing = this.getSteeringDirective(id);
+    if (!existing) return null;
+    const now = new Date().toISOString();
+    this.database
+      .prepare("UPDATE steering_directives SET disposition = ?, disposition_reason = ?, applied_attempt_id = ?, updated_at = ? WHERE id = ?")
+      .run(input.disposition, input.reason ?? null, input.attemptId ?? null, now, id);
+    this.addEvent(existing.runId, `steering.${input.disposition}`, `${existing.kind}${existing.targetTaskId ? ` for ${existing.targetTaskId}` : ""}: ${input.disposition}${input.reason ? ` — ${input.reason}` : ""}`, {
+      directiveId: id,
+      kind: existing.kind,
+      taskId: existing.targetTaskId,
+      attemptId: input.attemptId ?? null,
+    });
+    return this.getSteeringDirective(id);
+  }
+
+  getSteeringDirective(id: string): SteeringDirectiveRecord | null {
+    const row = this.database.prepare("SELECT * FROM steering_directives WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    return row ? toSteeringDirectiveRecord(row) : null;
+  }
+
+  listSteeringDirectives(runId: string, options: { disposition?: SteeringDisposition } = {}): SteeringDirectiveRecord[] {
+    const rows = options.disposition
+      ? this.database.prepare("SELECT * FROM steering_directives WHERE run_id = ? AND disposition = ? ORDER BY created_at ASC").all(runId, options.disposition)
+      : this.database.prepare("SELECT * FROM steering_directives WHERE run_id = ? ORDER BY created_at ASC").all(runId);
+    return (rows as Record<string, unknown>[]).map(toSteeringDirectiveRecord);
+  }
+
+  /** Pending directives the scheduler should consider at its next safe boundary. */
+  pendingSteeringDirectives(runId: string, targetTaskId?: string | null): SteeringDirectiveRecord[] {
+    return this.listSteeringDirectives(runId, { disposition: "pending" }).filter((directive) =>
+      targetTaskId === undefined ? true : directive.targetTaskId === targetTaskId,
+    );
   }
 
   updateDeliveryRepository(

@@ -166,6 +166,11 @@ export const RUN_EVENT_KINDS = [
   "delivery.branch_pushed",
   "delivery.draft_pr_created",
   "delivery.failed",
+  "steering.requested",
+  "steering.applied",
+  "steering.rejected",
+  "steering.superseded",
+  "steering.interrupted",
   "run.failed",
 ] as const;
 export type RunEventKind = (typeof RUN_EVENT_KINDS)[number];

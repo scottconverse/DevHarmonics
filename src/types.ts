@@ -336,3 +336,35 @@ export interface RunSummary {
   }>;
   events: RunEvent[];
 }
+
+export type SteeringDirectiveKind =
+  | "hold_admission"
+  | "resume_admission"
+  | "reprioritize"
+  | "reassign"
+  | "clarify"
+  | "interrupt";
+
+export type SteeringDisposition = "pending" | "applied" | "rejected" | "superseded";
+
+export interface SteeringPayload {
+  clarification?: string;
+  taskOrder?: string[];
+  provider?: string;
+  modelId?: string;
+  reason?: string;
+}
+
+export interface SteeringDirectiveRecord {
+  id: string;
+  runId: string;
+  kind: SteeringDirectiveKind;
+  targetTaskId: string | null;
+  actor: string;
+  payload: SteeringPayload;
+  disposition: SteeringDisposition;
+  dispositionReason: string | null;
+  appliedAttemptId: number | null;
+  createdAt: string;
+  updatedAt: string;
+}

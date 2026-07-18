@@ -428,3 +428,26 @@ export const architectOutputJsonSchema = {
   required: ["summary", "recommendedConcurrency", "revision", "previousRevision", "tasks"],
   additionalProperties: false,
 } as const;
+
+// DH-635 live run steering. Authority-bearing fields (permission, risk,
+// acceptance criteria, repository scope, run policy) are deliberately absent
+// and `strict()` rejects them: steering guides work inside the approved task
+// contract and can never widen it. Containment is structural, not a semantic
+// filter over free text.
+export const steeringPayloadSchema = z
+  .object({
+    clarification: z.string().min(1).max(4_000).optional(),
+    taskOrder: z.array(z.string().min(1).max(200)).max(200).optional(),
+    provider: z.enum(["codex", "claude", "gemini", "ollama"]).optional(),
+    modelId: z.string().min(1).max(200).optional(),
+    reason: z.string().min(1).max(1_000).optional(),
+  })
+  .strict();
+
+export const steeringDirectiveInputSchema = z
+  .object({
+    kind: z.enum(["hold_admission", "resume_admission", "reprioritize", "reassign", "clarify", "interrupt"]),
+    targetTaskId: z.string().min(1).max(200).nullable().default(null),
+    payload: steeringPayloadSchema.default({}),
+  })
+  .strict();

@@ -32,6 +32,7 @@ import {
   type RunPlan,
   type RunRequest,
   type RunAutonomy,
+  type SteeringDirectiveRecord,
   type TaskStatus,
 } from "./types.js";
 import { invocationFailureScope, RuntimeInvocationError, type InvocationPermission, type RuntimeAdapter } from "./runtime.js";
@@ -594,6 +595,7 @@ export class Orchestrator {
     const pending = new Map(plan.tasks.map((task) => [task.id, task]));
     const active = new Map<string, Promise<void>>();
     let providerCursor = 0;
+    let admissionHeld = false;
 
     while (pending.size || active.size) {
       // On cancel, stop scheduling. In-flight worker processes are aborted via
@@ -610,9 +612,22 @@ export class Orchestrator {
         }
       }
 
-      const ready = [...pending.values()].filter((task) =>
+      const readyTasks = [...pending.values()].filter((task) =>
         task.dependencies.every((dependency) => statuses.get(dependency) === "passed"),
       );
+
+      // DH-635: the admission point is a safe boundary. Consume admission-scoped
+      // steering here so a redirect never lands mid-attempt.
+      const steered = planSteeredAdmission({
+        pending: this.ledger.pendingSteeringDirectives(runId).filter((directive) => ADMISSION_STEERING_KINDS.includes(directive.kind)),
+        ready: readyTasks,
+        admissionHeld,
+        allowedProviders: workerProviders,
+      });
+      admissionHeld = steered.admissionHeld;
+      for (const item of steered.applied) this.ledger.resolveSteeringDirective(item.id, { disposition: "applied", reason: item.reason });
+      for (const item of steered.rejected) this.ledger.resolveSteeringDirective(item.id, { disposition: "rejected", reason: item.reason });
+      const ready = steered.ordered;
 
       while (active.size < concurrency && ready.length) {
         const task = ready.shift()!;
@@ -640,6 +655,10 @@ export class Orchestrator {
 
       if (active.size) {
         await Promise.race(active.values());
+      } else if (admissionHeld && pending.size) {
+        // Held on purpose: the queue is idle because the owner paused admission,
+        // not because the graph is stuck. Wait for a resume directive.
+        await delay(500);
       } else if (pending.size) {
         throw new Error("The task graph cannot make progress; check for cyclic dependencies");
       }
@@ -1572,10 +1591,30 @@ export class Orchestrator {
     const excludedModelIds = new Set<string>();
     const excludedConnectionIds = new Set<string>();
 
-    for (let attempt = 1; attempt <= input.config.application.retry.maxAttempts; attempt++) {
+    // DH-635: an interrupt costs one extra attempt so a redirected task is not
+    // punished by the retry budget it never consumed on its own behalf.
+    let interruptGrants = 0;
+    for (let attempt = 1; attempt <= input.config.application.retry.maxAttempts + interruptGrants; attempt++) {
       // Do not start a new attempt once cancelled; leave the 'cancelled' status
       // for ledger.cancelRun to own rather than marking the task 'failed'.
       if (input.signal.aborted) return "cancelled";
+
+      // The attempt boundary is the other safe boundary: consume clarifications
+      // for this task so updated direction reaches the worker prompt as feedback
+      // rather than being injected mid-response.
+      const steeringForTask = this.ledger
+        .pendingSteeringDirectives(input.runId, input.task.id)
+        .filter((directive) => directive.kind === "clarify");
+      const appliedClarifications: SteeringDirectiveRecord[] = [];
+      for (const directive of steeringForTask) {
+        const clarification = directive.payload.clarification?.trim();
+        if (!clarification) {
+          this.ledger.resolveSteeringDirective(directive.id, { disposition: "rejected", reason: "No clarification text supplied" });
+          continue;
+        }
+        feedback = feedback ? `${feedback}\n\nOwner clarification: ${clarification}` : `Owner clarification: ${clarification}`;
+        appliedClarifications.push(directive);
+      }
       const eligibleProviders = input.providers.filter((name) => this.ledger.isConnectionEligible(projectLegacyProvider(name).connectionId));
       if (!eligibleProviders.length) {
         this.ledger.setTaskStatus(input.runId, input.task.id, "failed");
@@ -1657,6 +1696,34 @@ export class Orchestrator {
           ...runtimeMetadata,
         },
       );
+      // Applied clarifications link to the exact attempt they steered, so the
+      // ledger can answer "which direction produced this work?".
+      for (const directive of appliedClarifications) {
+        this.ledger.resolveSteeringDirective(directive.id, {
+          disposition: "applied",
+          reason: `Delivered to ${providerName} at attempt ${attempt}`,
+          attemptId,
+        });
+      }
+
+      // DH-635 interrupt: a per-attempt controller chained to the run signal, so
+      // an owner can stop THIS attempt without cancelling the run. Interruption
+      // is an explicit stop-and-hand-off; DevHarmonics never claims to have
+      // injected direction into a response already in flight.
+      const attemptAbort = new AbortController();
+      const propagateRunAbort = () => attemptAbort.abort();
+      input.signal.addEventListener("abort", propagateRunAbort, { once: true });
+      let interruptDirective: SteeringDirectiveRecord | null = null;
+      const interruptWatch = setInterval(() => {
+        const pendingInterrupt = this.ledger
+          .pendingSteeringDirectives(input.runId, input.task.id)
+          .find((directive) => directive.kind === "interrupt");
+        if (pendingInterrupt) {
+          interruptDirective = pendingInterrupt;
+          attemptAbort.abort();
+        }
+      }, 500);
+
       let paidSpendReservation: PaidSpendReservation | null = null;
       let paidInvocationStarted = false;
 
@@ -1708,7 +1775,7 @@ export class Orchestrator {
                 request: sanitizeLocalToolRequest(toolRequest.arguments),
               }),
             })
-          : await provider.invoke(invocationRequest, { signal: input.signal });
+          : await provider.invoke(invocationRequest, { signal: attemptAbort.signal });
         await input.worktrees.assertPrimaryClean?.(`after ${input.task.id} attempt ${attempt}`);
         const fallbackReason = routing.fallback
           ? routing.factors.join("; ")
@@ -1756,6 +1823,38 @@ export class Orchestrator {
         // A cancel aborts the child process, surfacing here as a failure. Stop
         // without marking the task 'failed' or retrying; cancelRun owns status.
         if (input.signal.aborted) return "cancelled";
+        // An owner interrupt also surfaces here as an aborted invocation. It is
+        // not a provider failure: retain the partial attempt as evidence, then
+        // hand off to a fresh attempt carrying the new direction.
+        if (interruptDirective) {
+          const directive = interruptDirective as SteeringDirectiveRecord;
+          const note = directive.payload.clarification?.trim();
+          this.ledger.finishAttempt(attemptId, "failed", "", "Interrupted by owner steering", { failureKind: "interrupted" });
+          this.ledger.resolveSteeringDirective(directive.id, {
+            disposition: "applied",
+            reason: `Interrupted attempt ${attempt}; continuing with a new attempt`,
+            attemptId,
+          });
+          this.ledger.addEvent(input.runId, "steering.interrupted", `${input.task.title}: attempt ${attempt} interrupted by owner`, {
+            taskId: input.task.id,
+            directiveId: directive.id,
+            attemptId,
+          });
+          this.ledger.addBlackboardEntry({
+            runId: input.runId,
+            taskId: input.task.id,
+            kind: "handoff",
+            content: `Owner interrupted attempt ${attempt}.${note ? ` New direction: ${note}` : ""} Prior evidence is retained; continue from the current worktree state.`,
+            sourceAttemptId: attemptId,
+          });
+          feedback = note
+            ? `The owner interrupted your previous attempt. New direction: ${note}`
+            : "The owner interrupted your previous attempt. Re-read the task contract and continue.";
+          interruptDirective = null;
+          interruptGrants += 1;
+          this.ledger.setTaskStatus(input.runId, input.task.id, "retry");
+          continue;
+        }
         const message = error instanceof Error ? error.message : String(error);
         this.ledger.finishAttempt(attemptId, "failed", "", message, {
           failureKind: error instanceof RuntimeInvocationError ? error.kind : error instanceof WorkspaceIsolationError ? "policy_denied" : "unknown",
@@ -1790,6 +1889,11 @@ export class Orchestrator {
         }
         this.ledger.setTaskStatus(input.runId, input.task.id, "failed");
         return "failed";
+      } finally {
+        // Every exit path — success, retry, interrupt, failure — must release the
+        // interrupt watcher and the run-abort listener or each attempt leaks one.
+        clearInterval(interruptWatch);
+        input.signal.removeEventListener("abort", propagateRunAbort);
       }
 
       this.ledger.setTaskStatus(input.runId, input.task.id, "verifying");
@@ -2237,6 +2341,87 @@ export class Orchestrator {
       return !quotaGroup || this.ledger.isQuotaGroupEligible(connectionId, quotaGroup.id);
     });
   }
+}
+
+/** Steering kinds the scheduler resolves at the task-admission boundary. */
+export const ADMISSION_STEERING_KINDS: readonly SteeringDirectiveRecord["kind"][] = [
+  "hold_admission",
+  "resume_admission",
+  "reprioritize",
+  "reassign",
+];
+
+/**
+ * DH-635. Resolves the admission-scoped steering directives against the queue the
+ * scheduler is about to admit from.
+ *
+ * `ready` only ever contains dependency-satisfied tasks, so reordering here
+ * physically cannot start blocked work — the dependency guarantee is structural
+ * rather than a rule this function has to re-enforce. Directives that name
+ * something inadmissible fail closed with a reason instead of being dropped.
+ */
+export function planSteeredAdmission(input: {
+  pending: SteeringDirectiveRecord[];
+  ready: PlannedTask[];
+  admissionHeld: boolean;
+  allowedProviders: readonly string[];
+}): {
+  admissionHeld: boolean;
+  ordered: PlannedTask[];
+  applied: Array<{ id: string; reason: string }>;
+  rejected: Array<{ id: string; reason: string }>;
+} {
+  let admissionHeld = input.admissionHeld;
+  let ordered = [...input.ready];
+  const applied: Array<{ id: string; reason: string }> = [];
+  const rejected: Array<{ id: string; reason: string }> = [];
+
+  for (const directive of input.pending) {
+    if (directive.kind === "hold_admission") {
+      admissionHeld = true;
+      applied.push({ id: directive.id, reason: "New task admission held; active work continues" });
+      continue;
+    }
+    if (directive.kind === "resume_admission") {
+      admissionHeld = false;
+      applied.push({ id: directive.id, reason: "Task admission resumed" });
+      continue;
+    }
+    if (directive.kind === "reprioritize") {
+      const requested = directive.payload.taskOrder ?? [];
+      const admissible = new Set(ordered.map((task) => task.id));
+      const missing = requested.filter((id) => !admissible.has(id));
+      if (missing.length) {
+        rejected.push({
+          id: directive.id,
+          reason: `Cannot prioritise ${missing.join(", ")}: unknown, already running, or dependencies are not satisfied`,
+        });
+        continue;
+      }
+      const rank = new Map(requested.map((id, index) => [id, index]));
+      ordered = [...ordered].sort((left, right) => (rank.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(right.id) ?? Number.MAX_SAFE_INTEGER));
+      applied.push({ id: directive.id, reason: `Admission order set to ${requested.join(", ")}` });
+      continue;
+    }
+    if (directive.kind === "reassign") {
+      const target = ordered.find((task) => task.id === directive.targetTaskId);
+      if (!target) {
+        rejected.push({ id: directive.id, reason: `Cannot reassign '${directive.targetTaskId}': it is not waiting for admission` });
+        continue;
+      }
+      const provider = directive.payload.provider;
+      if (!provider || !input.allowedProviders.includes(provider)) {
+        rejected.push({ id: directive.id, reason: `Provider '${provider ?? "unset"}' is not an eligible worker for this run` });
+        continue;
+      }
+      ordered = ordered.map((task) => (task.id === target.id ? { ...task, preferredProvider: provider as PlannedTask["preferredProvider"] } : task));
+      applied.push({ id: directive.id, reason: `Reassigned ${target.id} to ${provider}` });
+      continue;
+    }
+    // clarify and interrupt are attempt-scoped; the task loop consumes them.
+  }
+
+  return { admissionHeld, ordered: admissionHeld ? [] : ordered, applied, rejected };
 }
 
 export function assignReviewFindings(

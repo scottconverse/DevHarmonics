@@ -786,7 +786,10 @@ function renderSelectedRun() {
   renderVerdict(run);
 }
 
-const STEERABLE_RUN_STATUSES = ["planning", "running", "awaiting_approval", "paused"];
+// A paused run is not steerable: recovery continues in a new run, so direction
+// recorded against this one would never reach a worker. Mirrors the ledger's
+// STEERABLE_RUN_STATUSES.
+const STEERABLE_RUN_STATUSES = ["planning", "running", "awaiting_approval"];
 
 function renderSteering(run) {
   const panel = $("#steering-panel");

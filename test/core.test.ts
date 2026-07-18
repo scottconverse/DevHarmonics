@@ -4107,3 +4107,70 @@ test("steering a queued task whose dependencies are unmet waits instead of being
   assert.equal(unknown.rejected.length, 1);
   assert.equal(unknown.deferred.length, 0);
 });
+
+test("the ledger refuses steering that could never be consumed", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-steering-refusal-"));
+  const taskIds = ["queuedTask", "workingTask", "verifyingTask", "retryTask", "passedTask"];
+  const plan: RunPlan = {
+    summary: "One task per state",
+    recommendedConcurrency: 1,
+    tasks: taskIds.map((id) => ({ id, title: id, description: "Work", dependencies: [], preferredProvider: "codex", checks: ["diff-check"] })),
+  } as unknown as RunPlan;
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    const runId = ledger.createRun("Refusals", root);
+    ledger.savePlan(runId, plan);
+    // Drive each task to its state through legal transitions only.
+    ledger.setTaskStatus(runId, "workingTask", "working", "codex");
+    ledger.setTaskStatus(runId, "verifyingTask", "working", "codex");
+    ledger.setTaskStatus(runId, "verifyingTask", "verifying");
+    ledger.setTaskStatus(runId, "retryTask", "working", "codex");
+    ledger.setTaskStatus(runId, "retryTask", "verifying");
+    ledger.setTaskStatus(runId, "retryTask", "retry");
+    ledger.setTaskStatus(runId, "passedTask", "working", "codex");
+    ledger.setTaskStatus(runId, "passedTask", "verifying");
+    ledger.setTaskStatus(runId, "passedTask", "passed");
+
+    // Interrupt is meaningful only while a provider call is genuinely in flight.
+    // 'verifying' runs our own validators; 'retry' is a backoff gap.
+    for (const id of ["queuedTask", "verifyingTask", "retryTask"]) {
+      assert.throws(
+        () => ledger.recordSteeringDirective({ runId, kind: "interrupt", targetTaskId: id, actor: "local-owner", payload: {} }),
+        /no attempt in flight/i,
+        `interrupt must be refused for ${id}`,
+      );
+    }
+    assert.ok(
+      ledger.recordSteeringDirective({ runId, kind: "interrupt", targetTaskId: "workingTask", actor: "local-owner", payload: {} }),
+      "interrupt is accepted exactly when an attempt is in flight",
+    );
+
+    // A finished task can never consume direction.
+    assert.throws(
+      () => ledger.recordSteeringDirective({ runId, kind: "clarify", targetTaskId: "passedTask", actor: "local-owner", payload: { clarification: "late" } }),
+      /already finished/i,
+      "a passed task cannot be steered",
+    );
+
+    // A paused run recovers as a NEW run, so this one can accept nothing further.
+    assert.equal(ledger.pauseRun(runId), true);
+    assert.equal(
+      ledger.listSteeringDirectives(runId).filter((directive) => directive.disposition === "pending").length,
+      0,
+      "pausing disposes directives it can no longer honour",
+    );
+    assert.throws(
+      () => ledger.recordSteeringDirective({ runId, kind: "clarify", targetTaskId: "queuedTask", actor: "local-owner", payload: { clarification: "after pause" } }),
+      /cannot be steered/i,
+      "a paused run refuses new direction instead of storing it forever",
+    );
+    assert.equal(
+      ledger.listSteeringDirectives(runId).filter((directive) => directive.disposition === "pending").length,
+      0,
+      "and the refusal left nothing pending",
+    );
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});

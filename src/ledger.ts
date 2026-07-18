@@ -1375,6 +1375,16 @@ const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
   schema_migrations: ["version", "name", "applied_at"],
 };
 
+/**
+ * Runs that can still consume direction. `paused` is deliberately absent:
+ * recovery continues in a new run, so a directive recorded against a paused run
+ * would have no consumer.
+ */
+export const STEERABLE_RUN_STATUSES: readonly string[] = ["planning", "running", "awaiting_approval"];
+
+/** Tasks that can still consume direction — anything not already finished. */
+export const STEERABLE_TASK_STATUSES: readonly string[] = ["queued", "working", "verifying", "retry"];
+
 function toSteeringDirectiveRecord(row: Record<string, unknown>): SteeringDirectiveRecord {
   return {
     id: String(row.id),
@@ -1898,29 +1908,53 @@ export class Ledger {
     actor: string;
     payload: SteeringPayload;
   }): SteeringDirectiveRecord {
-    const run = this.database.prepare("SELECT status FROM runs WHERE id = ?").get(input.runId) as { status: string } | undefined;
-    if (!run) throw new Error(`Run '${input.runId}' was not found`);
-    if (["ready", "not_ready", "failed", "cancelled"].includes(run.status)) {
-      throw new Error(`Run '${input.runId}' is in terminal state '${run.status}' and cannot be steered`);
-    }
     const now = new Date().toISOString();
     const id = crypto.randomUUID();
-    // A newer directive of the same kind against the same target replaces any
-    // still-pending peer, so the scheduler never applies stale direction.
-    this.database
-      .prepare(
-        `UPDATE steering_directives SET disposition = 'superseded', disposition_reason = ?, updated_at = ?
-         WHERE run_id = ? AND kind = ? AND disposition = 'pending'
-           AND ((target_task_id IS NULL AND ? IS NULL) OR target_task_id = ?)`,
-      )
-      .run("Superseded by a newer directive", now, input.runId, input.kind, input.targetTaskId, input.targetTaskId);
-    const payload = redactValue(input.payload) as SteeringPayload;
-    this.database
-      .prepare(
-        `INSERT INTO steering_directives (id, run_id, kind, target_task_id, actor, payload_json, disposition, disposition_reason, applied_attempt_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)`,
-      )
-      .run(id, input.runId, input.kind, input.targetTaskId, input.actor, JSON.stringify(payload), now, now);
+    // Validation and insertion share one transaction. Checking run/task state in
+    // a separate statement would let a task finish in the gap and leave the new
+    // directive with no consumer — a directive stuck pending forever.
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const run = this.database.prepare("SELECT status FROM runs WHERE id = ?").get(input.runId) as { status: string } | undefined;
+      if (!run) throw new Error(`Run '${input.runId}' was not found`);
+      if (!STEERABLE_RUN_STATUSES.includes(run.status)) {
+        // A paused run is not steerable: recovery continues in a NEW run, so a
+        // directive recorded here would never be reached.
+        throw new Error(`Run '${input.runId}' is '${run.status.replaceAll("_", " ")}' and cannot be steered`);
+      }
+      if (input.targetTaskId) {
+        const task = this.database
+          .prepare("SELECT status FROM tasks WHERE run_id = ? AND task_id = ?")
+          .get(input.runId, input.targetTaskId) as { status: string } | undefined;
+        if (!task) throw new Error(`Run '${input.runId}' has no task '${input.targetTaskId}'`);
+        if (!STEERABLE_TASK_STATUSES.includes(task.status)) {
+          throw new Error(`Task '${input.targetTaskId}' has already finished as '${task.status}' and can no longer be steered`);
+        }
+        if (input.kind === "interrupt" && task.status !== "working") {
+          throw new Error(`Task '${input.targetTaskId}' has no attempt in flight to interrupt (it is '${task.status}')`);
+        }
+      }
+      // A newer directive of the same kind against the same target replaces any
+      // still-pending peer, so the scheduler never applies stale direction.
+      this.database
+        .prepare(
+          `UPDATE steering_directives SET disposition = 'superseded', disposition_reason = ?, updated_at = ?
+           WHERE run_id = ? AND kind = ? AND disposition = 'pending'
+             AND ((target_task_id IS NULL AND ? IS NULL) OR target_task_id = ?)`,
+        )
+        .run("Superseded by a newer directive", now, input.runId, input.kind, input.targetTaskId, input.targetTaskId);
+      const payload = redactValue(input.payload) as SteeringPayload;
+      this.database
+        .prepare(
+          `INSERT INTO steering_directives (id, run_id, kind, target_task_id, actor, payload_json, disposition, disposition_reason, applied_attempt_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)`,
+        )
+        .run(id, input.runId, input.kind, input.targetTaskId, input.actor, JSON.stringify(payload), now, now);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
     this.addEvent(input.runId, "steering.requested", `${input.actor} requested ${input.kind}${input.targetTaskId ? ` for ${input.targetTaskId}` : ""}`, {
       directiveId: id,
       kind: input.kind,
@@ -2171,17 +2205,19 @@ export class Ledger {
       this.database.prepare("UPDATE tasks SET status = 'paused', updated_at = ? WHERE run_id = ? AND status IN ('queued', 'working', 'verifying', 'retry')").run(now, runId);
       this.database.prepare("UPDATE attempts SET status = 'interrupted', error = ?, finished_at = ? WHERE run_id = ? AND status = 'running'").run(redactText(reason), now, runId);
       this.addEvent(runId, "run.paused", reason);
-      // Recovery starts a NEW run rather than restarting this one, so directives
-      // left pending here would never be reachable again.
-      this.database
-        .prepare("UPDATE steering_directives SET disposition = 'rejected', disposition_reason = ?, updated_at = ? WHERE run_id = ? AND disposition = 'pending'")
-        .run("The run was paused before this direction could be applied; recovery continues in a new run", now, runId);
       this.database.exec("COMMIT");
-      return true;
     } catch (error) {
       this.database.exec("ROLLBACK");
       throw error;
     }
+    // Recovery starts a NEW run rather than restarting this one, so directives
+    // left pending here would never be reachable again. Routed through the one
+    // primitive: the earlier duplicate SQL here is exactly why the post-pause
+    // submission rule drifted away from the sweep.
+    this.dispositionUnreachableSteering(runId, {
+      reason: "The run was paused before this direction could be applied; recovery continues in a new run",
+    });
+    return true;
   }
 
   reconcileInterruptedRuns(): string[] {

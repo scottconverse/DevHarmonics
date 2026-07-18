@@ -844,21 +844,13 @@ async function route(
       sendJson(response, 404, { error: "Run not found" });
       return;
     }
-    const target = parsed.data.targetTaskId ? run.tasks.find((task) => task.id === parsed.data.targetTaskId) : null;
-    if (parsed.data.targetTaskId && !target) {
+    if (parsed.data.targetTaskId && !run.tasks.some((task) => task.id === parsed.data.targetTaskId)) {
       sendJson(response, 400, { error: `Run has no task '${parsed.data.targetTaskId}'` });
       return;
     }
-    // A task that has already finished can never consume direction, so accepting
-    // one here would create a directive with no reachable execution path.
-    if (target && ["passed", "failed", "blocked", "cancelled"].includes(target.status)) {
-      sendJson(response, 409, { error: `Task '${target.id}' has already finished as '${target.status}' and can no longer be steered` });
-      return;
-    }
-    if (parsed.data.kind === "interrupt" && target && target.status !== "working") {
-      sendJson(response, 409, { error: `Task '${target.id}' has no attempt in flight to interrupt (it is '${target.status}')` });
-      return;
-    }
+    // Run and task steerability are validated inside recordSteeringDirective's
+    // transaction, not here: a check in this layer could go stale between the
+    // read and the insert, admitting a directive that can never be consumed.
     try {
       const directive = context.ledger.recordSteeringDirective({
         runId: steeringMatch[1],

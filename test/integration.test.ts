@@ -1761,3 +1761,169 @@ test("cancel during validator verification marks task cancelled and avoids merge
     await rm(root, { recursive: true, force: true, maxRetries: 60, retryDelay: 250 });
   }
 });
+
+test("owner steering interrupts a live attempt and hands off to an attributed continuation", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-steering-e2e-"));
+  const project = await createRepository(root);
+  // A hanging CLI keeps attempt 1 genuinely in flight so the interrupt has to
+  // terminate a real child process rather than racing a fast fixture.
+  const hanging = await createHangingCli(root);
+  const fixture = await createFakeCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  config.runPolicy.requirePlanApproval = false;
+  config.connections.codex.command = hanging;
+  config.connections.claude.command = fixture;
+  config.connections.gemini.command = fixture;
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].timeoutMs = 60_000;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  let runId = "";
+  try {
+    const started = await fetch(`${dashboard.url}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ goal: "Create the fixture result", projectPath: project, agents: 1 }),
+    });
+    assert.equal(started.status, 202);
+    runId = ((await started.json()) as { runId: string }).runId;
+
+    const getRun = () => fetch(`${dashboard.url}/api/runs/${runId}`).then((response) => response.json() as Promise<{
+      status: string;
+      tasks: Array<{ id: string; status: string; attemptCount: number }>;
+      events: Array<{ kind: string }>;
+    }>);
+    await poll(getRun, (run) => run.tasks.some((task) => task.id === "one" && task.status === "working"), 30_000);
+
+    // Steering that tries to carry authority must be refused outright.
+    const escalation = await fetch(`${dashboard.url}/api/runs/${runId}/steering`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind: "clarify", targetTaskId: "one", payload: { clarification: "go", permission: "workspace_write" } }),
+    });
+    assert.equal(escalation.status, 400, "steering cannot carry a permission field");
+
+    // A directive that names no task can never be matched to one, so it must be
+    // refused rather than accepted and left pending forever.
+    const untargeted = await fetch(`${dashboard.url}/api/runs/${runId}/steering`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind: "interrupt", targetTaskId: null, payload: {} }),
+    });
+    assert.equal(untargeted.status, 400, "a task-scoped directive must name its task");
+
+    // The hanging CLI is configured with a 60s timeout and this test asserts the
+    // interrupt lands far inside that window, so a second attempt appearing
+    // cannot be explained by the attempt timing out on its own.
+    const interruptedAt = Date.now();
+    const interrupted = await fetch(`${dashboard.url}/api/runs/${runId}/steering`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind: "interrupt", targetTaskId: "one", payload: { clarification: "Use the shorter approach" } }),
+    });
+    assert.equal(interrupted.status, 201);
+
+    // The interrupt must terminate the hanging attempt and start a second one.
+    await poll(getRun, (run) => (run.tasks.find((task) => task.id === "one")?.attemptCount ?? 0) >= 2, 30_000);
+    const elapsedMs = Date.now() - interruptedAt;
+    assert.ok(
+      elapsedMs < 20_000,
+      `the second attempt must follow the interrupt promptly (took ${elapsedMs}ms); a 60s provider timeout could not have produced it`,
+    );
+    const afterInterrupt = await getRun();
+    assert.ok(afterInterrupt.events.some((event) => event.kind === "steering.interrupted"), "the interrupt is recorded as run evidence");
+    assert.notEqual(afterInterrupt.status, "cancelled", "interrupting one attempt must not cancel the run");
+
+    // The directive is applied and linked to the exact attempt it stopped.
+    const directives = await fetch(`${dashboard.url}/api/runs/${runId}/steering`).then((r) => r.json() as Promise<{
+      directives: Array<{ kind: string; disposition: string; appliedAttemptId: number | null; targetTaskId: string | null }>;
+    }>);
+    const applied = directives.directives.find((directive) => directive.kind === "interrupt");
+    assert.equal(applied?.disposition, "applied");
+    assert.equal(applied?.targetTaskId, "one");
+    assert.ok(applied?.appliedAttemptId, "an applied interrupt links to the attempt it stopped");
+
+    // The interrupted attempt is retained as evidence, not erased.
+    const evidence = await fetch(`${dashboard.url}/api/runs/${runId}/evidence`).then((r) => r.json() as Promise<{
+      attempts: Array<{ status: string; error: string | null }>;
+      blackboard: Array<{ kind: string; content: string }>;
+    }>);
+    assert.ok(evidence.attempts.some((attempt) => (attempt.error ?? "").includes("Interrupted by owner steering")), "the stopped attempt is retained");
+    assert.ok(evidence.blackboard.some((entry) => entry.kind === "handoff" && entry.content.includes("Owner interrupted")), "the continuation receives a handoff");
+  } finally {
+    await fetch(`${dashboard.url}/api/runs/${runId}/cancel`, { method: "POST", headers: { "content-type": "application/json" } }).catch(() => undefined);
+    await delay(500);
+    await dashboard.close();
+    if (runId) {
+      const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
+      for (const worktree of [path.join(runRoot, "tasks", "one"), path.join(runRoot, "integration")]) {
+        for (let attempt = 0; attempt < 60; attempt++) {
+          const result = await runProcess({ command: "git", args: ["worktree", "remove", "--force", worktree], cwd: project, timeoutMs: 30_000 });
+          if (result.exitCode === 0) break;
+          await delay(250);
+        }
+      }
+      await rm(runRoot, { recursive: true, force: true, maxRetries: 60, retryDelay: 250 });
+    }
+    await rm(root, { recursive: true, force: true, maxRetries: 60, retryDelay: 250 });
+  }
+});
+
+test("the steering panel reports requested admission changes honestly before they take effect", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-steering-ui-"));
+  const project = await createRepository(root);
+  await initializeProject(project);
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  try {
+    const appScript = await fetch(`${dashboard.url}/app.js`).then((response) => response.text());
+    // A directive is only in force once the scheduler consumes it, so a merely
+    // requested hold must never render as an applied one.
+    assert.match(appScript, /Hold requested/, "a pending hold is reported as requested, not as held");
+    assert.match(appScript, /takes effect at the next admission boundary/, "the panel says when a request takes effect");
+    assert.match(appScript, /admissionState === "held" \|\| admissionState === "holding"/, "hold is disabled while its own request is still in flight");
+    assert.match(appScript, /admissionState === "admitting" \|\| admissionState === "resuming"/, "resume is disabled while its own request is still in flight");
+    // The interrupt confirmation must not promise mid-response injection.
+    assert.match(appScript, /cannot change an answer already being written/, "the interrupt copy stays honest about what it does");
+    assert.doesNotMatch(appScript, /inject|mid-response/i, "the UI never claims to inject direction into a running response");
+
+    // renderSteering once called ready(), a helper local to renderProviders, which
+    // threw on every render and silently froze the whole panel. Module-scope-only
+    // references are the property that keeps it renderable.
+    // Which states are steerable is one rule owned by the ledger and served to
+    // the browser. A second hard-coded copy in the UI is what let the paused-run
+    // rule drift between layers, so the copy must not come back.
+    const bootstrap = await fetch(`${dashboard.url}/api/bootstrap`).then((response) => response.json()) as {
+      steering: { steerableRunStatuses: string[]; steerableTaskStatuses: string[] };
+    };
+    assert.deepEqual(bootstrap.steering.steerableRunStatuses, ["planning", "running", "awaiting_approval"], "the server publishes the steerable run states");
+    assert.ok(!bootstrap.steering.steerableRunStatuses.includes("paused"), "a paused run is never steerable: recovery continues in a new run");
+    assert.deepEqual(bootstrap.steering.steerableTaskStatuses, ["queued", "working", "verifying", "retry"], "the server publishes the steerable task states");
+    assert.match(appScript, /state\.bootstrap\?\.steering\?\.steerableRunStatuses/, "the browser reads the served rule");
+    assert.doesNotMatch(appScript, /const STEERABLE_RUN_STATUSES\s*=\s*\[/, "the browser must not keep its own copy of the rule");
+
+    const steeringRender = appScript.slice(appScript.indexOf("function renderSteering("), appScript.indexOf("function renderSteeringDirectives("));
+    assert.ok(steeringRender.length > 0, "renderSteering must exist");
+    assert.doesNotMatch(steeringRender, /\bready\(/, "renderSteering must not call helpers scoped to another render function");
+    assert.match(steeringRender, /provider\.available/, "provider eligibility comes from the bootstrap payload");
+
+    // Every capability the plan claims for DH-635 must be reachable in the UI,
+    // not merely implemented in the backend.
+    for (const control of ["steering-hold", "steering-resume", "steering-clarify", "steering-interrupt", "steering-reassign", "steering-reprioritize"]) {
+      assert.match(appScript, new RegExp(`#${control}`), `${control} must be wired`);
+    }
+
+    const page = await fetch(dashboard.url).then((response) => response.text());
+    assert.match(page, /id="steering-panel"/);
+    for (const control of ["steering-hold", "steering-resume", "steering-interrupt", "steering-reassign", "steering-reprioritize", "steering-order", "steering-provider"]) {
+      assert.match(page, new RegExp(`id="${control}"`), `${control} must exist in the shell`);
+    }
+    assert.match(page, /cannot change a task's permissions, risk, acceptance criteria, or repository scope/, "the panel states the containment boundary to the user");
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});

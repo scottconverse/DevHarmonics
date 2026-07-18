@@ -1,14 +1,16 @@
 # DevHarmonics Detailed Implementation Plan
 
 Document status: **Build-ready execution plan**
-Plan version: **1.23**
+Plan version: **1.24**
 Written: **2026-07-14**
 Revised: **2026-07-16**
 Product specification baseline: **DevHarmonics Product Specification v1.12**
 Current implementation baseline: **DevHarmonics v0.5.1**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 
-Revision history: **v1.23 (2026-07-16)** — Added DH-825, an experimental Open Interpreter worker adapter, to the integrations roadmap by owner decision: provider-neutral access to local and alternative coding models (Ollama/LM Studio, Kimi, DeepSeek, Qwen/GLM), qualified per exact model + harness + pinned Open Interpreter version, with DevHarmonics retaining exclusive control over task contracts, Git, validation, evidence, and integration, and never collecting provider credentials. The adapter does not alter the locked capability sequence; Open Interpreter also becomes the first conformance target for the DH-820 ACP transport.
+Revision history: **v1.24 (2026-07-18)** — Implemented DH-635 live run steering, the third item in the locked capability sequence: durable steering directives with full disposition and attempt linkage, admission-boundary hold/resume/reprioritise/reassign across both scheduler loops, attempt-boundary clarifications, and interrupt-and-handoff that retains evidence. Containment of scope, permission, spending, and acceptance authority is structural, and every directive ends with a disposition. Remaining sequence items are unchanged: real provider/local fallback during a CivicSuite task, a real cross-repository CivicSuite implementation, then Git-versioned reusable workflows.
+
+Prior revision: **v1.23 (2026-07-16)** — Added DH-825, an experimental Open Interpreter worker adapter, to the integrations roadmap by owner decision: provider-neutral access to local and alternative coding models (Ollama/LM Studio, Kimi, DeepSeek, Qwen/GLM), qualified per exact model + harness + pinned Open Interpreter version, with DevHarmonics retaining exclusive control over task contracts, Git, validation, evidence, and integration, and never collecting provider credentials. The adapter does not alter the locked capability sequence; Open Interpreter also becomes the first conformance target for the DH-820 ACP transport.
 
 Prior revision: **v1.22 (2026-07-16)** — Completed the first real bounded single-repository CivicSuite implementation (DH-740 pilot level 2): CivicCode's pinned CivicCore dependency, CI workflow, tests, and documentation were aligned from the v1.2.0 to the published v1.2.1 release wheel through the full objective → plan → approve → implement → validate → integrate → independent-review path, closing READY with a prepared exact-SHA delivery awaiting owner approval; the primary checkout was never modified. Implemented the first DH-632 wave exercised by that workflow: a shared operation acknowledgement helper across all dashboard actions (disabled/stateful controls, accessible busy state, honest indeterminate spinner, explicit done/failed end states with reasons), a global activity-strip live region that survives navigation, task-card elapsed/last-activity heartbeat with a truthful quiet-work warning reconstructed from durable ledger events, reduced-motion support, and deliberately no fabricated progress bars. Also adopted the Apache-2.0 license decision across the repository's license surfaces.
 
@@ -858,6 +860,10 @@ Implementation rule: DH-632 is not a later cleanup phase. The first real CivicSu
 
 #### DH-635: Live run steering — L
 
+Status: **Implemented in the v0.6 development line.** Steering directives are durable evidence carrying actor, target, payload, disposition, and disposition reason; attempt-steering directives (clarify, interrupt) also record the exact attempt they steered, while admission-state directives (hold, resume, reprioritise, reassign) link a task because no attempt exists when they apply; a newer directive supersedes a still-pending peer of the same kind and target, and terminal runs refuse steering. The scheduler resolves admission-scoped directives (hold, resume, reprioritise, reassign) at the task-admission boundary in both the single- and multi-repository loops, against the dependency-satisfied ready queue — so reordering cannot start blocked work — and fails closed with a reason when a directive names something inadmissible. Clarifications are consumed at the attempt boundary into worker feedback. An interrupt stops one attempt through a per-attempt abort chained to the run signal, retains the partial attempt and a handoff entry as evidence, and continues in a new attributed attempt; DevHarmonics never claims to inject direction into a response already in flight. Containment is structural rather than a semantic filter: the payload schema has no permission, risk, acceptance-criteria, repository-scope, or run-policy fields, and an interrupted attempt consumes one attempt from the single approved retry budget — steering adds no attempts, so it cannot increase the provider invocations or paid spend a task may make. Directives are validated and inserted in one transaction against live run and task state, and a task reaching a terminal status dispositions its outstanding direction in that same transition — so both interleavings are closed: direction recorded just before a task finishes is rejected when it finishes, and direction attempted after it is refused on submission. The same applies when a task is blocked by a failed dependency or the run is cancelled, terminalised, or paused. Which run and task states are steerable is one rule owned by the ledger and served to the browser, rather than duplicated per layer.
+
+Remaining scope: reassignment validates provider eligibility for the run, with exact-model qualification still enforced downstream at task start rather than at directive submission, and the payload's `modelId` field is not yet honoured — exact-model steering is not supported. Steering also has no DOM-level automated test harness: the panel's interrupt affordance and disposition rendering are covered by API-level state tests plus a live browser walkthrough, and a source-assertion-only approach has already been shown insufficient here, so UI behaviour changes need the walkthrough until a harness exists.
+
 Deliverables:
 
 - pause new task admission while retaining active state and evidence;
@@ -871,7 +877,8 @@ Acceptance:
 
 - a user can redirect a live run without editing an agent terminal or losing completed evidence;
 - unsupported mid-response injection becomes an explicit interrupt-and-handoff rather than a false steering claim;
-- every steering action has an actor, timestamp, target, disposition, and resulting attempt/task linkage.
+- every steering action has an actor, timestamp, target, and a terminal disposition — no directive may remain pending once no execution path for it exists;
+- attempt-steering directives (clarify, interrupt) additionally link the exact attempt they steered. Admission-state directives (hold, resume, reprioritise, reassign) act at the admission boundary and link a task rather than an attempt, because no attempt exists at the moment they are applied.
 
 #### DH-640: Workbench — M
 

@@ -26,6 +26,7 @@ const state = {
   workbenchSessions: [],
   workbenchSession: null,
   workbenchMessages: [],
+  steering: {},
 };
 const $ = (selector) => document.querySelector(selector);
 
@@ -699,6 +700,9 @@ async function refreshRuns() {
     state.cursorInitialized = true;
   }
   rememberEventCursor(observedCursor);
+  // Steering history must track the scheduler, not freeze at what this tab last
+  // posted: dispositions change when the run applies or rejects a directive.
+  if (state.selectedRunId) await refreshSteering(state.selectedRunId);
   renderRunList();
   renderSelectedRun();
   renderActivityStrip();
@@ -775,10 +779,130 @@ function renderSelectedRun() {
   $("#metric-attempts").textContent = run.tasks.reduce((sum, task) => sum + task.attemptCount, 0);
   $("#metric-active").textContent = run.tasks.filter((task) => ["working", "verifying", "retry"].includes(task.status)).length;
   renderIntegrationSet(run);
+  renderSteering(run);
   renderDelivery(run);
   renderBoard(run);
   renderActivity(run);
   renderVerdict(run);
+}
+
+// Which runs and tasks can still be steered is the ledger's rule, served in the
+// bootstrap payload. The browser must never keep its own copy: a duplicated
+// list is exactly how the paused-run rule drifted between layers before. If the
+// payload is somehow unavailable, steer nothing rather than guess.
+const steerableRunStatuses = () => state.bootstrap?.steering?.steerableRunStatuses ?? [];
+const steerableTaskStatuses = () => state.bootstrap?.steering?.steerableTaskStatuses ?? [];
+
+function renderSteering(run) {
+  const panel = $("#steering-panel");
+  const steerable = steerableRunStatuses().includes(run.status);
+  panel.classList.toggle("hidden", !steerable);
+  const directives = state.steering[run.id] || [];
+  if (!steerable) {
+    // A finished run's evidence is immutable; show history without controls.
+    if (directives.length) renderSteeringDirectives(directives);
+    return;
+  }
+
+  // Admission has three honest states, not two: a directive is only in force
+  // once the scheduler consumes it at its next admission boundary. Reporting a
+  // requested hold as "held" would claim an effect that has not happened yet.
+  const admissionDirectives = directives.filter((directive) => ["hold_admission", "resume_admission"].includes(directive.kind));
+  const held = admissionDirectives.filter((directive) => directive.disposition === "applied").at(-1)?.kind === "hold_admission";
+  const requested = admissionDirectives.filter((directive) => directive.disposition === "pending").at(-1) ?? null;
+  const admissionState = requested
+    ? requested.kind === "hold_admission" ? "holding" : "resuming"
+    : held ? "held" : "admitting";
+  const admissionLabel = {
+    holding: "Hold requested — takes effect at the next admission boundary",
+    resuming: "Resume requested — takes effect at the next admission boundary",
+    held: "Admission held",
+    admitting: "Admitting tasks",
+  }[admissionState];
+  $("#steering-admission").textContent = admissionLabel;
+  $("#steering-admission").className = `lifecycle ${admissionState === "held" ? "warn" : admissionState === "admitting" ? "" : "pending"}`;
+  // Never leave a control that would only queue a duplicate of what is already in flight.
+  $("#steering-hold").disabled = admissionState === "held" || admissionState === "holding";
+  $("#steering-resume").disabled = admissionState === "admitting" || admissionState === "resuming";
+
+  const select = $("#steering-task");
+  const previous = select.value;
+  // Finished tasks are excluded by the same rule the ledger enforces, so the
+  // panel never offers direction the server would refuse.
+  const steerableTasks = run.tasks.filter((task) => !task.id.startsWith("__") && steerableTaskStatuses().includes(task.status));
+  select.innerHTML = steerableTasks
+    .map((task) => `<option value="${escapeHtml(task.id)}">${escapeHtml(task.title)} — ${escapeHtml(task.status)}</option>`)
+    .join("");
+  if (steerableTasks.some((task) => task.id === previous)) select.value = previous;
+  // Only 'working' means a provider invocation is actually in flight. 'verifying'
+  // runs DevHarmonics' own validators and 'retry' is a backoff gap — offering
+  // interrupt there would invite the owner to stop work that is not running, and
+  // would instead abort a later replacement attempt.
+  const selectedTask = steerableTasks.find((task) => task.id === select.value);
+  $("#steering-interrupt").disabled = selectedTask?.status !== "working";
+
+  // Reassign and reprioritize act at the admission boundary, so they only apply
+  // to work that has not started. Offer them only when that is true.
+  const queued = steerableTasks.filter((task) => task.status === "queued");
+  const providerSelect = $("#steering-provider");
+  const previousProvider = providerSelect.value;
+  providerSelect.innerHTML = (state.bootstrap?.providers || [])
+    .filter((provider) => provider.available)
+    .map((provider) => `<option value="${escapeHtml(provider.name)}">${escapeHtml(providerDisplayName(provider.name))}</option>`)
+    .join("");
+  if ([...providerSelect.options].some((option) => option.value === previousProvider)) providerSelect.value = previousProvider;
+  const selectedIsQueued = Boolean(selectedTask && selectedTask.status === "queued");
+  providerSelect.disabled = !selectedIsQueued;
+  $("#steering-reassign").disabled = !selectedIsQueued || !providerSelect.options.length;
+  $("#steering-order").disabled = queued.length < 2;
+  $("#steering-order").placeholder = queued.length ? queued.map((task) => task.id).join(", ") : "No queued tasks";
+  $("#steering-reprioritize").disabled = queued.length < 2;
+
+  renderSteeringDirectives(directives);
+}
+
+function renderSteeringDirectives(directives) {
+  const container = $("#steering-directives");
+  if (!directives.length) {
+    container.innerHTML = '<div class="empty-state">No steering has been requested for this run.</div>';
+    return;
+  }
+  container.innerHTML = [...directives]
+    .reverse()
+    .map((directive) => {
+      const detail = directive.payload?.clarification || directive.payload?.taskOrder?.join(" → ") || directive.payload?.provider || "";
+      return `<article class="steering-directive ${escapeHtml(directive.disposition)}">
+        <div class="steering-directive-head">
+          <strong>${escapeHtml(directive.kind.replaceAll("_", " "))}${directive.targetTaskId ? ` · ${escapeHtml(directive.targetTaskId)}` : ""}</strong>
+          <span class="steering-disposition ${escapeHtml(directive.disposition)}">${escapeHtml(directive.disposition)}</span>
+        </div>
+        ${detail ? `<p>${escapeHtml(detail)}</p>` : ""}
+        <small>${escapeHtml(directive.actor)} · ${new Date(directive.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${directive.dispositionReason ? ` · ${escapeHtml(directive.dispositionReason)}` : ""}${directive.appliedAttemptId ? ` · attempt ${directive.appliedAttemptId}` : ""}</small>
+      </article>`;
+    })
+    .join("");
+}
+
+async function refreshSteering(runId) {
+  if (!runId) return;
+  try {
+    const result = await api(`/api/runs/${runId}/steering`);
+    state.steering[runId] = result.directives;
+  } catch {
+    // Steering history is supplementary; a fetch failure must not blank the run view.
+  }
+}
+
+async function submitSteering(button, runId, body, label) {
+  await withOperation(button, label, async () => {
+    await api(`/api/runs/${runId}/steering`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    await refreshSteering(runId);
+    await refreshRuns();
+  }, { onError: (message) => { $("#steering-error").textContent = message; }, busyLabel: "Sending…" });
 }
 
 function renderDelivery(run) {
@@ -1531,6 +1655,66 @@ $("#delivery-repositories").addEventListener("click", async (event) => {
     });
     await refreshRuns();
   }, { onError: (message) => { $("#delivery-error").textContent = message; }, busyLabel: action === "push_branch" ? "Pushing…" : "Creating draft PR…" });
+});
+$("#steering-hold").addEventListener("click", async (event) => {
+  const runId = state.selectedRunId;
+  if (!runId) return;
+  $("#steering-error").textContent = "";
+  await submitSteering(event.currentTarget, runId, { kind: "hold_admission", targetTaskId: null, payload: {} }, "Holding task admission");
+});
+$("#steering-resume").addEventListener("click", async (event) => {
+  const runId = state.selectedRunId;
+  if (!runId) return;
+  $("#steering-error").textContent = "";
+  await submitSteering(event.currentTarget, runId, { kind: "resume_admission", targetTaskId: null, payload: {} }, "Resuming task admission");
+});
+$("#steering-clarify-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const runId = state.selectedRunId;
+  const clarification = $("#steering-clarification").value.trim();
+  const targetTaskId = $("#steering-task").value;
+  if (!runId || !targetTaskId) return;
+  $("#steering-error").textContent = "";
+  if (!clarification) {
+    $("#steering-error").textContent = "Describe the clarification before sending it.";
+    return;
+  }
+  await submitSteering($("#steering-clarify"), runId, { kind: "clarify", targetTaskId, payload: { clarification } }, "Sending clarification");
+  $("#steering-clarification").value = "";
+});
+$("#steering-interrupt").addEventListener("click", async (event) => {
+  const runId = state.selectedRunId;
+  const targetTaskId = $("#steering-task").value;
+  if (!runId || !targetTaskId) return;
+  const clarification = $("#steering-clarification").value.trim();
+  if (!window.confirm(`Interrupt the active attempt for '${targetTaskId}'? DevHarmonics stops that attempt, keeps its evidence, and starts a new attempt with your direction. It cannot change an answer already being written.`)) return;
+  $("#steering-error").textContent = "";
+  await submitSteering(event.currentTarget, runId, { kind: "interrupt", targetTaskId, payload: clarification ? { clarification } : {} }, "Interrupting the active attempt");
+  $("#steering-clarification").value = "";
+});
+$("#steering-reassign").addEventListener("click", async (event) => {
+  const runId = state.selectedRunId;
+  const targetTaskId = $("#steering-task").value;
+  const provider = $("#steering-provider").value;
+  if (!runId || !targetTaskId || !provider) return;
+  $("#steering-error").textContent = "";
+  await submitSteering(event.currentTarget, runId, { kind: "reassign", targetTaskId, payload: { provider } }, `Reassigning ${targetTaskId}`);
+});
+$("#steering-reprioritize").addEventListener("click", async (event) => {
+  const runId = state.selectedRunId;
+  if (!runId) return;
+  const taskOrder = $("#steering-order").value.split(",").map((entry) => entry.trim()).filter(Boolean);
+  $("#steering-error").textContent = "";
+  if (!taskOrder.length) {
+    $("#steering-error").textContent = "List the queued task IDs in the order you want them admitted.";
+    return;
+  }
+  await submitSteering(event.currentTarget, runId, { kind: "reprioritize", targetTaskId: null, payload: { taskOrder } }, "Setting admission order");
+  $("#steering-order").value = "";
+});
+$("#steering-task").addEventListener("change", () => {
+  const run = state.runs.find((item) => item.id === state.selectedRunId);
+  if (run) renderSteering(run);
 });
 $("#close-drawer").addEventListener("click", closeTask);
 $("#drawer-backdrop").addEventListener("click", closeTask);

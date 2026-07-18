@@ -1,14 +1,16 @@
 # DevHarmonics Detailed Implementation Plan
 
 Document status: **Build-ready execution plan**
-Plan version: **1.26**
+Plan version: **1.27**
 Written: **2026-07-14**
 Revised: **2026-07-16**
 Product specification baseline: **DevHarmonics Product Specification v1.12**
 Current implementation baseline: **DevHarmonics v0.5.1**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 
-Revision history: **v1.26 (2026-07-18)** — Promoted the approval inbox from an implicit bullet inside DH-600 to DH-645, a named work package scheduled immediately after the locked capability sequence, after the first real CivicSuite delivery showed an owner decision sitting unsurfaced in the product. DH-645 covers the approval inbox, a program-scope view across products and runs, delivered-versus-observed reconciliation against the external forge, and an exportable status page that does not depend on the DevHarmonics ledger or on DevHarmonics running. The locked sequence is unchanged.
+Revision history: **v1.27 (2026-07-18)** — Added DH-647 decision records and comparative option analysis, after a container-runtime choice recorded with evidence eight days earlier was made again from scratch because nothing surfaced the original. DevHarmonics can prove what it did but cannot retain what it considered and rejected, so a killed approach is re-proposed at full cost and each rediscovery looks like fresh analysis. The work package covers durable decision records with rejected alternatives and their reasons, supersession that preserves history, a planning-time obligation to state options and the deciding constraint for consequential choices, and retrieval by subject.
+
+Prior revision: **v1.26 (2026-07-18)** — Promoted the approval inbox from an implicit bullet inside DH-600 to DH-645, a named work package scheduled immediately after the locked capability sequence, after the first real CivicSuite delivery showed an owner decision sitting unsurfaced in the product. DH-645 covers the approval inbox, a program-scope view across products and runs, delivered-versus-observed reconciliation against the external forge, and an exportable status page that does not depend on the DevHarmonics ledger or on DevHarmonics running. The locked sequence is unchanged.
 
 Prior revision: **v1.25 (2026-07-18)** — Refined DH-460 with reviewer capability tiers (context, executing, falsifying) after DH-635's review produced direct evidence that a large same-family context-review quorum missed both critical defects that a single executing-and-falsifying reviewer found. Quorum policy gains a required-tier dimension, review receipts record the tier and the evidence produced, and a quorum met only by context reviewers must be reported as unfalsified rather than as a passed independent review.
 
@@ -934,6 +936,32 @@ Acceptance:
 - an item leaves the inbox only when it is genuinely resolved, and an expired or superseded request states which;
 - a delivered result whose remote state has diverged — branch deleted, pull request closed, checks failed — is reported as a divergence, and DevHarmonics never presents its own ledger record as confirmation of external state it has not observed;
 - the exported status page renders correct current information with DevHarmonics stopped, and contains no value written by an agent.
+
+#### DH-647: Decision records and comparative option analysis — M
+
+Status: **Named work package, owner-approved 2026-07-18. Scheduled with DH-645, after the locked capability sequence.**
+
+DevHarmonics records what was done and can prove it, but it cannot record what was **considered and rejected, and why**. The blackboard holds decisions and assumptions for the life of a run; the constitution holds standing rules. Neither retains the shape of a choice: the options weighed, the constraint that decided it, and the alternatives killed with their reasons. An approach rejected for a good reason in one run is therefore re-proposed in the next, and the second attempt has no way to know the first ever happened.
+
+This is not hypothetical. A container runtime was selected for this machine on evidence, with its gotchas recorded, and eight days later the same decision was made again from scratch — reaching a defensible answer by defaulting rather than comparing, duplicating a tool that was already installed, and accepting a worse isolation posture that the original decision had specifically avoided. The original record existed; nothing pointed at it, so nothing loaded it.
+
+The failure generalises beyond tooling. Any long-running product accumulates rejected designs, and an agent crew that cannot see them will re-litigate them at full cost every time, while presenting each rediscovery as fresh analysis.
+
+Deliverables:
+
+- a durable DecisionRecord entity holding the question, the options considered, the deciding constraint, the selected option, each rejected option **with the reason it was rejected**, the evidence relied on, the accepted cost of the choice, and its scope (run, product, or machine);
+- records that outlive the run that produced them, are attached to the product rather than to a single execution, and are surfaced into planning context so an architect proposing an approach sees whether that approach was already killed and why;
+- explicit supersession: a later decision links to the one it replaces and states what changed, so the trail reads as one history rather than contradicting notes;
+- a planning-time obligation for consequential choices — introducing a dependency, selecting a runtime or transport, choosing between architectures — to state the options weighed and the deciding constraint before the work is approved, so the comparison is a plan input rather than a retrospective justification;
+- retrieval by subject rather than only by run, since the reader is usually asking "has this been decided before?" without knowing which run decided it.
+
+Acceptance:
+
+- a rejected approach cannot be silently re-proposed: planning context for an objective surfaces prior decisions on the same subject, including rejections, with their reasons;
+- a decision record states what it gave up, not only what it chose;
+- superseding a decision preserves the original and its reasoning rather than overwriting it;
+- a consequential choice made without recorded alternatives is visible as such, rather than being indistinguishable from one that was properly compared;
+- decision records survive restarts and are included in the exported evidence package.
 
 #### DH-650: Analytics — M
 

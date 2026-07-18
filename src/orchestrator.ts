@@ -155,7 +155,14 @@ export class Orchestrator {
     }
     const availableProviders = configuredProviders.filter((name) => this.ledger.isConnectionEligible(projectLegacyProvider(name).connectionId));
     const workerProviders = config.product.workers.filter((name) => availableProviders.includes(name));
-    if (!availableProviders.length || !workerProviders.length) throw new Error("No healthy provider is available to plan this objective");
+    // Planning itself needs a subscription architect — local models qualify for
+    // analysis, never for the architect role. Execution does not: a qualified
+    // local worker can carry the tasks, so a cooling subscription worker pool
+    // must not refuse to plan work that local models can actually run.
+    if (!availableProviders.length) throw new Error("No healthy provider is available to plan this objective");
+    if (!hasRunnableWorker({ ledger: this.ledger, subscriptionProviders: workerProviders })) {
+      throw new Error("No subscription worker is available and no qualified local worker can run this objective");
+    }
 
     const architectName = availableProviders.includes(config.product.architect) ? config.product.architect : availableProviders[0]!;
     const architectCandidates = config.routing.allowFallback
@@ -218,12 +225,18 @@ export class Orchestrator {
     if (!plan) throw lastArchitectError ?? new Error("No eligible architect produced a valid plan");
 
     const assignments = plan.tasks.map((task) => {
-      const fallbackProvider = task.preferredProvider && workerProviders.includes(task.preferredProvider) ? task.preferredProvider : workerProviders[0]!;
+      // Null when only local workers remain; the router selects among qualified
+      // local models rather than indexing an empty subscription pool.
+      const fallbackProvider = task.preferredProvider && workerProviders.includes(task.preferredProvider)
+        ? task.preferredProvider
+        : workerProviders[0] ?? null;
       try {
         const decision = router.route({ role: "worker", config, fallbackProvider, allowedProviders: workerProviders, permission: task.permission ?? "workspace_write", task });
         return { taskId: task.id, provider: decision.provider, modelId: decision.model.requestedModelId ?? null, tier: decision.workload.requiredTier, factors: decision.factors };
       } catch (error) {
-        return { taskId: task.id, provider: fallbackProvider, modelId: null, tier: "unavailable", factors: [error instanceof Error ? error.message : String(error)] };
+        // With no subscription worker left, the preview names the local pool
+        // rather than a provider that does not exist.
+        return { taskId: task.id, provider: fallbackProvider ?? "local", modelId: null, tier: "unavailable", factors: [error instanceof Error ? error.message : String(error)] };
       }
     });
     const capacity = new CapacityBroker().decide({
@@ -460,7 +473,11 @@ export class Orchestrator {
       throw new Error(`All enabled providers are unavailable or cooling down (${health.map((item) => `${item.connectionId}: ${item.state}${item.cooldownUntil ? ` until ${item.cooldownUntil}` : ""}`).join("; ")})`);
     }
     const workerProviders = config.product.workers.filter((name) => availableProviders.includes(name));
-    if (!workerProviders.length) throw new Error("No healthy provider is configured in the worker pool");
+    // A cooling subscription pool does not stop the run when a qualified local
+    // worker can carry the tasks; local runtimes have no quota to wait out.
+    if (!hasRunnableWorker({ ledger: this.ledger, subscriptionProviders: workerProviders })) {
+      throw new Error("No subscription worker is available and no qualified local worker can run this objective");
+    }
 
     const approvedObjective = request.objectiveLink ? this.ledger.getObjective(request.objectiveLink.objectiveId) : null;
     const affectedRepositoryIds = (request.approvedPlan?.repositoryImpact ?? [])

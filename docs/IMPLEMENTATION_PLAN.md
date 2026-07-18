@@ -1,14 +1,16 @@
 # DevHarmonics Detailed Implementation Plan
 
 Document status: **Build-ready execution plan**
-Plan version: **1.26**
+Plan version: **1.27**
 Written: **2026-07-14**
-Revised: **2026-07-16**
+Revised: **2026-07-18**
 Product specification baseline: **DevHarmonics Product Specification v1.12**
 Current implementation baseline: **DevHarmonics v0.5.1**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 
-Revision history: **v1.26 (2026-07-18)** — Promoted the approval inbox from an implicit bullet inside DH-600 to DH-645, a named work package scheduled immediately after the locked capability sequence, after the first real CivicSuite delivery showed an owner decision sitting unsurfaced in the product. DH-645 covers the approval inbox, a program-scope view across products and runs, delivered-versus-observed reconciliation against the external forge, and an exportable status page that does not depend on the DevHarmonics ledger or on DevHarmonics running. The locked sequence is unchanged.
+Revision history: **v1.27 (2026-07-18)** — Recorded two rules that an independent audit of the item-4 fixes established, both in the same shape: a second implementation of a decision drifts from the first, and the gap between them is the defect. DH-470 now states that an evidence gate and its verifier must share one grammar, after the citation verifier turned out to be bypassable by writing the evidence in a form the gate accepted but the verifier could not parse. DH-330 now states that code needing to know whether work can run must ask the component that will run it, after a liveness predicate that re-derived routing eligibility was proven wrong in both directions. Scope and the locked sequence are unchanged.
+
+**v1.26 (2026-07-18)** — Promoted the approval inbox from an implicit bullet inside DH-600 to DH-645, a named work package scheduled immediately after the locked capability sequence, after the first real CivicSuite delivery showed an owner decision sitting unsurfaced in the product. DH-645 covers the approval inbox, a program-scope view across products and runs, delivered-versus-observed reconciliation against the external forge, and an exportable status page that does not depend on the DevHarmonics ledger or on DevHarmonics running. The locked sequence is unchanged.
 
 Prior revision: **v1.25 (2026-07-18)** — Refined DH-460 with reviewer capability tiers (context, executing, falsifying) after DH-635's review produced direct evidence that a large same-family context-review quorum missed both critical defects that a single executing-and-falsifying reviewer found. Quorum policy gains a required-tier dimension, review receipts record the tier and the evidence produced, and a quorum met only by context reviewers must be reported as unfalsified rather than as a passed independent review.
 
@@ -495,6 +497,12 @@ Acceptance:
 
 #### DH-330: Classified failure and fallback engine — L
 
+Refinement (2026-07-18, from a real run and the independent audit of its fix): local fallback was reachable in routing and unreachable in practice. Four separate gates — objective planning, run start, the attempt loop, and both automatic-repair paths — decided whether work could proceed by looking at subscription provider health, which is not where local models live. A run whose subscription quota closed was refused before the router, the only component that considers a local model, was ever consulted.
+
+The first fix answered the question with a predicate that checked generic model lifecycle flags. The audit proved that predicate wrong in both directions: it kept a task alive for a model qualified only as an architect, and routing then threw out of the attempt and failed the entire run; and it refused a manually assigned inactive model that the router would in fact have selected, because explicit assignment does not require `active`.
+
+The rule this establishes: **when code needs to know whether work can run, it must ask the component that will run it.** A predicate that re-derives eligibility from underlying state is a second implementation of routing, and it will drift from the first. `ModelRouter.tryRoute` now returns a decision or a typed reason, so every gate asks the exact question execution will ask; a genuine error is still raised rather than being swallowed as "cannot route". Route failure inside a task settles that task rather than failing the run, because a cooling window can reopen.
+
 Deliverables:
 
 - classify network, provider outage, rate limit, short-window quota, long-window quota, concurrency, authentication, unsupported capability, model retirement, context overflow, tool denial, validator failure, and content-policy refusal;
@@ -699,6 +707,10 @@ Acceptance:
 Refinement (2026-07-18, from a real run): a read-only diagnostic produces no repository change, so validators have nothing to judge and the report's own citations become the evidence. Those citations were only ever checked for shape — a regex confirmed something resembling `file.ext:12` was present — so a worker that invents well-formed citations passed. During the item-4 proving run a local model produced five reports citing files that do not exist, a line whose real content is unrelated, and a version string absent from the repository entirely; all five tasks recorded `passed read-only verification`. Only the independent reviewer caught it, and only because it re-inspected the repository itself rather than reading the reports.
 
 Citations are checkable facts and are now verified mechanically: each cited path must exist inside the assigned worktree and the cited line must exist within it. This is deterministic, needs no model, and costs milliseconds. Two consequences are recorded rather than assumed. First, verification establishes that a citation *resolves*, not that the cited line supports the conclusion drawn from it — that remains a review question, and a report citing a real line with misattributed content still verifies. Second, a report containing no citations at all has none to reject, and the existing gate only demands line evidence when a task's acceptance criteria ask for it, so a vacuous report can still pass; requiring evidence proportionate to the claim is remaining scope.
+
+Second refinement (2026-07-18, from an independent audit of the fix): the first version of this verification could be bypassed by writing the evidence a different way. The verifier had its own citation grammar, narrower than the one the evidence gate accepts, so `[missing.md](missing.md), line 2` satisfied the gate and produced nothing for the verifier to check. Range ends were discarded, an empty file counted as having one line, `../` traversal was silently normalized away, and a legitimate absolute path inside the worktree was rejected outright.
+
+The rule this establishes: **a gate and its verifier must share one grammar.** Two independent implementations of "what counts as evidence" will diverge, and the gap between them is the hole. Both now call the same extractor, containment is decided once on the canonical target so a symlink cannot point out of the worktree, and each of these behaviours was proven load-bearing by reverting it and watching a test fail.
 
 The wider lesson for this milestone: where a workflow produces no artefact to validate, evidence integrity depends entirely on the report and the reviewer, and a context-only reviewer reading a plausible, well-formatted fabrication is unlikely to catch it. This is the same capability distinction recorded in DH-460.
 

@@ -349,6 +349,34 @@ Git merge conflicts are not repaired automatically in v0.5.1. The automatic fixe
 
 Reduce concurrency, use fewer providers, or wait for the subscription allowance to recover. DevHarmonics cannot increase provider-controlled quotas.
 
+### A Docker-gated validator skips, or fails only inside DevHarmonics
+
+Two environment facts matter on Windows, and both were learned the hard way on a real machine. They belong here rather than in anyone's session notes.
+
+**Task worktrees live under the system temp directory.** DevHarmonics creates its run worktrees under `os.tmpdir()`. In a packaged (MSIX-container) shell, `%TEMP%` is redirected, and some toolchains — notably a validator that reaches a Docker daemon to run a real database migration — fail there with connection errors while passing anywhere else. The result is a FALSE task failure that has nothing to do with the change under test. The fix is to point `TEMP` and `TMP` at a normal directory before launching DevHarmonics:
+
+```powershell
+$env:TEMP = "C:\dev\dh-runs"; $env:TMP = "C:\dev\dh-runs"
+```
+
+`os.tmpdir()` honours these, so no configuration option is needed.
+
+**Validators inherit DevHarmonics' environment.** A validator that needs Docker must be able to reach a daemon from the environment DevHarmonics was launched in. With Docker Engine running inside WSL and exposed on loopback TCP (not Docker Desktop), that means:
+
+```powershell
+$env:DOCKER_HOST = "tcp://127.0.0.1:2375"
+```
+
+Without it, a Docker-dependent test typically *skips* rather than fails — which is worse, because a migration-compatibility check that silently skips makes an incompatible dependency bump look green. If a validator's own output says it skipped for want of Docker, treat that as environment, not evidence.
+
+**Validators that need a repository's own toolchain** — a virtualenv interpreter, a repo-local binary — should be registered with the `${repoRoot}` token rather than an absolute path:
+
+```json
+{ "tests": { "command": "${repoRoot}/.venv/Scripts/python.exe", "args": ["-m", "pytest", "-q"], "timeoutMs": 900000 } }
+```
+
+The token expands to the repository's primary root on whatever machine the run happens to be on. An absolute path breaks on every other machine; a bare `python` runs whatever interpreter is first on PATH, which is usually not the repository's own environment.
+
 ## 12. Security and privacy
 
 - The dashboard listens only on the local loopback interface.

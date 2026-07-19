@@ -48,7 +48,7 @@ import { QUALIFICATION_FINGERPRINT_FIXTURE, ensureReviewerCandidateQualified, en
 import { modelQualificationFingerprint } from "../src/model-fingerprint.js";
 import { aggregateModelPerformance } from "../src/model-performance.js";
 import { quotaResetAt } from "../src/antigravity.js";
-import { runValidator } from "../src/validators.js";
+import { expandValidatorTokens, mergeRepositoryValidators, runValidator } from "../src/validators.js";
 import { parseReviewerResponse } from "../src/review.js";
 import { DeliveryService } from "../src/delivery.js";
 
@@ -1588,6 +1588,60 @@ test("repository validators cannot escape their assigned worktree through cwd", 
     await assert.rejects(() => readFile(outside, "utf8"), /ENOENT/);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a \${repoRoot} token in a validator command expands to the repository root", async () => {
+  // A registered validator that needs the repository's own toolchain — a venv
+  // interpreter, a repo-local node_modules binary — cannot be written as a bare
+  // command (wrong or missing on PATH) and must not be registered as an absolute
+  // machine path (breaks on every other machine). The token names the one thing
+  // both machines agree on: where the repository lives. It expands against the
+  // PRIMARY repository root, not the task worktree, because per-machine
+  // toolchains are gitignored and exist only in the primary checkout.
+  const validators = {
+    tests: { command: "${repoRoot}/.venv/Scripts/python.exe", args: ["-m", "pytest", "-q"], timeoutMs: 60_000 },
+    lint: { command: "ruff", args: ["check", "${repoRoot}/pyproject.toml"], timeoutMs: 60_000 },
+  };
+  const expanded = expandValidatorTokens(validators, "C:\repos\civiccode");
+  assert.equal(expanded.tests!.command, path.join("C:\repos\civiccode", ".venv/Scripts/python.exe"));
+  assert.deepEqual(expanded.tests!.args, ["-m", "pytest", "-q"]);
+  assert.deepEqual(expanded.lint!.args, ["check", path.join("C:\repos\civiccode", "pyproject.toml")]);
+  // Untouched entries come through identical, and the input is not mutated.
+  assert.equal(validators.tests.command, "${repoRoot}/.venv/Scripts/python.exe");
+
+  // A token with no root to expand against must fail loudly. Expanding it to
+  // nothing, or to the worktree, silently runs the wrong interpreter.
+  assert.throws(() => expandValidatorTokens(validators, null), /repoRoot/);
+
+  // The multi-repository merge: registered validators override the project's
+  // own, and their token expands against THAT repository's primary root.
+  const merged = mergeRepositoryValidators(
+    { tests: { command: "python", args: ["-m", "pytest"], timeoutMs: 1_000 }, extra: { command: "echo", args: [], timeoutMs: 1_000 } },
+    { tests: { command: "${repoRoot}/.venv/Scripts/python.exe", args: ["-m", "pytest", "-q"], timeoutMs: 2_000 } },
+    "D:\elsewhere\repo",
+  );
+  assert.equal(merged.tests!.command, path.join("D:\elsewhere\repo", ".venv/Scripts/python.exe"), "registered wins and expands against the repository's own root");
+  assert.equal(merged.extra!.command, "echo", "project validators without an override survive");
+
+  // End to end: the expanded command actually runs from a worktree-like cwd.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-token-e2e-"));
+  try {
+    const repo = path.join(root, "primary repo");
+    const bin = path.join(repo, "toolbin");
+    await mkdir(bin, { recursive: true });
+    const script = path.join(bin, "tool.mjs");
+    await writeFile(script, ["console.log('TOKEN_TOOL_RAN'); process.exit(0);", ""].join("\n"), "utf8");
+    const worktree = path.join(root, "worktree");
+    await mkdir(worktree, { recursive: true });
+    const config = expandValidatorTokens({
+      probe: { command: process.execPath, args: ["${repoRoot}/toolbin/tool.mjs"], timeoutMs: 10_000 },
+    }, repo);
+    const result = await runValidator("probe", config.probe!, worktree);
+    assert.equal(result.passed, true, result.stderr);
+    assert.match(result.stdout, /TOKEN_TOOL_RAN/);
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 

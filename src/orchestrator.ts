@@ -44,7 +44,7 @@ import { evaluateToolRequest, type ToolStage } from "./policy.js";
 import { adjudicateReviewQuorum, parseReviewerResponse, reviewRequirement, type ReviewFinding, type ReviewQuorumDecision, type ReviewRequirement, type StructuredReview } from "./review.js";
 import { OPENROUTER_MAX_OUTPUT_TOKENS, OpenRouterService, requireInvocationCostCeiling, type PaidSpendReservation } from "./openrouter.js";
 import { ensureSchedulerCandidateQualified, ensureSchedulerProviderCandidateQualified, type SchedulerQualificationResult } from "./qualification.js";
-import { resolveValidatorCwd, runValidator, unknownValidator } from "./validators.js";
+import { mergeRepositoryValidators, resolveValidatorCwd, runValidator, unknownValidator } from "./validators.js";
 import { analyzeVerificationIntegrity } from "./verification-integrity.js";
 import { runLocalToolLoop } from "./local-tools.js";
 import { WorktreeManager, WorkspaceIsolationError } from "./worktrees.js";
@@ -1137,7 +1137,7 @@ export class Orchestrator {
         repositoryContexts.set(repository.id, {
           config: {
             ...input.config,
-            repository: { validators: { ...localConfig.repository.validators, ...repository.validators } },
+            repository: { validators: mergeRepositoryValidators(localConfig.repository.validators, repository.validators, repository.localPath) },
           },
           constitution: await loadConstitution(repository.localPath!),
         });

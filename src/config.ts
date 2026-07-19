@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { copyFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { devHarmonicsConfigSchema, legacyDevHarmonicsConfigSchema } from "./schemas.js";
+import { expandValidatorTokens } from "./validators.js";
 import type { ProviderName, DevHarmonicsConfig } from "./types.js";
 
 export const defaultConfig: DevHarmonicsConfig = {
@@ -163,9 +164,20 @@ export async function loadConfig(projectPath: string): Promise<DevHarmonicsConfi
       routing: structuredClone(defaultConfig.routing),
     };
     await persistMigration(destination, contents, migrated);
-    return migrated;
+    return withExpandedValidators(migrated, projectPath);
   }
-  return parseConfig(devHarmonicsConfigSchema, raw, destination);
+  return withExpandedValidators(parseConfig(devHarmonicsConfigSchema, raw, destination), projectPath);
+}
+
+/**
+ * `${repoRoot}` in a project's own validator commands means this project's root.
+ * Expanded here, at the one place every consumer loads configuration through, so
+ * a validator that needs the repository's own toolchain can be written portably
+ * in .devharmonics/config.json. Registered per-repository validators from the
+ * ledger are expanded separately against that repository's local path.
+ */
+function withExpandedValidators(config: DevHarmonicsConfig, projectPath: string): DevHarmonicsConfig {
+  return { ...config, repository: { validators: expandValidatorTokens(config.repository.validators, path.resolve(projectPath)) } };
 }
 
 export async function saveConfig(projectPath: string, value: unknown): Promise<DevHarmonicsConfig> {

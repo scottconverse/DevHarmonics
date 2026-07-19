@@ -930,7 +930,18 @@ export class Orchestrator {
         this.ledger.addEvent(runId, "review.failed", `${reviewerFallbackReason}; trying the next eligible reviewer`, { provider: reviewerDecision.provider, connectionId: reviewer.connection.id, modelId: reviewerDecision.model.requestedModelId, failureKind, reviewAttempt });
       }
     }
-    if (reviewText === null) throw lastReviewerError ?? new Error("No eligible reviewer completed final review");
+    if (reviewText === null) {
+      // Report the cause the owner can act on. A routing refusal names the last
+      // thing routing checked — usually the model tier — which is misleading when
+      // independence excluded every available provider.
+      const base = lastReviewerError?.message ?? "No eligible reviewer completed final review";
+      throw new Error(describeReviewerUnavailability({
+        routingReason: base,
+        implementationProviders,
+        availableProviders,
+        requireImplementorIndependence: reviewPolicy.requireImplementorIndependence,
+      }));
+    }
     if (!completedReviewerIdentity) throw new Error("Completed final review is missing its reviewer identity");
     const firstReview = parseReviewerResponse(reviewText, completedReviewerIdentity);
     const firstReceiptId = this.ledger.recordReviewReceipt({
@@ -2680,6 +2691,29 @@ export function architectValidatorNames(
   const names = new Set(Object.keys(projectValidators));
   for (const repository of repositories) for (const name of Object.keys(repository.validators)) names.add(name);
   return [...names].sort();
+}
+
+/**
+ * Why no reviewer could be found, in terms the owner can act on.
+ *
+ * A routing refusal reports the last thing routing checked — usually the model
+ * tier — which is misleading when the real cause is that implementor
+ * independence excluded every available provider. A real cross-repository run
+ * failed exactly that way: two tasks ran on the only two enabled providers, both
+ * were excluded from reviewing, and the run blamed the tier. The remedy is to
+ * enable another provider or lower the risk level, and the old message hinted at
+ * neither.
+ */
+export function describeReviewerUnavailability(input: {
+  routingReason: string;
+  implementationProviders: readonly string[];
+  availableProviders: readonly string[];
+  requireImplementorIndependence: boolean;
+}): string {
+  if (!input.requireImplementorIndependence || input.availableProviders.length === 0) return input.routingReason;
+  const remaining = input.availableProviders.filter((provider) => !input.implementationProviders.includes(provider));
+  if (remaining.length > 0) return input.routingReason;
+  return `No independent reviewer is available: implementor independence is required for this risk level, and every available provider (${input.availableProviders.join(", ")}) implemented part of this run. Enable another provider, or lower the risk level to allow a same-provider review.`;
 }
 
 export function canRoute(ledger: Ledger, input: RouteInput): boolean {

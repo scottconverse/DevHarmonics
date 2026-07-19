@@ -6,13 +6,15 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createServer } from "node:http";
+import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { defaultConfig, initializeProject, loadConfig, resolveProviderCommand } from "../src/config.js";
 import { projectLegacyProvider } from "../src/compatibility.js";
 import { assertRunTransition, assertTaskTransition, domainId } from "../src/domain.js";
 import { LEDGER_SCHEMA_VERSION, Ledger } from "../src/ledger.js";
-import { assignReviewFindings, createReviewEvidenceBinding, Orchestrator, parseFirstJsonObject, planSteeredAdmission, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
-import { discoverOllama, OllamaAdapter, syncOllamaRegistry, syncOllamaRuntimes } from "../src/ollama.js";
+import { assignReviewFindings, canRoute, createReviewEvidenceBinding, Orchestrator, workerClassProbe, parseFirstJsonObject, planSteeredAdmission, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
+import { extractCitations, verifyReportCitations } from "../src/citations.js";
+import { boundedThinkingSettings, discoverOllama, minimalThinking, OllamaAdapter, qualifyOllamaModel, syncOllamaRegistry, syncOllamaRuntimes } from "../src/ollama.js";
 import {
   createProvider,
   extractClaudeText,
@@ -23,6 +25,7 @@ import {
   RuntimeInvocationError,
   classifyInvocationFailure,
   invocationFailureScope,
+  isAbortError,
   type InvocationEvent,
 } from "../src/runtime.js";
 import type { DevHarmonicsConfig, PlannedTask, RunPlan, SteeringDirectiveRecord } from "../src/types.js";
@@ -3140,7 +3143,20 @@ test("read-only task contracts survive persistence and never cross the commit bo
     const result = await (orchestrator as any).executeTask({
       runId, goal: "Observe", task: ledger.getTask(runId, task.id), constitution: "test", config,
       providers: ["codex"], providerCursor: 0,
-      worktrees: { createTask: async () => ({ path: root, branch: "observe" }), assertPrimaryClean: async () => { isolationChecks++; }, commitTask: async () => { committed = true; return false; }, mergeTask: async () => undefined },
+      // The stub worker cites STATUS.md:7 and README.md:1, so the worktree it is
+      // given must actually contain them: a diagnostic report is now rejected
+      // when its citations do not resolve, and a fixture citing files that do
+      // not exist would not survive a real run either.
+      worktrees: {
+        createTask: async () => {
+          await writeFile(path.join(root, "STATUS.md"), ["1", "2", "3", "4", "5", "6", "version 1.0.3", ""].join("\n"), "utf8");
+          await writeFile(path.join(root, "README.md"), ["version 1.0.4", ""].join("\n"), "utf8");
+          return { path: root, branch: "observe" };
+        },
+        assertPrimaryClean: async () => { isolationChecks++; },
+        commitTask: async () => { committed = true; return false; },
+        mergeTask: async () => undefined,
+      },
       signal: new AbortController().signal,
     });
     assert.equal(result, "passed");
@@ -3229,7 +3245,20 @@ test("Antigravity Gemini quota exhaustion falls back to the Claude and GPT quota
     config.application.retry.backoffMs = 1;
     config.product.workers = ["gemini"];
     config.repository.validators = { pass: { command: process.execPath, args: ["-e", "process.exit(0)"], timeoutMs: 5_000 } };
-    const outcome = await (orchestrator as any).executeTask({ runId, goal: "Observe", task, constitution: "test", config, providers: ["gemini"], providerCursor: 0, worktrees: { createTask: async () => ({ path: root, branch: "fixture" }), assertPrimaryClean: async () => undefined, commitTask: async () => false, mergeTask: async () => undefined }, signal: new AbortController().signal }).catch((error: unknown) => error);
+    // The stub worker cites README.md:7 and ARCHITECTURE.md:12, so those lines
+    // must genuinely exist in the worktree it is handed: a diagnostic report is
+    // now rejected when its citations do not resolve.
+    const observeWorktrees = {
+      createTask: async () => {
+        await writeFile(path.join(root, "README.md"), ["1", "2", "3", "4", "5", "6", "compatibility finding", ""].join("\n"), "utf8");
+        await writeFile(path.join(root, "ARCHITECTURE.md"), [...Array.from({ length: 12 }, (_, index) => `line ${index + 1}`), ""].join("\n"), "utf8");
+        return { path: root, branch: "fixture" };
+      },
+      assertPrimaryClean: async () => undefined,
+      commitTask: async () => false,
+      mergeTask: async () => undefined,
+    };
+    const outcome = await (orchestrator as any).executeTask({ runId, goal: "Observe", task, constitution: "test", config, providers: ["gemini"], providerCursor: 0, worktrees: observeWorktrees, signal: new AbortController().signal }).catch((error: unknown) => error);
     assert.equal(outcome, "passed", JSON.stringify({ invoked, events: ledger.getRun(runId)?.events, models: ledger.listModels(connectionId).map((model) => ({ id: model.id, active: model.active, qualified: model.qualified, stale: model.qualificationStale, health: ledger.getModelHealth(model.id), quota: model.metadata.quotaGroup })) }));
     assert.deepEqual(invoked, ["Gemini 3.5 Flash (Medium)", "GPT-OSS 120B (Medium)"]);
     assert.notEqual(ledger.getConnectionHealth(connectionId)?.state, "quota_exhausted");
@@ -4219,6 +4248,819 @@ test("a task finishing dispositions direction recorded moments earlier", async (
     assert.equal(ledger.getSteeringDirective(betaDirective.id)?.disposition, "rejected", "a failed task dispositions its direction as well");
   } finally {
     ledger.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test("a thinking local model qualifies instead of being marked incompatible", async () => {
+  // Reproduces a real blocker found running the live Ollama fleet: the analysis
+  // fixture caps num_predict at 16, a thinking model spends that entire budget
+  // on its reasoning channel, and the adapter — reading only message.content —
+  // reported "no assistant content" and classified the model 'incompatible'.
+  // Every thinking-capable model was therefore permanently unqualifiable,
+  // including Mellum2 Thinking, which the plan names as a local specialist.
+  let sawThinkDisabled: boolean | undefined;
+  const server = createServer(async (request, response) => {
+    response.setHeader("Content-Type", "application/json");
+    if (request.url === "/api/version") return response.end(JSON.stringify({ version: "fixture-1" }));
+    if (request.url === "/api/tags") return response.end(JSON.stringify({ models: [{ name: "thinker:12b" }] }));
+    if (request.url === "/api/show") return response.end(JSON.stringify({ capabilities: ["completion", "thinking"] }));
+    if (request.url === "/api/chat" && request.method === "POST") {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      const parsed = JSON.parse(body) as { think?: boolean; options?: { num_predict?: number } };
+      sawThinkDisabled = parsed.think === false;
+      // Faithful to real Ollama: with thinking on and a small budget the answer
+      // channel comes back empty and the stop reason is the token limit.
+      if (parsed.think === false) {
+        return response.end(JSON.stringify({ message: { role: "assistant", content: "DEVHARMONICS_QUALIFIED", thinking: "" }, done_reason: "stop", prompt_eval_count: 20, eval_count: 6 }));
+      }
+      return response.end(JSON.stringify({ message: { role: "assistant", content: "", thinking: "weighing the request" }, done_reason: "length", prompt_eval_count: 20, eval_count: 16 }));
+    }
+    response.statusCode = 404;
+    response.end(JSON.stringify({ error: "not found" }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-thinking-qual-"));
+  try {
+    const outcome = await qualifyOllamaModel("ollama:thinker:12b", root, baseUrl, "local:ollama", "thinker:12b");
+    assert.equal(sawThinkDisabled, true, "the qualification fixture asks the runtime not to spend its budget on reasoning");
+    assert.equal(outcome.passed, true, "a thinking-capable model must be able to pass analysis qualification");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test("a model whose thinking cannot be disabled still qualifies", async () => {
+  // GPT-OSS ignores `think: false` outright — Ollama documents that it accepts
+  // only "low", "medium" or "high" and that its trace cannot be fully disabled.
+  // Sending a boolean therefore left it reasoning against the fixture's 16-token
+  // budget, spending all of it on the trace and returning no answer, so a
+  // supported thinking model was permanently unqualifiable. This server behaves
+  // the way the documentation says the real one does.
+  // https://docs.ollama.com/capabilities/thinking
+  let sawThink: unknown;
+  let sawBudget: number | undefined;
+  const server = createServer(async (request, response) => {
+    response.setHeader("Content-Type", "application/json");
+    if (request.url === "/api/version") return response.end(JSON.stringify({ version: "fixture-1" }));
+    if (request.url === "/api/tags") return response.end(JSON.stringify({ models: [{ name: "gpt-oss:20b" }] }));
+    if (request.url === "/api/show") return response.end(JSON.stringify({ capabilities: ["completion", "thinking"] }));
+    if (request.url === "/api/chat" && request.method === "POST") {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      const parsed = JSON.parse(body) as { think?: unknown; options?: { num_predict?: number } };
+      sawThink = parsed.think;
+      sawBudget = parsed.options?.num_predict;
+      const level = typeof parsed.think === "string" ? parsed.think : null;
+      // A boolean is ignored: the model reasons anyway. So does a level — the
+      // trace is always emitted — but a level plus room for it leaves an answer.
+      const trace = level === "low" ? "brief trace" : "a much longer deliberation";
+      const budget = parsed.options?.num_predict ?? 0;
+      if (budget < trace.length) {
+        return response.end(JSON.stringify({ message: { role: "assistant", content: "", thinking: trace }, done_reason: "length", prompt_eval_count: 20, eval_count: budget }));
+      }
+      return response.end(JSON.stringify({ message: { role: "assistant", content: "DEVHARMONICS_QUALIFIED", thinking: trace }, done_reason: "stop", prompt_eval_count: 20, eval_count: 8 }));
+    }
+    response.statusCode = 404;
+    response.end(JSON.stringify({ error: "not found" }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-undisableable-thinking-"));
+  try {
+    const outcome = await qualifyOllamaModel("ollama:gpt-oss:20b", root, baseUrl, "local:ollama", "gpt-oss:20b");
+    assert.equal(sawThink, "low", "a model that ignores booleans is asked for its shortest supported trace instead");
+    assert.ok((sawBudget ?? 0) > 16, `an always-on trace needs budget for the trace and the answer, got ${String(sawBudget)}`);
+    assert.equal(outcome.passed, true, "a model whose thinking cannot be disabled must still be able to qualify");
+    // Models that can disable thinking are untouched: still a boolean, still bounded.
+    assert.equal(minimalThinking("qwen2.5:7b"), false);
+    assert.deepEqual(boundedThinkingSettings("qwen2.5:7b", { temperature: 0, num_predict: 16 }), { temperature: 0, num_predict: 16 });
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test("an exhausted output budget is reported as a budget failure, not model incompatibility", async () => {
+  // Classification matters: 'incompatible' is a durable statement that the model
+  // cannot do the work, and it excludes the model from scheduling. A truncated
+  // response is a configuration problem and must not be recorded as incapacity.
+  const server = createServer(async (request, response) => {
+    response.setHeader("Content-Type", "application/json");
+    if (request.url === "/api/version") return response.end(JSON.stringify({ version: "fixture-1" }));
+    if (request.url === "/api/tags") return response.end(JSON.stringify({ models: [{ name: "thinker:12b" }] }));
+    if (request.url === "/api/show") return response.end(JSON.stringify({ capabilities: ["completion", "thinking"] }));
+    if (request.url === "/api/chat" && request.method === "POST") {
+      return response.end(JSON.stringify({ message: { role: "assistant", content: "", thinking: "still reasoning" }, done_reason: "length", prompt_eval_count: 10, eval_count: 16 }));
+    }
+    response.statusCode = 404;
+    response.end(JSON.stringify({ error: "not found" }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const adapter = new OllamaAdapter(`http://127.0.0.1:${address.port}`);
+  try {
+    await assert.rejects(
+      () => adapter.invoke({
+        role: "worker",
+        prompt: "anything",
+        cwd: os.tmpdir(),
+        permission: "read_only",
+        timeoutMs: 30_000,
+        model: { requestedModelId: domainId("Model", "ollama:thinker:12b"), alias: "thinker:12b", settings: { temperature: 0, num_predict: 16 } },
+      }),
+      (error: unknown) => {
+        const failure = error as { kind?: string; message?: string };
+        assert.notEqual(failure.kind, "incompatible", "a truncated answer must not be recorded as model incapacity");
+        assert.equal(failure.kind, "context_overflow", "it is an output-budget failure");
+        assert.match(String(failure.message), /budget|truncat|reasoning/i, "the message explains what actually happened");
+        return true;
+      },
+    );
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("one caller cancelling a shared qualification does not cancel it for the other", async () => {
+  // Two tasks needing the same model, fingerprint, and role share ONE probe, so
+  // a model is not qualified twice concurrently. That sharing must not couple
+  // their lifetimes: a caller that cancels has to stop waiting without killing a
+  // probe the other caller still needs, and must not inherit a verdict it did
+  // not ask for. An audit showed this behaved correctly but that removing it
+  // left every test green, so the guarantee is pinned here.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-shared-flight-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    ledger.upsertConnection({ id: "local:ollama", provider: "ollama", transport: "local", authentication: "local_none", displayName: "Ollama", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "local", capacity: "available", adapterVersion: "test", runtimeVersion: "test", metadata: { baseUrl: "http://127.0.0.1:11434" } });
+    const modelId = "ollama:worker:7b";
+    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "local:ollama", canonicalName: "worker:7b", displayName: "worker:7b", source: "runtime_discovery", lifecycle: "known", visible: true, verified: false, qualified: false, active: false, metadata: { capabilities: ["completion"] } });
+
+    const task = { id: "probe", title: "Inspect", description: "Inspect", dependencies: [], preferredProvider: null, checks: [], kind: "diagnostic" as const, permission: "read_only" as const, risk: "low" as const };
+    const config = structuredClone(defaultConfig);
+    let probes = 0;
+    let release: (() => void) | null = null;
+    const shared = { ledger, config, cwd: root, role: "worker" as const, preferredProvider: "ollama", permission: "read_only" as const, task };
+    const qualify = async () => {
+      probes += 1;
+      await new Promise<void>((resolve) => { release = resolve; });
+      return { fixtureVersion: "local-analysis-v1", role: "analysis" as const, passed: true, score: 1, evidence: {} };
+    };
+
+    const ownerController = new AbortController();
+    const joinerController = new AbortController();
+    const owner = ensureSchedulerCandidateQualified({ ...shared, signal: ownerController.signal, qualify });
+    for (let tick = 0; tick < 200 && probes === 0; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+    const joiner = ensureSchedulerCandidateQualified({ ...shared, signal: joinerController.signal, qualify });
+    for (let tick = 0; tick < 50; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(probes, 1, "the second caller joins the in-flight probe rather than starting a second one");
+
+    // The JOINER cancels. The owner's probe must survive it.
+    joinerController.abort();
+    // Explicit deadline on THIS direction: the mutation that removes the
+    // joiner's independent wait makes it await a promise only this test can
+    // release, so without a bound it hangs instead of naming the broken
+    // contract. The previous round put the deadline on the other direction.
+    await assert.rejects(
+      Promise.race([joiner, delay(5_000).then(() => { throw new Error("the cancelling joiner was still waiting after 5s"); })]),
+      (error: unknown) => isAbortError(error),
+      "the cancelling caller stops waiting",
+    );
+
+    assert.ok(release, "the shared probe is still outstanding");
+    (release as () => void)();
+    const result = await owner;
+    assert.equal(result?.passed, true, "the caller that did not cancel still gets its answer");
+    assert.equal(probes, 1, "still exactly one underlying probe");
+    assert.deepEqual(
+      ledger.listModelQualifications(modelId).filter((item) => !item.passed),
+      [],
+      "one caller cancelling must not record a failure against the model",
+    );
+    assert.equal(ledger.isModelEligible(modelId), true, "and must not cool it out of scheduling");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test("cancelling the caller that started a shared qualification does not cancel the others", async () => {
+  // The reverse order of the test above, and the half an audit found missing.
+  // Fixing only "the joiner cancels" left the probe running on the FIRST
+  // caller's signal, so cancelling that caller aborted work a later caller was
+  // still waiting on — unrelated tasks coupled purely by arrival order.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-owner-cancel-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    ledger.upsertConnection({ id: "local:ollama", provider: "ollama", transport: "local", authentication: "local_none", displayName: "Ollama", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "local", capacity: "available", adapterVersion: "test", runtimeVersion: "test", metadata: { baseUrl: "http://127.0.0.1:11434" } });
+    const modelId = "ollama:worker:7b";
+    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "local:ollama", canonicalName: "worker:7b", displayName: "worker:7b", source: "runtime_discovery", lifecycle: "known", visible: true, verified: false, qualified: false, active: false, metadata: { capabilities: ["completion"] } });
+
+    const task = { id: "probe", title: "Inspect", description: "Inspect", dependencies: [], preferredProvider: null, checks: [], kind: "diagnostic" as const, permission: "read_only" as const, risk: "low" as const };
+    const shared = { ledger, config: structuredClone(defaultConfig), cwd: root, role: "worker" as const, preferredProvider: "ollama", permission: "read_only" as const, task };
+    let probes = 0;
+    let release: (() => void) | null = null;
+    let sawProbeAbort = false;
+    // The seam observes the SHARED probe's signal, so this test can tell whether
+    // the underlying work was really cancelled. A callback that ignores the
+    // signal cannot distinguish a correct implementation from a broken one.
+    const qualify = async ({ signal }: { signal: AbortSignal }) => {
+      probes += 1;
+      signal.addEventListener("abort", () => { sawProbeAbort = true; }, { once: true });
+      await new Promise<void>((resolve) => { release = resolve; });
+      return { fixtureVersion: "local-analysis-v1", role: "analysis" as const, passed: true, score: 1, evidence: {} };
+    };
+
+    const ownerController = new AbortController();
+    const joinerController = new AbortController();
+    const owner = ensureSchedulerCandidateQualified({ ...shared, signal: ownerController.signal, qualify });
+    for (let tick = 0; tick < 200 && probes === 0; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+    const joiner = ensureSchedulerCandidateQualified({ ...shared, signal: joinerController.signal, qualify });
+    for (let tick = 0; tick < 50; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(probes, 1, "the second caller joined rather than starting a second probe");
+
+    // The OWNER cancels. The joiner never asked to stop.
+    ownerController.abort();
+    // An explicit deadline, so a lifetime regression fails by naming the broken
+    // contract rather than by hanging until an outer CI watchdog fires.
+    await assert.rejects(
+      Promise.race([owner, delay(5_000).then(() => { throw new Error("the cancelling caller was still waiting after 5s"); })]),
+      (error: unknown) => isAbortError(error),
+      "the cancelling caller stops waiting",
+    );
+    assert.equal(joinerController.signal.aborted, false, "the joiner never cancelled");
+    for (let tick = 0; tick < 50; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(sawProbeAbort, false, "the shared probe must survive while a subscriber still wants it");
+
+    assert.ok(release, "the shared probe is still outstanding");
+    (release as () => void)();
+    const result = await joiner;
+    assert.equal(result?.passed, true, "the caller that did not cancel still gets its answer");
+    assert.equal(probes, 1, "still exactly one underlying probe");
+    assert.deepEqual(
+      ledger.listModelQualifications(modelId).filter((item) => !item.passed),
+      [],
+      "no failure was recorded against the model",
+    );
+    assert.equal(ledger.isModelEligible(modelId), true, "and it was not cooled out of scheduling");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test("a live joiner keeps a shared qualification discoverable after its creator cancels", async () => {
+  // One probe per model/fingerprint/role is the whole point of sharing. Cleanup
+  // used to be tied to the CREATOR's wait, so a creator that cancelled
+  // unpublished a flight live joiners were still using — and the next caller
+  // started a second concurrent probe against the same model, racing the same
+  // durable qualification and health writes. The entry must live as long as the
+  // probe does, not as long as whoever happened to start it.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-flight-lifetime-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    ledger.upsertConnection({ id: "local:ollama", provider: "ollama", transport: "local", authentication: "local_none", displayName: "Ollama", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "local", capacity: "available", adapterVersion: "test", runtimeVersion: "test", metadata: { baseUrl: "http://127.0.0.1:11434" } });
+    const modelId = "ollama:worker:7b";
+    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "local:ollama", canonicalName: "worker:7b", displayName: "worker:7b", source: "runtime_discovery", lifecycle: "known", visible: true, verified: false, qualified: false, active: false, metadata: { capabilities: ["completion"] } });
+
+    const task = { id: "probe", title: "Inspect", description: "Inspect", dependencies: [], preferredProvider: null, checks: [], kind: "diagnostic" as const, permission: "read_only" as const, risk: "low" as const };
+    const shared = { ledger, config: structuredClone(defaultConfig), cwd: root, role: "worker" as const, preferredProvider: "ollama", permission: "read_only" as const, task };
+    let probes = 0;
+    let release: (() => void) | null = null;
+    const qualify = async () => {
+      probes += 1;
+      await new Promise<void>((resolve) => { release = resolve; });
+      return { fixtureVersion: "local-analysis-v1", role: "analysis" as const, passed: true, score: 1, evidence: {} };
+    };
+    const settle = async () => { for (let tick = 0; tick < 50; tick += 1) await new Promise((resolve) => setImmediate(resolve)); };
+
+    const ownerController = new AbortController();
+    const owner = ensureSchedulerCandidateQualified({ ...shared, signal: ownerController.signal, qualify });
+    for (let tick = 0; tick < 200 && probes === 0; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+    const joiner = ensureSchedulerCandidateQualified({ ...shared, signal: new AbortController().signal, qualify });
+    await settle();
+    assert.equal(probes, 1, "the joiner joined the creator's probe");
+
+    // The creator cancels while the joiner is still waiting.
+    ownerController.abort();
+    await assert.rejects(
+      Promise.race([owner, delay(5_000).then(() => { throw new Error("the cancelling creator was still waiting after 5s"); })]),
+      (error: unknown) => isAbortError(error),
+      "the creator stops waiting",
+    );
+    await settle();
+
+    // A third caller arrives. It must find the SAME probe, not start another.
+    const late = ensureSchedulerCandidateQualified({ ...shared, signal: new AbortController().signal, qualify });
+    await settle();
+    assert.equal(probes, 1, "a still-live joiner keeps the shared flight discoverable to later callers");
+
+    assert.ok(release, "the shared probe is still outstanding");
+    (release as () => void)();
+    const [joinerResult, lateResult] = await Promise.all([joiner, late]);
+    assert.equal(joinerResult?.passed, true, "the joiner gets its answer");
+    assert.equal(lateResult?.passed, true, "and so does the later caller, from the same probe");
+    assert.equal(probes, 1, "exactly one underlying probe ran throughout");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test("an answer that lands as the caller cancels is not persisted as a verdict", async () => {
+  // The narrow ordering this guards: the shared probe wins its race against the
+  // caller's abort, so the caller receives a value — and only then does the
+  // cancellation land, before the caller resumes and would persist it. I claimed
+  // this window could not be staged deterministically; an audit showed it can,
+  // by scheduling the abort from a getter on the outcome, which runs while the
+  // result is being read and queues the cancellation into exactly that gap.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-late-cancel-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    ledger.upsertConnection({ id: "local:ollama", provider: "ollama", transport: "local", authentication: "local_none", displayName: "Ollama", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "local", capacity: "available", adapterVersion: "test", runtimeVersion: "test", metadata: { baseUrl: "http://127.0.0.1:11434" } });
+    const modelId = "ollama:worker:7b";
+    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "local:ollama", canonicalName: "worker:7b", displayName: "worker:7b", source: "runtime_discovery", lifecycle: "known", visible: true, verified: false, qualified: false, active: false, metadata: { capabilities: ["completion"] } });
+
+    const controller = new AbortController();
+    const outcome = {
+      fixtureVersion: "local-analysis-v1",
+      role: "analysis" as const,
+      passed: false,
+      score: 0,
+      // Read while the outcome is spread, which is after the probe settled and
+      // before the caller resumes. Two microtasks put the abort in that gap.
+      get evidence() {
+        queueMicrotask(() => queueMicrotask(() => controller.abort()));
+        return {};
+      },
+    };
+
+    await assert.rejects(
+      ensureSchedulerCandidateQualified({
+        ledger,
+        config: structuredClone(defaultConfig),
+        cwd: root,
+        role: "worker",
+        preferredProvider: "ollama",
+        permission: "read_only",
+        task: { id: "probe", title: "Inspect", description: "Inspect", dependencies: [], preferredProvider: null, checks: [], kind: "diagnostic", permission: "read_only", risk: "low" },
+        signal: controller.signal,
+        qualify: async () => outcome,
+      }),
+      (error: unknown) => isAbortError(error),
+      "an answer that arrives as the caller cancels must not become that caller's verdict",
+    );
+
+    assert.deepEqual(
+      ledger.listModelQualifications(modelId).filter((item) => !item.passed),
+      [],
+      "and must not be persisted as a failed qualification",
+    );
+    assert.equal(ledger.isModelEligible(modelId), true, "nor cool the model out of scheduling");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test("a probe that ignores cancellation is not left published for later callers", async () => {
+  // An abort is a REQUEST, and not every probe honours it. Cleanup used to run
+  // only when the shared promise settled, so a probe that ignored cancellation
+  // never settled and its entry stayed published forever: the next caller for
+  // that model joined work nobody owned and no caller could ever finish, with
+  // each stranded key held for the life of the process.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-abandoned-flight-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    ledger.upsertConnection({ id: "local:ollama", provider: "ollama", transport: "local", authentication: "local_none", displayName: "Ollama", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "local", capacity: "available", adapterVersion: "test", runtimeVersion: "test", metadata: { baseUrl: "http://127.0.0.1:11434" } });
+    const modelId = "ollama:worker:7b";
+    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "local:ollama", canonicalName: "worker:7b", displayName: "worker:7b", source: "runtime_discovery", lifecycle: "known", visible: true, verified: false, qualified: false, active: false, metadata: { capabilities: ["completion"] } });
+
+    const task = { id: "probe", title: "Inspect", description: "Inspect", dependencies: [], preferredProvider: null, checks: [], kind: "diagnostic" as const, permission: "read_only" as const, risk: "low" as const };
+    const shared = { ledger, config: structuredClone(defaultConfig), cwd: root, role: "worker" as const, preferredProvider: "ollama", permission: "read_only" as const, task };
+    let probes = 0;
+    const settle = async () => { for (let tick = 0; tick < 50; tick += 1) await new Promise((resolve) => setImmediate(resolve)); };
+    // Deliberately deaf to cancellation, and it never answers.
+    const deaf = () => { probes += 1; return new Promise<never>(() => {}); };
+
+    const first = new AbortController();
+    const stranded = ensureSchedulerCandidateQualified({ ...shared, signal: first.signal, qualify: deaf });
+    for (let tick = 0; tick < 200 && probes === 0; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+    first.abort();
+    await assert.rejects(
+      Promise.race([stranded, delay(5_000).then(() => { throw new Error("the only subscriber was still waiting after 5s"); })]),
+      (error: unknown) => isAbortError(error),
+      "the only subscriber stops waiting",
+    );
+    await settle();
+
+    // Every subscriber has gone. A later caller must start fresh work, not join
+    // the abandoned probe that nobody owns and that will never answer.
+    const later = new AbortController();
+    const revived = ensureSchedulerCandidateQualified({ ...shared, signal: later.signal, qualify: deaf });
+    for (let tick = 0; tick < 200 && probes < 2; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(probes, 2, "a later caller starts its own probe rather than joining an abandoned one");
+
+    later.abort();
+    await assert.rejects(
+      Promise.race([revived, delay(5_000).then(() => { throw new Error("the later caller was still waiting after 5s"); })]),
+      (error: unknown) => isAbortError(error),
+      "and it can cancel too",
+    );
+    await settle();
+
+    // The same boundary, entered by a caller whose signal was ALREADY aborted
+    // when it arrived. An aborted signal never emits 'abort', so a listener
+    // alone would leave that subscriber counted forever and strand the flight.
+    const preAborted = new AbortController();
+    preAborted.abort();
+    await assert.rejects(
+      Promise.race([
+        ensureSchedulerCandidateQualified({ ...shared, signal: preAborted.signal, qualify: deaf }),
+        delay(5_000).then(() => { throw new Error("an already-cancelled caller was still waiting after 5s"); }),
+      ]),
+      (error: unknown) => isAbortError(error),
+      "a caller that had already cancelled does not wait",
+    );
+    await settle();
+    const probesBefore = probes;
+    const after = new AbortController();
+    const fresh = ensureSchedulerCandidateQualified({ ...shared, signal: after.signal, qualify: deaf });
+    for (let tick = 0; tick < 200 && probes === probesBefore; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(probes > probesBefore, "an already-cancelled caller must not leave a stranded probe behind it");
+    after.abort();
+    await assert.rejects(
+      Promise.race([fresh, delay(5_000).then(() => { throw new Error("the fresh caller was still waiting after 5s"); })]),
+      (error: unknown) => isAbortError(error),
+      "and that fresh probe can be cancelled too",
+    );
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test("cancelling a real local qualification call leaves the model schedulable", async () => {
+  // The previous version of this guarantee was tested through an injected
+  // qualify callback that listened to the signal — so it proved the seam the
+  // test controlled, not the path that ships. An audit then showed the two
+  // Ollama fixtures took a signal parameter and never handed it to the HTTP
+  // call underneath: a cancelled probe whose response arrived anyway was scored
+  // as a failed qualification and cooled the only local worker for 30 minutes.
+  // This drives the real adapter against a real server that answers late.
+  let sawSignalledAbort = false;
+  const server = createServer(async (request, response) => {
+    response.setHeader("Content-Type", "application/json");
+    if (request.url === "/api/version") return response.end(JSON.stringify({ version: "fixture-1" }));
+    if (request.url === "/api/tags") return response.end(JSON.stringify({ models: [{ name: "worker:7b" }] }));
+    if (request.url === "/api/show") return response.end(JSON.stringify({ capabilities: ["completion"] }));
+    if (request.url === "/api/chat" && request.method === "POST") {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      // Answers late, and answers WRONG — so if the abort is not honoured, the
+      // result is a failed qualification rather than a passing one.
+      await delay(400);
+      // The socket being gone is what proves the signal reached the request
+      // itself, rather than being noticed only after the answer came back.
+      if (request.destroyed || response.destroyed) {
+        sawSignalledAbort = true;
+        return;
+      }
+      return response.end(JSON.stringify({ message: { role: "assistant", content: "NOT_THE_MARKER" }, done_reason: "stop", prompt_eval_count: 5, eval_count: 5 }));
+    }
+    response.statusCode = 404;
+    response.end(JSON.stringify({ error: "not found" }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-real-abort-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    await syncOllamaRuntimes(ledger, [{ id: "fixture", displayName: "Fixture", baseUrl: `http://127.0.0.1:${address.port}`, enabled: true }]);
+    const model = ledger.listModels("local:ollama:fixture")[0];
+    assert.ok(model, "the fixture runtime registered a model");
+
+    const controller = new AbortController();
+    const inFlight = ensureSchedulerCandidateQualified({
+      ledger,
+      config: structuredClone(defaultConfig),
+      cwd: root,
+      role: "worker",
+      preferredProvider: "ollama",
+      permission: "read_only",
+      task: { id: "probe", title: "Inspect", description: "Inspect", dependencies: [], preferredProvider: null, checks: [], kind: "diagnostic", permission: "read_only", risk: "low" },
+      signal: controller.signal,
+    });
+    // Cancel while the real HTTP call is genuinely outstanding.
+    await delay(120);
+    controller.abort();
+    await assert.rejects(inFlight, (error: unknown) => isAbortError(error), "a cancelled real qualification surfaces as an abort");
+
+    // The rejection arrives as soon as the signal fires; the server only learns
+    // the socket is gone when it tries to answer, so give it that moment.
+    for (let tick = 0; tick < 60 && !sawSignalledAbort; tick += 1) await delay(25);
+    assert.equal(sawSignalledAbort, true, "the abort reached the HTTP request rather than being dropped at the adapter");
+    assert.deepEqual(
+      ledger.listModelQualifications(model.id).filter((item) => !item.passed),
+      [],
+      "a cancelled call must not be persisted as a failed qualification",
+    );
+    assert.equal(ledger.isModelEligible(model.id), true, "a cancelled call must not cool the model out of scheduling");
+  } finally {
+    ledger.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test("interrupting a first-use qualification leaves the model's health untouched", async () => {
+  // An audit found this in the fix for the interrupt window: the abort signal
+  // reached the probe, but qualification caught EVERY throw and turned it into
+  // passed:false. That was persisted as a failed qualification and recorded as
+  // 'incompatible', which carries a 30-minute cooldown — so exercising the
+  // owner's interrupt could make the only local worker ineligible for its own
+  // retry and for later runs. An interrupt is a control action, not evidence
+  // about a model.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-abort-health-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    ledger.upsertConnection({ id: "local:ollama", provider: "ollama", transport: "local", authentication: "local_none", displayName: "Ollama", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "local", capacity: "available", adapterVersion: "test", runtimeVersion: "test", metadata: { baseUrl: "http://127.0.0.1:11434" } });
+    const modelId = "ollama:worker:7b";
+    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "local:ollama", canonicalName: "worker:7b", displayName: "worker:7b", source: "runtime_discovery", lifecycle: "known", visible: true, verified: false, qualified: false, active: false, metadata: { capabilities: ["completion"] } });
+
+    const controller = new AbortController();
+    let probeStarted = false;
+    // A probe that never answers on its own — only the abort ends it, which is
+    // what a real first-use qualification against a live model looks like.
+    const blocked = ensureSchedulerCandidateQualified({
+      ledger,
+      config: structuredClone(defaultConfig),
+      cwd: root,
+      role: "worker",
+      preferredProvider: "ollama",
+      permission: "read_only",
+      // A low-risk read-only diagnostic classifies to the lowest tier, which is
+      // what a small local model can actually be selected for.
+      task: { id: "probe", title: "Inspect", description: "Inspect", dependencies: [], preferredProvider: null, checks: [], kind: "diagnostic", permission: "read_only", risk: "low" },
+      signal: controller.signal,
+      // Deliberately UNABORTABLE: it ignores the signal and answers late with a
+      // failing result. Some adapters cannot be cancelled, and any adapter can
+      // have its answer land in the moment after cancellation. Neither may be
+      // allowed to become a verdict, so the guarantee has to sit at the boundary
+      // rather than depend on the call underneath being well behaved.
+      qualify: async () => {
+        probeStarted = true;
+        await delay(150);
+        return { fixtureVersion: "local-analysis-v1", role: "analysis" as const, passed: false, score: 0, evidence: {} };
+      },
+    });
+    for (let tick = 0; tick < 200 && !probeStarted; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(probeStarted, true, "the probe is genuinely in flight before the interrupt");
+
+    controller.abort();
+    await assert.rejects(blocked, (error: unknown) => isAbortError(error), "an unabortable probe answering after cancellation must not become a verdict");
+
+    // The point of the test: nothing about the model was concluded.
+    const after = ledger.getModel(modelId);
+    assert.equal(after?.qualified, false, "the model is no more qualified than before");
+    assert.deepEqual(
+      ledger.listModelQualifications(modelId).filter((item) => !item.passed),
+      [],
+      "an interrupt must not be persisted as a failed qualification",
+    );
+    assert.equal(ledger.isModelEligible(modelId), true, "an interrupt must not cool the model out of scheduling");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test("worker liveness is decided by the router itself, not by a proxy that disagrees with it", async () => {
+  // Found by the v0.6 item-4 fallback proving run. The attempt loop guards on
+  // input.providers, which only ever holds subscription providers, so once the
+  // last subscription connection cools the task is failed with "all eligible
+  // providers are cooling down or unavailable" — without ever asking the router,
+  // which is the only place a local model is considered. Local fallback was
+  // therefore reachable in routing and unreachable in practice.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-local-fallback-guard-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    ledger.upsertConnection({ id: "subscription-cli:claude", provider: "claude", transport: "subscription_cli", authentication: "subscription", displayName: "Claude", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "unknown", capacity: "unknown", adapterVersion: "test", runtimeVersion: "test", metadata: {} });
+    ledger.upsertConnection({ id: "local:ollama", provider: "ollama", transport: "local", authentication: "local_none", displayName: "Ollama", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "local", capacity: "available", adapterVersion: "test", runtimeVersion: "test", metadata: { baseUrl: "http://127.0.0.1:11434" } });
+    ledger.upsertDiscoveredModel({ id: "ollama:worker:7b", connectionId: "local:ollama", canonicalName: "worker:7b", displayName: "worker:7b", source: "runtime_discovery", lifecycle: "active", visible: true, verified: true, qualified: true, active: true, metadata: { capabilities: ["completion"] } });
+
+    // The subscription connection runs out; the local runtime is untouched.
+    ledger.recordConnectionOutcome("subscription-cli:claude", { success: false, failureKind: "quota_exhausted", detail: "usage limit reached" });
+
+    const subscriptionEligible = ledger.isConnectionEligible("subscription-cli:claude");
+    const localEligible = ledger.isConnectionEligible("local:ollama");
+    assert.equal(localEligible, true, "the local runtime is still usable");
+
+    // The decision the attempt loop has to make: with no subscription connection
+    // usable, is there still somewhere to run? That question is only answered
+    // honestly by the router. A predicate that checked generic lifecycle flags
+    // instead — qualified, active, not excluded — disagreed with routing in both
+    // directions, and an audit proved both. Each case below is one of those.
+    const config = structuredClone(defaultConfig);
+    const noSubscription = () => workerClassProbe(config, []);
+    const modelId = "ollama:worker:7b";
+
+    // False positive: qualified and active, but only for the architect role. The
+    // old predicate said the task could run; routing then threw out of the
+    // attempt and failed the whole run instead of settling one task.
+    ledger.recordModelQualification({ modelId, fixtureVersion: "test", role: "architect", passed: true, score: 1, evidence: {} });
+    assert.equal(ledger.getModel(modelId)?.qualified, true, "the model is qualified in the generic sense the old predicate checked");
+    assert.equal(canRoute(ledger, noSubscription()), false, "a model qualified only as architect cannot take worker work");
+
+    // Qualified for analysis: it can carry read-only worker work.
+    ledger.recordModelQualification({ modelId, fixtureVersion: "test", role: "analysis", passed: true, score: 1, evidence: {} });
+    assert.equal(canRoute(ledger, noSubscription()), true, "a cooling subscription must not end the task while a qualified local worker is available");
+    // ...but not a write: that needs the local tool qualification, which the
+    // generic predicate had no way to see.
+    assert.equal(
+      canRoute(ledger, { ...noSubscription(), permission: "workspace_write" }),
+      false,
+      "an analysis-qualified local model cannot be treated as a writer",
+    );
+
+    // False negative: an inactive model that is manually assigned. Routing
+    // honours explicit assignment without requiring active, so refusing here
+    // would refuse a model the router would in fact have selected.
+    ledger.setModelPreference(modelId, { active: false });
+    assert.equal(canRoute(ledger, noSubscription()), false, "an inactive model is not picked up by ordinary selection");
+    const assigned = structuredClone(defaultConfig);
+    assigned.routing.worker.modelId = modelId;
+    assert.equal(
+      canRoute(ledger, workerClassProbe(assigned, [])),
+      true,
+      "a manually assigned local model routes even while inactive, so liveness must say so too",
+    );
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test("a diagnostic report citing files that do not exist is rejected as unverifiable", async () => {
+  // A local model produced five reports whose path:line citations were entirely
+  // invented — non-existent files, empty lines, unrelated content — and every
+  // task passed, because the diagnostic gate only checked that citations LOOKED
+  // like citations. Only the independent reviewer caught it, after a full run.
+  // Citations are mechanically checkable, so check them.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-citations-"));
+  try {
+    await writeFile(path.join(root, "README.md"), "line one\nline two\nline three\n", "utf8");
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "src", "app.py"), "import os\nVERSION = '1.2.0'\n", "utf8");
+
+    const genuine = await verifyReportCitations(root, "Found the pin at src/app.py:2 and context in README.md:1.");
+    assert.deepEqual(genuine.unverifiable, [], "citations that resolve to real lines verify cleanly");
+    assert.equal(genuine.checked.length, 2, "both citations were checked");
+
+    // The exact shapes observed in the real run.
+    const fabricated = await verifyReportCitations(
+      root,
+      "Evidence: config.yaml:3 states the version, user_manual.md:2 confirms it, and README.md:99 repeats it.",
+    );
+    const bad = fabricated.unverifiable.map((item) => item.citation).sort();
+    assert.deepEqual(bad, ["README.md:99", "config.yaml:3", "user_manual.md:2"], "missing files and out-of-range lines are all unverifiable");
+    assert.ok(
+      fabricated.unverifiable.every((item) => item.reason.length > 0),
+      "each rejection explains itself so the owner can see what was wrong",
+    );
+    // A report with no citations at all is not this check's business.
+    const none = await verifyReportCitations(root, "No citations here, just prose.");
+    assert.deepEqual(none.checked, []);
+    assert.deepEqual(none.unverifiable, []);
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test("every evidence form the diagnostic gate accepts is resolved by the citation verifier", async () => {
+  // An audit proved the verifier was bypassable: the gate in agents.ts accepted
+  // `[missing.md](missing.md), line 2` as evidence, but the verifier's own
+  // narrower pattern found zero citations in it, so a fabricated finding written
+  // in that shape passed unchecked. Range ends were discarded, empty files
+  // counted as one line, `../` traversal was silently stripped, and a legitimate
+  // absolute path inside the worktree was rejected. Each row below is one of
+  // those proven evasions.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-citation-forms-"));
+  try {
+    await writeFile(path.join(root, "README.md"), "line one\nline two\nline three\n", "utf8");
+    await writeFile(path.join(root, "empty.md"), "", "utf8");
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "src", "app.py"), "import os\nVERSION = '1.2.0'\n", "utf8");
+    // A decoy with the same basename as the traversal target, to prove the
+    // traversal is rejected rather than quietly resolved against the decoy.
+    await writeFile(path.join(root, "outside.ts"), "export const x = 1;\n", "utf8");
+    // The traversal and absolute-path rows must fail because the cited path is
+    // outside the worktree, NOT merely because nothing is there — so both
+    // targets really exist. Without this the containment check can be deleted
+    // and the suite stays green.
+    // A directory and a filename that both contain spaces, inside the worktree.
+    const spaced = path.join(root, "dir with spaces");
+    await mkdir(spaced, { recursive: true });
+    await writeFile(path.join(spaced, "inside file.ts"), ["export const a = 1;", "export const b = 2;", ""].join("\n"), "utf8");
+    await mkdir(path.join(root, "sub dir"), { recursive: true });
+    await writeFile(path.join(root, "sub dir", "notes file.md"), ["first line", ""].join("\n"), "utf8");
+
+    const neighbour = await mkdtemp(path.join(os.tmpdir(), "devharmonics-citation-neighbour-"));
+    await writeFile(path.join(neighbour, "other.ts"), "export const y = 2;\n", "utf8");
+    await writeFile(path.join(path.dirname(root), "outside.ts"), "export const z = 3;\n", "utf8");
+
+    const cases: Array<{ text: string; verifies: boolean; why: string }> = [
+      { text: "Found the pin at src/app.py:2 and context in README.md:1.", verifies: true, why: "plain path:line" },
+      { text: "See [README.md](README.md), line 2 for the claim.", verifies: true, why: "linked path with nearby line" },
+      { text: "See [missing.md](missing.md), line 2 for the claim.", verifies: false, why: "linked form naming a file that does not exist" },
+      { text: "The evidence is in [empty.md](empty.md), line 1.", verifies: false, why: "a line cited in an empty file" },
+      { text: "Range README.md:1-2 covers it.", verifies: true, why: "a range fully inside the file" },
+      { text: "Range README.md:2-999 covers it.", verifies: false, why: "a range whose end is past the file" },
+      { text: "Range README.md:3-1 covers it.", verifies: false, why: "a backwards range" },
+      { text: "Broken at ../outside.ts:1 upstream.", verifies: false, why: "traversal outside the worktree" },
+      { text: `Broken at ${path.join(root, "src", "app.py")}:2 exactly.`, verifies: true, why: "an absolute path inside the worktree" },
+      { text: `Broken at ${path.join(neighbour, "other.ts")}:1 exactly.`, verifies: false, why: "an absolute path to a real file outside the worktree" },
+      { text: "Version 1.2.0 shipped and 3.4.5 followed, no files named.", verifies: true, why: "version strings are not citations" },
+      // An audit built a real repository under a path containing spaces and
+      // showed the citation was truncated to its last segment and then rejected
+      // as fabricated. Real repositories live under such paths.
+      { text: `Broken at ${path.join(spaced, "inside file.ts")}:2 exactly.`, verifies: true, why: "an absolute path containing spaces" },
+      { text: `Broken at ${path.join(spaced, "inside file.ts")}:99 exactly.`, verifies: false, why: "an absolute path with spaces, past the end of the file" },
+      { text: `See [the file](${path.join(spaced, "inside file.ts")}:2) for the claim.`, verifies: true, why: "a linked path containing spaces" },
+      { text: `See \`${path.join(spaced, "inside file.ts")}:2\` for the claim.`, verifies: true, why: "a backtick-quoted path containing spaces" },
+      { text: `See [notes](sub dir/notes file.md), line 1 for the claim.`, verifies: true, why: "a linked relative path containing spaces" },
+      { text: "See `sub dir/notes file.md`, line 1 for the claim.", verifies: true, why: "a backtick-quoted relative path containing spaces" },
+      { text: "See `sub dir/missing file.md`, line 1 for the claim.", verifies: false, why: "a quoted relative path with spaces that does not exist" },
+      // The forms an audit showed were truncated to a bare suffix such as
+      // `file.md:2`, because a shorter wrong match claimed the span first.
+      { text: "See [notes](sub dir/notes file.md:2) for the claim.", verifies: false, why: "a linked relative spaced path with an inline line past the end" },
+      { text: "See [notes](sub dir/notes file.md:1) for the claim.", verifies: true, why: "a linked relative spaced path with an inline line" },
+      { text: "See `sub dir/notes file.md:1` for the claim.", verifies: true, why: "a quoted relative spaced path with an inline line" },
+      { text: `Broken at ${path.join(spaced, "inside file.ts").replaceAll("\\", "/")}:2 exactly.`, verifies: true, why: "a POSIX-separated rooted spaced path" },
+    ];
+
+    for (const item of cases) {
+      const verification = await verifyReportCitations(root, item.text);
+      assert.equal(
+        verification.unverifiable.length === 0,
+        item.verifies,
+        `${item.why}: ${JSON.stringify(item.text)} produced ${JSON.stringify(verification.unverifiable)}`,
+      );
+    }
+
+    // A POSIX-rooted path with spaces must be EXTRACTED whole. On Windows it
+    // will then be judged outside the worktree, which is correct — but it must
+    // not first be truncated to a bare suffix, which is the defect an audit
+    // found. Asserting on extraction keeps this claim platform-independent.
+    assert.deepEqual(
+      extractCitations("Broken at /repo with spaces/notes file.md:2 exactly.").map((item) => item.rawPath),
+      ["/repo with spaces/notes file.md"],
+      "a POSIX-rooted path containing spaces is read whole, not truncated to its last segment",
+    );
+    assert.deepEqual(
+      extractCitations("Broken at file:///repo with spaces/notes file.md:2 exactly.").map((item) => item.rawPath),
+      ["file:///repo with spaces/notes file.md"],
+      "a POSIX file:/// path containing spaces is read whole",
+    );
+
+    // The gate and the verifier must agree on what counts as evidence. Any form
+    // the gate passes must produce at least one citation for the verifier to
+    // resolve — that equivalence is the whole defence against this class.
+    const gated = {
+      id: "t-citation-parity",
+      title: "Inspect evidence",
+      description: "Inspect evidence",
+      dependencies: [],
+      preferredProvider: null,
+      checks: ["test"],
+      kind: "diagnostic" as const,
+      permission: "read_only" as const,
+      risk: "low" as const,
+      acceptanceCriteria: ["Every finding cites a repository-relative file path and line number"],
+    };
+    const padding = " This report is long enough to clear the minimum length required of a diagnostic report body.";
+    for (const item of cases) {
+      const text = item.text + padding;
+      if (validateDiagnosticResult(gated, text) === null) {
+        assert.ok(
+          extractCitations(text).length > 0,
+          `the gate accepted ${JSON.stringify(item.text)} as evidence but the verifier found nothing to check`,
+        );
+      }
+    }
+
+    await rm(neighbour, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    await rm(path.join(path.dirname(root), "outside.ts"), { force: true, maxRetries: 10, retryDelay: 100 });
+  } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });

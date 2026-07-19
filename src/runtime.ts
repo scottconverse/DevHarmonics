@@ -46,6 +46,13 @@ export interface InvocationRequest {
   permission: InvocationPermission;
   timeoutMs: number | null;
   maxOutputTokens?: number;
+  /**
+   * Ask a reasoning-capable runtime not to emit a separate thinking channel for
+   * this call. Set it where the caller needs a short exact answer within a small
+   * token budget — reasoning would otherwise consume the budget and leave no
+   * answer. Runtimes without the capability ignore it.
+   */
+  disableThinking?: boolean;
   model: ModelSelection;
 }
 
@@ -104,6 +111,19 @@ export type InvocationFailureKind =
   | "incompatible"
   | "process_failed"
   | "unknown";
+
+/**
+ * True when this error is a deliberate abort rather than evidence about a model.
+ *
+ * A cancelled or interrupted probe says nothing about whether a model can do the
+ * work, so it must never be recorded as a failed qualification: that durably
+ * marks a capable model unqualified and excludes it from scheduling. A timeout
+ * is deliberately NOT an abort — that IS evidence.
+ */
+export function isAbortError(error: unknown): boolean {
+  if (error instanceof RuntimeInvocationError) return error.kind === "cancelled";
+  return error instanceof Error && error.name === "AbortError";
+}
 
 export class RuntimeInvocationError extends Error {
   constructor(

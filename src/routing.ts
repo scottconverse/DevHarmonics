@@ -34,10 +34,25 @@ export interface RoutingScoreBreakdown {
   costAwareness: number;
 }
 
-interface RouteInput {
+/**
+ * No model can take this work — a routine, expected answer, not a defect.
+ *
+ * Distinguished from every other error `route` can raise so that a caller
+ * asking "can anything run this?" can answer it without swallowing a genuine
+ * bug as a negative.
+ */
+export class RoutingUnavailableError extends Error {}
+
+export interface RouteInput {
   role: AgentRole;
   config: DevHarmonicsConfig;
-  fallbackProvider: ProviderName;
+  /**
+   * Preferred subscription provider, or null when no subscription connection is
+   * usable and only local runtimes remain. Null is a legitimate state, not an
+   * error: local models carry no subscription quota and are selected on their
+   * own qualification.
+   */
+  fallbackProvider: ProviderName | null;
   allowedProviders: readonly string[];
   permission: InvocationPermission;
   task?: PlannedTask | null;
@@ -48,6 +63,24 @@ interface RouteInput {
 
 export class ModelRouter {
   constructor(private readonly ledger: Ledger) {}
+
+  /**
+   * The decision this exact input would produce, or the reason nothing can take
+   * it. Callers that need to know whether work is runnable ask this rather than
+   * approximating routing with a looser predicate: a proxy that checks generic
+   * lifecycle flags answers both true and false incorrectly, because it cannot
+   * see role qualification, permission, capability needs, tier fit, manual
+   * assignment, or benchmark requirements. Sharing the real implementation is
+   * the only way the answer stays equivalent to what execution will do.
+   */
+  tryRoute(input: RouteInput): { decision: RoutingDecision } | { reason: string } {
+    try {
+      return { decision: this.route(input) };
+    } catch (error) {
+      if (error instanceof RoutingUnavailableError) return { reason: error.message };
+      throw error;
+    }
+  }
 
   route(input: RouteInput): RoutingDecision {
     const assignment = input.config.routing[input.role];
@@ -74,7 +107,7 @@ export class ModelRouter {
         ], false);
       }
       if (!input.config.routing.allowFallback) {
-        throw new Error(`Assigned ${input.role} model '${assignment.modelId}' is missing, excluded, unqualified for the role, cooling, or incompatible with ${input.permission}`);
+        throw new RoutingUnavailableError(`Assigned ${input.role} model '${assignment.modelId}' is missing, excluded, unqualified for the role, cooling, or incompatible with ${input.permission}`);
       }
     }
 
@@ -129,7 +162,7 @@ export class ModelRouter {
     }
 
     const provider = this.defaultProvider(input);
-    if (!provider) throw new Error(`No eligible model or provider default is available for ${input.role} (${workload.requiredTier} tier required)`);
+    if (!provider) throw new RoutingUnavailableError(`No eligible model or provider default is available for ${input.role} (${workload.requiredTier} tier required)`);
     const connection = this.connection(`subscription-cli:${provider}`)!;
     const effort = input.config.routing.mode === "adaptive" ? effortForTier(workload.requiredTier) : assignment.effort;
     return {

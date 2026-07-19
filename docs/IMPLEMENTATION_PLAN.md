@@ -1,16 +1,22 @@
 # DevHarmonics Detailed Implementation Plan
 
 Document status: **Build-ready execution plan**
-Plan version: **1.27**
+Plan version: **1.30**
 Written: **2026-07-14**
-Revised: **2026-07-16**
+Revised: **2026-07-18**
 Product specification baseline: **DevHarmonics Product Specification v1.12**
 Current implementation baseline: **DevHarmonics v0.5.1**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 
-Revision history: **v1.27 (2026-07-18)** — Added DH-647 decision records and comparative option analysis, after a container-runtime choice recorded with evidence eight days earlier was made again from scratch because nothing surfaced the original. DevHarmonics can prove what it did but cannot retain what it considered and rejected, so a killed approach is re-proposed at full cost and each rediscovery looks like fresh analysis. The work package covers durable decision records with rejected alternatives and their reasons, supersession that preserves history, a planning-time obligation to state options and the deciding constraint for consequential choices, and retrieval by subject.
+Revision history: **v1.30 (2026-07-18)** — Item 4 closed GREEN after eight independent audit rounds. Recorded the lesson that outlasted the fixes: the recurring defect was in verification, not in the product. Four fixes shipped with tests structurally unable to fail, and mutation testing rather than a green suite caught every one. DH-330 now states that a test never watched to fail is not evidence, and that "this cannot be tested deterministically" is a conclusion to distrust.
 
-Prior revision: **v1.26 (2026-07-18)** — Promoted the approval inbox from an implicit bullet inside DH-600 to DH-645, a named work package scheduled immediately after the locked capability sequence, after the first real CivicSuite delivery showed an owner decision sitting unsurfaced in the product. DH-645 covers the approval inbox, a program-scope view across products and runs, delivered-versus-observed reconciliation against the external forge, and an exportable status page that does not depend on the DevHarmonics ledger or on DevHarmonics running. The locked sequence is unchanged.
+**v1.29 (2026-07-18)** — Recorded two further rules from the second audit round of the item-4 fixes, both learned by getting them wrong first: a control action (interrupt, cancel) is never evidence about a model, and a gate should refuse on the requirement an operation actually has rather than on a proxy for it. Both are in DH-330. Scope and the locked sequence are unchanged.
+
+**v1.28 (2026-07-18)** — Recorded two rules that an independent audit of the item-4 fixes established, both in the same shape: a second implementation of a decision drifts from the first, and the gap between them is the defect. DH-470 now states that an evidence gate and its verifier must share one grammar, after the citation verifier turned out to be bypassable by writing the evidence in a form the gate accepted but the verifier could not parse. DH-330 now states that code needing to know whether work can run must ask the component that will run it, after a liveness predicate that re-derived routing eligibility was proven wrong in both directions. Scope and the locked sequence are unchanged.
+
+**v1.27 (2026-07-18)** — Added DH-647 decision records and comparative option analysis, after a container-runtime choice recorded with evidence eight days earlier was made again from scratch because nothing surfaced the original. DevHarmonics can prove what it did but cannot retain what it considered and rejected, so a killed approach is re-proposed at full cost and each rediscovery looks like fresh analysis. The work package covers durable decision records with rejected alternatives and their reasons, supersession that preserves history, a planning-time obligation to state options and the deciding constraint for consequential choices, and retrieval by subject.
+
+**v1.26 (2026-07-18)** — Promoted the approval inbox from an implicit bullet inside DH-600 to DH-645, a named work package scheduled immediately after the locked capability sequence, after the first real CivicSuite delivery showed an owner decision sitting unsurfaced in the product. DH-645 covers the approval inbox, a program-scope view across products and runs, delivered-versus-observed reconciliation against the external forge, and an exportable status page that does not depend on the DevHarmonics ledger or on DevHarmonics running. The locked sequence is unchanged.
 
 Prior revision: **v1.25 (2026-07-18)** — Refined DH-460 with reviewer capability tiers (context, executing, falsifying) after DH-635's review produced direct evidence that a large same-family context-review quorum missed both critical defects that a single executing-and-falsifying reviewer found. Quorum policy gains a required-tier dimension, review receipts record the tier and the evidence produced, and a quorum met only by context reviewers must be reported as unfalsified rather than as a passed independent review.
 
@@ -497,6 +503,26 @@ Acceptance:
 
 #### DH-330: Classified failure and fallback engine — L
 
+Refinement (2026-07-18, from a real run and the independent audit of its fix): local fallback was reachable in routing and unreachable in practice. Four separate gates — objective planning, run start, the attempt loop, and both automatic-repair paths — decided whether work could proceed by looking at subscription provider health, which is not where local models live. A run whose subscription quota closed was refused before the router, the only component that considers a local model, was ever consulted.
+
+The first fix answered the question with a predicate that checked generic model lifecycle flags. The audit proved that predicate wrong in both directions: it kept a task alive for a model qualified only as an architect, and routing then threw out of the attempt and failed the entire run; and it refused a manually assigned inactive model that the router would in fact have selected, because explicit assignment does not require `active`.
+
+The rule this establishes: **when code needs to know whether work can run, it must ask the component that will run it.** A predicate that re-derives eligibility from underlying state is a second implementation of routing, and it will drift from the first. `ModelRouter.tryRoute` now returns a decision or a typed reason, so every gate asks the exact question execution will ask; a genuine error is still raised rather than being swallowed as "cannot route". Route failure inside a task settles that task rather than failing the run, because a cooling window can reopen.
+
+Second refinement (2026-07-18, from the independent audit of the fix above): two further rules, both learned by getting them wrong first.
+
+**A control action is not evidence.** Threading an abort signal into first-use qualification made interrupt and cancel real, but qualification caught every throw and turned it into a failed result. An owner interrupt was therefore persisted as a failed qualification and recorded as `incompatible`, which carries a thirty-minute cooldown — so exercising the product's own interrupt could make the only local worker ineligible for its own retry. This is the same durable misclassification that made truncated output mark capable models incompatible, re-entered through a different door. An abort now propagates on the error's own identity, judged by what the error IS rather than by which caller is asking, so a concurrent caller sharing an in-flight probe cannot record a failure for an abort it did not request.
+
+**Refuse on the requirement, not on the proxy.** Planning genuinely requires a subscription: no local model is architect-qualified, so without one there is nothing that can produce a plan. That refusal is correct and is now documented in the code as a deliberate, narrow exception. It is narrow in a second way as well: the requirement is ONE healthy architect, so a single signed-out provider must not block planning that another healthy provider can do — refusing whenever any enabled provider was signed out was itself the overbroad form of this mistake. Everything downstream — starting an approved run, executing its tasks, repairing, and reviewing — was refusing on the same subscription facts even though an approved plan needs no architect. A signed-out subscription is now an input to routing rather than a gate in front of it. The general form: state the requirement the operation actually has, and let the component that satisfies it answer.
+
+Third refinement (2026-07-18, after eight audit rounds closed this item GREEN): the defect pattern was not in the product, it was in how the fixes were verified. Four separate times the code was wrong AND its test was structurally incapable of noticing — a seam was injected that honoured a signal the real adapter dropped; a seam was injected that ignored a signal, so both mutations passed against it; a precondition asserted a CLI was signed out without asserting the orchestrator could see it. Every one of those tests passed. Mutation testing caught all four; a green suite caught none.
+
+The rule this establishes, and the reason it belongs in the plan rather than in a commit message: **a test that has never been watched to fail is not evidence.** For anything guarding an invariant this product actually sells — evidence integrity, honest cancellation, local fallback — the fix is not done when the test passes. It is done when removing the production change makes that test fail by name. Where the reversion merely hangs, give the wait an explicit deadline so the contract is named rather than left to a CI watchdog.
+
+One corollary, learned by getting it wrong: "this cannot be tested deterministically" is a conclusion to distrust. It was written into this module about the post-probe cancellation window, with the gap documented in a comment as considered judgement. The window was stageable in a few lines by scheduling the cancellation from a getter that runs while the result is read. Documenting a coverage gap honestly is better than faking coverage, and worse than closing it.
+
+A fourth, smaller lesson worth keeping: marking a task `working` before qualification is what makes an interrupt honest, but it also means `working` no longer implies a provider invocation is in flight. Any check that meant the latter must say so — a stale precondition of exactly this kind turned into an intermittent test failure rather than an obvious one.
+
 Deliverables:
 
 - classify network, provider outage, rate limit, short-window quota, long-window quota, concurrency, authentication, unsupported capability, model retirement, context overflow, tool denial, validator failure, and content-policy refusal;
@@ -697,6 +723,17 @@ Acceptance:
 - fixer changes invalidate prior review receipts and trigger the configured re-review gate.
 
 #### DH-470: Verification-integrity and anti-shortcut gates — XL
+
+Refinement (2026-07-18, from a real run): a read-only diagnostic produces no repository change, so validators have nothing to judge and the report's own citations become the evidence. Those citations were only ever checked for shape — a regex confirmed something resembling `file.ext:12` was present — so a worker that invents well-formed citations passed. During the item-4 proving run a local model produced five reports citing files that do not exist, a line whose real content is unrelated, and a version string absent from the repository entirely; all five tasks recorded `passed read-only verification`. Only the independent reviewer caught it, and only because it re-inspected the repository itself rather than reading the reports.
+
+Citations are checkable facts and are now verified mechanically: each cited path must exist inside the assigned worktree and the cited line must exist within it. This is deterministic, needs no model, and costs milliseconds. Two consequences are recorded rather than assumed. First, verification establishes that a citation *resolves*, not that the cited line supports the conclusion drawn from it — that remains a review question, and a report citing a real line with misattributed content still verifies. Second, a report containing no citations at all has none to reject, and the existing gate only demands line evidence when a task's acceptance criteria ask for it, so a vacuous report can still pass; requiring evidence proportionate to the claim is remaining scope.
+
+Second refinement (2026-07-18, from an independent audit of the fix): the first version of this verification could be bypassed by writing the evidence a different way. The verifier had its own citation grammar, narrower than the one the evidence gate accepts, so `[missing.md](missing.md), line 2` satisfied the gate and produced nothing for the verifier to check. Range ends were discarded, an empty file counted as having one line, `../` traversal was silently normalized away, and a legitimate absolute path inside the worktree was rejected outright.
+
+The rule this establishes: **a gate and its verifier must share one grammar.** Two independent implementations of "what counts as evidence" will diverge, and the gap between them is the hole. Both now call the same extractor, containment is decided once on the canonical target so a symlink cannot point out of the worktree, and each of these behaviours was proven load-bearing by reverting it and watching a test fail.
+
+The wider lesson for this milestone: where a workflow produces no artefact to validate, evidence integrity depends entirely on the report and the reviewer, and a context-only reviewer reading a plausible, well-formatted fabrication is unlikely to catch it. This is the same capability distinction recorded in DH-460.
+
 
 Deliverables:
 

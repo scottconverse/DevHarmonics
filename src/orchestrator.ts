@@ -21,6 +21,7 @@ import {
   workerPrompt,
 } from "./prompts.js";
 import { chunkDiffFiles, runContextOnlyReview, type ReviewChunk } from "./local-review.js";
+import { describeUnverifiableCitations, verifyReportCitations } from "./citations.js";
 import {
   PROVIDERS,
   type CheckResult,
@@ -35,9 +36,9 @@ import {
   type SteeringDirectiveRecord,
   type TaskStatus,
 } from "./types.js";
-import { invocationFailureScope, RuntimeInvocationError, type InvocationPermission, type RuntimeAdapter } from "./runtime.js";
+import { invocationFailureScope, isAbortError, RuntimeInvocationError, type InvocationPermission, type RuntimeAdapter } from "./runtime.js";
 import { syncSubscriptionConnections } from "./registry.js";
-import { ModelRouter } from "./routing.js";
+import { ModelRouter, type RouteInput } from "./routing.js";
 import { observeLocalResources } from "./resources.js";
 import { evaluateToolRequest, type ToolStage } from "./policy.js";
 import { adjudicateReviewQuorum, parseReviewerResponse, reviewRequirement, type ReviewFinding, type ReviewQuorumDecision, type ReviewRequirement, type StructuredReview } from "./review.js";
@@ -142,19 +143,45 @@ export class Orchestrator {
     const config = await loadConfig(projectPath);
     const constitution = await loadConstitution(projectPath);
     const configuredProviders = this.availableProviders(config, input.enabledProviders);
+    // DELIBERATE, NARROW EXCEPTION: planning is the one operation that genuinely
+    // requires a subscription. No local model is architect-qualified, so without
+    // a signed-in subscription there is nothing that can produce a plan, and
+    // refusing here is honest rather than a subscription-only reflex. Everything
+    // downstream — starting an approved run, executing its tasks, repairing, and
+    // reviewing — is gated on an exact route instead, so a local fleet can carry
+    // work a subscription planned. Do not copy these two refusals past planning.
     if (!configuredProviders.length) throw new Error("No subscription-backed providers are enabled");
 
     const providerStatuses = await inspectProviders(config, projectPath);
     syncSubscriptionConnections(this.ledger, providerStatuses);
     await syncOllamaRuntimes(this.ledger, config.localRuntimes.ollama);
     const unavailable = providerStatuses.filter((provider) => configuredProviders.includes(provider.name) && !provider.available);
-    if (unavailable.length) {
-      const instructions = unavailable.map((provider) => `${provider.name}: ${provider.summary}${provider.authenticated ? "" : `; run '${provider.loginCommand}'`}`).join("; ");
-      throw new Error(`Provider sign-in required before planning (${instructions}), then refresh and retry.`);
-    }
-    const availableProviders = configuredProviders.filter((name) => this.ledger.isConnectionEligible(projectLegacyProvider(name).connectionId));
+    // A signed-out provider is removed from the pool, not treated as a reason to
+    // refuse. Refusing whenever ANY enabled provider was signed out let one
+    // unused signed-out subscription block planning that a different, healthy
+    // architect could have done. The requirement is one healthy architect, so
+    // that is what is checked — and the sign-in detail becomes the reason when
+    // none remains, rather than a gate in front of the question.
+    const availableProviders = configuredProviders.filter((name) =>
+      !unavailable.some((provider) => provider.name === name)
+      && this.ledger.isConnectionEligible(projectLegacyProvider(name).connectionId),
+    );
     const workerProviders = config.product.workers.filter((name) => availableProviders.includes(name));
-    if (!availableProviders.length || !workerProviders.length) throw new Error("No healthy provider is available to plan this objective");
+    // Planning itself needs a subscription architect — local models qualify for
+    // analysis, never for the architect role. Execution does not: a qualified
+    // local worker can carry the tasks, so a cooling subscription worker pool
+    // must not refuse to plan work that local models can actually run.
+    if (!availableProviders.length) {
+      const instructions = unavailable.map((provider) => `${provider.name}: ${provider.summary}${provider.authenticated ? "" : `; run '${provider.loginCommand}'`}`).join("; ");
+      throw new Error(
+        instructions
+          ? `No healthy provider is available to plan this objective (${instructions}), then refresh and retry.`
+          : "No healthy provider is available to plan this objective",
+      );
+    }
+    if (!canRoute(this.ledger, workerClassProbe(config, workerProviders))) {
+      throw new Error("No subscription worker is available and no qualified local worker can run this objective");
+    }
 
     const architectName = availableProviders.includes(config.product.architect) ? config.product.architect : availableProviders[0]!;
     const architectCandidates = config.routing.allowFallback
@@ -217,12 +244,18 @@ export class Orchestrator {
     if (!plan) throw lastArchitectError ?? new Error("No eligible architect produced a valid plan");
 
     const assignments = plan.tasks.map((task) => {
-      const fallbackProvider = task.preferredProvider && workerProviders.includes(task.preferredProvider) ? task.preferredProvider : workerProviders[0]!;
+      // Null when only local workers remain; the router selects among qualified
+      // local models rather than indexing an empty subscription pool.
+      const fallbackProvider = task.preferredProvider && workerProviders.includes(task.preferredProvider)
+        ? task.preferredProvider
+        : workerProviders[0] ?? null;
       try {
         const decision = router.route({ role: "worker", config, fallbackProvider, allowedProviders: workerProviders, permission: task.permission ?? "workspace_write", task });
         return { taskId: task.id, provider: decision.provider, modelId: decision.model.requestedModelId ?? null, tier: decision.workload.requiredTier, factors: decision.factors };
       } catch (error) {
-        return { taskId: task.id, provider: fallbackProvider, modelId: null, tier: "unavailable", factors: [error instanceof Error ? error.message : String(error)] };
+        // With no subscription worker left, the preview names the local pool
+        // rather than a provider that does not exist.
+        return { taskId: task.id, provider: fallbackProvider ?? "local", modelId: null, tier: "unavailable", factors: [error instanceof Error ? error.message : String(error)] };
       }
     });
     const capacity = new CapacityBroker().decide({
@@ -437,7 +470,6 @@ export class Orchestrator {
     this.ledger.setRunAutonomy(runId, autonomy);
     const constitution = await loadConstitution(projectPath);
     const configuredProviders = this.availableProviders(config, request.enabledProviders);
-    if (!configuredProviders.length) throw new Error("No subscription-backed providers are enabled");
 
     const providerStatuses = await inspectProviders(config, projectPath);
     syncSubscriptionConnections(this.ledger, providerStatuses);
@@ -445,21 +477,44 @@ export class Orchestrator {
     const unavailable = providerStatuses.filter(
       (provider) => configuredProviders.includes(provider.name) && !provider.available,
     );
-    if (unavailable.length) {
-      const instructions = unavailable
+    // A signed-out subscription is not a usable provider, so it is removed from
+    // the pool rather than being allowed to fail an invocation later. This is
+    // the same fact the old gate refused on — it is now an input to routing
+    // instead of a refusal in front of it.
+    const availableProviders = configuredProviders.filter((name) =>
+      !unavailable.some((provider) => provider.name === name)
+      && this.ledger.isConnectionEligible(projectLegacyProvider(name).connectionId),
+    );
+    const workerProviders = config.product.workers.filter((name) => availableProviders.includes(name));
+    // Planning requires a subscription architect, because no local model is
+    // architect-qualified. Starting an ALREADY-APPROVED plan does not: the plan
+    // exists, and qualified local models can carry the work and review it. So a
+    // run is gated on whether its roles can actually be routed, and nothing
+    // else. Refusing first on "no subscription configured" or "a configured
+    // subscription is signed out" was a subscription-only refusal standing in
+    // front of exactly the question the router can answer — an audit found
+    // three of that class, and this was the last one.
+    //
+    // Both halves must route: work no reviewer can review is not a run that can
+    // finish. Sign-in and health details are reported as the REASON when a role
+    // cannot be routed, rather than as a gate before asking.
+    const missingRole = !canRoute(this.ledger, workerClassProbe(config, workerProviders))
+      ? "worker"
+      : !canRoute(this.ledger, { role: "reviewer", config, fallbackProvider: availableProviders[0] ?? null, allowedProviders: availableProviders, permission: "read_only", task: null })
+        ? "reviewer"
+        : null;
+    if (missingRole) {
+      const health = this.ledger.listConnectionHealth().filter((item) => configuredProviders.some((name) => projectLegacyProvider(name).connectionId === item.connectionId));
+      const signIn = unavailable
         .map((provider) => `${provider.name}: ${provider.summary}${provider.authenticated ? "" : `; run '${provider.loginCommand}'`}`)
         .join("; ");
-      throw new Error(`Provider sign-in required before this run (${instructions}), then refresh and retry.`);
+      const detail = [
+        ...(configuredProviders.length ? [] : ["no subscription-backed provider is enabled"]),
+        ...(signIn ? [`sign-in required — ${signIn}`] : []),
+        ...health.map((item) => `${item.connectionId}: ${item.state}${item.cooldownUntil ? ` until ${item.cooldownUntil}` : ""}`),
+      ].join("; ");
+      throw new Error(`No subscription or qualified local ${missingRole} is available for this run (${detail || "no eligible connection"})`);
     }
-    const availableProviders = configuredProviders.filter((name) =>
-      this.ledger.isConnectionEligible(projectLegacyProvider(name).connectionId),
-    );
-    if (!availableProviders.length) {
-      const health = this.ledger.listConnectionHealth().filter((item) => configuredProviders.some((name) => projectLegacyProvider(name).connectionId === item.connectionId));
-      throw new Error(`All enabled providers are unavailable or cooling down (${health.map((item) => `${item.connectionId}: ${item.state}${item.cooldownUntil ? ` until ${item.cooldownUntil}` : ""}`).join("; ")})`);
-    }
-    const workerProviders = config.product.workers.filter((name) => availableProviders.includes(name));
-    if (!workerProviders.length) throw new Error("No healthy provider is configured in the worker pool");
 
     const approvedObjective = request.objectiveLink ? this.ledger.getObjective(request.objectiveLink.objectiveId) : null;
     const affectedRepositoryIds = (request.approvedPlan?.repositoryImpact ?? [])
@@ -728,9 +783,14 @@ export class Orchestrator {
       repositories: [{ repositoryId: integrationStatus.repositoryRoot, baseCommit: integrationStatus.baseCommit, headCommit: integrationStatus.headCommit }],
     });
     const integrationReviewSha256 = integrationReviewEvidence.sha256;
+    // Null when no subscription provider is available at all. Planning still
+    // refuses an empty provider list, so this is defensive rather than a live
+    // defect — but the previous `availableProviders[0]!` produced `undefined`
+    // typed as a ProviderName, which is a lie the compiler cannot catch and the
+    // exact hazard class an audit flagged elsewhere on this path.
     const reviewerName = availableProviders.includes(config.product.reviewer)
       ? config.product.reviewer
-      : availableProviders[0]!;
+      : availableProviders[0] ?? null;
     const reviewerProviders = this.openRouterEligible(config) ? [...availableProviders, "openrouter"] : availableProviders;
     const implementationProviders = [...new Set(
       (this.ledger.getRun(runId)?.tasks ?? [])
@@ -750,9 +810,11 @@ export class Orchestrator {
     let reviewerFallbackReason: string | null = null;
     let lastReviewerError: Error | null = null;
     for (let reviewAttempt = 1; reviewAttempt <= config.application.retry.maxAttempts; reviewAttempt++) {
-      const reviewerStart = reviewerProviders.indexOf(reviewerName);
+      const reviewerStart = reviewerName ? reviewerProviders.indexOf(reviewerName) : -1;
       const qualificationProviders = reviewerProviders.map((_, index) => reviewerProviders[(Math.max(0, reviewerStart) + reviewAttempt - 1 + index) % reviewerProviders.length]!);
-      let reviewerFallbackProvider = qualificationProviders[0]!;
+      // No subscription candidate to qualify leaves the router to choose among
+      // already-qualified local reviewers, exactly as the worker path does.
+      let reviewerFallbackProvider: ProviderName | null = (qualificationProviders[0] ?? null) as ProviderName | null;
       for (const qualificationProvider of qualificationProviders) {
         const qualification = await ensureSchedulerCandidateQualified({ ledger: this.ledger, config, cwd: worktrees.integrationPath, role: "reviewer", preferredProvider: qualificationProvider, permission: "read_only", excludedModelIds: excludedReviewerModels, excludedConnectionIds: excludedReviewerConnections });
         this.recordSchedulerQualification(runId, qualification, "reviewer");
@@ -763,7 +825,7 @@ export class Orchestrator {
           continue;
         }
         if (qualification?.passed) {
-          reviewerFallbackProvider = qualification.provider;
+          reviewerFallbackProvider = qualification.provider as ProviderName;
           break;
         }
       }
@@ -772,7 +834,7 @@ export class Orchestrator {
         reviewerDecision = router.route({
           role: "reviewer",
           config,
-          fallbackProvider: reviewerFallbackProvider as ProviderName,
+          fallbackProvider: reviewerFallbackProvider,
           allowedProviders: reviewerProviders,
           permission: "read_only",
           excludedModelIds: excludedReviewerModels,
@@ -912,10 +974,7 @@ export class Orchestrator {
     for (let fixRound = 1; !finalQuorum.passed && finalQuorum.openFindings.length && autonomy !== "observe" && fixRound <= config.reviewPolicy.maxFixRounds; fixRound++) {
       const reviewerSet = new Set(finalReviews.map((review) => review.provider));
       const fixerProviders = workerProviders.filter((provider) => !reviewerSet.has(provider));
-      if (!fixerProviders.length) {
-        this.ledger.addEvent(runId, "fixer.failed", "No implementor provider independent from the review quorum is available", { fixRound, reviewerProviders: [...reviewerSet] });
-        break;
-      }
+      const reviewerConnectionIds = this.connectionIdsForProviders(reviewerSet);
       const repairTask: PlannedTask = {
         id: `__review_fix_${fixRound}`,
         title: `Resolve review findings (round ${fixRound})`,
@@ -933,9 +992,27 @@ export class Orchestrator {
         acceptanceCriteria: finalQuorum.openFindings.map((finding) => finding.suggestedCorrection),
         expectedArtifacts: ["committed repair diff", "passing validator receipts"],
       };
+      // A repair needs an implementor independent of the quorum, not a
+      // *subscription* one. This gate derived its candidates from the
+      // subscription worker pool alone, so a run that had successfully fallen
+      // back to local execution still stopped dead at its own fix round.
+      // Connections belonging to a provider that reviewed are excluded by
+      // identity, so independence is preserved for local models too.
+      if (!fixerProviders.length && !canRoute(this.ledger, {
+        role: "worker",
+        config,
+        fallbackProvider: null,
+        allowedProviders: [],
+        permission: "workspace_write",
+        task: repairTask,
+        excludedConnectionIds: reviewerConnectionIds,
+      })) {
+        this.ledger.addEvent(runId, "fixer.failed", "No implementor independent from the review quorum is available", { fixRound, reviewerProviders: [...reviewerSet] });
+        break;
+      }
       this.ledger.addTask(runId, repairTask);
-      this.ledger.addEvent(runId, "fixer.started", `${fixerProviders[0]} is addressing ${finalQuorum.openFindings.length} open review finding(s)`, { fixRound, taskId: repairTask.id, findings: finalQuorum.openFindings.map((finding) => finding.id), excludedReviewerProviders: [...reviewerSet] });
-      const fixStatus = await this.executeTask({ runId, goal: request.goal, task: repairTask, constitution, config, providers: fixerProviders, providerCursor: providerCursor + fixRound, worktrees, signal });
+      this.ledger.addEvent(runId, "fixer.started", `${repairTask.preferredProvider ?? "a qualified local implementor"} is addressing ${finalQuorum.openFindings.length} open review finding(s)`, { fixRound, taskId: repairTask.id, findings: finalQuorum.openFindings.map((finding) => finding.id), excludedReviewerProviders: [...reviewerSet] });
+      const fixStatus = await this.executeTask({ runId, goal: request.goal, task: repairTask, constitution, config, providers: fixerProviders, providerCursor: providerCursor + fixRound, worktrees, signal, excludeConnectionIds: reviewerConnectionIds });
       if (fixStatus !== "passed") {
         this.ledger.addEvent(runId, "fixer.failed", `Review fixer round ${fixRound} did not pass its validators`, { fixRound, taskId: repairTask.id, status: fixStatus });
         break;
@@ -1232,10 +1309,7 @@ export class Orchestrator {
         }
         const reviewerProviders = new Set(reviewRound.reviews.map((review) => review.provider));
         const fixerProviders = input.workerProviders.filter((provider) => !reviewerProviders.has(provider));
-        if (!fixerProviders.length) {
-          this.ledger.addEvent(input.runId, "fixer.failed", "No implementor provider independent from the multi-repository review quorum is available", { fixRound, reviewerProviders: [...reviewerProviders] });
-          break;
-        }
+        const reviewerConnectionIds = this.connectionIdsForProviders(reviewerProviders);
 
         const repairTaskIds = repositoryTaskIds(`__review_fix_${fixRound}`, [...assignments.byRepository.keys()]);
         const repairs = [...assignments.byRepository.entries()].map(([repositoryId, findings], index) => {
@@ -1249,7 +1323,7 @@ export class Orchestrator {
             description: `Correct only these retained review findings in repository ${repositoryId}:\n${findings.map((finding) => `- ${finding.severity.toUpperCase()} ${finding.location ?? "location not supplied"}: ${finding.rationale}\n  Suggested correction: ${finding.suggestedCorrection}`).join("\n")}`,
             dependencies: [],
             repositoryIds: [repositoryId],
-            preferredProvider: fixerProviders[index % fixerProviders.length] ?? fixerProviders[0]!,
+            preferredProvider: fixerProviders.length ? fixerProviders[index % fixerProviders.length]! : null,
             checks: checks.length ? checks : ["diff-check"],
             kind: "repair",
             repositoryScope: repositoryScope.length ? repositoryScope : ["."],
@@ -1261,6 +1335,21 @@ export class Orchestrator {
           };
           return { repositoryId, context, manager: integration.manager(repositoryId), repairTask };
         });
+        // Same class as the single-repository gate: independence from the
+        // quorum is the requirement, not a subscription implementor. Every
+        // repository's repair must be routable, since they run together.
+        if (!fixerProviders.length && !repairs.every((repair) => canRoute(this.ledger, {
+          role: "worker",
+          config: repair.context.config,
+          fallbackProvider: null,
+          allowedProviders: [],
+          permission: "workspace_write",
+          task: repair.repairTask,
+          excludedConnectionIds: reviewerConnectionIds,
+        }))) {
+          this.ledger.addEvent(input.runId, "fixer.failed", "No implementor independent from the multi-repository review quorum is available", { fixRound, reviewerProviders: [...reviewerProviders] });
+          break;
+        }
         for (const repair of repairs) {
           this.ledger.addTask(input.runId, repair.repairTask);
           this.ledger.addEvent(input.runId, "fixer.started", `${repair.repairTask.preferredProvider} is addressing ${assignments.byRepository.get(repair.repositoryId)!.length} finding(s) in ${repair.repositoryId}`, { fixRound, taskId: repair.repairTask.id, repositoryId: repair.repositoryId });
@@ -1277,6 +1366,7 @@ export class Orchestrator {
             providerCursor: providerCursor + fixRound + index,
             worktrees: repair.manager,
             signal: input.signal,
+            excludeConnectionIds: reviewerConnectionIds,
           }),
         })));
         if (repairStatuses.some(({ status }) => status !== "passed")) {
@@ -1381,7 +1471,8 @@ export class Orchestrator {
     runId: string;
     reviewSlot: number;
     requiredReviewers: number;
-    reviewerName: ProviderName;
+    /** Null when only qualified local reviewers remain; the router then chooses among them. */
+    reviewerName: ProviderName | null;
     reviewerProviders: readonly string[];
     implementationProviders: readonly string[];
     excludedReviewerModels: Set<string>;
@@ -1406,9 +1497,11 @@ export class Orchestrator {
     let lastError: Error | null = null;
     let fallbackReason: string | null = null;
     for (let reviewAttempt = 1; reviewAttempt <= input.config.application.retry.maxAttempts; reviewAttempt++) {
-      const start = input.reviewerProviders.indexOf(input.reviewerName);
+      const start = input.reviewerName ? input.reviewerProviders.indexOf(input.reviewerName) : -1;
       const qualificationProviders = input.reviewerProviders.map((_, index) => input.reviewerProviders[(Math.max(0, start) + input.reviewSlot + reviewAttempt - 2 + index) % input.reviewerProviders.length]!);
-      let fallbackProvider = qualificationProviders[0]!;
+      // Null with no subscription candidate left: the router chooses among the
+      // already-qualified local reviewers instead of indexing an empty pool.
+      let fallbackProvider: ProviderName | null = (qualificationProviders[0] ?? null) as ProviderName | null;
       for (const provider of qualificationProviders) {
         const qualification = await ensureSchedulerCandidateQualified({
           ledger: this.ledger,
@@ -1428,7 +1521,7 @@ export class Orchestrator {
           continue;
         }
         if (qualification?.passed) {
-          fallbackProvider = qualification.provider;
+          fallbackProvider = qualification.provider as ProviderName;
           break;
         }
       }
@@ -1544,7 +1637,8 @@ export class Orchestrator {
     integrationSha256: string;
     evidenceBinding: ReviewEvidenceBinding;
     requirement: ReviewRequirement;
-    reviewerName: ProviderName;
+    /** Null when only qualified local reviewers remain; the router then chooses among them. */
+    reviewerName: ProviderName | null;
     reviewerProviders: readonly string[];
     implementationProviders: readonly string[];
     config: DevHarmonicsConfig;
@@ -1594,6 +1688,11 @@ export class Orchestrator {
     };
   }
 
+  /** Every connection belonging to one of these providers, for identity-based exclusion. */
+  private connectionIdsForProviders(providers: ReadonlySet<string>): Set<string> {
+    return new Set(this.ledger.listConnections().filter((connection) => providers.has(connection.provider)).map((connection) => connection.id));
+  }
+
   private async executeTask(input: {
     runId: string;
     goal: string;
@@ -1604,6 +1703,8 @@ export class Orchestrator {
     providerCursor: number;
     worktrees: WorktreeManager;
     signal: AbortSignal;
+    /** Connections this task must not use, e.g. the reviewers a repair must stay independent of. */
+    excludeConnectionIds?: ReadonlySet<string>;
   }): Promise<TaskStatus> {
     try {
       return await this.runTaskAttempts(input);
@@ -1632,12 +1733,13 @@ export class Orchestrator {
     providerCursor: number;
     worktrees: WorktreeManager;
     signal: AbortSignal;
+    excludeConnectionIds?: ReadonlySet<string>;
   }): Promise<TaskStatus> {
     const taskWorktree = await input.worktrees.createTask(input.task.id);
     const taskPermission = input.task.permission ?? "workspace_write";
     let feedback = "";
     const excludedModelIds = new Set<string>();
-    const excludedConnectionIds = new Set<string>();
+    const excludedConnectionIds = new Set<string>(input.excludeConnectionIds ?? []);
 
     // DH-635: an interrupted attempt consumes the approved retry budget exactly
     // like any other attempt. Granting extra attempts for interrupts would let
@@ -1666,32 +1768,122 @@ export class Orchestrator {
         appliedClarifications.push(directive);
       }
       const eligibleProviders = input.providers.filter((name) => this.ledger.isConnectionEligible(projectLegacyProvider(name).connectionId));
-      if (!eligibleProviders.length) {
-        this.ledger.setTaskStatus(input.runId, input.task.id, "failed");
-        this.ledger.addEvent(input.runId, "task.failed", `${input.task.title}: all eligible providers are cooling down or unavailable`);
-        return "failed";
+      // Null when every subscription connection is cooling and only qualified
+      // local workers remain; selectWorker cannot index an empty pool.
+      const fallbackProvider = eligibleProviders.length
+        ? this.selectWorker(input.task, eligibleProviders, input.providerCursor + attempt - 1)
+        : null;
+      // The attempt begins here, and scheduler-time qualification is part of it:
+      // the task is genuinely being worked on before a model is finally chosen.
+      // Saying so keeps the status honest and, because every failure path from
+      // this point transitions to 'retry', keeps those transitions legal — a
+      // qualification failure on the first attempt previously asked for
+      // queued -> retry, which the state machine rejects, failing the whole run.
+      // The provider is filled in below once routing resolves it.
+      // DH-635 interrupt: a per-attempt controller chained to the run signal, so
+      // an owner can stop THIS attempt without cancelling the run. Interruption
+      // is an explicit stop-and-hand-off; DevHarmonics never claims to have
+      // injected direction into a response already in flight.
+      //
+      // It is installed BEFORE the task is marked 'working', because that status
+      // is exactly what makes the ledger accept an interrupt and the dashboard
+      // offer the button. Installing it later left a window — first-use model
+      // qualification, which can take as long as a real invocation — where the
+      // product accepted an interrupt that nothing was watching for, and the
+      // directive could only affect a later attempt.
+      const attemptAbort = new AbortController();
+      const propagateRunAbort = () => attemptAbort.abort();
+      input.signal.addEventListener("abort", propagateRunAbort, { once: true });
+      let interruptDirective: SteeringDirectiveRecord | null = null;
+      const interruptWatch = setInterval(() => {
+        const pendingInterrupt = this.ledger
+          .pendingSteeringDirectives(input.runId, input.task.id)
+          .find((directive) => directive.kind === "interrupt");
+        if (pendingInterrupt) {
+          interruptDirective = pendingInterrupt;
+          attemptAbort.abort();
+        }
+      }, 500);
+      // Idempotent, so every early exit between here and the attempt's own
+      // try/finally can release the watcher without tracking which already did.
+      const releaseAttemptWatch = (): void => {
+        clearInterval(interruptWatch);
+        input.signal.removeEventListener("abort", propagateRunAbort);
+      };
+      this.ledger.setTaskStatus(input.runId, input.task.id, "working");
+      // Scheduler-time qualification checks a subscription candidate. With no
+      // subscription connection left there is nothing for it to check, and the
+      // router selects among already-qualified local models instead.
+      // An aborted probe throws rather than returning a verdict, so that a
+      // control action is never mistaken for evidence about the model. Whether
+      // this attempt owns the abort is decided immediately below; either way the
+      // model's health is left untouched.
+      let qualification: Awaited<ReturnType<typeof ensureSchedulerCandidateQualified>> = null;
+      try {
+        qualification = fallbackProvider
+          ? await ensureSchedulerCandidateQualified({
+              ledger: this.ledger,
+              config: input.config,
+              cwd: taskWorktree.path,
+              role: "worker",
+              preferredProvider: fallbackProvider,
+              permission: taskPermission,
+              task: input.task,
+              excludedModelIds,
+              excludedConnectionIds,
+              signal: attemptAbort.signal,
+            })
+          : null;
+      } catch (error) {
+        if (!isAbortError(error)) throw error;
+        // Inconclusive, not failed. If this attempt was the one aborted, the
+        // cancel/interrupt handling below owns it; if another attempt aborted a
+        // probe this one had joined, this attempt simply has no qualification
+        // result and lets the router choose among already-qualified models.
+        qualification = null;
       }
-      const fallbackProvider = this.selectWorker(
-        input.task,
-        eligibleProviders,
-        input.providerCursor + attempt - 1,
-      );
-      const qualification = await ensureSchedulerCandidateQualified({
-        ledger: this.ledger,
-        config: input.config,
-        cwd: taskWorktree.path,
-        role: "worker",
-        preferredProvider: fallbackProvider,
-        permission: taskPermission,
-        task: input.task,
-        excludedModelIds,
-        excludedConnectionIds,
-      });
       this.recordSchedulerQualification(input.runId, qualification, "worker", input.task.id);
+      // A cancel raised during qualification must not be followed by a task
+      // transition: the task is already 'cancelled', and asking it to go to
+      // 'retry' or 'working' from there is an illegal transition that fails the
+      // run. cancelRun owns the status from this point.
+      if (input.signal.aborted) {
+        releaseAttemptWatch();
+        return "cancelled";
+      }
+      // An interrupt raised during qualification stopped the probe rather than a
+      // provider invocation, so it is honoured at the attempt boundary and said
+      // so plainly. No attempt record exists yet to attribute it to.
+      if (interruptDirective) {
+        const directive = interruptDirective as SteeringDirectiveRecord;
+        const note = directive.payload.clarification?.trim();
+        this.ledger.resolveSteeringDirective(directive.id, {
+          disposition: "applied",
+          reason: `Interrupted attempt ${attempt} during model qualification, before any provider invocation`,
+        });
+        this.ledger.addEvent(input.runId, "steering.interrupted", `${input.task.title}: attempt ${attempt} interrupted during model qualification`, {
+          taskId: input.task.id,
+          directiveId: directive.id,
+        });
+        feedback = note
+          ? `The owner interrupted your previous attempt. New direction: ${note}`
+          : "The owner interrupted your previous attempt. Re-read the task contract and continue.";
+        interruptDirective = null;
+        releaseAttemptWatch();
+        if (attempt >= input.config.application.retry.maxAttempts) {
+          this.ledger.setTaskStatus(input.runId, input.task.id, "failed");
+          this.ledger.addEvent(input.runId, "task.failed", `${input.task.title}: the owner's interruption used the task's last attempt`);
+          return "failed";
+        }
+        this.ledger.setTaskStatus(input.runId, input.task.id, "retry");
+        await delay(input.config.application.retry.backoffMs);
+        continue;
+      }
       if (qualification?.attempted && !qualification.passed) {
         excludedModelIds.add(qualification.modelId);
         feedback = `Model qualification failed: ${qualification.provider} candidate '${qualification.modelId}' did not pass the ${qualification.role} fixture.`;
         this.ledger.addEvent(input.runId, "task.provider_failed", feedback, { taskId: input.task.id, modelId: qualification.modelId, failureKind: "incompatible" });
+        releaseAttemptWatch();
         if (attempt < input.config.application.retry.maxAttempts) {
           this.ledger.setTaskStatus(input.runId, input.task.id, "retry");
           await delay(input.config.application.retry.backoffMs);
@@ -1700,7 +1892,7 @@ export class Orchestrator {
         this.ledger.setTaskStatus(input.runId, input.task.id, "failed");
         return "failed";
       }
-      const routing = new ModelRouter(this.ledger).route({
+      const routeAttempt = new ModelRouter(this.ledger).tryRoute({
         role: "worker",
         config: input.config,
         fallbackProvider,
@@ -1710,6 +1902,28 @@ export class Orchestrator {
         excludedModelIds,
         excludedConnectionIds,
       });
+      // Nothing can take this task right now. That is a task-level outcome, not
+      // a run-level crash: a cooling window can reopen, so it settles and
+      // retries like any other provider failure. Routing used to sit outside
+      // this handling behind a liveness predicate that only approximated it, so
+      // a guess that disagreed with the router threw out of executeTask and
+      // failed the entire run instead of settling one task.
+      if ("reason" in routeAttempt) {
+        this.ledger.addEvent(input.runId, "task.provider_failed", `${input.task.title}: ${routeAttempt.reason}`, { taskId: input.task.id });
+        releaseAttemptWatch();
+        if (attempt < input.config.application.retry.maxAttempts) {
+          this.ledger.setTaskStatus(input.runId, input.task.id, "retry");
+          await delay(input.config.application.retry.backoffMs);
+          continue;
+        }
+        this.ledger.setTaskStatus(input.runId, input.task.id, "failed");
+        // Say why routing actually refused rather than asserting a cause. An
+        // exhausted subscription is the common case, not the only one: an
+        // assigned model can be missing, or unqualified for the role.
+        this.ledger.addEvent(input.runId, "task.failed", `${input.task.title}: no model could take this task (${routeAttempt.reason})`);
+        return "failed";
+      }
+      const routing = routeAttempt.decision;
       if (!(PROVIDERS as readonly string[]).includes(routing.provider) && routing.provider !== "ollama" && taskPermission === "workspace_write") {
         throw new Error(`Worker model '${routing.model.requestedModelId}' cannot write until the local tool policy engine is enabled`);
       }
@@ -1756,23 +1970,6 @@ export class Orchestrator {
         });
       }
 
-      // DH-635 interrupt: a per-attempt controller chained to the run signal, so
-      // an owner can stop THIS attempt without cancelling the run. Interruption
-      // is an explicit stop-and-hand-off; DevHarmonics never claims to have
-      // injected direction into a response already in flight.
-      const attemptAbort = new AbortController();
-      const propagateRunAbort = () => attemptAbort.abort();
-      input.signal.addEventListener("abort", propagateRunAbort, { once: true });
-      let interruptDirective: SteeringDirectiveRecord | null = null;
-      const interruptWatch = setInterval(() => {
-        const pendingInterrupt = this.ledger
-          .pendingSteeringDirectives(input.runId, input.task.id)
-          .find((directive) => directive.kind === "interrupt");
-        if (pendingInterrupt) {
-          interruptDirective = pendingInterrupt;
-          attemptAbort.abort();
-        }
-      }, 500);
 
       let paidSpendReservation: PaidSpendReservation | null = null;
       let paidInvocationStarted = false;
@@ -1833,7 +2030,24 @@ export class Orchestrator {
             ? feedback
             : null;
         const normalizedResult = normalizeAgentResult("worker", result.text);
-        const diagnosticIssue = taskPermission === "read_only" ? validateDiagnosticResult(input.task, result.text) : null;
+        // A read-only task changes nothing, so validators have no repository
+        // state to judge and the report's own citations are the evidence. Check
+        // that they resolve to real lines in the assigned worktree: a worker
+        // that invents well-formed citations otherwise passes on fabricated
+        // findings, which a real run demonstrated. This verifies that cited
+        // lines exist, not that they support the conclusion — that stays a
+        // review question.
+        const citationIssue = taskPermission === "read_only"
+          ? await (async () => {
+              const verification = await verifyReportCitations(taskWorktree.path, result.text);
+              return verification.unverifiable.length
+                ? `the diagnostic report cites evidence that does not exist: ${describeUnverifiableCitations(verification)}`
+                : null;
+            })()
+          : null;
+        const diagnosticIssue = taskPermission === "read_only"
+          ? validateDiagnosticResult(input.task, result.text) ?? citationIssue
+          : null;
         this.ledger.finishAttempt(attemptId, diagnosticIssue ? "rejected" : "completed", result.text, diagnosticIssue ?? "", {
           modelId: result.model.resolvedModelId,
           modelResolution: result.model.resolution,
@@ -2397,6 +2611,55 @@ export class Orchestrator {
       return !quotaGroup || this.ledger.isQuotaGroupEligible(connectionId, quotaGroup.id);
     });
   }
+}
+
+/**
+ * Whether this exact shape of work can be routed to a model right now.
+ *
+ * Asks the router the question execution will ask, rather than approximating it.
+ * The predicate this replaced checked generic lifecycle flags and answered both
+ * true and false incorrectly: it kept a task alive for a local model qualified
+ * only as an architect (routing then threw out of the attempt and failed the
+ * run), and refused a manually assigned inactive local model that the router
+ * would in fact have selected.
+ */
+export function canRoute(ledger: Ledger, input: RouteInput): boolean {
+  return "decision" in new ModelRouter(ledger).tryRoute(input);
+}
+
+/**
+ * "Some worker class can run something" — the only honest question at planning
+ * and run start, where no specific task exists yet.
+ *
+ * Deliberately the most permissive worker shape. A plan that turns out to need
+ * more than this settles at the task that needs it, which is where the
+ * task-level answer lives. The weaker pre-plan answer must never be reused as a
+ * task-level one: they are different questions.
+ */
+export function workerClassProbe(config: DevHarmonicsConfig, workerProviders: readonly ProviderName[]): RouteInput {
+  return {
+    role: "worker",
+    config,
+    fallbackProvider: workerProviders[0] ?? null,
+    allowedProviders: workerProviders,
+    permission: "read_only",
+    // The most permissive worker shape there is. A low-risk read-only
+    // diagnostic classifies to the lowest tier, so this asks "can anything take
+    // worker work at all?". Passing no task instead classifies as standard
+    // tier, which would refuse to plan or start work that small local models can
+    // genuinely run — the same false-negative class this replaced.
+    task: {
+      id: "__worker_class_probe",
+      title: "worker availability probe",
+      description: "worker availability probe",
+      dependencies: [],
+      preferredProvider: null,
+      checks: [],
+      kind: "diagnostic",
+      permission: "read_only",
+      risk: "low",
+    },
+  };
 }
 
 /** Steering kinds the scheduler resolves at the task-admission boundary. */

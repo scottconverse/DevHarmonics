@@ -1,3 +1,4 @@
+import { extractCitations } from "./citations.js";
 import type { AgentRole, PlannedTask } from "./types.js";
 
 export interface AgentResultEnvelope {
@@ -53,9 +54,10 @@ export function validateDiagnosticResult(task: PlannedTask, text: string): strin
   if (normalized.length < 80) return "the diagnostic report is too short to substantiate its conclusions";
   const requiresLineEvidence = [...(task.acceptanceCriteria ?? []), ...(task.expectedArtifacts ?? [])]
     .some((value) => /line number|path:line|line citation/i.test(value));
-  const pathLineCitation = /[A-Za-z0-9_.-]+\.[A-Za-z0-9]+:\d+(?:-\d+)?\b/;
-  const linkedFileWithNearbyLine = /(?:\[[^\]]*[A-Za-z0-9_.-]+\.[A-Za-z0-9]+\]\([^)]+\)|[A-Za-z0-9_.-]+\.[A-Za-z0-9]+)[\s\S]{0,300}\bline(?:s)?\s+\d+(?:\s*[-\u2013]\s*\d+)?\b/i;
-  if (requiresLineEvidence && !pathLineCitation.test(text) && !linkedFileWithNearbyLine.test(text)) {
+  // Deliberately the same extractor the citation verifier resolves against: an
+  // evidence form this gate accepts but that verifier cannot parse is a hole,
+  // and two separate patterns had already opened one.
+  if (requiresLineEvidence && extractCitations(text).length === 0) {
     return "the diagnostic report does not contain the required repository path:line evidence";
   }
   return null;

@@ -11,6 +11,7 @@ import { initializeProject, loadConfig, devHarmonicsDirectory } from "../src/con
 import { inspectProviders } from "../src/doctor.js";
 import { Ledger } from "../src/ledger.js";
 import { Orchestrator, repositoryTaskIds } from "../src/orchestrator.js";
+import { syncOllamaRuntimes } from "../src/ollama.js";
 import { runProcess } from "../src/process.js";
 import { startDashboard } from "../src/server.js";
 
@@ -107,7 +108,10 @@ if (process.argv.includes("--version")) {
   else if (process.argv.includes("--output-format")) console.log(JSON.stringify({result:review}));
   else console.log(review);
 } else if (input.includes("diagnostic investigator")) {
-  console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"README.md:1 contains the heading Fixture. This directly satisfies the assigned diagnostic criterion, and the read-only inspection identified no contradictory heading elsewhere. No files were changed."}}));
+  const report = input.includes("Fabricated fixture")
+    ? "config.yaml:3 states the fixture version, user_manual.md:2 confirms it, and README.md:99 repeats the same value. These three sources agree with each other, and the read-only inspection found no contradictory statement anywhere else in the repository."
+    : "README.md:1 contains the heading Fixture. This directly satisfies the assigned diagnostic criterion, and the read-only inspection identified no contradictory heading elsewhere. No files were changed.";
+  console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:report}}));
 } else if (input.includes("Correct only these retained review findings")) {
   if (existsSync("needs-fix.txt")) unlinkSync("needs-fix.txt");
   writeFileSync("result.txt", "corrected by independent fixer\\n", "utf8");
@@ -265,12 +269,14 @@ if (process.argv.includes("--version")) {
   else if (process.argv.includes("--output-format")) console.log(JSON.stringify({result:review}));
   else console.log(review);
 } else {
-  // Worker prompt: hang until the orchestrator kills us on cancel. Bounded to
-  // ~10s so a killed-but-orphaned grandchild (the Windows .cmd wrapper spawns
-  // node, and killing cmd.exe does not reap it) self-exits and releases the
-  // worktree directory for cleanup instead of leaking. Upgrade path: parent-
-  // death detection if the bound ever proves too short for a slow poll.
-  const until = Date.now() + 4_000;
+  // Worker prompt: hang until the orchestrator kills us on cancel or interrupt.
+  // The bound must OUTLIVE the assertion window of every test that interrupts
+  // this invocation, or a natural exit can supply the handoff the test means to
+  // attribute to the interrupt — an audit flagged exactly that, with the bound
+  // at 4s and a comment claiming 10s. It stays bounded so a killed-but-orphaned
+  // grandchild (the Windows .cmd wrapper spawns node, and killing cmd.exe does
+  // not reap it) still self-exits and releases the worktree for cleanup.
+  const until = Date.now() + 45_000;
   while (Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 100));
 }
 `,
@@ -954,6 +960,280 @@ test("objective preview creates no run and exact approved revision executes with
       await rm(runRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
     await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("a run whose subscription worker is exhausted falls back to a qualified local model", async () => {
+  // The central claim of the local-fallback work, end to end. Every gate on the
+  // path — objective planning, run start, and the attempt loop — used to refuse
+  // on subscription health alone, before local execution was ever considered,
+  // so fallback was reachable in routing and unreachable in practice. An audit
+  // showed the production wiring could be removed with the suite still green.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-local-fallback-e2e-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  let localInvocations = 0;
+  const ollama = createServer(async (request, response) => {
+    response.setHeader("Content-Type", "application/json");
+    if (request.url === "/api/version") return response.end(JSON.stringify({ version: "fixture-1" }));
+    if (request.url === "/api/tags") return response.end(JSON.stringify({ models: [{ name: "local-analyst:7b" }] }));
+    if (request.url === "/api/show") return response.end(JSON.stringify({ capabilities: ["completion"] }));
+    if (request.url === "/api/chat" && request.method === "POST") {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      localInvocations += 1;
+      const parsed = JSON.parse(body) as { messages?: Array<{ content?: string }> };
+      const prompt = parsed.messages?.[0]?.content ?? "";
+      const text = prompt.includes("qualification fixture")
+        ? "DEVHARMONICS_QUALIFIED"
+        : "README.md:1 contains the heading Fixture. This directly satisfies the assigned diagnostic criterion, and the read-only inspection identified no contradictory heading elsewhere. No files were changed.";
+      return response.end(JSON.stringify({ message: { role: "assistant", content: text }, done_reason: "stop", prompt_eval_count: 20, eval_count: 12 }));
+    }
+    response.statusCode = 404;
+    response.end(JSON.stringify({ error: "not found" }));
+  });
+  await new Promise<void>((resolve) => ollama.listen(0, "127.0.0.1", resolve));
+  const address = ollama.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  config.runPolicy.requirePlanApproval = false;
+  config.localRuntimes.ollama = [{ id: "fixture", displayName: "Fixture runtime", baseUrl, enabled: true }];
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}
+`, "utf8");
+
+  const ledger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  let runId = "";
+  try {
+    // Register and qualify the local fleet the way a prior run would have, then
+    // exhaust the only subscription worker. Nothing but the local model is left
+    // that can carry a task.
+    await syncOllamaRuntimes(ledger, config.localRuntimes.ollama);
+    const localModel = ledger.listModels("local:ollama:fixture")[0];
+    assert.ok(localModel, `the fixture runtime registered no model: ${JSON.stringify(ledger.listConnections().map((item) => item.id))}`);
+    ledger.recordModelQualification({ modelId: localModel.id, fixtureVersion: "local-analysis-v1", role: "analysis", passed: true, score: 1, evidence: {}, fingerprint: localModel.qualificationFingerprint });
+    ledger.setModelPreference(localModel.id, { active: true });
+    ledger.upsertConnection({ id: "subscription-cli:codex", provider: "codex", transport: "subscription_cli", authentication: "subscription", displayName: "Codex", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "unknown", capacity: "unknown", adapterVersion: "test", runtimeVersion: "test", metadata: {} });
+    ledger.recordConnectionOutcome("subscription-cli:codex", { success: false, failureKind: "quota_exhausted", detail: "usage limit reached" });
+    assert.equal(ledger.isConnectionEligible("subscription-cli:codex"), false, "the only subscription worker is cooling");
+
+    // The subscription worker is not merely cooling — it is SIGNED OUT, which
+    // run start used to refuse on outright, before asking whether anything could
+    // actually run. An approved run needs no architect, so a qualified local
+    // fleet must be able to carry it. Planning keeps that refusal deliberately;
+    // starting an approved run does not.
+    const signedOut = await createFakeCli(await mkdtemp(path.join(os.tmpdir(), "devharmonics-signed-out-")), false);
+    const signedOutConfig = structuredClone(config);
+    signedOutConfig.connections.codex.command = signedOut;
+    await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(signedOutConfig, null, 2)}
+`, "utf8");
+
+    const before = localInvocations;
+    runId = await new Orchestrator(ledger).run({ goal: "Audit fixture without changing it", projectPath: project, autonomy: "observe", agents: 1 });
+    const run = ledger.getRun(runId);
+    // The run must not be refused before it starts, and the task must not be
+    // failed for lack of a subscription.
+    assert.ok(localInvocations > before, "the local runtime carried the work");
+    const task = run?.tasks.find((item) => item.id === "observe");
+    assert.equal(task?.status, "passed", `the local model must be able to complete the task: ${JSON.stringify(run?.events?.map((event) => event.message))}`);
+    assert.equal(run?.status, "ready", JSON.stringify(run?.finalReview));
+  } finally {
+    ledger.close();
+    await new Promise<void>((resolve) => ollama.close(() => resolve()));
+    if (runId) {
+      const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
+      await runProcess({ command: "git", args: ["worktree", "prune"], cwd: project, timeoutMs: 30_000 });
+      await rm(runRoot, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+    }
+    await rm(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+  }
+});
+
+test("one signed-out provider does not block planning that a healthy architect can do", async () => {
+  // Planning genuinely needs a subscription architect, but it was refusing
+  // whenever ANY enabled provider was signed out — so one unused signed-out
+  // subscription blocked planning that a different, healthy architect could do.
+  // The requirement is one healthy architect, not that everything is signed in.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-partial-signin-"));
+  const project = await createRepository(root);
+  const healthy = await createFakeCli(root);
+  const signedOut = await createFakeCli(await mkdtemp(path.join(os.tmpdir(), "devharmonics-signedout-cli-")), false);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  // codex is a configured worker, but signed out. claude can architect and work.
+  config.product.workers = ["claude", "codex"];
+  config.connections.claude.command = healthy;
+  config.connections.gemini.command = healthy;
+  config.connections.codex.enabled = true;
+  config.connections.codex.command = signedOut;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}
+`, "utf8");
+
+  // Precondition: the fixture really does present a signed-out provider.
+  // Without this the test can pass for the wrong reason.
+  const statuses = await inspectProviders(await loadConfig(project), project);
+  assert.equal(statuses.find((provider) => provider.name === "codex")?.available, false, "codex must be signed out for this test to mean anything");
+
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  try {
+    const created = await fetch(`${dashboard.url}/api/objectives`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        outcome: "Local orchestrator fixture: create the exact approved result",
+        acceptanceCriteria: ["Create result.txt"],
+        constraints: ["Use the configured validator"],
+        projectPath: project,
+        repositoryIds: [],
+        risk: "medium",
+        autonomy: "supervised",
+        priority: "normal",
+        policyNotes: [],
+      }),
+    });
+    assert.equal(created.status, 201, await created.clone().text());
+    const objective = (await created.json()) as { objective: { id: string } };
+
+    // Planning must succeed on the healthy architect, with codex signed out.
+    const proposed = await fetch(`${dashboard.url}/api/objectives/${objective.objective.id}/plans`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabledProviders: ["codex", "claude", "gemini"] }),
+    });
+    const text = await proposed.clone().text();
+    assert.doesNotMatch(text, /sign-in required/i, "planning must not refuse for a signed-out provider it does not need");
+    assert.equal(proposed.status, 201, text);
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+  }
+});
+
+test("a task no model can route settles the task instead of crashing the run", async () => {
+  // The pre-plan gate and the per-task question are different questions, and an
+  // audit showed the suite could not tell whether the code still knew that.
+  // Here they genuinely diverge: an analysis-qualified local model satisfies the
+  // read-only worker-class probe at run start, but cannot take a workspace_write
+  // task, which needs the local tool qualification. Routing therefore fails
+  // INSIDE the attempt. It must settle that task honestly; it used to throw out
+  // of executeTask and fail the whole run.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-route-settle-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  const ollama = createServer(async (request, response) => {
+    response.setHeader("Content-Type", "application/json");
+    if (request.url === "/api/version") return response.end(JSON.stringify({ version: "fixture-1" }));
+    if (request.url === "/api/tags") return response.end(JSON.stringify({ models: [{ name: "local-analyst:7b" }] }));
+    if (request.url === "/api/show") return response.end(JSON.stringify({ capabilities: ["completion"] }));
+    response.statusCode = 404;
+    response.end(JSON.stringify({ error: "not found" }));
+  });
+  await new Promise<void>((resolve) => ollama.listen(0, "127.0.0.1", resolve));
+  const address = ollama.address();
+  assert.ok(address && typeof address === "object");
+
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  config.runPolicy.requirePlanApproval = false;
+  config.localRuntimes.ollama = [{ id: "fixture", displayName: "Fixture runtime", baseUrl: `http://127.0.0.1:${address.port}`, enabled: true }];
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}
+`, "utf8");
+
+  const ledger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  let runId = "";
+  try {
+    await syncOllamaRuntimes(ledger, config.localRuntimes.ollama);
+    const localModel = ledger.listModels("local:ollama:fixture")[0];
+    assert.ok(localModel);
+    // Qualified for ANALYSIS only — read-only work, never writes.
+    ledger.recordModelQualification({ modelId: localModel.id, fixtureVersion: "local-analysis-v1", role: "analysis", passed: true, score: 1, evidence: {}, fingerprint: localModel.qualificationFingerprint });
+    ledger.setModelPreference(localModel.id, { active: true });
+    ledger.upsertConnection({ id: "subscription-cli:codex", provider: "codex", transport: "subscription_cli", authentication: "subscription", displayName: "Codex", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "unknown", capacity: "unknown", adapterVersion: "test", runtimeVersion: "test", metadata: {} });
+    ledger.recordConnectionOutcome("subscription-cli:codex", { success: false, failureKind: "quota_exhausted", detail: "usage limit reached" });
+
+    // The run must START — the worker class exists — and then settle the task it
+    // cannot route, rather than dying.
+    runId = await new Orchestrator(ledger).run({ goal: "Local orchestrator fixture", projectPath: project, agents: 1 });
+    const run = ledger.getRun(runId);
+    const task = run?.tasks.find((item) => item.id === "one");
+    assert.ok(["failed", "blocked"].includes(task?.status ?? ""), `the unroutable task settles honestly, got '${task?.status}'`);
+    assert.ok(
+      !(run?.events ?? []).some((event) => /Invalid task status transition/.test(event.message)),
+      "settling must not go through an illegal transition",
+    );
+    assert.ok(
+      (run?.events ?? []).some((event) => /No eligible model or provider default is available/.test(event.message)),
+      `the run must record why nothing could take the task: ${JSON.stringify((run?.events ?? []).map((event) => event.message))}`,
+    );
+  } finally {
+    ledger.close();
+    await new Promise<void>((resolve) => ollama.close(() => resolve()));
+    if (runId) {
+      const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
+      await runProcess({ command: "git", args: ["worktree", "prune"], cwd: project, timeoutMs: 30_000 });
+      await rm(runRoot, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+    }
+    await rm(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+  }
+});
+
+test("a diagnostic whose citations do not resolve is rejected by the run, not just by the checker", async () => {
+  // The citation verifier had unit coverage, but nothing proved it was WIRED:
+  // an audit showed the gate could be deleted from executeTask and the suite
+  // would stay green. This is the end-to-end claim — a worker that invents
+  // well-formed citations must not produce a ready run. The positive case is
+  // the observe run above, whose report cites README.md:1 and passes.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-fabricated-citations-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  config.runPolicy.requirePlanApproval = false;
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}
+`, "utf8");
+
+  const ledger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  let runId = "";
+  try {
+    runId = await new Orchestrator(ledger).run({ goal: "Fabricated fixture audit", projectPath: project, autonomy: "observe", agents: 1 });
+    const run = ledger.getRun(runId);
+    assert.notEqual(run?.status, "ready", `a run built on citations that do not exist must not be ready: ${JSON.stringify(run?.tasks)}`);
+    const task = run?.tasks.find((item) => item.id === "observe");
+    assert.ok(["failed", "blocked"].includes(task?.status ?? ""), `the fabricating task must not pass, got '${task?.status}'`);
+    const rejections = (run?.events ?? []).filter((event) => /cites evidence that does not exist/.test(event.message));
+    assert.ok(rejections.length > 0, `the run must say the citations did not resolve: ${JSON.stringify((run?.events ?? []).map((event) => event.message))}`);
+    // ...and it must name what was wrong, not merely that something was.
+    assert.match(rejections[0]!.message, /config\.yaml:3|user_manual\.md:2|README\.md:99/);
+    // The report never becomes a finding other agents can build on.
+    const evidence = ledger.getRunEvidence(runId);
+    assert.ok(
+      !(evidence?.blackboard ?? []).some((entry) => entry.kind === "finding" && entry.content.includes("config.yaml")),
+      "a rejected report must not be recorded as a finding",
+    );
+  } finally {
+    ledger.close();
+    if (runId) {
+      const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
+      await runProcess({ command: "git", args: ["worktree", "prune"], cwd: project, timeoutMs: 30_000 });
+      await rm(runRoot, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+    }
+    await rm(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
   }
 });
 
@@ -1797,7 +2077,15 @@ test("owner steering interrupts a live attempt and hands off to an attributed co
       tasks: Array<{ id: string; status: string; attemptCount: number }>;
       events: Array<{ kind: string }>;
     }>);
-    await poll(getRun, (run) => run.tasks.some((task) => task.id === "one" && task.status === "working"), 30_000);
+    // 'working' alone is no longer a precise precondition for "an attempt is
+    // live". A task is now marked working before first-use qualification, so
+    // that the interrupt the product offers at that moment is genuinely
+    // watched for. attemptCount only rises once qualification and routing are
+    // done and the provider invocation is about to start, so waiting on it is
+    // what this test actually means. Waiting on 'working' alone let the
+    // interrupt land in the qualification window under load, which exercised a
+    // different (also correct) code path and made this test intermittent.
+    await poll(getRun, (run) => run.tasks.some((task) => task.id === "one" && task.status === "working" && task.attemptCount >= 1), 30_000);
 
     // Steering that tries to carry authority must be refused outright.
     const escalation = await fetch(`${dashboard.url}/api/runs/${runId}/steering`, {
@@ -1925,5 +2213,67 @@ test("the steering panel reports requested admission changes honestly before the
   } finally {
     await dashboard.close();
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test("a first-attempt qualification failure retries the task instead of crashing the run", async () => {
+  // Found by a real fallback proving run against an exhausted subscription.
+  // Scheduler-time qualification runs before the task is marked 'working', so
+  // its failure path asked for queued -> retry, which the task state machine
+  // forbids. The thrown transition failed the entire RUN — exactly when a
+  // provider is degraded and resilience matters most.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-qual-retry-"));
+  const project = await createRepository(root);
+  // Authenticates and reports a version like a healthy CLI, but never returns
+  // the qualification marker, so every worker qualification attempt fails.
+  const script = path.join(root, "unqualifiable.mjs");
+  await writeFile(script, `const args = process.argv.slice(2);
+if (args.includes("--version")) { console.log("1.0 fixture"); process.exit(0); }
+if ((args[0] === "auth" && args[1] === "status") || args[0] === "models" || (args[0] === "login" && args[1] === "status")) { console.log("Authenticated fixture"); process.exit(0); }
+console.log("I am unable to comply with that request.");
+process.exit(0);
+`, "utf8");
+  const unqualifiable = path.join(root, "unqualifiable.cmd");
+  await writeFile(unqualifiable, `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`, "utf8");
+  const fixture = await createFakeCli(root);
+
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  config.runPolicy.requirePlanApproval = false;
+  config.connections.codex.command = unqualifiable;
+  config.connections.claude.command = fixture;
+  config.connections.gemini.command = fixture;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+  const ledger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  let runId = "";
+  try {
+    runId = await new Orchestrator(ledger).run({ goal: "Create the fixture result", projectPath: project, agents: 1 });
+    const run = ledger.getRun(runId);
+    // The run may legitimately end not-ready — no worker could be qualified —
+    // but it must not die on an internal state-machine violation.
+    assert.doesNotMatch(
+      `${run?.finalReview ?? ""}`,
+      /Invalid task status transition/,
+      "a failed qualification must not crash the run with an invalid transition",
+    );
+    assert.ok(
+      !(run?.events ?? []).some((event) => event.kind === "run.failed" && /Invalid task status transition/.test(event.message)),
+      "no invalid-transition failure event",
+    );
+    // The task itself must reach an honest terminal state.
+    const task = run?.tasks.find((item) => item.id !== "__integration__");
+    assert.ok(["failed", "blocked", "passed"].includes(task?.status ?? ""), `task settled, got '${task?.status}'`);
+  } finally {
+    ledger.close();
+    if (runId) {
+      const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
+      await runProcess({ command: "git", args: ["worktree", "prune"], cwd: project, timeoutMs: 30_000 });
+      await rm(runRoot, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+    }
+    await rm(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
   }
 });

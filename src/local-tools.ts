@@ -31,13 +31,16 @@ export async function runLocalToolLoop(input: {
   repositoryScope: readonly string[];
   authorize: (request: { toolId: LocalToolRequest["toolId"]; targetPaths: string[]; arguments: Readonly<Record<string, unknown>> }) => LocalToolAuthorization;
   maxSteps?: number;
+  /** Aborts the loop between steps and the model call within a step. */
+  signal?: AbortSignal | undefined;
 }): Promise<InvocationResult & { toolExecutions: LocalToolExecution[] }> {
   const maxSteps = Math.max(1, Math.min(input.maxSteps ?? 12, 24));
   const executions: LocalToolExecution[] = [];
   let transcript = `${input.request.prompt}\n\n${toolProtocol(input.repositoryScope)}`;
   let lastResult: InvocationResult | null = null;
   for (let step = 1; step <= maxSteps; step++) {
-    const result = await input.adapter.invoke({ ...input.request, permission: "read_only", prompt: transcript });
+    input.signal?.throwIfAborted();
+    const result = await input.adapter.invoke({ ...input.request, permission: "read_only", prompt: transcript }, input.signal ? { signal: input.signal } : undefined);
     lastResult = result;
     const envelope = parseEnvelope(result.text);
     if (typeof envelope.final === "string" && envelope.final.trim()) {

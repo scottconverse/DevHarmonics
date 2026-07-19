@@ -12,7 +12,10 @@ You need:
 - Node.js 24 or newer
 - Git
 - A Git repository for the project you want to change
-- At least one supported provider CLI installed and signed in
+- At least one supported provider CLI installed and signed in. This is what
+  PLANNING needs: no local model is qualified to act as the architect. Running
+  a plan you have already approved does not need one — qualified local models
+  can carry the work and review it.
 
 DevHarmonics does not accept API keys or provider passwords. If a prompt asks you for an OpenAI, Anthropic, or Google password inside the DevHarmonics dashboard, stop: that is not an authentic product flow.
 
@@ -42,7 +45,9 @@ Expected version output is `DevHarmonics 0.5.1`.
 
 ## 3. Sign in to providers
 
-Provider sign-in belongs to each official CLI. DevHarmonics checks both installation and authentication, disables unavailable providers, and will not begin a run with a signed-out selection.
+Provider sign-in belongs to each official CLI. DevHarmonics checks both installation and authentication and removes a signed-out provider from the pool it chooses from.
+
+Being signed out of one provider is not by itself a reason to stop. Planning needs one healthy subscription architect, so it stops only when none is left. Starting a plan you have already approved needs a worker and a reviewer that can actually be routed — and those may be local models, so an approved run can proceed with every subscription signed out.
 
 ### Codex / OpenAI
 
@@ -90,7 +95,7 @@ Run:
 devharmonics doctor --project C:\path\to\your\project
 ```
 
-Each provider is shown as `READY` or `SETUP`, with its detected version, authentication state, and login command. At least one provider must be ready.
+Each provider is shown as `READY` or `SETUP`, with its detected version, authentication state, and login command. At least one provider must be ready in order to plan. Once a plan is approved, what matters is whether a worker and a reviewer can be routed, which qualified local models can satisfy.
 
 ### Register a product and its local repositories
 
@@ -169,7 +174,7 @@ The **Steer this run** panel lets you redirect live work without opening an agen
 - **Hold new tasks** stops DevHarmonics starting anything new while tasks already running finish normally. **Resume admission** releases the queue. The panel distinguishes a request you just made from one the scheduler has actually applied, so you always know whether a hold is in force yet.
 - **Reassign** moves a queued task to a different signed-in provider, and **Set order** chooses which queued tasks are admitted first. Both apply only to work that has not started, and neither can start a task whose dependencies are unfinished.
 - **Send clarification** delivers extra direction to one task. It is applied at that task's next attempt boundary rather than mid-answer, and the record shows exactly which attempt received it.
-- **Interrupt & hand off** stops the attempt a task is currently running, keeps that partial attempt as evidence, and starts a fresh attempt carrying your direction. DevHarmonics does not claim to change an answer already being written — it stops and hands off, which is why the button is available only while the task is *working*, meaning a provider call is genuinely in flight. It is unavailable while validators run or during a retry gap, because there is nothing in flight to stop. An interrupted attempt uses one of the task's approved attempts, so interrupting repeatedly can exhaust the task's budget and fail it — steering redirects work, it never buys extra provider usage.
+- **Interrupt & hand off** stops whatever a task is currently doing and starts a fresh attempt carrying your direction. DevHarmonics does not claim to change an answer already being written — it stops and hands off. The button is available while the task is *working*, which covers two situations, and it is honest about both. If a provider call is in flight, that partial attempt is kept as evidence and the new attempt is attributed to it. If the task is still qualifying a model for first use — which happens before any provider call — the interrupt stops that instead, and there is no attempt record to keep, because none had been created yet. It is unavailable while validators run or during a retry gap, because there is nothing to stop. An interrupted attempt uses one of the task's approved attempts, so interrupting repeatedly can exhaust the task's budget and fail it — steering redirects work, it never buys extra provider usage.
 
 Steering guides work inside the plan you approved. It cannot change a task's permissions, risk, acceptance criteria, or repository scope, and it cannot enable external writes or paid API use — those remain plan and policy decisions. Every steering request is recorded with who made it, what it targeted, and whether it was applied, rejected, or superseded by a later request, so a run's history explains every redirection after the fact.
 

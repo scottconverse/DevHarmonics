@@ -12,7 +12,10 @@ You need:
 - Node.js 24 or newer
 - Git
 - A Git repository for the project you want to change
-- At least one supported provider CLI installed and signed in
+- At least one supported provider CLI installed and signed in. This is what
+  PLANNING needs: no local model is qualified to act as the architect. Running
+  a plan you have already approved does not need one — qualified local models
+  can carry the work and review it.
 
 DevHarmonics does not accept API keys or provider passwords. If a prompt asks you for an OpenAI, Anthropic, or Google password inside the DevHarmonics dashboard, stop: that is not an authentic product flow.
 
@@ -42,7 +45,9 @@ Expected version output is `DevHarmonics 0.5.1`.
 
 ## 3. Sign in to providers
 
-Provider sign-in belongs to each official CLI. DevHarmonics checks both installation and authentication, disables unavailable providers, and will not begin a run with a signed-out selection.
+Provider sign-in belongs to each official CLI. DevHarmonics checks both installation and authentication and removes a signed-out provider from the pool it chooses from.
+
+Being signed out of one provider is not by itself a reason to stop. Planning needs one healthy subscription architect, so it stops only when none is left. Starting a plan you have already approved needs a worker and a reviewer that can actually be routed — and those may be local models, so an approved run can proceed with every subscription signed out.
 
 ### Codex / OpenAI
 
@@ -90,7 +95,7 @@ Run:
 devharmonics doctor --project C:\path\to\your\project
 ```
 
-Each provider is shown as `READY` or `SETUP`, with its detected version, authentication state, and login command. At least one provider must be ready.
+Each provider is shown as `READY` or `SETUP`, with its detected version, authentication state, and login command. At least one provider must be ready in order to plan. Once a plan is approved, what matters is whether a worker and a reviewer can be routed, which qualified local models can satisfy.
 
 ### Register a product and its local repositories
 

@@ -4390,6 +4390,60 @@ test("an exhausted output budget is reported as a budget failure, not model inco
   }
 });
 
+test("one caller cancelling a shared qualification does not cancel it for the other", async () => {
+  // Two tasks needing the same model, fingerprint, and role share ONE probe, so
+  // a model is not qualified twice concurrently. That sharing must not couple
+  // their lifetimes: a caller that cancels has to stop waiting without killing a
+  // probe the other caller still needs, and must not inherit a verdict it did
+  // not ask for. An audit showed this behaved correctly but that removing it
+  // left every test green, so the guarantee is pinned here.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-shared-flight-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    ledger.upsertConnection({ id: "local:ollama", provider: "ollama", transport: "local", authentication: "local_none", displayName: "Ollama", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "local", capacity: "available", adapterVersion: "test", runtimeVersion: "test", metadata: { baseUrl: "http://127.0.0.1:11434" } });
+    const modelId = "ollama:worker:7b";
+    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "local:ollama", canonicalName: "worker:7b", displayName: "worker:7b", source: "runtime_discovery", lifecycle: "known", visible: true, verified: false, qualified: false, active: false, metadata: { capabilities: ["completion"] } });
+
+    const task = { id: "probe", title: "Inspect", description: "Inspect", dependencies: [], preferredProvider: null, checks: [], kind: "diagnostic" as const, permission: "read_only" as const, risk: "low" as const };
+    const config = structuredClone(defaultConfig);
+    let probes = 0;
+    let release: (() => void) | null = null;
+    const shared = { ledger, config, cwd: root, role: "worker" as const, preferredProvider: "ollama", permission: "read_only" as const, task };
+    const qualify = async () => {
+      probes += 1;
+      await new Promise<void>((resolve) => { release = resolve; });
+      return { fixtureVersion: "local-analysis-v1", role: "analysis" as const, passed: true, score: 1, evidence: {} };
+    };
+
+    const ownerController = new AbortController();
+    const joinerController = new AbortController();
+    const owner = ensureSchedulerCandidateQualified({ ...shared, signal: ownerController.signal, qualify });
+    for (let tick = 0; tick < 200 && probes === 0; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+    const joiner = ensureSchedulerCandidateQualified({ ...shared, signal: joinerController.signal, qualify });
+    for (let tick = 0; tick < 50; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(probes, 1, "the second caller joins the in-flight probe rather than starting a second one");
+
+    // The JOINER cancels. The owner's probe must survive it.
+    joinerController.abort();
+    await assert.rejects(joiner, (error: unknown) => isAbortError(error), "the cancelling caller stops waiting");
+
+    assert.ok(release, "the shared probe is still outstanding");
+    (release as () => void)();
+    const result = await owner;
+    assert.equal(result?.passed, true, "the caller that did not cancel still gets its answer");
+    assert.equal(probes, 1, "still exactly one underlying probe");
+    assert.deepEqual(
+      ledger.listModelQualifications(modelId).filter((item) => !item.passed),
+      [],
+      "one caller cancelling must not record a failure against the model",
+    );
+    assert.equal(ledger.isModelEligible(modelId), true, "and must not cool it out of scheduling");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
 test("cancelling a real local qualification call leaves the model schedulable", async () => {
   // The previous version of this guarantee was tested through an injected
   // qualify callback that listened to the signal — so it proved the seam the

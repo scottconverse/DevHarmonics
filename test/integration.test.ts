@@ -269,12 +269,14 @@ if (process.argv.includes("--version")) {
   else if (process.argv.includes("--output-format")) console.log(JSON.stringify({result:review}));
   else console.log(review);
 } else {
-  // Worker prompt: hang until the orchestrator kills us on cancel. Bounded to
-  // ~10s so a killed-but-orphaned grandchild (the Windows .cmd wrapper spawns
-  // node, and killing cmd.exe does not reap it) self-exits and releases the
-  // worktree directory for cleanup instead of leaking. Upgrade path: parent-
-  // death detection if the bound ever proves too short for a slow poll.
-  const until = Date.now() + 4_000;
+  // Worker prompt: hang until the orchestrator kills us on cancel or interrupt.
+  // The bound must OUTLIVE the assertion window of every test that interrupts
+  // this invocation, or a natural exit can supply the handoff the test means to
+  // attribute to the interrupt — an audit flagged exactly that, with the bound
+  // at 4s and a comment claiming 10s. It stays bounded so a killed-but-orphaned
+  // grandchild (the Windows .cmd wrapper spawns node, and killing cmd.exe does
+  // not reap it) still self-exits and releases the worktree for cleanup.
+  const until = Date.now() + 45_000;
   while (Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 100));
 }
 `,
@@ -1049,6 +1051,68 @@ test("a run whose subscription worker is exhausted falls back to a qualified loc
       await runProcess({ command: "git", args: ["worktree", "prune"], cwd: project, timeoutMs: 30_000 });
       await rm(runRoot, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
     }
+    await rm(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+  }
+});
+
+test("one signed-out provider does not block planning that a healthy architect can do", async () => {
+  // Planning genuinely needs a subscription architect, but it was refusing
+  // whenever ANY enabled provider was signed out — so one unused signed-out
+  // subscription blocked planning that a different, healthy architect could do.
+  // The requirement is one healthy architect, not that everything is signed in.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-partial-signin-"));
+  const project = await createRepository(root);
+  const healthy = await createFakeCli(root);
+  const signedOut = await createFakeCli(await mkdtemp(path.join(os.tmpdir(), "devharmonics-signedout-cli-")), false);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  // codex is a configured worker, but signed out. claude can architect and work.
+  config.product.workers = ["claude", "codex"];
+  config.connections.claude.command = healthy;
+  config.connections.gemini.command = healthy;
+  config.connections.codex.enabled = true;
+  config.connections.codex.command = signedOut;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}
+`, "utf8");
+
+  // Precondition: the fixture really does present a signed-out provider.
+  // Without this the test can pass for the wrong reason.
+  const statuses = await inspectProviders(await loadConfig(project), project);
+  assert.equal(statuses.find((provider) => provider.name === "codex")?.available, false, "codex must be signed out for this test to mean anything");
+
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  try {
+    const created = await fetch(`${dashboard.url}/api/objectives`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        outcome: "Local orchestrator fixture: create the exact approved result",
+        acceptanceCriteria: ["Create result.txt"],
+        constraints: ["Use the configured validator"],
+        projectPath: project,
+        repositoryIds: [],
+        risk: "medium",
+        autonomy: "supervised",
+        priority: "normal",
+        policyNotes: [],
+      }),
+    });
+    assert.equal(created.status, 201, await created.clone().text());
+    const objective = (await created.json()) as { objective: { id: string } };
+
+    // Planning must succeed on the healthy architect, with codex signed out.
+    const proposed = await fetch(`${dashboard.url}/api/objectives/${objective.objective.id}/plans`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabledProviders: ["codex", "claude", "gemini"] }),
+    });
+    const text = await proposed.clone().text();
+    assert.doesNotMatch(text, /sign-in required/i, "planning must not refuse for a signed-out provider it does not need");
+    assert.equal(proposed.status, 201, text);
+  } finally {
+    await dashboard.close();
     await rm(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
   }
 });

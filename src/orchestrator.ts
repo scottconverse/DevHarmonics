@@ -156,17 +156,29 @@ export class Orchestrator {
     syncSubscriptionConnections(this.ledger, providerStatuses);
     await syncOllamaRuntimes(this.ledger, config.localRuntimes.ollama);
     const unavailable = providerStatuses.filter((provider) => configuredProviders.includes(provider.name) && !provider.available);
-    if (unavailable.length) {
-      const instructions = unavailable.map((provider) => `${provider.name}: ${provider.summary}${provider.authenticated ? "" : `; run '${provider.loginCommand}'`}`).join("; ");
-      throw new Error(`Provider sign-in required before planning (${instructions}), then refresh and retry.`);
-    }
-    const availableProviders = configuredProviders.filter((name) => this.ledger.isConnectionEligible(projectLegacyProvider(name).connectionId));
+    // A signed-out provider is removed from the pool, not treated as a reason to
+    // refuse. Refusing whenever ANY enabled provider was signed out let one
+    // unused signed-out subscription block planning that a different, healthy
+    // architect could have done. The requirement is one healthy architect, so
+    // that is what is checked — and the sign-in detail becomes the reason when
+    // none remains, rather than a gate in front of the question.
+    const availableProviders = configuredProviders.filter((name) =>
+      !unavailable.some((provider) => provider.name === name)
+      && this.ledger.isConnectionEligible(projectLegacyProvider(name).connectionId),
+    );
     const workerProviders = config.product.workers.filter((name) => availableProviders.includes(name));
     // Planning itself needs a subscription architect — local models qualify for
     // analysis, never for the architect role. Execution does not: a qualified
     // local worker can carry the tasks, so a cooling subscription worker pool
     // must not refuse to plan work that local models can actually run.
-    if (!availableProviders.length) throw new Error("No healthy provider is available to plan this objective");
+    if (!availableProviders.length) {
+      const instructions = unavailable.map((provider) => `${provider.name}: ${provider.summary}${provider.authenticated ? "" : `; run '${provider.loginCommand}'`}`).join("; ");
+      throw new Error(
+        instructions
+          ? `No healthy provider is available to plan this objective (${instructions}), then refresh and retry.`
+          : "No healthy provider is available to plan this objective",
+      );
+    }
     if (!canRoute(this.ledger, workerClassProbe(config, workerProviders))) {
       throw new Error("No subscription worker is available and no qualified local worker can run this objective");
     }

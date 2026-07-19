@@ -46,7 +46,10 @@ The development branch after v0.5.1 also includes owner-approved delivery for RE
 - Windows, macOS, or Linux
 - Node.js 24 or newer
 - Git
-- At least one installed and subscription-authenticated provider CLI:
+- At least one installed and subscription-authenticated provider CLI. This is
+  required to PLAN: no local model is qualified for the architect role, so
+  planning needs a signed-in subscription. An already-approved plan does not —
+  it can execute and be reviewed entirely by qualified local models. Providers:
   - Codex: `codex login`
   - Claude Code: `claude auth login`
   - Google Antigravity (Gemini, Claude, and GPT models exposed by the signed-in account): launch `agy` and complete first-run sign-in
@@ -76,7 +79,9 @@ The current release is source-distributed; it does not yet include a packaged Wi
 
 ## First-run sign-in
 
-Run the provider's own login command, complete its browser flow, then return to DevHarmonics and click **Refresh sign-in status**. Installed-but-signed-out providers remain disabled and cannot start work.
+Run the provider's own login command, complete its browser flow, then return to DevHarmonics and click **Refresh sign-in status**.
+
+A signed-out provider is removed from the pool rather than treated as a reason to stop. Planning still needs one healthy subscription architect, but one signed-out provider does not block planning that another healthy provider can do — and an approved run proceeds whenever a qualified worker and reviewer can be routed, including local ones.
 
 Antigravity has a less obvious first-run flow:
 
@@ -175,7 +180,7 @@ The DH-720 execution path creates an exact integration set rather than treating 
 1. Save a structured objective draft containing the outcome, acceptance criteria, constraints, risk, priority, deadline, policy, run mode, and optional product/repository scope. Saving or refining a draft starts no run.
 2. Ask a read-only architect for an immutable plan revision and preview its dependency graph, affected/excluded repository map, repository-scoped tasks, integration conditions, permissions, checks, proposed model assignments, and capacity.
 3. Revise the plan or approve an exact revision. Execution uses that stored revision without silently replanning it.
-4. Require clean affected Git working trees and authenticated providers. A standalone or single-repository run creates `devharmonics/<run-prefix>`; a multi-repository run creates a distinct integration branch/worktree for every affected repository and records its base commit.
+4. Require clean affected Git working trees, and a routable worker and reviewer. Once a plan is approved, a subscription for each is not required — qualified local models can carry and review the work. A standalone or single-repository run creates `devharmonics/<run-prefix>`; a multi-repository run creates a distinct integration branch/worktree for every affected repository and records its base commit.
 5. Assign each ready task a repository-local task branch and temporary worktree. One task targets one repository; tasks in different repositories may execute concurrently.
 6. Run a worker in that isolated worktree and execute only allowlisted validators.
 7. Return failed check receipts to a worker for a bounded retry.

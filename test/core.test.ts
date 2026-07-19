@@ -4444,6 +4444,65 @@ test("one caller cancelling a shared qualification does not cancel it for the ot
   }
 });
 
+test("cancelling the caller that started a shared qualification does not cancel the others", async () => {
+  // The reverse order of the test above, and the half an audit found missing.
+  // Fixing only "the joiner cancels" left the probe running on the FIRST
+  // caller's signal, so cancelling that caller aborted work a later caller was
+  // still waiting on — unrelated tasks coupled purely by arrival order.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-owner-cancel-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    ledger.upsertConnection({ id: "local:ollama", provider: "ollama", transport: "local", authentication: "local_none", displayName: "Ollama", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "local", capacity: "available", adapterVersion: "test", runtimeVersion: "test", metadata: { baseUrl: "http://127.0.0.1:11434" } });
+    const modelId = "ollama:worker:7b";
+    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "local:ollama", canonicalName: "worker:7b", displayName: "worker:7b", source: "runtime_discovery", lifecycle: "known", visible: true, verified: false, qualified: false, active: false, metadata: { capabilities: ["completion"] } });
+
+    const task = { id: "probe", title: "Inspect", description: "Inspect", dependencies: [], preferredProvider: null, checks: [], kind: "diagnostic" as const, permission: "read_only" as const, risk: "low" as const };
+    const shared = { ledger, config: structuredClone(defaultConfig), cwd: root, role: "worker" as const, preferredProvider: "ollama", permission: "read_only" as const, task };
+    let probes = 0;
+    let release: (() => void) | null = null;
+    let sawProbeAbort = false;
+    // The seam observes the SHARED probe's signal, so this test can tell whether
+    // the underlying work was really cancelled. A callback that ignores the
+    // signal cannot distinguish a correct implementation from a broken one.
+    const qualify = async ({ signal }: { signal: AbortSignal }) => {
+      probes += 1;
+      signal.addEventListener("abort", () => { sawProbeAbort = true; }, { once: true });
+      await new Promise<void>((resolve) => { release = resolve; });
+      return { fixtureVersion: "local-analysis-v1", role: "analysis" as const, passed: true, score: 1, evidence: {} };
+    };
+
+    const ownerController = new AbortController();
+    const joinerController = new AbortController();
+    const owner = ensureSchedulerCandidateQualified({ ...shared, signal: ownerController.signal, qualify });
+    for (let tick = 0; tick < 200 && probes === 0; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+    const joiner = ensureSchedulerCandidateQualified({ ...shared, signal: joinerController.signal, qualify });
+    for (let tick = 0; tick < 50; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(probes, 1, "the second caller joined rather than starting a second probe");
+
+    // The OWNER cancels. The joiner never asked to stop.
+    ownerController.abort();
+    await assert.rejects(owner, (error: unknown) => isAbortError(error), "the cancelling caller stops waiting");
+    assert.equal(joinerController.signal.aborted, false, "the joiner never cancelled");
+    for (let tick = 0; tick < 50; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(sawProbeAbort, false, "the shared probe must survive while a subscriber still wants it");
+
+    assert.ok(release, "the shared probe is still outstanding");
+    (release as () => void)();
+    const result = await joiner;
+    assert.equal(result?.passed, true, "the caller that did not cancel still gets its answer");
+    assert.equal(probes, 1, "still exactly one underlying probe");
+    assert.deepEqual(
+      ledger.listModelQualifications(modelId).filter((item) => !item.passed),
+      [],
+      "no failure was recorded against the model",
+    );
+    assert.equal(ledger.isModelEligible(modelId), true, "and it was not cooled out of scheduling");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
 test("cancelling a real local qualification call leaves the model schedulable", async () => {
   // The previous version of this guarantee was tested through an injected
   // qualify callback that listened to the signal — so it proved the seam the

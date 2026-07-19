@@ -13,7 +13,45 @@ import { modelQuotaGroup } from "./antigravity.js";
 export type QualificationRole = "general" | "architect" | "worker" | "reviewer" | "analysis" | "benchmark" | "local_tools";
 
 export const QUALIFICATION_FINGERPRINT_FIXTURE = "model-qualification-suite-v2";
-const qualificationFlights = new Map<string, Promise<QualificationOutcome>>();
+/**
+ * One in-flight qualification per model/fingerprint/role, shared by every caller
+ * that wants it, so a model is never qualified twice concurrently.
+ *
+ * The probe belongs to its SUBSCRIBERS, not to whichever caller arrived first.
+ * Running it on the first caller's signal coupled unrelated work by arrival
+ * order: cancelling that caller aborted a probe other callers were still waiting
+ * on. The internal controller is aborted only once every subscriber withdraws.
+ */
+interface SharedQualificationFlight {
+  promise: Promise<QualificationOutcome>;
+  controller: AbortController;
+  /** Callers still waiting, by their own signal. */
+  waiting: Set<AbortSignal>;
+  /** Callers with no signal; they cannot withdraw, so the probe must finish. */
+  unconditional: number;
+}
+
+const qualificationFlights = new Map<string, SharedQualificationFlight>();
+
+/** Wait on a shared probe under this caller's own cancellation, not the creator's. */
+function joinQualificationFlight(flight: SharedQualificationFlight, signal?: AbortSignal): Promise<QualificationOutcome> {
+  if (!signal) {
+    flight.unconditional += 1;
+    return flight.promise;
+  }
+  flight.waiting.add(signal);
+  const withdraw = (): void => {
+    if (!flight.waiting.delete(signal)) return;
+    // The probe ends only when nobody wants it any more. One caller cancelling
+    // must not destroy work another caller is still waiting on.
+    if (flight.waiting.size === 0 && flight.unconditional === 0) flight.controller.abort(signal.reason);
+  };
+  signal.addEventListener("abort", withdraw, { once: true });
+  return raceAbort(flight.promise, signal).finally(() => {
+    signal.removeEventListener("abort", withdraw);
+    flight.waiting.delete(signal);
+  });
+}
 
 export interface QualificationOutcome {
   fixtureVersion: string;
@@ -67,7 +105,12 @@ export async function ensureSchedulerCandidateQualified(input: {
    * of a terminal state.
    */
   signal?: AbortSignal | undefined;
-  qualify?: (input: { model: ModelRecord; connection: ConnectionRecord; role: QualificationRole }) => Promise<QualificationOutcome>;
+  /**
+   * Test seam. It receives the SHARED probe's signal — not the caller's —
+   * because that is what the real adapter receives. A seam that cannot observe
+   * cancellation cannot prove anything about cancellation.
+   */
+  qualify?: (input: { model: ModelRecord; connection: ConnectionRecord; role: QualificationRole; signal: AbortSignal }) => Promise<QualificationOutcome>;
 }): Promise<SchedulerQualificationResult | null> {
   const selected = selectSchedulerQualificationCandidate(input);
   if (!selected) return null;
@@ -88,23 +131,19 @@ export async function ensureSchedulerCandidateQualified(input: {
   const probe = async (role: QualificationRole): Promise<QualificationOutcome> => {
     const flightKey = `${refreshed.id}\u0000${fingerprint}\u0000${role}`;
     const existing = qualificationFlights.get(flightKey);
-    // Joining an in-flight probe must not mean inheriting its lifetime: this
-    // caller's own abort has to release it without cancelling a probe another
-    // attempt still needs, and that probe's abort must not become this caller's
-    // verdict on the model.
-    if (existing) return raceAbort(existing, input.signal);
-    const flight = (async (): Promise<QualificationOutcome> => {
+    if (existing) return joinQualificationFlight(existing, input.signal);
+    const controller = new AbortController();
+    const flight: SharedQualificationFlight = {
+      promise: undefined as unknown as Promise<QualificationOutcome>,
+      controller,
+      waiting: new Set(),
+      unconditional: 0,
+    };
+    flight.promise = (async (): Promise<QualificationOutcome> => {
       try {
         const probed = await (input.qualify
-          ? input.qualify({ model: refreshed, connection, role })
-          : qualifyRuntimeModel({ model: refreshed, connection, config: input.config, cwd: input.cwd, role, signal: input.signal }));
-        // The single guarantee that nothing is concluded after an abort, placed
-        // at the boundary every adapter passes through rather than inside each
-        // one. An adapter that cannot be aborted, or one whose response lands in
-        // the moment after cancellation, still must not produce a verdict — an
-        // audit found exactly that, because two Ollama fixtures took a signal
-        // parameter and never handed it to the call underneath.
-        input.signal?.throwIfAborted();
+          ? input.qualify({ model: refreshed, connection, role, signal: controller.signal })
+          : qualifyRuntimeModel({ model: refreshed, connection, config: input.config, cwd: input.cwd, role, signal: controller.signal }));
         return { ...probed, role };
       } catch (error) {
         // An aborted probe is the owner stopping the attempt, not evidence about
@@ -127,7 +166,7 @@ export async function ensureSchedulerCandidateQualified(input: {
     })();
     qualificationFlights.set(flightKey, flight);
     try {
-      return await flight;
+      return await joinQualificationFlight(flight, input.signal);
     } finally {
       if (qualificationFlights.get(flightKey) === flight) qualificationFlights.delete(flightKey);
     }
@@ -137,6 +176,12 @@ export async function ensureSchedulerCandidateQualified(input: {
   if (!(refreshed.qualified && !refreshed.qualificationStale && currentQualification)) {
     attempted = true;
     const outcome = await probe(qualificationRole);
+    // Per-caller, because the probe is shared: an answer produced for someone
+    // else must not become THIS caller's verdict after it cancelled. This is
+    // also what protects against an adapter that cannot be aborted, or one whose
+    // response lands in the moment after cancellation — an audit found two
+    // Ollama fixtures taking a signal parameter and never using it.
+    input.signal?.throwIfAborted();
     input.ledger.recordModelQualification({ modelId: refreshed.id, ...outcome, fingerprint });
     if (!outcome.passed) {
       input.ledger.recordModelOutcome(refreshed.id, { success: false, failureKind: "incompatible", detail: `Scheduler-time ${qualificationRole} qualification failed` });
@@ -146,6 +191,7 @@ export async function ensureSchedulerCandidateQualified(input: {
   if (specialistBenchmarkRequired && !currentBenchmark) {
     attempted = true;
     const benchmark = await probe("benchmark");
+    input.signal?.throwIfAborted();
     input.ledger.recordModelQualification({ modelId: refreshed.id, ...benchmark, fingerprint });
     if (!benchmark.passed) {
       input.ledger.recordModelOutcome(refreshed.id, { success: false, failureKind: "incompatible", detail: "Scheduler-time specialist benchmark failed" });

@@ -49,11 +49,20 @@ export interface CitationVerification {
   unverifiable: CitationCheck[];
 }
 
+// Canonical repository files that carry no extension. A closed list, not a
+// pattern: "any all-caps word before a colon" would extract prose like
+// `ERROR:404` or `ISO:9001`, fail to verify it, and falsely reject a real
+// report. Exotic extensionless files outside this list are a documented limit,
+// the same trade as bare relative paths containing spaces.
+const EXTENSIONLESS_NAME = String.raw`(?:LICENSE|LICENCE|NOTICE|COPYING|COPYRIGHT|AUTHORS|CONTRIBUTORS|CODEOWNERS|MAINTAINERS|OWNERS|CHANGELOG|README|INSTALL|SECURITY|VERSION|MANIFEST|TODO|Dockerfile|Containerfile|Makefile|Justfile|Rakefile|Gemfile|Procfile|Brewfile|Caddyfile|Vagrantfile|Jenkinsfile)`;
+// A filename: either something with an alphabetic extension — the extension must
+// start with a letter so version strings like `1.2.0` are not read as filenames —
+// or one of the canonical extensionless names above.
+const FILE_NAME = String.raw`(?:[\w.@~+-]*\.[A-Za-z][A-Za-z0-9]{0,7}|${EXTENSIONLESS_NAME})`;
 // A path token: an optional `file:///` scheme, an optional root (Windows drive,
 // UNC share, or POSIX `/`), directory segments that may include `..`, and a
-// filename with an alphabetic extension. The extension must start with a letter
-// so that version strings like `1.2.0` are not read as filenames.
-const PATH_TOKEN = String.raw`(?:file:///)?(?:[A-Za-z]:[\\/]|\\\\[\w.-]+[\\/]|/)?(?:[\w.@~+-]+[\\/])*[\w.@~+-]*\.[A-Za-z][A-Za-z0-9]{0,7}`;
+// filename.
+const PATH_TOKEN = String.raw`(?:file:///)?(?:[A-Za-z]:[\\/]|\\\\[\w.-]+[\\/]|/)?(?:[\w.@~+-]+[\\/])*${FILE_NAME}`;
 // Do not start a match in the middle of a longer path or identifier.
 const BOUNDARY = String.raw`(?<![\w.\\/:-])`;
 const RANGE = String.raw`(\d+)(?:\s*[-–]\s*(\d+))?`;
@@ -68,11 +77,11 @@ const RANGE = String.raw`(\d+)(?:\s*[-–]\s*(\d+))?`;
 // root IS the third slash of that scheme, so it takes `file://` instead. Folding
 // them into one optional prefix left `file:///repo/x.md` with no root to match.
 const ROOTED_PREFIX = String.raw`(?:(?:file:///)?(?:[A-Za-z]:[\\/]|\\\\[^\\/:*?"<>|\r\n]+[\\/])|(?:file://)?/)`;
-const ROOTED_SPACED_PATH = String.raw`${ROOTED_PREFIX}[^:*?"<>|\r\n]*\.[A-Za-z][A-Za-z0-9]{0,7}`;
+const ROOTED_SPACED_PATH = String.raw`${ROOTED_PREFIX}(?:[^:*?"<>|\r\n]*\.[A-Za-z][A-Za-z0-9]{0,7}|(?:[^:*?"<>|\r\n]*[\\/])?${EXTENSIONLESS_NAME})`;
 // Second: any path a delimiter already bounds — a markdown link target, or a
 // backtick/quote span. The delimiter does the disambiguation, so relative and
 // POSIX paths with spaces are covered here.
-const DELIMITED_PATH = String.raw`[^\r\n"'\`\]\)]*\.[A-Za-z][A-Za-z0-9]{0,7}`;
+const DELIMITED_PATH = String.raw`(?:[^\r\n"'\`\]\)]*\.[A-Za-z][A-Za-z0-9]{0,7}|[^\r\n"'\`\]\)]*${EXTENSIONLESS_NAME})`;
 
 const ROOTED_SPACED_CITATION = new RegExp(`${BOUNDARY}(${ROOTED_SPACED_PATH}):${RANGE}`, "g");
 const DIRECT_CITATION = new RegExp(`${BOUNDARY}(${PATH_TOKEN}):${RANGE}`, "g");

@@ -8,11 +8,11 @@ import { DatabaseSync } from "node:sqlite";
 import { createServer } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
-import { defaultConfig, initializeProject, loadConfig, resolveProviderCommand } from "../src/config.js";
+import { defaultConfig, devHarmonicsDirectory, initializeProject, loadConfig, resolveProviderCommand } from "../src/config.js";
 import { projectLegacyProvider } from "../src/compatibility.js";
 import { assertRunTransition, assertTaskTransition, domainId } from "../src/domain.js";
 import { LEDGER_SCHEMA_VERSION, Ledger } from "../src/ledger.js";
-import { assignReviewFindings, canRoute, createReviewEvidenceBinding, Orchestrator, workerClassProbe, parseFirstJsonObject, planSteeredAdmission, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
+import { assignReviewFindings, buildRepositoryContext, canRoute, createReviewEvidenceBinding, Orchestrator, workerClassProbe, parseFirstJsonObject, planSteeredAdmission, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
 import { extractCitations, verifyReportCitations } from "../src/citations.js";
 import { boundedThinkingSettings, discoverOllama, minimalThinking, OllamaAdapter, qualifyOllamaModel, syncOllamaRegistry, syncOllamaRuntimes } from "../src/ollama.js";
 import {
@@ -199,10 +199,17 @@ test("observe run prompts require diagnostic evidence without repository changes
   // how five fabricated-adjacent reports once read as convincing.
   assert.match(reviewer, /supports? the conclusion/i, "the tool-holding reviewer is told to judge support, not existence");
   assert.match(reviewer, /already been verified to exist|existence is already verified/i, "and told what the mechanical gate already covers");
-  assert.match(
+  // One assertion helper for both variants, so their shared contract cannot
+  // drift apart — an audit showed the context-only half could lose its
+  // existence statement with this test still green.
+  const assertCitationDuty = (prompt: string, variant: string): void => {
+    assert.match(prompt, /supports? the conclusion/i, `${variant} is told to judge support, not existence`);
+    assert.match(prompt, /already been verified to exist|existence is already verified/i, `${variant} is told what the mechanical gate already covers`);
+  };
+  assertCitationDuty(reviewer, "the tool-holding reviewer");
+  assertCitationDuty(
     localReviewerContextHeader({ goal: "Audit release truth", constitution: "Evidence first", plan, checkSummary: "test: PASS", taskReports: reports, autonomy: "observe" }),
-    /supports? the conclusion/i,
-    "the context-only reviewer carries the same duty",
+    "the context-only reviewer",
   );
   assert.match(localReviewerContextHeader({ goal: "Audit release truth", constitution: "Evidence first", plan, checkSummary: "test: PASS", taskReports: reports, autonomy: "observe" }), /package\.json says 1\.0\.4/);
 });
@@ -238,10 +245,21 @@ test("diagnostic result validation rejects deferrals and missing path-line evide
     /cite|path:line/i,
     "a vacuous report must not pass merely because the criteria forgot to demand evidence",
   );
+  // The SOLE citation is an extensionless canonical file. An earlier version of
+  // this test put README.md:12 beside it, so it passed while LICENSE:1 was
+  // silently unparseable — an audit proved the gate rejected a real LICENSE:1
+  // report outright, before the verifier ever saw it. LICENSE, Dockerfile,
+  // Makefile, CODEOWNERS and their kin are ordinary primary sources for exactly
+  // the reports this gate exists to check.
   assert.equal(
-    validateDiagnosticResult(unphrased, "LICENSE:1 declares Apache-2.0 and README.md:12 repeats it, so the posture is consistent between the legal text and the contributor-facing summary of this repository."),
+    validateDiagnosticResult(unphrased, "LICENSE:1 declares the Apache License 2.0 for this repository, and that single legal text governs the entire posture with no competing grant anywhere else."),
     null,
-    "the same conclusion grounded in citations passes",
+    "a real extensionless canonical file is a citation on its own",
+  );
+  assert.deepEqual(
+    extractCitations("Dockerfile:12 pins the base image and Makefile:5 rebuilds it; CODEOWNERS:2 assigns review.").map((item) => item.citation).sort(),
+    ["CODEOWNERS:2", "Dockerfile:12", "Makefile:5"],
+    "canonical extensionless names are extracted and handed to the verifier",
   );
 });
 
@@ -1671,6 +1689,38 @@ test("a \${repoRoot} token in a validator command expands to the repository root
     const result = await runValidator("probe", config.probe!, worktree);
     assert.equal(result.passed, true, result.stderr);
     assert.match(result.stdout, /TOKEN_TOOL_RAN/);
+
+    // The two PRODUCTION wiring points, exercised as production runs them. An
+    // audit reverted both while every test above stayed green, because only the
+    // helpers were covered — the exact seam-instead-of-shipping-path mistake
+    // this branch was supposed to have learned from.
+    //
+    // 1. A project's own config: loadConfig must return it expanded.
+    const project = path.join(root, "token project");
+    await initializeProject(project);
+    const projectConfig = await loadConfig(project);
+    projectConfig.repository.validators = {
+      probe: { command: "${repoRoot}/toolbin/tool.mjs", args: ["--flag", "${repoRoot}/pyproject.toml"], timeoutMs: 10_000 },
+    };
+    await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(projectConfig, null, 2)}
+`, "utf8");
+    const loaded = await loadConfig(project);
+    assert.equal(loaded.repository.validators.probe!.command, path.join(project, "toolbin/tool.mjs"), "loadConfig returns the project's validators expanded against the project root");
+    assert.equal(loaded.repository.validators.probe!.args[1], path.join(project, "pyproject.toml"), "arguments expand too");
+
+    // 2. The multi-repository context: registered validators expand against the
+    // REGISTERED repository's root, not the run's own project root.
+    const registeredRepo = path.join(root, "registered repo");
+    await initializeProject(registeredRepo);
+    const context = await buildRepositoryContext(loaded, {
+      localPath: registeredRepo,
+      validators: { tests: { command: "${repoRoot}/.venv/Scripts/python.exe", args: ["-m", "pytest"], timeoutMs: 10_000 } },
+    });
+    assert.equal(
+      context.config.repository.validators.tests!.command,
+      path.join(registeredRepo, ".venv/Scripts/python.exe"),
+      "the repository context carries the registered validator expanded against that repository's own root",
+    );
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }

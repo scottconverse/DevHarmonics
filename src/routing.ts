@@ -250,7 +250,19 @@ export class ModelRouter {
       if (provider !== "codex" && provider !== "claude" && provider !== "gemini") continue;
       const connection = this.connection(`subscription-cli:${provider}`);
       if (!connection || input.excludedConnectionIds?.has(connection.id) || !this.ledger.isConnectionEligible(connection.id)) continue;
-      const managedFleet = this.ledger.listModels(connection.id).some((model) => model.active && model.qualified && !model.excluded);
+      // "Has a managed fleet" must mean the same thing here as acceptance means
+      // above, or the two drift and the connection becomes unroutable: skipped
+      // here as managed, rejected there as unusable. A STALE qualification is the
+      // case that exposed it — it means "requalify at first use", which the
+      // scheduler does, so it must not suppress the provider default that gets
+      // the run as far as that qualification.
+      const managedFleet = this.ledger.listModels(connection.id).some((model) =>
+        model.active
+        && model.qualified
+        && !model.qualificationStale
+        && !model.excluded
+        && !model.retired
+        && this.ledger.isModelEligible(model.id));
       if (managedFleet) continue;
       return provider;
     }

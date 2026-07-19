@@ -4425,7 +4425,15 @@ test("one caller cancelling a shared qualification does not cancel it for the ot
 
     // The JOINER cancels. The owner's probe must survive it.
     joinerController.abort();
-    await assert.rejects(joiner, (error: unknown) => isAbortError(error), "the cancelling caller stops waiting");
+    // Explicit deadline on THIS direction: the mutation that removes the
+    // joiner's independent wait makes it await a promise only this test can
+    // release, so without a bound it hangs instead of naming the broken
+    // contract. The previous round put the deadline on the other direction.
+    await assert.rejects(
+      Promise.race([joiner, delay(5_000).then(() => { throw new Error("the cancelling joiner was still waiting after 5s"); })]),
+      (error: unknown) => isAbortError(error),
+      "the cancelling caller stops waiting",
+    );
 
     assert.ok(release, "the shared probe is still outstanding");
     (release as () => void)();
@@ -4561,6 +4569,112 @@ test("a live joiner keeps a shared qualification discoverable after its creator 
     assert.equal(joinerResult?.passed, true, "the joiner gets its answer");
     assert.equal(lateResult?.passed, true, "and so does the later caller, from the same probe");
     assert.equal(probes, 1, "exactly one underlying probe ran throughout");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test("an answer that lands as the caller cancels is not persisted as a verdict", async () => {
+  // The narrow ordering this guards: the shared probe wins its race against the
+  // caller's abort, so the caller receives a value — and only then does the
+  // cancellation land, before the caller resumes and would persist it. I claimed
+  // this window could not be staged deterministically; an audit showed it can,
+  // by scheduling the abort from a getter on the outcome, which runs while the
+  // result is being read and queues the cancellation into exactly that gap.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-late-cancel-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    ledger.upsertConnection({ id: "local:ollama", provider: "ollama", transport: "local", authentication: "local_none", displayName: "Ollama", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "local", capacity: "available", adapterVersion: "test", runtimeVersion: "test", metadata: { baseUrl: "http://127.0.0.1:11434" } });
+    const modelId = "ollama:worker:7b";
+    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "local:ollama", canonicalName: "worker:7b", displayName: "worker:7b", source: "runtime_discovery", lifecycle: "known", visible: true, verified: false, qualified: false, active: false, metadata: { capabilities: ["completion"] } });
+
+    const controller = new AbortController();
+    const outcome = {
+      fixtureVersion: "local-analysis-v1",
+      role: "analysis" as const,
+      passed: false,
+      score: 0,
+      // Read while the outcome is spread, which is after the probe settled and
+      // before the caller resumes. Two microtasks put the abort in that gap.
+      get evidence() {
+        queueMicrotask(() => queueMicrotask(() => controller.abort()));
+        return {};
+      },
+    };
+
+    await assert.rejects(
+      ensureSchedulerCandidateQualified({
+        ledger,
+        config: structuredClone(defaultConfig),
+        cwd: root,
+        role: "worker",
+        preferredProvider: "ollama",
+        permission: "read_only",
+        task: { id: "probe", title: "Inspect", description: "Inspect", dependencies: [], preferredProvider: null, checks: [], kind: "diagnostic", permission: "read_only", risk: "low" },
+        signal: controller.signal,
+        qualify: async () => outcome,
+      }),
+      (error: unknown) => isAbortError(error),
+      "an answer that arrives as the caller cancels must not become that caller's verdict",
+    );
+
+    assert.deepEqual(
+      ledger.listModelQualifications(modelId).filter((item) => !item.passed),
+      [],
+      "and must not be persisted as a failed qualification",
+    );
+    assert.equal(ledger.isModelEligible(modelId), true, "nor cool the model out of scheduling");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test("a probe that ignores cancellation is not left published for later callers", async () => {
+  // An abort is a REQUEST, and not every probe honours it. Cleanup used to run
+  // only when the shared promise settled, so a probe that ignored cancellation
+  // never settled and its entry stayed published forever: the next caller for
+  // that model joined work nobody owned and no caller could ever finish, with
+  // each stranded key held for the life of the process.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-abandoned-flight-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    ledger.upsertConnection({ id: "local:ollama", provider: "ollama", transport: "local", authentication: "local_none", displayName: "Ollama", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "local", capacity: "available", adapterVersion: "test", runtimeVersion: "test", metadata: { baseUrl: "http://127.0.0.1:11434" } });
+    const modelId = "ollama:worker:7b";
+    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "local:ollama", canonicalName: "worker:7b", displayName: "worker:7b", source: "runtime_discovery", lifecycle: "known", visible: true, verified: false, qualified: false, active: false, metadata: { capabilities: ["completion"] } });
+
+    const task = { id: "probe", title: "Inspect", description: "Inspect", dependencies: [], preferredProvider: null, checks: [], kind: "diagnostic" as const, permission: "read_only" as const, risk: "low" as const };
+    const shared = { ledger, config: structuredClone(defaultConfig), cwd: root, role: "worker" as const, preferredProvider: "ollama", permission: "read_only" as const, task };
+    let probes = 0;
+    const settle = async () => { for (let tick = 0; tick < 50; tick += 1) await new Promise((resolve) => setImmediate(resolve)); };
+    // Deliberately deaf to cancellation, and it never answers.
+    const deaf = () => { probes += 1; return new Promise<never>(() => {}); };
+
+    const first = new AbortController();
+    const stranded = ensureSchedulerCandidateQualified({ ...shared, signal: first.signal, qualify: deaf });
+    for (let tick = 0; tick < 200 && probes === 0; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+    first.abort();
+    await assert.rejects(
+      Promise.race([stranded, delay(5_000).then(() => { throw new Error("the only subscriber was still waiting after 5s"); })]),
+      (error: unknown) => isAbortError(error),
+      "the only subscriber stops waiting",
+    );
+    await settle();
+
+    // Every subscriber has gone. A later caller must start fresh work, not join
+    // the abandoned probe that nobody owns and that will never answer.
+    const later = new AbortController();
+    const revived = ensureSchedulerCandidateQualified({ ...shared, signal: later.signal, qualify: deaf });
+    for (let tick = 0; tick < 200 && probes < 2; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(probes, 2, "a later caller starts its own probe rather than joining an abandoned one");
+
+    later.abort();
+    await assert.rejects(
+      Promise.race([revived, delay(5_000).then(() => { throw new Error("the later caller was still waiting after 5s"); })]),
+      (error: unknown) => isAbortError(error),
+      "and it can cancel too",
+    );
   } finally {
     ledger.close();
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });

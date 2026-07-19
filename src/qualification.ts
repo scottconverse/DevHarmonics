@@ -29,6 +29,8 @@ interface SharedQualificationFlight {
   waiting: Set<AbortSignal>;
   /** Callers with no signal; they cannot withdraw, so the probe must finish. */
   unconditional: number;
+  /** Removes this flight from the map, if it is still the published one. */
+  unpublish: () => void;
 }
 
 const qualificationFlights = new Map<string, SharedQualificationFlight>();
@@ -44,7 +46,14 @@ function joinQualificationFlight(flight: SharedQualificationFlight, signal?: Abo
     if (!flight.waiting.delete(signal)) return;
     // The probe ends only when nobody wants it any more. One caller cancelling
     // must not destroy work another caller is still waiting on.
-    if (flight.waiting.size === 0 && flight.unconditional === 0) flight.controller.abort(signal.reason);
+    if (flight.waiting.size > 0 || flight.unconditional > 0) return;
+    flight.controller.abort(signal.reason);
+    // Unpublish here as well as on settlement, because an abort is a REQUEST and
+    // some probes do not honour it. A probe that ignores cancellation never
+    // settles, so settlement-only cleanup left the entry published forever: the
+    // next caller for that model joined work nobody owned and no caller could
+    // ever finish, and each stranded key stayed for the life of the process.
+    flight.unpublish();
   };
   signal.addEventListener("abort", withdraw, { once: true });
   return raceAbort(flight.promise, signal).finally(() => {
@@ -138,6 +147,11 @@ export async function ensureSchedulerCandidateQualified(input: {
       controller,
       waiting: new Set(),
       unconditional: 0,
+      // Identity-guarded, so a late settlement of an abandoned flight cannot
+      // delete the replacement flight that took its key.
+      unpublish: () => {
+        if (qualificationFlights.get(flightKey) === flight) qualificationFlights.delete(flightKey);
+      },
     };
     flight.promise = (async (): Promise<QualificationOutcome> => {
       try {
@@ -171,10 +185,7 @@ export async function ensureSchedulerCandidateQualified(input: {
     // still using, so the next caller for the same model started a second
     // concurrent probe — duplicate local compute racing the same durable
     // qualification and health writes.
-    const unpublish = (): void => {
-      if (qualificationFlights.get(flightKey) === flight) qualificationFlights.delete(flightKey);
-    };
-    flight.promise.then(unpublish, unpublish);
+    flight.promise.then(flight.unpublish, flight.unpublish);
     return joinQualificationFlight(flight, input.signal);
   };
 
@@ -182,19 +193,12 @@ export async function ensureSchedulerCandidateQualified(input: {
   if (!(refreshed.qualified && !refreshed.qualificationStale && currentQualification)) {
     attempted = true;
     const outcome = await probe(qualificationRole);
-    // Backstop, deliberately kept, and honestly not independently covered.
-    //
-    // A cancelled caller normally rejects earlier, inside joinQualificationFlight:
-    // its own signal loses the race and it never reaches here. This check only
-    // fires in the narrow window where the shared probe settled at essentially
-    // the same moment the caller cancelled, so the race resolved with a value.
-    // Discarding it is right — the caller is going away — but the window cannot
-    // be staged deterministically through the public API, so no test kills this
-    // line. It is kept because the alternative is persisting a verdict for a
-    // caller that asked to stop, which is the exact failure two audit rounds
-    // were spent removing. Recorded as untested defence rather than pretended
-    // coverage; if this module is refactored, re-derive the guarantee rather
-    // than trusting the suite to catch its loss.
+    // A cancelled caller normally rejects earlier, inside joinQualificationFlight.
+    // This fires in the narrow window where the shared probe wins that race — so
+    // the caller holds a value — and the cancellation lands before the caller
+    // resumes here. Persisting then would record a verdict for a caller that had
+    // already asked to stop, which is the failure several audit rounds were spent
+    // removing. Covered by a test that stages the ordering deliberately.
     input.signal?.throwIfAborted();
     input.ledger.recordModelQualification({ modelId: refreshed.id, ...outcome, fingerprint });
     if (!outcome.passed) {

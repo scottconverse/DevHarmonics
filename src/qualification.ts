@@ -165,22 +165,36 @@ export async function ensureSchedulerCandidateQualified(input: {
       }
     })();
     qualificationFlights.set(flightKey, flight);
-    try {
-      return await joinQualificationFlight(flight, input.signal);
-    } finally {
+    // The entry is published for as long as the PROBE lives, not for as long as
+    // the caller that created it happens to wait. Tying cleanup to the creator
+    // meant a creator who cancelled unpublished a flight that live joiners were
+    // still using, so the next caller for the same model started a second
+    // concurrent probe — duplicate local compute racing the same durable
+    // qualification and health writes.
+    const unpublish = (): void => {
       if (qualificationFlights.get(flightKey) === flight) qualificationFlights.delete(flightKey);
-    }
+    };
+    flight.promise.then(unpublish, unpublish);
+    return joinQualificationFlight(flight, input.signal);
   };
 
   let attempted = false;
   if (!(refreshed.qualified && !refreshed.qualificationStale && currentQualification)) {
     attempted = true;
     const outcome = await probe(qualificationRole);
-    // Per-caller, because the probe is shared: an answer produced for someone
-    // else must not become THIS caller's verdict after it cancelled. This is
-    // also what protects against an adapter that cannot be aborted, or one whose
-    // response lands in the moment after cancellation — an audit found two
-    // Ollama fixtures taking a signal parameter and never using it.
+    // Backstop, deliberately kept, and honestly not independently covered.
+    //
+    // A cancelled caller normally rejects earlier, inside joinQualificationFlight:
+    // its own signal loses the race and it never reaches here. This check only
+    // fires in the narrow window where the shared probe settled at essentially
+    // the same moment the caller cancelled, so the race resolved with a value.
+    // Discarding it is right — the caller is going away — but the window cannot
+    // be staged deterministically through the public API, so no test kills this
+    // line. It is kept because the alternative is persisting a verdict for a
+    // caller that asked to stop, which is the exact failure two audit rounds
+    // were spent removing. Recorded as untested defence rather than pretended
+    // coverage; if this module is refactored, re-derive the guarantee rather
+    // than trusting the suite to catch its loss.
     input.signal?.throwIfAborted();
     input.ledger.recordModelQualification({ modelId: refreshed.id, ...outcome, fingerprint });
     if (!outcome.passed) {

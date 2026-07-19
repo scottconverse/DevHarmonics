@@ -5089,6 +5089,49 @@ test("interrupting a first-use qualification leaves the model's health untouched
   }
 });
 
+test("a stale qualification does not hide a connection's provider default", async () => {
+  // Found by running the product: an approved cross-repository run was refused
+  // at start with "no subscription or qualified local worker is available",
+  // while reporting both subscriptions READY.
+  //
+  // Two implementations of one decision had drifted. `defaultProvider` decides a
+  // connection has a managed fleet — and therefore should NOT fall back to the
+  // provider default — using active && qualified && !excluded, which counts a
+  // STALE qualification. `acceptModel` then rejects those same models precisely
+  // because they are stale. The connection is skipped as managed while nothing
+  // on it is usable, so routing finds nothing at all.
+  //
+  // A stale qualification means "requalify at first use", which is exactly what
+  // scheduler-time qualification does. It must not suppress the provider default.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-stale-default-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    ledger.upsertConnection({ id: "subscription-cli:codex", provider: "codex", transport: "subscription_cli", authentication: "subscription", displayName: "Codex", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "unknown", capacity: "unknown", adapterVersion: "test", runtimeVersion: "test", metadata: {} });
+    const modelId = "subscription-cli:codex:model:gpt-5-5";
+    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "subscription-cli:codex", canonicalName: "gpt-5-5", displayName: "gpt-5-5", source: "provider_catalog", lifecycle: "known", visible: true, verified: false, qualified: false, active: false, metadata: profileMetadata({ tier: "premium", family: "gpt-5", capabilities: ["text", "code"], source: "catalog" }) });
+    // Qualified under an old fingerprint, then the runtime changed — the ordinary
+    // state after a provider CLI upgrade, applied exactly as the scheduler does.
+    ledger.recordModelQualification({ modelId, fixtureVersion: "test", role: "general", passed: true, score: 1, evidence: {}, fingerprint: "old-fingerprint" });
+    ledger.setModelPreference(modelId, { active: true });
+    ledger.applyModelFingerprint(modelId, "new-fingerprint");
+
+    const stale = ledger.getModel(modelId);
+    assert.equal(stale?.qualified, true, "the model still carries a qualification record");
+    assert.equal(stale?.qualificationStale, true, "but it is stale, so it cannot be accepted as-is");
+    assert.equal(stale?.active, true, "and it is active, which is what made the connection look like a managed fleet");
+
+    const config = structuredClone(defaultConfig);
+    assert.equal(
+      canRoute(ledger, workerClassProbe(config, ["codex"])),
+      true,
+      "a connection whose only qualification is stale must still offer its provider default, so first-use requalification can run",
+    );
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
 test("worker liveness is decided by the router itself, not by a proxy that disagrees with it", async () => {
   // Found by the v0.6 item-4 fallback proving run. The attempt loop guards on
   // input.providers, which only ever holds subscription providers, so once the

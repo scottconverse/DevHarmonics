@@ -52,8 +52,15 @@ export function validateDiagnosticResult(task: PlannedTask, text: string): strin
     return "the worker asked for approval instead of executing the already-approved diagnostic";
   }
   if (normalized.length < 80) return "the diagnostic report is too short to substantiate its conclusions";
-  const requiresLineEvidence = [...(task.acceptanceCriteria ?? []), ...(task.expectedArtifacts ?? [])]
-    .some((value) => /line number|path:line|line citation/i.test(value));
+  // A read-only diagnostic's citations ARE its evidence: it changes nothing, so
+  // validators have no repository state to judge and the report stands alone. A
+  // report grounded in nothing is not a diagnostic, however fluent — so every
+  // diagnostic requires at least one citation, whether or not its acceptance
+  // criteria remembered to ask. Criteria phrasing still forces the requirement
+  // onto other read-only kinds that ask for line evidence explicitly.
+  const requiresLineEvidence = task.kind === "diagnostic"
+    || [...(task.acceptanceCriteria ?? []), ...(task.expectedArtifacts ?? [])]
+      .some((value) => /line number|path:line|line citation/i.test(value));
   // Deliberately the same extractor the citation verifier resolves against: an
   // evidence form this gate accepts but that verifier cannot parse is a hole,
   // and two separate patterns had already opened one.

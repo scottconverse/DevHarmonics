@@ -35,6 +35,7 @@ import {
   type RunAutonomy,
   type SteeringDirectiveRecord,
   type TaskStatus,
+  type ValidatorConfig,
 } from "./types.js";
 import { invocationFailureScope, isAbortError, RuntimeInvocationError, type InvocationPermission, type RuntimeAdapter } from "./runtime.js";
 import { syncSubscriptionConnections } from "./registry.js";
@@ -44,7 +45,7 @@ import { evaluateToolRequest, type ToolStage } from "./policy.js";
 import { adjudicateReviewQuorum, parseReviewerResponse, reviewRequirement, type ReviewFinding, type ReviewQuorumDecision, type ReviewRequirement, type StructuredReview } from "./review.js";
 import { OPENROUTER_MAX_OUTPUT_TOKENS, OpenRouterService, requireInvocationCostCeiling, type PaidSpendReservation } from "./openrouter.js";
 import { ensureSchedulerCandidateQualified, ensureSchedulerProviderCandidateQualified, type SchedulerQualificationResult } from "./qualification.js";
-import { resolveValidatorCwd, runValidator, unknownValidator } from "./validators.js";
+import { mergeRepositoryValidators, resolveValidatorCwd, runValidator, unknownValidator } from "./validators.js";
 import { analyzeVerificationIntegrity } from "./verification-integrity.js";
 import { runLocalToolLoop } from "./local-tools.js";
 import { WorktreeManager, WorkspaceIsolationError } from "./worktrees.js";
@@ -1133,14 +1134,7 @@ export class Orchestrator {
 
       const repositoryContexts = new Map<string, { config: DevHarmonicsConfig; constitution: string }>();
       for (const repository of repositories) {
-        const localConfig = await loadConfig(repository.localPath!);
-        repositoryContexts.set(repository.id, {
-          config: {
-            ...input.config,
-            repository: { validators: { ...localConfig.repository.validators, ...repository.validators } },
-          },
-          constitution: await loadConstitution(repository.localPath!),
-        });
+        repositoryContexts.set(repository.id, await buildRepositoryContext(input.config, repository));
       }
 
       const requestedAgents = input.request.agents ??
@@ -2623,6 +2617,29 @@ export class Orchestrator {
  * run), and refused a manually assigned inactive local model that the router
  * would in fact have selected.
  */
+/**
+ * The execution context for one repository in a multi-repository run: its own
+ * project configuration with the ledger's registered validators merged over it,
+ * `${repoRoot}` expanded against THAT repository's primary root.
+ *
+ * Extracted so the production wiring is testable directly — an audit showed the
+ * previous inline version could be reverted to an unexpanded spread with every
+ * related test still green, because only the helpers underneath were covered.
+ */
+export async function buildRepositoryContext(
+  baseConfig: DevHarmonicsConfig,
+  repository: { localPath: string | null; validators: Record<string, ValidatorConfig> },
+): Promise<{ config: DevHarmonicsConfig; constitution: string }> {
+  const localConfig = await loadConfig(repository.localPath!);
+  return {
+    config: {
+      ...baseConfig,
+      repository: { validators: mergeRepositoryValidators(localConfig.repository.validators, repository.validators, repository.localPath) },
+    },
+    constitution: await loadConstitution(repository.localPath!),
+  };
+}
+
 export function canRoute(ledger: Ledger, input: RouteInput): boolean {
   return "decision" in new ModelRouter(ledger).tryRoute(input);
 }

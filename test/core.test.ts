@@ -8,11 +8,11 @@ import { DatabaseSync } from "node:sqlite";
 import { createServer } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
-import { defaultConfig, initializeProject, loadConfig, resolveProviderCommand } from "../src/config.js";
+import { defaultConfig, devHarmonicsDirectory, initializeProject, loadConfig, resolveProviderCommand } from "../src/config.js";
 import { projectLegacyProvider } from "../src/compatibility.js";
 import { assertRunTransition, assertTaskTransition, domainId } from "../src/domain.js";
 import { LEDGER_SCHEMA_VERSION, Ledger } from "../src/ledger.js";
-import { assignReviewFindings, canRoute, createReviewEvidenceBinding, Orchestrator, workerClassProbe, parseFirstJsonObject, planSteeredAdmission, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
+import { assignReviewFindings, buildRepositoryContext, canRoute, createReviewEvidenceBinding, Orchestrator, workerClassProbe, parseFirstJsonObject, planSteeredAdmission, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
 import { extractCitations, verifyReportCitations } from "../src/citations.js";
 import { boundedThinkingSettings, discoverOllama, minimalThinking, OllamaAdapter, qualifyOllamaModel, syncOllamaRegistry, syncOllamaRuntimes } from "../src/ollama.js";
 import {
@@ -48,7 +48,7 @@ import { QUALIFICATION_FINGERPRINT_FIXTURE, ensureReviewerCandidateQualified, en
 import { modelQualificationFingerprint } from "../src/model-fingerprint.js";
 import { aggregateModelPerformance } from "../src/model-performance.js";
 import { quotaResetAt } from "../src/antigravity.js";
-import { runValidator } from "../src/validators.js";
+import { expandValidatorTokens, mergeRepositoryValidators, runValidator } from "../src/validators.js";
 import { parseReviewerResponse } from "../src/review.js";
 import { DeliveryService } from "../src/delivery.js";
 
@@ -192,6 +192,65 @@ test("observe run prompts require diagnostic evidence without repository changes
   assert.match(reviewer, /diagnostic task reports/i);
   assert.match(reviewer, /package\.json says 1\.0\.4/);
   assert.doesNotMatch(reviewer, /review the combined diff/i);
+  // The mechanical citation gate proves a cited line EXISTS; only the reviewer
+  // can judge whether it SUPPORTS the conclusion drawn from it. That division
+  // of labour must be stated in the prompt, in both reviewer variants, or the
+  // reviewer reasonably assumes resolution implies support — which is exactly
+  // how five fabricated-adjacent reports once read as convincing.
+  assert.match(reviewer, /supports? the conclusion/i, "the tool-holding reviewer is told to judge support, not existence");
+  assert.match(reviewer, /already been verified to exist|existence is already verified/i, "and told what the mechanical gate already covers");
+  // One assertion helper for both variants, so their shared contract cannot
+  // drift apart — an audit showed the context-only half could lose its
+  // existence statement with this test still green.
+  const assertCitationDuty = (prompt: string, variant: string): void => {
+    assert.match(prompt, /supports? the conclusion/i, `${variant} is told to judge support, not existence`);
+    assert.match(prompt, /already been verified to exist|existence is already verified/i, `${variant} is told what the mechanical gate already covers`);
+  };
+  assertCitationDuty(reviewer, "the tool-holding reviewer");
+  assertCitationDuty(
+    localReviewerContextHeader({ goal: "Audit release truth", constitution: "Evidence first", plan, checkSummary: "test: PASS", taskReports: reports, autonomy: "observe" }),
+    "the context-only reviewer",
+  );
+
+  // Citations are verified mechanically only for read-only tasks. Telling a
+  // reviewer of an IMPLEMENTATION plan that its report citations were verified
+  // is a claim the product did not earn — an audit found both prompts making it
+  // unconditionally. The claim must track what actually ran.
+  const writePlan: RunPlan = {
+    summary: "implementation fixture plan",
+    recommendedConcurrency: 1,
+    tasks: [{ id: "build", title: "Build it", description: "Build it", dependencies: [], preferredProvider: null, checks: ["test"], kind: "implementation", permission: "workspace_write", risk: "medium" }],
+  };
+  for (const [variant, prompt] of [
+    ["tool-holding", reviewerPrompt({ goal: "Ship it", constitution: "Evidence first", plan: writePlan, checkSummary: "test: PASS", taskReports: "build: done", workspacePath: "C:/fixture", autonomy: "bounded" })],
+    ["context-only", localReviewerContextHeader({ goal: "Ship it", constitution: "Evidence first", plan: writePlan, checkSummary: "test: PASS", taskReports: "build: done", autonomy: "bounded" })],
+  ] as const) {
+    assert.doesNotMatch(
+      prompt,
+      /already been verified to exist|existence is already verified/i,
+      `${variant} must not claim mechanical verification for a plan with no read-only task`,
+    );
+  }
+
+  // The MIXED plan: some reports were verified, some were not. The claim must
+  // name which — an unqualified "verified" would overstate it, and no claim at
+  // all would waste evidence the product did produce.
+  const mixedPlan: RunPlan = {
+    summary: "mixed fixture plan",
+    recommendedConcurrency: 1,
+    tasks: [
+      { id: "inspect", title: "Inspect", description: "Inspect", dependencies: [], preferredProvider: null, checks: ["test"], kind: "diagnostic", permission: "read_only", risk: "low" },
+      { id: "build", title: "Build it", description: "Build it", dependencies: [], preferredProvider: null, checks: ["test"], kind: "implementation", permission: "workspace_write", risk: "medium" },
+    ],
+  };
+  for (const [variant, prompt] of [
+    ["tool-holding", reviewerPrompt({ goal: "Ship it", constitution: "Evidence first", plan: mixedPlan, checkSummary: "test: PASS", taskReports: "inspect: done", workspacePath: "C:/fixture", autonomy: "bounded" })],
+    ["context-only", localReviewerContextHeader({ goal: "Ship it", constitution: "Evidence first", plan: mixedPlan, checkSummary: "test: PASS", taskReports: "inspect: done", autonomy: "bounded" })],
+  ] as const) {
+    assert.match(prompt, /verified to exist for the read-only tasks \(inspect\)/i, `${variant} names which reports were verified`);
+    assert.match(prompt, /remaining tasks carry no such verification/i, `${variant} says the rest were not`);
+    assert.match(prompt, /supports? the conclusion/i, `${variant} still carries the support duty`);
+  }
   assert.match(localReviewerContextHeader({ goal: "Audit release truth", constitution: "Evidence first", plan, checkSummary: "test: PASS", taskReports: reports, autonomy: "observe" }), /package\.json says 1\.0\.4/);
 });
 
@@ -212,6 +271,58 @@ test("diagnostic result validation rejects deferrals and missing path-line evide
   assert.match(validateDiagnosticResult(task, "The version claims conflict, but no source locations are included in this otherwise sufficiently long report.") ?? "", /path:line/i);
   assert.equal(validateDiagnosticResult(task, "[README.md](C:/workspace/README.md:1) identifies CivicSuite version 1.0.4, while [STATUS.md](C:\\workspace\\STATUS.md:7) still identifies 1.0.3. This is a concrete release-readiness contradiction."), null);
   assert.equal(validateDiagnosticResult(task, "The target file is [SECURITY.md](file:///C:/workspace/SECURITY.md). Line 45 requires dependency issues to be reported upstream and patched or pinned. This is a substantive release-safety control with an explicit file and line citation."), null);
+
+  // A diagnostic whose acceptance criteria never mention line evidence used to
+  // accept a report with no citations at all — the citation verifier had
+  // nothing to check, so a purely rhetorical report passed the gate outright.
+  // A read-only diagnostic's citations ARE its evidence: with no repository
+  // change for validators to judge, a report grounded in nothing is not a
+  // diagnostic, however fluent. Every diagnostic must cite at least one
+  // verifiable location.
+  const unphrased = { ...task, acceptanceCriteria: ["Summarize the repository's licensing posture"] };
+  assert.match(
+    validateDiagnosticResult(unphrased, "The licensing posture is broadly permissive and well maintained, with contributor expectations that appear consistent across the project and no obvious conflicts in spirit or intent anywhere.") ?? "",
+    /cite|path:line/i,
+    "a vacuous report must not pass merely because the criteria forgot to demand evidence",
+  );
+  // The SOLE citation is an extensionless canonical file. An earlier version of
+  // this test put README.md:12 beside it, so it passed while LICENSE:1 was
+  // silently unparseable — an audit proved the gate rejected a real LICENSE:1
+  // report outright, before the verifier ever saw it. LICENSE, Dockerfile,
+  // Makefile, CODEOWNERS and their kin are ordinary primary sources for exactly
+  // the reports this gate exists to check.
+  assert.equal(
+    validateDiagnosticResult(unphrased, "LICENSE:1 declares the Apache License 2.0 for this repository, and that single legal text governs the entire posture with no competing grant anywhere else."),
+    null,
+    "a real extensionless canonical file is a citation on its own",
+  );
+  assert.deepEqual(
+    extractCitations("Dockerfile:12 pins the base image and Makefile:5 rebuilds it; CODEOWNERS:2 assigns review.").map((item) => item.citation).sort(),
+    ["CODEOWNERS:2", "Dockerfile:12", "Makefile:5"],
+    "canonical extensionless names are extracted and handed to the verifier",
+  );
+  // A dotted DIRECTORY before an extensionless file. The generic alternative
+  // could match `.github` and stop, leaving the real filename to be swallowed by
+  // the link's trailing wildcard — so the citation either vanished or resolved
+  // to a directory. `.github/CODEOWNERS` is where CODEOWNERS actually lives.
+  assert.deepEqual(
+    extractCitations("[owners](.github/CODEOWNERS:2) assigns review.").map((item) => item.citation),
+    [".github/CODEOWNERS:2"],
+    "a linked path whose directory is dotted keeps its extensionless filename",
+  );
+  assert.deepEqual(
+    extractCitations("See [owners](.github/CODEOWNERS), line 2 for review assignment.").map((item) => item.citation),
+    [".github/CODEOWNERS:2"],
+    "and the same path with the line in nearby prose",
+  );
+  assert.deepEqual(
+    extractCitations("[release](.github/workflows/release.yml:13) sets the default ref.").map((item) => item.citation),
+    [".github/workflows/release.yml:13"],
+    "ordinary extensioned files under dotted directories still parse",
+  );
+  // Prose that merely looks like a citation must stay out: extracting it would
+  // fail verification and reject a real report.
+  assert.deepEqual(extractCitations("The scanner returned ERROR:404 and ISO:9001 was cited.").map((item) => item.citation), []);
 });
 
 test("observe plan validation rejects implementation or writable task contracts", () => {
@@ -1588,6 +1699,92 @@ test("repository validators cannot escape their assigned worktree through cwd", 
     await assert.rejects(() => readFile(outside, "utf8"), /ENOENT/);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a \${repoRoot} token in a validator command expands to the repository root", async () => {
+  // A registered validator that needs the repository's own toolchain — a venv
+  // interpreter, a repo-local node_modules binary — cannot be written as a bare
+  // command (wrong or missing on PATH) and must not be registered as an absolute
+  // machine path (breaks on every other machine). The token names the one thing
+  // both machines agree on: where the repository lives. It expands against the
+  // PRIMARY repository root, not the task worktree, because per-machine
+  // toolchains are gitignored and exist only in the primary checkout.
+  const validators = {
+    tests: { command: "${repoRoot}/.venv/Scripts/python.exe", args: ["-m", "pytest", "-q"], timeoutMs: 60_000 },
+    lint: { command: "ruff", args: ["check", "${repoRoot}/pyproject.toml"], timeoutMs: 60_000 },
+  };
+  const expanded = expandValidatorTokens(validators, "C:\repos\civiccode");
+  assert.equal(expanded.tests!.command, path.join("C:\repos\civiccode", ".venv/Scripts/python.exe"));
+  assert.deepEqual(expanded.tests!.args, ["-m", "pytest", "-q"]);
+  assert.deepEqual(expanded.lint!.args, ["check", path.join("C:\repos\civiccode", "pyproject.toml")]);
+  // Untouched entries come through identical, and the input is not mutated.
+  assert.equal(validators.tests.command, "${repoRoot}/.venv/Scripts/python.exe");
+
+  // A token with no root to expand against must fail loudly. Expanding it to
+  // nothing, or to the worktree, silently runs the wrong interpreter.
+  assert.throws(() => expandValidatorTokens(validators, null), /repoRoot/);
+
+  // The multi-repository merge: registered validators override the project's
+  // own, and their token expands against THAT repository's primary root.
+  const merged = mergeRepositoryValidators(
+    { tests: { command: "python", args: ["-m", "pytest"], timeoutMs: 1_000 }, extra: { command: "echo", args: [], timeoutMs: 1_000 } },
+    { tests: { command: "${repoRoot}/.venv/Scripts/python.exe", args: ["-m", "pytest", "-q"], timeoutMs: 2_000 } },
+    "D:\elsewhere\repo",
+  );
+  assert.equal(merged.tests!.command, path.join("D:\elsewhere\repo", ".venv/Scripts/python.exe"), "registered wins and expands against the repository's own root");
+  assert.equal(merged.extra!.command, "echo", "project validators without an override survive");
+
+  // End to end: the expanded command actually runs from a worktree-like cwd.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-token-e2e-"));
+  try {
+    const repo = path.join(root, "primary repo");
+    const bin = path.join(repo, "toolbin");
+    await mkdir(bin, { recursive: true });
+    const script = path.join(bin, "tool.mjs");
+    await writeFile(script, ["console.log('TOKEN_TOOL_RAN'); process.exit(0);", ""].join("\n"), "utf8");
+    const worktree = path.join(root, "worktree");
+    await mkdir(worktree, { recursive: true });
+    const config = expandValidatorTokens({
+      probe: { command: process.execPath, args: ["${repoRoot}/toolbin/tool.mjs"], timeoutMs: 10_000 },
+    }, repo);
+    const result = await runValidator("probe", config.probe!, worktree);
+    assert.equal(result.passed, true, result.stderr);
+    assert.match(result.stdout, /TOKEN_TOOL_RAN/);
+
+    // The two PRODUCTION wiring points, exercised as production runs them. An
+    // audit reverted both while every test above stayed green, because only the
+    // helpers were covered — the exact seam-instead-of-shipping-path mistake
+    // this branch was supposed to have learned from.
+    //
+    // 1. A project's own config: loadConfig must return it expanded.
+    const project = path.join(root, "token project");
+    await initializeProject(project);
+    const projectConfig = await loadConfig(project);
+    projectConfig.repository.validators = {
+      probe: { command: "${repoRoot}/toolbin/tool.mjs", args: ["--flag", "${repoRoot}/pyproject.toml"], timeoutMs: 10_000 },
+    };
+    await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(projectConfig, null, 2)}
+`, "utf8");
+    const loaded = await loadConfig(project);
+    assert.equal(loaded.repository.validators.probe!.command, path.join(project, "toolbin/tool.mjs"), "loadConfig returns the project's validators expanded against the project root");
+    assert.equal(loaded.repository.validators.probe!.args[1], path.join(project, "pyproject.toml"), "arguments expand too");
+
+    // 2. The multi-repository context: registered validators expand against the
+    // REGISTERED repository's root, not the run's own project root.
+    const registeredRepo = path.join(root, "registered repo");
+    await initializeProject(registeredRepo);
+    const context = await buildRepositoryContext(loaded, {
+      localPath: registeredRepo,
+      validators: { tests: { command: "${repoRoot}/.venv/Scripts/python.exe", args: ["-m", "pytest"], timeoutMs: 10_000 } },
+    });
+    assert.equal(
+      context.config.repository.validators.tests!.command,
+      path.join(registeredRepo, ".venv/Scripts/python.exe"),
+      "the repository context carries the registered validator expanded against that repository's own root",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -4345,6 +4542,54 @@ test("a model whose thinking cannot be disabled still qualifies", async () => {
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test("a local model that times out cools that model, not the whole connection", async () => {
+  // One slow model must not take the entire local fleet down with it. A timed-out
+  // Ollama call was classified 'process_failed' — "could not be reached" — which
+  // scopes to the CONNECTION, so a single 14B model blowing its deadline cooled
+  // every other local model for the duration. The runtime did answer; it was the
+  // model that ran out of time. Classified as 'timeout', the failure scopes to
+  // the exact model and the rest of the fleet stays schedulable.
+  const server = createServer(async (request, response) => {
+    response.setHeader("Content-Type", "application/json");
+    if (request.url === "/api/version") return response.end(JSON.stringify({ version: "fixture-1" }));
+    if (request.url === "/api/tags") return response.end(JSON.stringify({ models: [{ name: "slow:14b" }] }));
+    if (request.url === "/api/chat" && request.method === "POST") {
+      // Never answers within any caller's deadline.
+      await delay(60_000);
+      return response.end(JSON.stringify({ message: { role: "assistant", content: "late" } }));
+    }
+    response.statusCode = 404;
+    response.end(JSON.stringify({ error: "not found" }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const adapter = new OllamaAdapter(`http://127.0.0.1:${address.port}`, "local:ollama");
+    let thrown: unknown;
+    try {
+      await adapter.invoke({
+        role: "worker",
+        prompt: "answer",
+        cwd: os.tmpdir(),
+        permission: "read_only",
+        timeoutMs: 300,
+        model: { requestedModelId: domainId("Model", "ollama:slow:14b"), alias: "slow:14b", settings: {} },
+      });
+      assert.fail("the call must not succeed");
+    } catch (error) {
+      thrown = error;
+    }
+    assert.ok(thrown instanceof RuntimeInvocationError, String(thrown));
+    assert.equal(thrown.kind, "timeout", "a deadline blown by the model is a timeout, not an unreachable runtime");
+    assert.equal(thrown.retryable, true, "a timeout is retryable");
+    assert.match(thrown.message, /timed out/i, "and says so, rather than claiming the runtime was unreachable");
+    assert.equal(invocationFailureScope(thrown.kind, true), "model", "so the failure cools the model, not the connection");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
 

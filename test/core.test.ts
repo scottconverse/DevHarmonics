@@ -231,6 +231,26 @@ test("observe run prompts require diagnostic evidence without repository changes
       `${variant} must not claim mechanical verification for a plan with no read-only task`,
     );
   }
+
+  // The MIXED plan: some reports were verified, some were not. The claim must
+  // name which — an unqualified "verified" would overstate it, and no claim at
+  // all would waste evidence the product did produce.
+  const mixedPlan: RunPlan = {
+    summary: "mixed fixture plan",
+    recommendedConcurrency: 1,
+    tasks: [
+      { id: "inspect", title: "Inspect", description: "Inspect", dependencies: [], preferredProvider: null, checks: ["test"], kind: "diagnostic", permission: "read_only", risk: "low" },
+      { id: "build", title: "Build it", description: "Build it", dependencies: [], preferredProvider: null, checks: ["test"], kind: "implementation", permission: "workspace_write", risk: "medium" },
+    ],
+  };
+  for (const [variant, prompt] of [
+    ["tool-holding", reviewerPrompt({ goal: "Ship it", constitution: "Evidence first", plan: mixedPlan, checkSummary: "test: PASS", taskReports: "inspect: done", workspacePath: "C:/fixture", autonomy: "bounded" })],
+    ["context-only", localReviewerContextHeader({ goal: "Ship it", constitution: "Evidence first", plan: mixedPlan, checkSummary: "test: PASS", taskReports: "inspect: done", autonomy: "bounded" })],
+  ] as const) {
+    assert.match(prompt, /verified to exist for the read-only tasks \(inspect\)/i, `${variant} names which reports were verified`);
+    assert.match(prompt, /remaining tasks carry no such verification/i, `${variant} says the rest were not`);
+    assert.match(prompt, /supports? the conclusion/i, `${variant} still carries the support duty`);
+  }
   assert.match(localReviewerContextHeader({ goal: "Audit release truth", constitution: "Evidence first", plan, checkSummary: "test: PASS", taskReports: reports, autonomy: "observe" }), /package\.json says 1\.0\.4/);
 });
 

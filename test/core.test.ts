@@ -3390,7 +3390,7 @@ test("quota exhaustion cools a subscription connection and falls back with durab
     config.application.retry.backoffMs = 1;
     config.product.workers = ["codex", "claude"];
     config.repository.validators = { pass: { command: process.execPath, args: ["-e", "process.exit(0)"], timeoutMs: 5_000 } };
-    const result = await (orchestrator as any).executeTask({ runId, goal: "Fallback", task, constitution: "test", config, providers: ["codex", "claude"], providerCursor: 0, worktrees: { root, integrationPath: root, createTask: async () => ({ path: root, branch: "fixture" }), commitTask: async () => false, mergeTask: async () => undefined }, signal: new AbortController().signal });
+    const result = await (orchestrator as any).executeTask({ runId, goal: "Fallback", task, constitution: "test", config, providers: ["codex", "claude"], providerCursor: 0, worktrees: { root, integrationPath: root, createTask: async () => ({ path: root, branch: "fixture" }), commitTask: async () => false, mergeTask: async () => undefined, taskBranchChangedAnything: async () => true }, signal: new AbortController().signal });
     assert.equal(result, "passed");
     assert.equal(ledger.getConnectionHealth("subscription-cli:codex")?.state, "quota_exhausted");
     assert.equal(ledger.getConnectionHealth("subscription-cli:claude")?.state, "ready");

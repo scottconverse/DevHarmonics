@@ -128,6 +128,11 @@ if (process.argv.includes("--version")) {
   mkdirSync("test", {recursive:true});
   writeFileSync("test/shortcut.test.ts", "test.skip('important behavior', () => {});\\n", "utf8");
   console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"Added shortcut test"}}));
+} else if (input.includes("No-op fixture")) {
+  // Reports success without touching the repository, exactly as a real worker
+  // did on the first cross-repository run: it narrated its intentions and
+  // changed nothing at all.
+  console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"I inspected the files and applied the corrections. The changes are complete."}}));
 } else {
   writeFileSync("result.txt", "created by worker\\n", "utf8");
   console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"Created result.txt"}}));
@@ -1163,6 +1168,51 @@ test("a run starts when its reviewer is not yet qualified but can be", async () 
       "a reviewer that can be qualified on first use must not be treated as absent",
     );
     assert.ok((run?.tasks ?? []).length > 0, `the run executed rather than being refused: ${run?.finalReview}`);
+  } finally {
+    ledger.close();
+    if (runId) {
+      const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
+      await runProcess({ command: "git", args: ["worktree", "prune"], cwd: project, timeoutMs: 30_000 });
+      await rm(runRoot, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+    }
+    await rm(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+  }
+});
+
+test("a write task that changes nothing does not pass", async () => {
+  // The first real cross-repository run marked both tasks PASSED having changed
+  // no files at all. The workers narrated their intentions and edited nothing;
+  // diff-check passed because there was no diff to fault, and tests passed
+  // because nothing was broken. Only the independent reviewer noticed, and only
+  // because it looked for a diff that did not exist.
+  //
+  // A workspace_write task that produced no repository change has not done its
+  // work, whatever it claims. Saying so is deterministic and costs one git call.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-noop-worker-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  config.runPolicy.requirePlanApproval = false;
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}
+`, "utf8");
+
+  const ledger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  let runId = "";
+  try {
+    runId = await new Orchestrator(ledger).run({ goal: "No-op fixture: apply the corrections", projectPath: project, agents: 1 });
+    const run = ledger.getRun(runId);
+    const task = run?.tasks.find((item) => !item.id.startsWith("__"));
+    assert.ok(task, "a task was planned");
+    assert.notEqual(task.status, "passed", `a task that changed nothing must not pass: ${JSON.stringify(run?.tasks.map((t) => ({ id: t.id, status: t.status })))}`);
+    assert.ok(
+      (run?.events ?? []).some((event) => /no repository change/i.test(event.message)),
+      `the run says the task produced nothing: ${JSON.stringify((run?.events ?? []).map((event) => event.message).slice(0, 12))}`,
+    );
   } finally {
     ledger.close();
     if (runId) {

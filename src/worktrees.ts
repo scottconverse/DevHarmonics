@@ -177,6 +177,22 @@ export class WorktreeManager {
     return { path: worktreePath, branch };
   }
 
+  /**
+   * Whether this task branch actually changed anything relative to the base the
+   * run started from.
+   *
+   * A worker that narrates its intentions and edits nothing leaves a branch
+   * identical to the base. Its validators then pass trivially — a diff check has
+   * no diff to fault, and tests still pass because nothing broke — so the task
+   * reports success for work it did not do. Asking git is deterministic and
+   * costs nothing.
+   */
+  async taskBranchChangedAnything(branch: string): Promise<boolean> {
+    if (!this.baseCommitValue) throw new Error("Integration worktree has not been initialized or preflighted");
+    const diff = await this.git(this.projectPath, ["diff", "--quiet", `${this.baseCommitValue}..${branch}`]);
+    return diff.exitCode !== 0;
+  }
+
   async commitTask(worktreePath: string, taskId: string): Promise<boolean> {
     await this.git(worktreePath, ["add", "-A"]);
     const staged = await this.git(worktreePath, ["diff", "--cached", "--quiet"]);

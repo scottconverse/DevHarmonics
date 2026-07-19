@@ -12,7 +12,7 @@ import { defaultConfig, devHarmonicsDirectory, initializeProject, loadConfig, re
 import { projectLegacyProvider } from "../src/compatibility.js";
 import { assertRunTransition, assertTaskTransition, domainId } from "../src/domain.js";
 import { LEDGER_SCHEMA_VERSION, Ledger } from "../src/ledger.js";
-import { architectValidatorNames, assignReviewFindings, buildRepositoryContext, canRoute, createReviewEvidenceBinding, Orchestrator, workerClassProbe, parseFirstJsonObject, planSteeredAdmission, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
+import { architectValidatorNames, assignReviewFindings, describeReviewerUnavailability, buildRepositoryContext, canRoute, createReviewEvidenceBinding, Orchestrator, workerClassProbe, parseFirstJsonObject, planSteeredAdmission, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
 import { extractCitations, verifyReportCitations } from "../src/citations.js";
 import { boundedThinkingSettings, discoverOllama, minimalThinking, OllamaAdapter, qualifyOllamaModel, syncOllamaRegistry, syncOllamaRuntimes } from "../src/ollama.js";
 import {
@@ -5157,6 +5157,47 @@ test("a qualification for one role does not hide the provider default for anothe
     ledger.close();
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
+});
+
+test("a review blocked by implementor independence says so", () => {
+  // Found by the first real cross-repository run. Both tasks ran on the only two
+  // enabled providers, medium risk requires implementor independence, so BOTH
+  // connections were excluded from reviewing and no reviewer could exist. The run
+  // reported "No eligible model or provider default is available for reviewer
+  // (premium tier required)" — blaming the model tier, never mentioning
+  // independence, and giving the owner nothing to act on. The true remedy is to
+  // enable another provider, which that message does not hint at.
+  assert.equal(
+    describeReviewerUnavailability({
+      routingReason: "No eligible model or provider default is available for reviewer (premium tier required)",
+      implementationProviders: ["codex", "claude"],
+      availableProviders: ["codex", "claude"],
+      requireImplementorIndependence: true,
+    }),
+    "No independent reviewer is available: implementor independence is required for this risk level, and every available provider (codex, claude) implemented part of this run. Enable another provider, or lower the risk level to allow a same-provider review.",
+    "the owner is told the real cause and the actual remedy",
+  );
+  // When independence is not the cause, the routing reason stands unchanged.
+  assert.equal(
+    describeReviewerUnavailability({
+      routingReason: "No eligible model or provider default is available for reviewer (premium tier required)",
+      implementationProviders: ["codex"],
+      availableProviders: ["codex", "claude", "gemini"],
+      requireImplementorIndependence: true,
+    }),
+    "No eligible model or provider default is available for reviewer (premium tier required)",
+    "a genuine routing shortfall is not relabelled as an independence problem",
+  );
+  assert.equal(
+    describeReviewerUnavailability({
+      routingReason: "some other routing reason",
+      implementationProviders: ["codex", "claude"],
+      availableProviders: ["codex", "claude"],
+      requireImplementorIndependence: false,
+    }),
+    "some other routing reason",
+    "independence that is not required cannot be the explanation",
+  );
 });
 
 test("a stale qualification does not hide a connection's provider default", async () => {

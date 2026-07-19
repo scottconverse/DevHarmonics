@@ -230,7 +230,7 @@ export class Orchestrator {
           maxOutputTokens: OPENROUTER_MAX_OUTPUT_TOKENS,
           model: decision.model,
         });
-        const parsed = this.parsePlan(result.text, config, input.objective.autonomy);
+        const parsed = this.parsePlan(result.text, config, input.objective.autonomy, architectValidators);
         this.validateObjectiveRepositoryPlan(input.objective, parsed, repositoryContext?.requiredImpactIds ?? []);
         const previousRevision = input.previous?.revision ?? null;
         plan = { ...parsed, revision: previousRevision === null ? 1 : previousRevision + 1, previousRevision };
@@ -2453,11 +2453,22 @@ export class Orchestrator {
     return providers[cursor % providers.length]!;
   }
 
-  private parsePlan(text: string, config: DevHarmonicsConfig, autonomy: DevHarmonicsConfig["runPolicy"]["autonomy"] = config.runPolicy.autonomy): RunPlan {
+  private parsePlan(
+    text: string,
+    config: DevHarmonicsConfig,
+    autonomy: DevHarmonicsConfig["runPolicy"]["autonomy"] = config.runPolicy.autonomy,
+    // The vocabulary the architect was offered. Accepting a plan against a
+    // DIFFERENT list than the one the architect was given is the same contract
+    // drift twice over: it was told to choose from the repositories' validators
+    // and then refused for doing so. Defaults to the project's validators for
+    // single-repository planning, where the two lists are identical.
+    allowedValidators: readonly string[] = Object.keys(config.repository.validators),
+  ): RunPlan {
     const plan = runPlanSchema.parse(parseFirstJsonObject(text));
+    const allowed = new Set(allowedValidators);
     for (const task of plan.tasks) {
       for (const check of task.checks) {
-        if (!config.repository.validators[check]) {
+        if (!allowed.has(check)) {
           throw new Error(`Architect selected unknown validator '${check}' for task '${task.id}'`);
         }
       }

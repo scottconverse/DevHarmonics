@@ -44,7 +44,7 @@ import { classifyWorkload, inferModelProfile, profileMetadata, SUBSCRIPTION_COMP
 import { parseCurrentClaudeModels } from "../src/catalog.js";
 import { estimateInvocationCost, estimateQualificationCost, isExactOpenRouterModelId, OpenRouterAdapter, OpenRouterService } from "../src/openrouter.js";
 import { architectPrompt, localReviewerContextHeader, reviewerPrompt, workerPrompt } from "../src/prompts.js";
-import { QUALIFICATION_FINGERPRINT_FIXTURE, ensureReviewerCandidateQualified, ensureSchedulerCandidateQualified, ensureSchedulerProviderCandidateQualified, hasCurrentOperationalQualification, qualifyRuntimeModel, trackedFamilyQualificationRole } from "../src/qualification.js";
+import { QUALIFICATION_FINGERPRINT_FIXTURE, ensureReviewerCandidateQualified, hasQualifiableCandidate, ensureSchedulerCandidateQualified, ensureSchedulerProviderCandidateQualified, hasCurrentOperationalQualification, qualifyRuntimeModel, trackedFamilyQualificationRole } from "../src/qualification.js";
 import { modelQualificationFingerprint } from "../src/model-fingerprint.js";
 import { aggregateModelPerformance } from "../src/model-performance.js";
 import { quotaResetAt } from "../src/antigravity.js";
@@ -5112,6 +5112,51 @@ test("a cross-repository architect is offered the validators its repositories ac
   );
   // With no repository scope the project's own validators are the whole answer.
   assert.deepEqual(architectValidatorNames(project, []), ["diff-check", "test"]);
+});
+
+test("a qualification for one role does not hide the provider default for another", async () => {
+  // Found by the third attempt at the first real cross-repository run. Earlier
+  // runs had qualified models for the WORKER and ARCHITECT roles, so every
+  // connection carried a current qualification. `defaultProvider` then treated
+  // each connection as a managed fleet and declined to offer its provider
+  // default — for the REVIEWER role, which nothing on either connection was
+  // qualified for. The run was refused with "no subscription or qualified local
+  // reviewer is available" while both subscriptions were ready.
+  //
+  // "Has a managed fleet" has to mean "has a model that can serve THIS role".
+  // Otherwise the first role to be qualified permanently blocks first-use
+  // qualification of every other role on that connection.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-role-blind-fleet-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    ledger.upsertConnection({ id: "subscription-cli:codex", provider: "codex", transport: "subscription_cli", authentication: "subscription", displayName: "Codex", enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "unknown", capacity: "unknown", adapterVersion: "test", runtimeVersion: "test", metadata: {} });
+    const modelId = "subscription-cli:codex:model:gpt-5-6";
+    ledger.upsertDiscoveredModel({ id: modelId, connectionId: "subscription-cli:codex", canonicalName: "gpt-5-6", displayName: "gpt-5-6", source: "provider_catalog", lifecycle: "known", visible: true, verified: false, qualified: false, active: false, metadata: profileMetadata({ tier: "premium", family: "gpt-5", capabilities: ["text", "code"], source: "catalog" }) });
+    // Current, non-stale, active — qualified for WORKER only, exactly as a prior
+    // run leaves a connection.
+    ledger.recordModelQualification({ modelId, fixtureVersion: "test", role: "worker", passed: true, score: 1, evidence: {} });
+    ledger.setModelPreference(modelId, { active: true });
+
+    const config = structuredClone(defaultConfig);
+    // Routing correctly refuses: nothing is qualified as a reviewer YET, and the
+    // reviewer path deliberately qualifies a candidate before routing rather
+    // than falling back to a provider default.
+    assert.equal(
+      canRoute(ledger, { role: "reviewer", config, fallbackProvider: "codex", allowedProviders: ["codex"], permission: "read_only", task: null }),
+      false,
+      "nothing is reviewer-qualified yet, so routing has nothing to choose",
+    );
+    // But a candidate exists, so the run must not be refused before first-use
+    // qualification has had its chance.
+    assert.equal(
+      hasQualifiableCandidate({ ledger, config, role: "reviewer", preferredProvider: "codex", permission: "read_only" }),
+      true,
+      "a premium model on a ready connection is a reviewer candidate even before it is qualified",
+    );
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
 });
 
 test("a stale qualification does not hide a connection's provider default", async () => {

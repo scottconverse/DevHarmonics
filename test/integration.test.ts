@@ -10,6 +10,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { initializeProject, loadConfig, devHarmonicsDirectory } from "../src/config.js";
 import { inspectProviders } from "../src/doctor.js";
 import { Ledger } from "../src/ledger.js";
+import { profileMetadata } from "../src/model-intelligence.js";
 import { Orchestrator, repositoryTaskIds } from "../src/orchestrator.js";
 import { syncOllamaRuntimes } from "../src/ollama.js";
 import { runProcess } from "../src/process.js";
@@ -1114,6 +1115,61 @@ test("one signed-out provider does not block planning that a healthy architect c
     assert.equal(proposed.status, 201, text);
   } finally {
     await dashboard.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+  }
+});
+
+test("a run starts when its reviewer is not yet qualified but can be", async () => {
+  // The third attempt at the first real cross-repository run was refused with
+  // "no subscription or qualified local reviewer is available" while both
+  // subscriptions were ready. Earlier runs had left every connection carrying a
+  // current WORKER qualification, which suppresses the provider default, and
+  // nothing was reviewer-qualified yet — reviewers are qualified on first use.
+  // A gate that demands current routability refuses work that would qualify a
+  // reviewer moments later.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-reviewer-firstuse-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  config.runPolicy.requirePlanApproval = false;
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}
+`, "utf8");
+
+  const ledger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  let runId = "";
+  try {
+    // Exactly the state a prior run leaves: a current, active, non-stale
+    // qualification for ANOTHER role on every connection, so no connection
+    // offers its provider default, and nothing is reviewer-qualified.
+    for (const provider of ["codex", "claude", "gemini"] as const) {
+      const connectionId = `subscription-cli:${provider}`;
+      ledger.upsertConnection({ id: connectionId, provider, transport: "subscription_cli", authentication: "subscription", displayName: provider, enabled: true, installed: true, authenticated: true, visible: true, healthy: true, available: true, entitlement: "unknown", capacity: "unknown", adapterVersion: "test", runtimeVersion: "test", metadata: {} });
+      const modelId = `${connectionId}:model:seeded`;
+      ledger.upsertDiscoveredModel({ id: modelId, connectionId, canonicalName: "seeded", displayName: "seeded", source: "provider_catalog", lifecycle: "known", visible: true, verified: false, qualified: false, active: false, metadata: profileMetadata({ tier: "premium", family: "seeded", capabilities: ["text", "code"], source: "catalog" }) });
+      ledger.recordModelQualification({ modelId, fixtureVersion: "test", role: "worker", passed: true, score: 1, evidence: {} });
+      ledger.setModelPreference(modelId, { active: true });
+    }
+
+    runId = await new Orchestrator(ledger).run({ goal: "Audit fixture without changing it", projectPath: project, autonomy: "observe", agents: 1 });
+    const run = ledger.getRun(runId);
+    assert.doesNotMatch(
+      `${run?.finalReview ?? ""}`,
+      /qualified local reviewer is available/i,
+      "a reviewer that can be qualified on first use must not be treated as absent",
+    );
+    assert.ok((run?.tasks ?? []).length > 0, `the run executed rather than being refused: ${run?.finalReview}`);
+  } finally {
+    ledger.close();
+    if (runId) {
+      const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
+      await runProcess({ command: "git", args: ["worktree", "prune"], cwd: project, timeoutMs: 30_000 });
+      await rm(runRoot, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+    }
     await rm(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
   }
 });

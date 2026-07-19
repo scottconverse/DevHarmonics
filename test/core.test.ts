@@ -12,7 +12,7 @@ import { defaultConfig, devHarmonicsDirectory, initializeProject, loadConfig, re
 import { projectLegacyProvider } from "../src/compatibility.js";
 import { assertRunTransition, assertTaskTransition, domainId } from "../src/domain.js";
 import { LEDGER_SCHEMA_VERSION, Ledger } from "../src/ledger.js";
-import { assignReviewFindings, buildRepositoryContext, canRoute, createReviewEvidenceBinding, Orchestrator, workerClassProbe, parseFirstJsonObject, planSteeredAdmission, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
+import { architectValidatorNames, assignReviewFindings, buildRepositoryContext, canRoute, createReviewEvidenceBinding, Orchestrator, workerClassProbe, parseFirstJsonObject, planSteeredAdmission, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
 import { extractCitations, verifyReportCitations } from "../src/citations.js";
 import { boundedThinkingSettings, discoverOllama, minimalThinking, OllamaAdapter, qualifyOllamaModel, syncOllamaRegistry, syncOllamaRuntimes } from "../src/ollama.js";
 import {
@@ -5087,6 +5087,31 @@ test("interrupting a first-use qualification leaves the model's health untouched
     ledger.close();
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
+});
+
+test("a cross-repository architect is offered the validators its repositories actually have", () => {
+  // Found by running the first real cross-repository objective. The architect is
+  // told "every check name must come from the allowlisted validators above", and
+  // was handed the PROJECT's validator names — diff-check, test, build — while
+  // the affected repositories register lint, tests, typecheck. It obeyed, planned
+  // `test`, and every task failed with "unknown validator 'test'". The run could
+  // not have succeeded: the vocabulary it was given did not exist where the work
+  // had to run.
+  const project = {
+    "diff-check": { command: "git", args: ["diff", "--check"], timeoutMs: 1_000 },
+    test: { command: "npm", args: ["test"], timeoutMs: 1_000 },
+  };
+  const repositories = [
+    { id: "repo:core", validators: { lint: { command: "ruff", args: [], timeoutMs: 1_000 }, tests: { command: "pytest", args: [], timeoutMs: 1_000 } } },
+    { id: "repo:web", validators: { typecheck: { command: "tsc", args: [], timeoutMs: 1_000 }, tests: { command: "vitest", args: [], timeoutMs: 1_000 } } },
+  ];
+  assert.deepEqual(
+    architectValidatorNames(project, repositories),
+    ["diff-check", "lint", "test", "tests", "typecheck"],
+    "the vocabulary is the union of the project's validators and every affected repository's, deduplicated and stable",
+  );
+  // With no repository scope the project's own validators are the whole answer.
+  assert.deepEqual(architectValidatorNames(project, []), ["diff-check", "test"]);
 });
 
 test("a stale qualification does not hide a connection's provider default", async () => {

@@ -192,6 +192,12 @@ export class Orchestrator {
     const excludedArchitectModels = new Set<string>();
     const excludedArchitectConnections = new Set<string>();
     const repositoryContext = this.objectiveRepositoryContext(input.objective);
+    // The architect may only name checks that exist where the work will run, so
+    // the affected repositories' validators join the project's in its vocabulary.
+    const impactedRepositories = repositoryContext
+      ? (this.ledger.getProduct(input.objective.productId!)?.repositories ?? []).filter((repository) => repositoryContext.requiredImpactIds.includes(repository.id))
+      : [];
+    const architectValidators = architectValidatorNames(config.repository.validators, impactedRepositories);
     let plan: RunPlan | null = null;
     let lastArchitectError: Error | null = null;
     for (let candidateIndex = 0; candidateIndex < architectCandidates.length; candidateIndex++) {
@@ -209,7 +215,7 @@ export class Orchestrator {
           prompt: architectPrompt({
             goal: objectivePromptText(input.objective),
             constitution,
-            validators: Object.keys(config.repository.validators),
+            validators: architectValidators,
             providers: workerProviders,
             workspacePath: projectPath,
             autonomy: input.objective.autonomy,
@@ -2638,6 +2644,26 @@ export async function buildRepositoryContext(
     },
     constitution: await loadConstitution(repository.localPath!),
   };
+}
+
+/**
+ * The validator names an architect may choose from.
+ *
+ * The prompt tells it every check name must come from this list, so the list has
+ * to contain names that exist where the work will run. Handing it only the
+ * PROJECT's validators made every cross-repository plan name checks the affected
+ * repositories do not have: the first real cross-repository run planned `test`
+ * against repositories registering `tests`, and every task failed with "unknown
+ * validator". The union is offered, and the per-repository context below tells
+ * the architect which names belong to which repository.
+ */
+export function architectValidatorNames(
+  projectValidators: Record<string, ValidatorConfig>,
+  repositories: ReadonlyArray<{ validators: Record<string, ValidatorConfig> }>,
+): string[] {
+  const names = new Set(Object.keys(projectValidators));
+  for (const repository of repositories) for (const name of Object.keys(repository.validators)) names.add(name);
+  return [...names].sort();
 }
 
 export function canRoute(ledger: Ledger, input: RouteInput): boolean {

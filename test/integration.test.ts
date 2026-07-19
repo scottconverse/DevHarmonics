@@ -63,6 +63,7 @@ if (process.argv.includes("--version")) {
   else if (process.argv.includes("--output-format")) console.log(JSON.stringify({result:marker}));
   else console.log(marker);
 } else if (input.includes("You are the architect")) {
+  if (process.env.DH_CAPTURE_ARCHITECT_PROMPT) { const fs = await import("node:fs"); fs.writeFileSync(process.env.DH_CAPTURE_ARCHITECT_PROMPT, input, "utf8"); }
   const observe = input.includes("This is an OBSERVE run");
   const task = observe
     ? {id:"observe",title:"Audit fixture",description:"Report the README heading",dependencies:[],preferredProvider:"codex",checks:["diff-check"],kind:"diagnostic",repositoryScope:["README.md"],permission:"read_only",risk:"low",capabilityNeeds:["analysis"],acceptanceCriteria:["Cite the README heading"],expectedArtifacts:["evidence report"]}
@@ -1233,6 +1234,95 @@ test("a diagnostic whose citations do not resolve is rejected by the run, not ju
       await runProcess({ command: "git", args: ["worktree", "prune"], cwd: project, timeoutMs: 30_000 });
       await rm(runRoot, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
     }
+    await rm(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+  }
+});
+
+test("a cross-repository architect is told the validators its repositories actually register", async () => {
+  // The architect is instructed that every check name must come from the
+  // allowlisted validators. It was handed the PROJECT's names while the affected
+  // repositories registered different ones, so the first real cross-repository
+  // run planned `test` against repositories that have `tests`, and every task
+  // failed with "unknown validator". Asserting the helper could not catch this —
+  // the defect was in what the production call passed.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-architect-vocab-"));
+  const core = await createRepository(path.join(root, "core"));
+  const docs = await createRepository(path.join(root, "docs"));
+  await git(core, ["remote", "add", "origin", "https://github.com/vocab-product/core.git"]);
+  await git(docs, ["remote", "add", "origin", "https://github.com/vocab-product/docs.git"]);
+  const command = await createFakeCli(root);
+  await initializeProject(core);
+  const config = await loadConfig(core);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(core), "config.json"), `${JSON.stringify(config, null, 2)}
+`, "utf8");
+
+  const captured = path.join(root, "architect-prompt.txt");
+  process.env.DH_CAPTURE_ARCHITECT_PROMPT = captured;
+  const dashboard = await startDashboard({ projectPath: core, port: 0, open: false });
+  try {
+    const productResponse = await fetch(`${dashboard.url}/api/products`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "vocab-product",
+        name: "Vocab product",
+        organizationUrl: "https://github.com/vocab-product",
+        repositories: [
+          { id: "repo:core", name: "core", fullName: "vocab-product/core", url: "https://github.com/vocab-product/core", cloneUrl: "https://github.com/vocab-product/core.git", defaultBranch: "main", visibility: "public", archived: false, sizeKb: 10, language: "Python", description: "Core", intelligence: {} },
+          { id: "repo:docs", name: "docs", fullName: "vocab-product/docs", url: "https://github.com/vocab-product/docs", cloneUrl: "https://github.com/vocab-product/docs.git", defaultBranch: "main", visibility: "public", archived: false, sizeKb: 10, language: "Markdown", description: "Docs", intelligence: {} },
+        ],
+      }),
+    });
+    assert.equal(productResponse.status, 201, await productResponse.clone().text());
+    for (const [localPath, role, validators] of [
+      [core, "module", { "repo-only-lint": "git diff --check" }],
+      [docs, "documentation", { "repo-only-docs-check": "git diff --check" }],
+    ] as const) {
+      const response = await fetch(`${dashboard.url}/api/products/vocab-product/repositories`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ localPath, role, expectedBranch: "main", owners: ["fixture"], dependencyRepositoryIds: [], governanceSources: ["README.md"], validators }),
+      });
+      assert.equal(response.status, 201, await response.clone().text());
+    }
+
+    const objectiveResponse = await fetch(`${dashboard.url}/api/objectives`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        outcome: "Cross repository fixture: implement and document the product change",
+        acceptanceCriteria: ["Both repositories contain the approved result"],
+        constraints: [],
+        projectPath: core,
+        productId: "vocab-product",
+        repositoryIds: ["repo:core", "repo:docs"],
+        risk: "medium",
+        autonomy: "supervised",
+        priority: "normal",
+        policyNotes: [],
+      }),
+    });
+    assert.equal(objectiveResponse.status, 201, await objectiveResponse.clone().text());
+    const objective = await objectiveResponse.json() as { objective: { id: string } };
+    const planResponse = await fetch(`${dashboard.url}/api/objectives/${objective.objective.id}/plans`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabledProviders: ["codex", "claude", "gemini"] }),
+    });
+    assert.equal(planResponse.status, 201, await planResponse.clone().text());
+
+    const prompt = await readFile(captured, "utf8");
+    const allowlist = /Allowlisted validators: (.+)/.exec(prompt)?.[1] ?? "";
+    assert.match(allowlist, /repo-only-lint/, "the architect is offered the validators the affected repositories register");
+    assert.match(allowlist, /repo-only-docs-check/, "including every affected repository, not just the first");
+    assert.match(allowlist, /diff-check/, "and the project's own validators remain available");
+  } finally {
+    delete process.env.DH_CAPTURE_ARCHITECT_PROMPT;
+    await dashboard.close();
     await rm(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
   }
 });

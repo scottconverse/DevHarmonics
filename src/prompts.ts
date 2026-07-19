@@ -56,7 +56,7 @@ For every repository listed as requiring an impact decision, include exactly one
 Available worker providers: ${input.providers.join(", ")}
 Allowlisted validators: ${input.validators.length ? input.validators.join(", ") : "none"}
 
-Inspect the repository but do not modify it while planning. ${taskInstructions} Every check name must come from the allowlisted validators above. Never invent a shell command. Dependencies must form a directed acyclic graph.
+Inspect the repository but do not modify it while planning. ${taskInstructions} Every check name must come from the allowlisted validators above, and for a repository-scoped task it must be one the repository context lists for THAT repository — a validator registered elsewhere does not exist there. Never invent a shell command. Dependencies must form a directed acyclic graph.
 
 Return only a JSON object with this exact shape:
 {

@@ -64,7 +64,10 @@ const RANGE = String.raw`(\d+)(?:\s*[-–]\s*(\d+))?`;
 // First: a path anchored at a root AND terminated by `:line`. Both ends are
 // required — the root says where it begins, the line number says where it ends —
 // so the spaces between them cannot swallow the surrounding prose.
-const ROOTED_PREFIX = String.raw`(?:file:///)?(?:[A-Za-z]:[\\/]|\\\\[^\\/:*?"<>|\r\n]+[\\/])`;
+// Windows and UNC roots may carry a `file:///` scheme in front of them; a POSIX
+// root IS the third slash of that scheme, so it takes `file://` instead. Folding
+// them into one optional prefix left `file:///repo/x.md` with no root to match.
+const ROOTED_PREFIX = String.raw`(?:(?:file:///)?(?:[A-Za-z]:[\\/]|\\\\[^\\/:*?"<>|\r\n]+[\\/])|(?:file://)?/)`;
 const ROOTED_SPACED_PATH = String.raw`${ROOTED_PREFIX}[^:*?"<>|\r\n]*\.[A-Za-z][A-Za-z0-9]{0,7}`;
 // Second: any path a delimiter already bounds — a markdown link target, or a
 // backtick/quote span. The delimiter does the disambiguation, so relative and
@@ -114,12 +117,20 @@ export function extractCitations(text: string): ParsedCitation[] {
     }
   };
 
-  // Most specific first: a longer match claims its span, and every later pattern
-  // skips anything overlapping a span already claimed.
+  // Order is load-bearing, because the first match claims its span and every
+  // later pattern skips anything overlapping it.
+  //
+  // DELIMITED FORMS MUST COME FIRST. Running the plain `path:line` pattern
+  // earlier let it match the SUFFIX of a delimited path containing spaces —
+  // `[notes](sub dir/notes file.md:2)` produced `file.md:2`, which claimed the
+  // span and shut out the link pattern that would have read the whole path. A
+  // shorter wrong match beat a longer right one, so a real citation resolved
+  // against a file that does not exist. Rooted paths lead because a root plus a
+  // terminating `:line` is the least ambiguous form there is.
   collect(ROOTED_SPACED_CITATION, 1, 2);
-  collect(DIRECT_CITATION, 1, 2);
   collect(LINKED_CITATION, 1, 2);
   collect(QUOTED_CITATION, 1, 2);
+  collect(DIRECT_CITATION, 1, 2);
   collect(BARE_PATH, 1, 2);
 
   const seen = new Set<string>();

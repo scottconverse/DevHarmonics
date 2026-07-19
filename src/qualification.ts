@@ -98,6 +98,13 @@ export async function ensureSchedulerCandidateQualified(input: {
         const probed = await (input.qualify
           ? input.qualify({ model: refreshed, connection, role })
           : qualifyRuntimeModel({ model: refreshed, connection, config: input.config, cwd: input.cwd, role, signal: input.signal }));
+        // The single guarantee that nothing is concluded after an abort, placed
+        // at the boundary every adapter passes through rather than inside each
+        // one. An adapter that cannot be aborted, or one whose response lands in
+        // the moment after cancellation, still must not produce a verdict — an
+        // audit found exactly that, because two Ollama fixtures took a signal
+        // parameter and never handed it to the call underneath.
+        input.signal?.throwIfAborted();
         return { ...probed, role };
       } catch (error) {
         // An aborted probe is the owner stopping the attempt, not evidence about

@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createServer } from "node:http";
+import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { defaultConfig, initializeProject, loadConfig, resolveProviderCommand } from "../src/config.js";
 import { projectLegacyProvider } from "../src/compatibility.js";
@@ -4389,6 +4390,80 @@ test("an exhausted output budget is reported as a budget failure, not model inco
   }
 });
 
+test("cancelling a real local qualification call leaves the model schedulable", async () => {
+  // The previous version of this guarantee was tested through an injected
+  // qualify callback that listened to the signal — so it proved the seam the
+  // test controlled, not the path that ships. An audit then showed the two
+  // Ollama fixtures took a signal parameter and never handed it to the HTTP
+  // call underneath: a cancelled probe whose response arrived anyway was scored
+  // as a failed qualification and cooled the only local worker for 30 minutes.
+  // This drives the real adapter against a real server that answers late.
+  let sawSignalledAbort = false;
+  const server = createServer(async (request, response) => {
+    response.setHeader("Content-Type", "application/json");
+    if (request.url === "/api/version") return response.end(JSON.stringify({ version: "fixture-1" }));
+    if (request.url === "/api/tags") return response.end(JSON.stringify({ models: [{ name: "worker:7b" }] }));
+    if (request.url === "/api/show") return response.end(JSON.stringify({ capabilities: ["completion"] }));
+    if (request.url === "/api/chat" && request.method === "POST") {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      // Answers late, and answers WRONG — so if the abort is not honoured, the
+      // result is a failed qualification rather than a passing one.
+      await delay(400);
+      // The socket being gone is what proves the signal reached the request
+      // itself, rather than being noticed only after the answer came back.
+      if (request.destroyed || response.destroyed) {
+        sawSignalledAbort = true;
+        return;
+      }
+      return response.end(JSON.stringify({ message: { role: "assistant", content: "NOT_THE_MARKER" }, done_reason: "stop", prompt_eval_count: 5, eval_count: 5 }));
+    }
+    response.statusCode = 404;
+    response.end(JSON.stringify({ error: "not found" }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-real-abort-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    await syncOllamaRuntimes(ledger, [{ id: "fixture", displayName: "Fixture", baseUrl: `http://127.0.0.1:${address.port}`, enabled: true }]);
+    const model = ledger.listModels("local:ollama:fixture")[0];
+    assert.ok(model, "the fixture runtime registered a model");
+
+    const controller = new AbortController();
+    const inFlight = ensureSchedulerCandidateQualified({
+      ledger,
+      config: structuredClone(defaultConfig),
+      cwd: root,
+      role: "worker",
+      preferredProvider: "ollama",
+      permission: "read_only",
+      task: { id: "probe", title: "Inspect", description: "Inspect", dependencies: [], preferredProvider: null, checks: [], kind: "diagnostic", permission: "read_only", risk: "low" },
+      signal: controller.signal,
+    });
+    // Cancel while the real HTTP call is genuinely outstanding.
+    await delay(120);
+    controller.abort();
+    await assert.rejects(inFlight, (error: unknown) => isAbortError(error), "a cancelled real qualification surfaces as an abort");
+
+    // The rejection arrives as soon as the signal fires; the server only learns
+    // the socket is gone when it tries to answer, so give it that moment.
+    for (let tick = 0; tick < 60 && !sawSignalledAbort; tick += 1) await delay(25);
+    assert.equal(sawSignalledAbort, true, "the abort reached the HTTP request rather than being dropped at the adapter");
+    assert.deepEqual(
+      ledger.listModelQualifications(model.id).filter((item) => !item.passed),
+      [],
+      "a cancelled call must not be persisted as a failed qualification",
+    );
+    assert.equal(ledger.isModelEligible(model.id), true, "a cancelled call must not cool the model out of scheduling");
+  } finally {
+    ledger.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
 test("interrupting a first-use qualification leaves the model's health untouched", async () => {
   // An audit found this in the fix for the interrupt window: the abort signal
   // reached the probe, but qualification caught EVERY throw and turned it into
@@ -4419,16 +4494,22 @@ test("interrupting a first-use qualification leaves the model's health untouched
       // what a small local model can actually be selected for.
       task: { id: "probe", title: "Inspect", description: "Inspect", dependencies: [], preferredProvider: null, checks: [], kind: "diagnostic", permission: "read_only", risk: "low" },
       signal: controller.signal,
-      qualify: () => new Promise((_resolve, reject) => {
+      // Deliberately UNABORTABLE: it ignores the signal and answers late with a
+      // failing result. Some adapters cannot be cancelled, and any adapter can
+      // have its answer land in the moment after cancellation. Neither may be
+      // allowed to become a verdict, so the guarantee has to sit at the boundary
+      // rather than depend on the call underneath being well behaved.
+      qualify: async () => {
         probeStarted = true;
-        controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true });
-      }),
+        await delay(150);
+        return { fixtureVersion: "local-analysis-v1", role: "analysis" as const, passed: false, score: 0, evidence: {} };
+      },
     });
     for (let tick = 0; tick < 200 && !probeStarted; tick += 1) await new Promise((resolve) => setImmediate(resolve));
     assert.equal(probeStarted, true, "the probe is genuinely in flight before the interrupt");
 
     controller.abort();
-    await assert.rejects(blocked, (error: unknown) => isAbortError(error), "an aborted probe surfaces as an abort, not as a verdict");
+    await assert.rejects(blocked, (error: unknown) => isAbortError(error), "an unabortable probe answering after cancellation must not become a verdict");
 
     // The point of the test: nothing about the model was concluded.
     const after = ledger.getModel(modelId);
@@ -4601,6 +4682,12 @@ test("every evidence form the diagnostic gate accepts is resolved by the citatio
       { text: `See [notes](sub dir/notes file.md), line 1 for the claim.`, verifies: true, why: "a linked relative path containing spaces" },
       { text: "See `sub dir/notes file.md`, line 1 for the claim.", verifies: true, why: "a backtick-quoted relative path containing spaces" },
       { text: "See `sub dir/missing file.md`, line 1 for the claim.", verifies: false, why: "a quoted relative path with spaces that does not exist" },
+      // The forms an audit showed were truncated to a bare suffix such as
+      // `file.md:2`, because a shorter wrong match claimed the span first.
+      { text: "See [notes](sub dir/notes file.md:2) for the claim.", verifies: false, why: "a linked relative spaced path with an inline line past the end" },
+      { text: "See [notes](sub dir/notes file.md:1) for the claim.", verifies: true, why: "a linked relative spaced path with an inline line" },
+      { text: "See `sub dir/notes file.md:1` for the claim.", verifies: true, why: "a quoted relative spaced path with an inline line" },
+      { text: `Broken at ${path.join(spaced, "inside file.ts").replaceAll("\\", "/")}:2 exactly.`, verifies: true, why: "a POSIX-separated rooted spaced path" },
     ];
 
     for (const item of cases) {
@@ -4611,6 +4698,21 @@ test("every evidence form the diagnostic gate accepts is resolved by the citatio
         `${item.why}: ${JSON.stringify(item.text)} produced ${JSON.stringify(verification.unverifiable)}`,
       );
     }
+
+    // A POSIX-rooted path with spaces must be EXTRACTED whole. On Windows it
+    // will then be judged outside the worktree, which is correct — but it must
+    // not first be truncated to a bare suffix, which is the defect an audit
+    // found. Asserting on extraction keeps this claim platform-independent.
+    assert.deepEqual(
+      extractCitations("Broken at /repo with spaces/notes file.md:2 exactly.").map((item) => item.rawPath),
+      ["/repo with spaces/notes file.md"],
+      "a POSIX-rooted path containing spaces is read whole, not truncated to its last segment",
+    );
+    assert.deepEqual(
+      extractCitations("Broken at file:///repo with spaces/notes file.md:2 exactly.").map((item) => item.rawPath),
+      ["file:///repo with spaces/notes file.md"],
+      "a POSIX file:/// path containing spaces is read whole",
+    );
 
     // The gate and the verifier must agree on what counts as evidence. Any form
     // the gate passes must produce at least one citation for the verifier to

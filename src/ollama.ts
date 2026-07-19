@@ -358,7 +358,7 @@ export async function qualifyOllamaModel(
     timeoutMs: 2 * 60_000,
     disableThinking: true,
     model: { requestedModelId: domainId("Model", modelId), alias: modelName ?? null, settings: { temperature: 0, num_predict: 16 } },
-  });
+  }, signal ? { signal } : undefined);
   const passed = result.text.trim() === "DEVHARMONICS_QUALIFIED";
   return {
     fixtureVersion: "local-analysis-v1",
@@ -405,7 +405,7 @@ export async function qualifyOllamaSpecialistModel(
     timeoutMs: 2 * 60_000,
     disableThinking: true,
     model: { requestedModelId: domainId("Model", modelId), alias: modelName ?? null, settings: { temperature: 0, num_predict: 128 } },
-  });
+  }, signal ? { signal } : undefined);
   let parsed: Record<string, unknown> | null = null;
   try {
     const value = JSON.parse(result.text.trim()) as unknown;

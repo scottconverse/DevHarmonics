@@ -1,14 +1,16 @@
 # DevHarmonics Detailed Implementation Plan
 
 Document status: **Build-ready execution plan**
-Plan version: **1.28**
+Plan version: **1.29**
 Written: **2026-07-14**
 Revised: **2026-07-18**
 Product specification baseline: **DevHarmonics Product Specification v1.12**
 Current implementation baseline: **DevHarmonics v0.5.1**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 
-Revision history: **v1.28 (2026-07-18)** — Recorded two further rules from the second audit round of the item-4 fixes, both learned by getting them wrong first: a control action (interrupt, cancel) is never evidence about a model, and a gate should refuse on the requirement an operation actually has rather than on a proxy for it. Both are in DH-330. Scope and the locked sequence are unchanged.
+Revision history: **v1.29 (2026-07-18)** — Item 4 closed GREEN after eight independent audit rounds. Recorded the lesson that outlasted the fixes: the recurring defect was in verification, not in the product. Four fixes shipped with tests structurally unable to fail, and mutation testing rather than a green suite caught every one. DH-330 now states that a test never watched to fail is not evidence, and that "this cannot be tested deterministically" is a conclusion to distrust.
+
+**v1.28 (2026-07-18)** — Recorded two further rules from the second audit round of the item-4 fixes, both learned by getting them wrong first: a control action (interrupt, cancel) is never evidence about a model, and a gate should refuse on the requirement an operation actually has rather than on a proxy for it. Both are in DH-330. Scope and the locked sequence are unchanged.
 
 **v1.27 (2026-07-18)** — Recorded two rules that an independent audit of the item-4 fixes established, both in the same shape: a second implementation of a decision drifts from the first, and the gap between them is the defect. DH-470 now states that an evidence gate and its verifier must share one grammar, after the citation verifier turned out to be bypassable by writing the evidence in a form the gate accepted but the verifier could not parse. DH-330 now states that code needing to know whether work can run must ask the component that will run it, after a liveness predicate that re-derived routing eligibility was proven wrong in both directions. Scope and the locked sequence are unchanged.
 
@@ -511,7 +513,13 @@ Second refinement (2026-07-18, from the independent audit of the fix above): two
 
 **Refuse on the requirement, not on the proxy.** Planning genuinely requires a subscription: no local model is architect-qualified, so without one there is nothing that can produce a plan. That refusal is correct and is now documented in the code as a deliberate, narrow exception. It is narrow in a second way as well: the requirement is ONE healthy architect, so a single signed-out provider must not block planning that another healthy provider can do — refusing whenever any enabled provider was signed out was itself the overbroad form of this mistake. Everything downstream — starting an approved run, executing its tasks, repairing, and reviewing — was refusing on the same subscription facts even though an approved plan needs no architect. A signed-out subscription is now an input to routing rather than a gate in front of it. The general form: state the requirement the operation actually has, and let the component that satisfies it answer.
 
-A third, smaller lesson worth keeping: marking a task `working` before qualification is what makes an interrupt honest, but it also means `working` no longer implies a provider invocation is in flight. Any check that meant the latter must say so — a stale precondition of exactly this kind turned into an intermittent test failure rather than an obvious one.
+Third refinement (2026-07-18, after eight audit rounds closed this item GREEN): the defect pattern was not in the product, it was in how the fixes were verified. Four separate times the code was wrong AND its test was structurally incapable of noticing — a seam was injected that honoured a signal the real adapter dropped; a seam was injected that ignored a signal, so both mutations passed against it; a precondition asserted a CLI was signed out without asserting the orchestrator could see it. Every one of those tests passed. Mutation testing caught all four; a green suite caught none.
+
+The rule this establishes, and the reason it belongs in the plan rather than in a commit message: **a test that has never been watched to fail is not evidence.** For anything guarding an invariant this product actually sells — evidence integrity, honest cancellation, local fallback — the fix is not done when the test passes. It is done when removing the production change makes that test fail by name. Where the reversion merely hangs, give the wait an explicit deadline so the contract is named rather than left to a CI watchdog.
+
+One corollary, learned by getting it wrong: "this cannot be tested deterministically" is a conclusion to distrust. It was written into this module about the post-probe cancellation window, with the gap documented in a comment as considered judgement. The window was stageable in a few lines by scheduling the cancellation from a getter that runs while the result is read. Documenting a coverage gap honestly is better than faking coverage, and worse than closing it.
+
+A fourth, smaller lesson worth keeping: marking a task `working` before qualification is what makes an interrupt honest, but it also means `working` no longer implies a provider invocation is in flight. Any check that meant the latter must say so — a stale precondition of exactly this kind turned into an intermittent test failure rather than an obvious one.
 
 Deliverables:
 

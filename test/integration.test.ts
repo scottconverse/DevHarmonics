@@ -86,7 +86,7 @@ if (process.argv.includes("--version")) {
         ],
         integrationConditions:["The documentation must describe the behavior implemented in the core repository."],
         tasks:[
-          {id:"core",title:"Implement the product change",description:"Update the core repository",dependencies:[],preferredProvider:"codex",checks:input.includes("automatic fixer")?["diff-check","defect-free"]:["diff-check"],repositoryIds:["repo:core"]},
+          {id:"core",title:"Implement the product change",description:"Update the core repository",dependencies:[],preferredProvider:"codex",checks:input.includes("automatic fixer")?["diff-check","defect-free"]:(input.includes("repo-only-lint")?["repo-only-lint"]:["diff-check"]),repositoryIds:["repo:core"]},
           {id:"docs",title:"Document the product change",description:"Update the documentation repository",dependencies:["core"],preferredProvider:"codex",checks:["diff-check"],repositoryIds:["repo:docs"]}
         ]
       }
@@ -1320,6 +1320,17 @@ test("a cross-repository architect is told the validators its repositories actua
     assert.match(allowlist, /repo-only-lint/, "the architect is offered the validators the affected repositories register");
     assert.match(allowlist, /repo-only-docs-check/, "including every affected repository, not just the first");
     assert.match(allowlist, /diff-check/, "and the project's own validators remain available");
+
+    // BOTH SIDES of the contract. Offering a vocabulary the plan validator then
+    // rejects is the same drift twice: the architect was told to choose from the
+    // repositories' validators and then refused for doing so. A plan naming a
+    // repository-registered validator must be accepted.
+    const revision = await planResponse.json() as { revision: { plan: { tasks: Array<{ id: string; checks: string[] }> } } };
+    const planned = revision.revision.plan.tasks.flatMap((task) => task.checks);
+    assert.ok(
+      planned.some((check) => check === "repo-only-lint" || check === "repo-only-docs-check"),
+      `the accepted plan uses a repository-registered validator: ${JSON.stringify(revision.revision.plan.tasks.map((t) => ({ id: t.id, checks: t.checks })))}`,
+    );
   } finally {
     delete process.env.DH_CAPTURE_ARCHITECT_PROMPT;
     await dashboard.close();

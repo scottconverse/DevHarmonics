@@ -44,7 +44,7 @@ import { observeLocalResources } from "./resources.js";
 import { evaluateToolRequest, type ToolStage } from "./policy.js";
 import { adjudicateReviewQuorum, parseReviewerResponse, reviewRequirement, type ReviewFinding, type ReviewQuorumDecision, type ReviewRequirement, type StructuredReview } from "./review.js";
 import { OPENROUTER_MAX_OUTPUT_TOKENS, OpenRouterService, requireInvocationCostCeiling, type PaidSpendReservation } from "./openrouter.js";
-import { ensureSchedulerCandidateQualified, ensureSchedulerProviderCandidateQualified, type SchedulerQualificationResult } from "./qualification.js";
+import { ensureSchedulerCandidateQualified, ensureSchedulerProviderCandidateQualified, hasQualifiableCandidate, type SchedulerQualificationResult } from "./qualification.js";
 import { mergeRepositoryValidators, resolveValidatorCwd, runValidator, unknownValidator } from "./validators.js";
 import { analyzeVerificationIntegrity } from "./verification-integrity.js";
 import { runLocalToolLoop } from "./local-tools.js";
@@ -507,7 +507,12 @@ export class Orchestrator {
     // cannot be routed, rather than as a gate before asking.
     const missingRole = !canRoute(this.ledger, workerClassProbe(config, workerProviders))
       ? "worker"
+      // A reviewer is qualified on first use, so demanding one be ALREADY
+      // routable refuses work that would qualify a candidate moments later. Ask
+      // whether a reviewer can be routed OR qualified — a run only lacks a
+      // reviewer when neither is true.
       : !canRoute(this.ledger, { role: "reviewer", config, fallbackProvider: availableProviders[0] ?? null, allowedProviders: availableProviders, permission: "read_only", task: null })
+        && !availableProviders.some((provider) => hasQualifiableCandidate({ ledger: this.ledger, config, role: "reviewer", preferredProvider: provider, permission: "read_only" }))
         ? "reviewer"
         : null;
     if (missingRole) {

@@ -274,6 +274,20 @@ export function trackedFamilyQualificationRole(transport: ConnectionRecord["tran
   return role === "worker" ? "local_tools" : "analysis";
 }
 
+/**
+ * Whether any model could be qualified for this role right now.
+ *
+ * Distinct from "is a model already routable". First-use qualification runs when
+ * a role is first needed, so a pre-flight gate that demands current routability
+ * refuses work that would qualify a candidate a moment later — a real run was
+ * refused for want of a reviewer while two ready subscriptions each held a
+ * perfectly qualifiable premium model. This asks the component that does the
+ * qualifying whether it has anything to work with.
+ */
+export function hasQualifiableCandidate(input: Parameters<typeof selectSchedulerQualificationCandidate>[0]): boolean {
+  return selectSchedulerQualificationCandidate(input) !== null;
+}
+
 function selectSchedulerQualificationCandidate(input: {
   ledger: Ledger;
   config: DevHarmonicsConfig;

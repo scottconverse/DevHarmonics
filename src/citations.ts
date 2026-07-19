@@ -81,7 +81,15 @@ const ROOTED_SPACED_PATH = String.raw`${ROOTED_PREFIX}(?:[^:*?"<>|\r\n]*\.[A-Za-
 // Second: any path a delimiter already bounds — a markdown link target, or a
 // backtick/quote span. The delimiter does the disambiguation, so relative and
 // POSIX paths with spaces are covered here.
-const DELIMITED_PATH = String.raw`(?:[^\r\n"'\`\]\)]*\.[A-Za-z][A-Za-z0-9]{0,7}|[^\r\n"'\`\]\)]*${EXTENSIONLESS_NAME})`;
+// Directories are matched as their own segments rather than being absorbed into
+// the filename pattern. Letting one greedy run cover the whole path meant a
+// DOTTED DIRECTORY could satisfy the extension rule and end the match early:
+// `.github/CODEOWNERS` matched just `.github`, and the real filename was then
+// swallowed by the link's trailing wildcard — so the citation either vanished
+// or resolved to a directory. Segments may contain spaces; only a separator
+// ends one.
+const DELIMITED_SEGMENT = String.raw`[^\r\n"'\`\]\)/\\]*`;
+const DELIMITED_PATH = String.raw`(?:${DELIMITED_SEGMENT}[\\/])*(?:${DELIMITED_SEGMENT}\.[A-Za-z][A-Za-z0-9]{0,7}|${DELIMITED_SEGMENT}${EXTENSIONLESS_NAME})`;
 
 const ROOTED_SPACED_CITATION = new RegExp(`${BOUNDARY}(${ROOTED_SPACED_PATH}):${RANGE}`, "g");
 const DIRECT_CITATION = new RegExp(`${BOUNDARY}(${PATH_TOKEN}):${RANGE}`, "g");

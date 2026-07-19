@@ -1350,6 +1350,11 @@ test("DH-720 automatically fixes a repository-scoped finding and independently r
   await git(core, ["remote", "add", "origin", "https://github.com/fixture-product/core.git"]);
   await git(docs, ["remote", "add", "origin", "https://github.com/fixture-product/docs.git"]);
   const coreBase = (await git(core, ["rev-parse", "HEAD"])).stdout.trim();
+    // Gitignored, so it lives in the primary checkout without dirtying the tree
+    // and never appears in a task worktree.
+    await writeFile(path.join(docs, ".gitignore"), "root-token-probe.mjs\n", "utf8");
+    await git(docs, ["add", ".gitignore"]);
+    await git(docs, ["commit", "-m", "chore: ignore the root-token probe"]);
   const docsBase = (await git(docs, ["rev-parse", "HEAD"])).stdout.trim();
   const command = await createFakeCli(root);
   await initializeProject(core);
@@ -1388,10 +1393,18 @@ test("DH-720 automatically fixes a repository-scoped finding and independently r
       const response = await fetch(`${dashboard.url}/api/products/fixture-product/repositories`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ localPath, role, expectedBranch: "main", owners: ["fixture"], dependencyRepositoryIds: [], governanceSources: ["README.md"], validators: role === "module" ? { "diff-check": "git diff --check", "defect-free": `node -e "const p=require('path');process.exit(!process.cwd().includes(p.sep+'tasks'+p.sep)&&require('fs').existsSync('needs-fix.txt')?1:0)"` } : { "diff-check": "git diff --check" } }),
+        body: JSON.stringify({ localPath, role, expectedBranch: "main", owners: ["fixture"], dependencyRepositoryIds: [], governanceSources: ["README.md"], validators: role === "module" ? { "diff-check": "git diff --check", "defect-free": `node -e "const p=require('path');process.exit(!process.cwd().includes(p.sep+'tasks'+p.sep)&&require('fs').existsSync('needs-fix.txt')?1:0)"` } : { "diff-check": "node ${repoRoot}/root-token-probe.mjs" } }),
       });
       assert.equal(response.status, 201, await response.clone().text());
     }
+
+    // The docs repository's registered validator is `node ${repoRoot}/root-token-probe.mjs`,
+    // and this script exists ONLY in that repository's primary checkout — it is
+    // never committed, so no task worktree contains it. The validator therefore
+    // passes only if production expanded the token against the REGISTERED
+    // repository's own root. Testing the helper directly could not catch a
+    // production call site that stopped calling it; this drives the real loop.
+    await writeFile(path.join(docs, "root-token-probe.mjs"), "process.stdout.write('ROOT_TOKEN_PROBE_OK');\n", "utf8");
 
     const objectiveResponse = await fetch(`${dashboard.url}/api/objectives`, {
       method: "POST",
@@ -1432,6 +1445,17 @@ test("DH-720 automatically fixes a repository-scoped finding and independently r
       (candidate) => ["ready", "not_ready", "failed"].includes(candidate.status),
       45_000,
     );
+    const detail = await fetch(`${dashboard.url}/api/runs/${runId}`).then((response) => response.json() as Promise<{
+      tasks: Array<{ id: string; checks?: Array<{ name: string; passed: boolean; stdout?: string; stderr?: string }> }>;
+    }>);
+    const tokenCheck = detail.tasks
+      .filter((task) => task.id.includes("docs"))
+      .flatMap((task) => task.checks ?? [])
+      .find((check) => check.name === "diff-check");
+    assert.ok(tokenCheck, `the docs task ran its registered validator: ${JSON.stringify(detail.tasks.map((task) => ({ id: task.id, checks: (task.checks ?? []).map((c) => c.name) })))}`);
+    assert.equal(tokenCheck.passed, true, `the token must expand against the registered repository's own root: ${JSON.stringify(tokenCheck)}`);
+    assert.match(tokenCheck.stdout ?? "", /ROOT_TOKEN_PROBE_OK/);
+
     assert.equal(run.status, "ready", run.finalReview ?? "run did not become ready");
     assert.match(run.finalReview ?? "", /repo:core .* -> .*repo:docs/s);
 
@@ -1441,6 +1465,9 @@ test("DH-720 automatically fixes a repository-scoped finding and independently r
     assert.ok(integrationSet);
     assert.equal(integrationSet.repositories.length, 2);
     const byId = new Map(integrationSet.repositories.map((repository) => [repository.repositoryId, repository]));
+    // Proof the token reached the shipping path: the docs check ran the script
+    // that lives only in the primary checkout.
+
     assert.equal(byId.get("repo:core")?.baseCommit, coreBase);
     assert.equal(byId.get("repo:docs")?.baseCommit, docsBase);
     assert.notEqual(byId.get("repo:core")?.headCommit, coreBase);

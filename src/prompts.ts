@@ -132,6 +132,25 @@ ${input.feedback ? `\nPrevious verification feedback:\n${input.feedback}\n` : ""
 ${instructions}`;
 }
 
+/**
+ * What the reviewer may be told about citation verification, given what actually
+ * ran. `verifyReportCitations` executes only for read-only tasks, so a plan with
+ * no read-only task earns no existence claim at all, and a mixed plan earns one
+ * scoped to the reports it covered.
+ */
+export function citationDutyText(plan: RunPlan): string {
+  const judgeSupport = "For each material conclusion, open the cited lines and judge whether their actual content supports the conclusion drawn from them; a real line cited for a claim it does not support is a finding, not evidence.";
+  const readOnly = plan.tasks.filter((task) => (task.permission ?? "workspace_write") === "read_only");
+  if (readOnly.length === 0) {
+    return `Citations in these reports have NOT been mechanically verified — that check runs only for read-only tasks, and this plan has none. Treat every cited location as unverified. ${judgeSupport}`;
+  }
+  if (readOnly.length === plan.tasks.length) {
+    return `Every path:line citation in these reports has already been verified to exist. That is all it proves. ${judgeSupport}`;
+  }
+  const names = readOnly.map((task) => task.id).join(", ");
+  return `Citations have already been verified to exist for the read-only tasks (${names}); that is all that check proves, and reports from the remaining tasks carry no such verification. ${judgeSupport}`;
+}
+
 export function reviewerPrompt(input: {
   goal: string;
   constitution: string;
@@ -148,7 +167,12 @@ export function reviewerPrompt(input: {
   // whether they SUPPORT what is claimed from them. Said explicitly, because a
   // reviewer who assumes resolution implies support waves through a report that
   // cites real lines whose content has nothing to do with its conclusions.
-  const citationDuty = "Every path:line citation in these reports has already been verified to exist. That is all it proves. For each material conclusion, open the cited lines and judge whether their actual content supports the conclusion drawn from them; a real line cited for a claim it does not support is a finding, not evidence.";
+  //
+  // Verification runs only for read-only tasks, so the claim is made only about
+  // reports that actually went through it. Telling a reviewer that an
+  // implementation task's citations were mechanically verified is a claim the
+  // product has not earned.
+  const citationDuty = citationDutyText(input.plan);
   return `You are the final reviewer. Inspect the integration worktree in read-only mode.
 
 Exact isolated workspace root: ${input.workspacePath}
@@ -192,7 +216,7 @@ export function localReviewerContextHeader(input: {
   ].join("; ")).join("\n");
   return `You are the final context-only reviewer for an isolated integration branch. You do not have repository tools; the orchestrator will provide the combined diff in bounded chunks.
 
-Citations in the task reports have been mechanically verified to exist — existence is already verified, and it is all that is. Where the provided chunks include the cited content, judge whether it supports the conclusion drawn from it, and treat a real line cited for a claim it does not support as a finding. Where the chunks do not include the cited content, say plainly that support could not be assessed rather than assuming it.
+${citationDutyText(input.plan)} Where the provided chunks do not include the cited content, say plainly that support could not be assessed rather than assuming it.
 
 Goal:
 ${bounded(input.goal, 3_000)}

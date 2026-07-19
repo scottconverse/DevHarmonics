@@ -211,6 +211,26 @@ test("observe run prompts require diagnostic evidence without repository changes
     localReviewerContextHeader({ goal: "Audit release truth", constitution: "Evidence first", plan, checkSummary: "test: PASS", taskReports: reports, autonomy: "observe" }),
     "the context-only reviewer",
   );
+
+  // Citations are verified mechanically only for read-only tasks. Telling a
+  // reviewer of an IMPLEMENTATION plan that its report citations were verified
+  // is a claim the product did not earn — an audit found both prompts making it
+  // unconditionally. The claim must track what actually ran.
+  const writePlan: RunPlan = {
+    summary: "implementation fixture plan",
+    recommendedConcurrency: 1,
+    tasks: [{ id: "build", title: "Build it", description: "Build it", dependencies: [], preferredProvider: null, checks: ["test"], kind: "implementation", permission: "workspace_write", risk: "medium" }],
+  };
+  for (const [variant, prompt] of [
+    ["tool-holding", reviewerPrompt({ goal: "Ship it", constitution: "Evidence first", plan: writePlan, checkSummary: "test: PASS", taskReports: "build: done", workspacePath: "C:/fixture", autonomy: "bounded" })],
+    ["context-only", localReviewerContextHeader({ goal: "Ship it", constitution: "Evidence first", plan: writePlan, checkSummary: "test: PASS", taskReports: "build: done", autonomy: "bounded" })],
+  ] as const) {
+    assert.doesNotMatch(
+      prompt,
+      /already been verified to exist|existence is already verified/i,
+      `${variant} must not claim mechanical verification for a plan with no read-only task`,
+    );
+  }
   assert.match(localReviewerContextHeader({ goal: "Audit release truth", constitution: "Evidence first", plan, checkSummary: "test: PASS", taskReports: reports, autonomy: "observe" }), /package\.json says 1\.0\.4/);
 });
 
@@ -261,6 +281,28 @@ test("diagnostic result validation rejects deferrals and missing path-line evide
     ["CODEOWNERS:2", "Dockerfile:12", "Makefile:5"],
     "canonical extensionless names are extracted and handed to the verifier",
   );
+  // A dotted DIRECTORY before an extensionless file. The generic alternative
+  // could match `.github` and stop, leaving the real filename to be swallowed by
+  // the link's trailing wildcard — so the citation either vanished or resolved
+  // to a directory. `.github/CODEOWNERS` is where CODEOWNERS actually lives.
+  assert.deepEqual(
+    extractCitations("[owners](.github/CODEOWNERS:2) assigns review.").map((item) => item.citation),
+    [".github/CODEOWNERS:2"],
+    "a linked path whose directory is dotted keeps its extensionless filename",
+  );
+  assert.deepEqual(
+    extractCitations("See [owners](.github/CODEOWNERS), line 2 for review assignment.").map((item) => item.citation),
+    [".github/CODEOWNERS:2"],
+    "and the same path with the line in nearby prose",
+  );
+  assert.deepEqual(
+    extractCitations("[release](.github/workflows/release.yml:13) sets the default ref.").map((item) => item.citation),
+    [".github/workflows/release.yml:13"],
+    "ordinary extensioned files under dotted directories still parse",
+  );
+  // Prose that merely looks like a citation must stay out: extracting it would
+  // fail verification and reject a real report.
+  assert.deepEqual(extractCitations("The scanner returned ERROR:404 and ISO:9001 was cited.").map((item) => item.citation), []);
 });
 
 test("observe plan validation rejects implementation or writable task contracts", () => {

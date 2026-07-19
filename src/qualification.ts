@@ -55,7 +55,11 @@ function joinQualificationFlight(flight: SharedQualificationFlight, signal?: Abo
     // ever finish, and each stranded key stayed for the life of the process.
     flight.unpublish();
   };
-  signal.addEventListener("abort", withdraw, { once: true });
+  // An already-aborted signal never emits 'abort', so a listener alone would
+  // leave this subscriber counted forever — and with a probe that ignores
+  // cancellation, the flight would stay published with nobody owning it.
+  if (signal.aborted) withdraw();
+  else signal.addEventListener("abort", withdraw, { once: true });
   return raceAbort(flight.promise, signal).finally(() => {
     signal.removeEventListener("abort", withdraw);
     flight.waiting.delete(signal);

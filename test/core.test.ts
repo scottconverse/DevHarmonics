@@ -4675,6 +4675,33 @@ test("a probe that ignores cancellation is not left published for later callers"
       (error: unknown) => isAbortError(error),
       "and it can cancel too",
     );
+    await settle();
+
+    // The same boundary, entered by a caller whose signal was ALREADY aborted
+    // when it arrived. An aborted signal never emits 'abort', so a listener
+    // alone would leave that subscriber counted forever and strand the flight.
+    const preAborted = new AbortController();
+    preAborted.abort();
+    await assert.rejects(
+      Promise.race([
+        ensureSchedulerCandidateQualified({ ...shared, signal: preAborted.signal, qualify: deaf }),
+        delay(5_000).then(() => { throw new Error("an already-cancelled caller was still waiting after 5s"); }),
+      ]),
+      (error: unknown) => isAbortError(error),
+      "a caller that had already cancelled does not wait",
+    );
+    await settle();
+    const probesBefore = probes;
+    const after = new AbortController();
+    const fresh = ensureSchedulerCandidateQualified({ ...shared, signal: after.signal, qualify: deaf });
+    for (let tick = 0; tick < 200 && probes === probesBefore; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(probes > probesBefore, "an already-cancelled caller must not leave a stranded probe behind it");
+    after.abort();
+    await assert.rejects(
+      Promise.race([fresh, delay(5_000).then(() => { throw new Error("the fresh caller was still waiting after 5s"); })]),
+      (error: unknown) => isAbortError(error),
+      "and that fresh probe can be cancelled too",
+    );
   } finally {
     ledger.close();
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });

@@ -2210,6 +2210,7 @@ export class Orchestrator {
           });
           await input.worktrees.commitTask(taskWorktree.path, input.task.id);
           if (input.signal.aborted) return "cancelled";
+
           // A retry can reuse a task branch that already contains a commit from a
           // failed merge. Always attempt integration, even when this attempt made
           // no new commit, so unmerged work can never be reported as passed.
@@ -2227,6 +2228,26 @@ export class Orchestrator {
             request: { branch: taskWorktree.branch },
           });
           await input.worktrees.mergeTask(taskWorktree.branch, input.task.id);
+          // A worker that narrates its intentions and edits nothing leaves a
+          // branch identical to the base. Its validators then pass trivially —
+          // a diff check has no diff to fault, tests still pass because nothing
+          // broke — and the task reports success for work it did not do. A real
+          // cross-repository run passed two such tasks; only the independent
+          // reviewer noticed, and only because it went looking for a diff that
+          // was not there. Asking git is deterministic and costs nothing.
+          if (!(await input.worktrees.taskBranchChangedAnything(taskWorktree.branch))) {
+            feedback = "Your previous attempt produced no repository change. Make the edits the task requires, or state plainly that no change is needed and why.";
+            this.ledger.addBlackboardEntry({ runId: input.runId, taskId: input.task.id, kind: "risk", content: feedback, sourceAttemptId: attemptId });
+            this.ledger.addEvent(input.runId, "task.retry", `${input.task.title}: the attempt produced no repository change`);
+            if (attempt < input.config.application.retry.maxAttempts) {
+              this.ledger.setTaskStatus(input.runId, input.task.id, "retry");
+              await delay(input.config.application.retry.backoffMs);
+              continue;
+            }
+            this.ledger.setTaskStatus(input.runId, input.task.id, "failed");
+            this.ledger.addEvent(input.runId, "task.failed", `${input.task.title} produced no repository change`);
+            return "failed";
+          }
           // A cancel that landed during the commit/merge awaits must not overwrite
           // the cancelled status to passed.
           if (input.signal.aborted) return "cancelled";

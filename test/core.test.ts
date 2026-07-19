@@ -192,6 +192,18 @@ test("observe run prompts require diagnostic evidence without repository changes
   assert.match(reviewer, /diagnostic task reports/i);
   assert.match(reviewer, /package\.json says 1\.0\.4/);
   assert.doesNotMatch(reviewer, /review the combined diff/i);
+  // The mechanical citation gate proves a cited line EXISTS; only the reviewer
+  // can judge whether it SUPPORTS the conclusion drawn from it. That division
+  // of labour must be stated in the prompt, in both reviewer variants, or the
+  // reviewer reasonably assumes resolution implies support — which is exactly
+  // how five fabricated-adjacent reports once read as convincing.
+  assert.match(reviewer, /supports? the conclusion/i, "the tool-holding reviewer is told to judge support, not existence");
+  assert.match(reviewer, /already been verified to exist|existence is already verified/i, "and told what the mechanical gate already covers");
+  assert.match(
+    localReviewerContextHeader({ goal: "Audit release truth", constitution: "Evidence first", plan, checkSummary: "test: PASS", taskReports: reports, autonomy: "observe" }),
+    /supports? the conclusion/i,
+    "the context-only reviewer carries the same duty",
+  );
   assert.match(localReviewerContextHeader({ goal: "Audit release truth", constitution: "Evidence first", plan, checkSummary: "test: PASS", taskReports: reports, autonomy: "observe" }), /package\.json says 1\.0\.4/);
 });
 
@@ -212,6 +224,25 @@ test("diagnostic result validation rejects deferrals and missing path-line evide
   assert.match(validateDiagnosticResult(task, "The version claims conflict, but no source locations are included in this otherwise sufficiently long report.") ?? "", /path:line/i);
   assert.equal(validateDiagnosticResult(task, "[README.md](C:/workspace/README.md:1) identifies CivicSuite version 1.0.4, while [STATUS.md](C:\\workspace\\STATUS.md:7) still identifies 1.0.3. This is a concrete release-readiness contradiction."), null);
   assert.equal(validateDiagnosticResult(task, "The target file is [SECURITY.md](file:///C:/workspace/SECURITY.md). Line 45 requires dependency issues to be reported upstream and patched or pinned. This is a substantive release-safety control with an explicit file and line citation."), null);
+
+  // A diagnostic whose acceptance criteria never mention line evidence used to
+  // accept a report with no citations at all — the citation verifier had
+  // nothing to check, so a purely rhetorical report passed the gate outright.
+  // A read-only diagnostic's citations ARE its evidence: with no repository
+  // change for validators to judge, a report grounded in nothing is not a
+  // diagnostic, however fluent. Every diagnostic must cite at least one
+  // verifiable location.
+  const unphrased = { ...task, acceptanceCriteria: ["Summarize the repository's licensing posture"] };
+  assert.match(
+    validateDiagnosticResult(unphrased, "The licensing posture is broadly permissive and well maintained, with contributor expectations that appear consistent across the project and no obvious conflicts in spirit or intent anywhere.") ?? "",
+    /cite|path:line/i,
+    "a vacuous report must not pass merely because the criteria forgot to demand evidence",
+  );
+  assert.equal(
+    validateDiagnosticResult(unphrased, "LICENSE:1 declares Apache-2.0 and README.md:12 repeats it, so the posture is consistent between the legal text and the contributor-facing summary of this repository."),
+    null,
+    "the same conclusion grounded in citations passes",
+  );
 });
 
 test("observe plan validation rejects implementation or writable task contracts", () => {
@@ -4399,6 +4430,54 @@ test("a model whose thinking cannot be disabled still qualifies", async () => {
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test("a local model that times out cools that model, not the whole connection", async () => {
+  // One slow model must not take the entire local fleet down with it. A timed-out
+  // Ollama call was classified 'process_failed' — "could not be reached" — which
+  // scopes to the CONNECTION, so a single 14B model blowing its deadline cooled
+  // every other local model for the duration. The runtime did answer; it was the
+  // model that ran out of time. Classified as 'timeout', the failure scopes to
+  // the exact model and the rest of the fleet stays schedulable.
+  const server = createServer(async (request, response) => {
+    response.setHeader("Content-Type", "application/json");
+    if (request.url === "/api/version") return response.end(JSON.stringify({ version: "fixture-1" }));
+    if (request.url === "/api/tags") return response.end(JSON.stringify({ models: [{ name: "slow:14b" }] }));
+    if (request.url === "/api/chat" && request.method === "POST") {
+      // Never answers within any caller's deadline.
+      await delay(60_000);
+      return response.end(JSON.stringify({ message: { role: "assistant", content: "late" } }));
+    }
+    response.statusCode = 404;
+    response.end(JSON.stringify({ error: "not found" }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const adapter = new OllamaAdapter(`http://127.0.0.1:${address.port}`, "local:ollama");
+    let thrown: unknown;
+    try {
+      await adapter.invoke({
+        role: "worker",
+        prompt: "answer",
+        cwd: os.tmpdir(),
+        permission: "read_only",
+        timeoutMs: 300,
+        model: { requestedModelId: domainId("Model", "ollama:slow:14b"), alias: "slow:14b", settings: {} },
+      });
+      assert.fail("the call must not succeed");
+    } catch (error) {
+      thrown = error;
+    }
+    assert.ok(thrown instanceof RuntimeInvocationError, String(thrown));
+    assert.equal(thrown.kind, "timeout", "a deadline blown by the model is a timeout, not an unreachable runtime");
+    assert.equal(thrown.retryable, true, "a timeout is retryable");
+    assert.match(thrown.message, /timed out/i, "and says so, rather than claiming the runtime was unreachable");
+    assert.equal(invocationFailureScope(thrown.kind, true), "model", "so the failure cools the model, not the connection");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
 

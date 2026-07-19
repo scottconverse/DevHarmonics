@@ -232,6 +232,14 @@ export class OllamaAdapter implements RuntimeAdapter {
       });
     } catch (error) {
       const cancelled = options.signal?.aborted ?? false;
+      // A blown deadline is the MODEL running out of time, not the runtime being
+      // unreachable. 'process_failed' scopes to the whole connection, so one slow
+      // model was cooling every other local model with it; 'timeout' scopes to
+      // the exact model and the rest of the fleet stays schedulable.
+      const timedOut = !cancelled && timeoutSignal.aborted;
+      if (timedOut) {
+        throw new RuntimeInvocationError(`Ollama model '${model}' timed out after ${timeout}ms`, "timeout", this.connection.id, -1, true);
+      }
       throw new RuntimeInvocationError(
         cancelled ? "Ollama invocation was cancelled" : `Ollama could not be reached: ${error instanceof Error ? error.message : String(error)}`,
         cancelled ? "cancelled" : "process_failed",

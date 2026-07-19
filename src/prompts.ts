@@ -144,6 +144,11 @@ export function reviewerPrompt(input: {
   const reviewSubject = input.autonomy === "observe"
     ? "Review the diagnostic task reports and repository state. Confirm that the reports answer the goal with concrete evidence, that no repository changes were made, and that conclusions distinguish fact from inference."
     : "Review the combined diff, task reports, and repository state.";
+  // The mechanical gate proves cited lines EXIST; only a reviewer can judge
+  // whether they SUPPORT what is claimed from them. Said explicitly, because a
+  // reviewer who assumes resolution implies support waves through a report that
+  // cites real lines whose content has nothing to do with its conclusions.
+  const citationDuty = "Every path:line citation in these reports has already been verified to exist. That is all it proves. For each material conclusion, open the cited lines and judge whether their actual content supports the conclusion drawn from them; a real line cited for a claim it does not support is a finding, not evidence.";
   return `You are the final reviewer. Inspect the integration worktree in read-only mode.
 
 Exact isolated workspace root: ${input.workspacePath}
@@ -164,7 +169,7 @@ ${input.checkSummary}
 Diagnostic task reports and handoffs:
 ${input.taskReports || "No task reports were recorded."}
 
-${reviewSubject} Return a concise verdict beginning with exactly READY or NOT READY. After the verdict, explain the evidence and material risks. Then include exactly one fenced JSON object with this shape:
+${reviewSubject} ${citationDuty} Return a concise verdict beginning with exactly READY or NOT READY. After the verdict, explain the evidence and material risks. Then include exactly one fenced JSON object with this shape:
 \`\`\`json
 {"findings":[{"id":"stable-short-id","severity":"low|medium|high|critical","location":"path:line or null","rationale":"evidence-backed reason","suggestedCorrection":"bounded correction","disposition":"open"}]}
 \`\`\`
@@ -186,6 +191,8 @@ export function localReviewerContextHeader(input: {
     `acceptance=${(task.acceptanceCriteria ?? []).join(" | ") || "assigned checks pass"}`,
   ].join("; ")).join("\n");
   return `You are the final context-only reviewer for an isolated integration branch. You do not have repository tools; the orchestrator will provide the combined diff in bounded chunks.
+
+Citations in the task reports have been mechanically verified to exist — existence is already verified, and it is all that is. Where the provided chunks include the cited content, judge whether it supports the conclusion drawn from it, and treat a real line cited for a claim it does not support as a finding. Where the chunks do not include the cited content, say plainly that support could not be assessed rather than assuming it.
 
 Goal:
 ${bounded(input.goal, 3_000)}

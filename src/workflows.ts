@@ -3,9 +3,12 @@ import { z } from "zod";
 
 /**
  * DH-810: a workflow is a versioned, parameterized document stored in Git.
- * Its identity is its content hash — the same discipline as plan revisions —
- * so a later edit can never masquerade as the revision a historical run
- * executed. Parsing fails closed with named issues; there is no partial parse.
+ * Its identity is its content hash — the same content-addressed discipline the
+ * ledger already uses for review evidence bindings — so a later edit can never
+ * masquerade as the revision a historical run executed. (Plan revisions use
+ * per-objective counters with approval flags; the shared property is
+ * immutability of the recorded thing, not the identifier scheme.) Parsing
+ * fails closed with named issues; there is no partial parse.
  */
 
 const workflowInputSchema = z.object({
@@ -24,7 +27,7 @@ export const workflowDocumentSchema = z.object({
     acceptanceCriteria: z.array(z.string().min(1)).min(1),
     risk: z.enum(["low", "medium", "high"]),
   }),
-  evidenceRequirements: z.array(z.string().min(1)),
+  evidenceRequirements: z.array(z.string().min(1)).min(1),
   approvalPoints: z.array(z.enum(["plan", "external_write", "spending", "destructive"])),
   completionContract: z.object({
     deliverable: z.string().min(1),
@@ -54,12 +57,27 @@ export function parseWorkflowDocument(text: string): WorkflowParseResult {
     return { ok: false, issues: parsed.error.issues.map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`) };
   }
   const workflow = parsed.data;
+  const issues: string[] = [];
   // A workflow may not demand a permission its declared approval points do not
   // gate — a document that grants itself ungated external writes is refused at
   // parse time, not discovered at run time.
   if (workflow.permissions.allowExternalWrites && !workflow.approvalPoints.includes("external_write")) {
-    return { ok: false, issues: ["permissions.allowExternalWrites requires an external_write approval point"] };
+    issues.push("permissions.allowExternalWrites requires an external_write approval point");
   }
+  // Inputs are named parameters — a duplicate name is ambiguous at
+  // instantiation and refused here, not resolved arbitrarily later.
+  const names = workflow.inputs.map((input) => input.name);
+  for (const name of new Set(names.filter((candidate, index) => names.indexOf(candidate) !== index))) {
+    issues.push(`inputs: duplicate input name '${name}'`);
+  }
+  // Every ${placeholder} in the outcome template must name a declared input —
+  // an author's typo surfaces at parse time, never as a silently unexpanded
+  // token in a running objective.
+  const declared = new Set(names);
+  for (const match of workflow.objective.outcomeTemplate.matchAll(/\$\{([^}]*)\}/g)) {
+    if (!declared.has(match[1]!)) issues.push(`objective.outcomeTemplate: placeholder '\${${match[1]}}' names no declared input`);
+  }
+  if (issues.length) return { ok: false, issues };
   return { ok: true, workflow };
 }
 

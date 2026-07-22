@@ -3590,11 +3590,20 @@ export class Ledger {
     };
   }
 
-  /** A run may only pin a revision the ledger actually stores — fail closed on anything else. */
+  /**
+   * A run may only pin a revision the ledger actually stores, and the pin is
+   * an audit fact: once set it can be re-asserted idempotently but never
+   * re-pointed at a different revision (panel finding — a later-callable
+   * setter that overwrites the pin IS the history rewrite this design forbids).
+   */
   linkRunWorkflowRevision(runId: string, revisionHash: string): void {
     if (!this.getWorkflowRevision(revisionHash)) throw new Error(`Unknown workflow revision '${revisionHash}'`);
-    const result = this.database.prepare("UPDATE runs SET workflow_revision_hash = ? WHERE id = ?").run(revisionHash, runId);
-    if (result.changes === 0) throw new Error(`Run '${runId}' was not found`);
+    const current = this.database.prepare("SELECT workflow_revision_hash FROM runs WHERE id = ?").get(runId) as { workflow_revision_hash: string | null } | undefined;
+    if (!current) throw new Error(`Run '${runId}' was not found`);
+    if (current.workflow_revision_hash !== null && current.workflow_revision_hash !== revisionHash) {
+      throw new Error(`Run '${runId}' is already pinned to workflow revision '${current.workflow_revision_hash}'`);
+    }
+    this.database.prepare("UPDATE runs SET workflow_revision_hash = ? WHERE id = ?").run(revisionHash, runId);
   }
 
   listReviewReceipts(runId: string): ReviewReceiptRecord[] {

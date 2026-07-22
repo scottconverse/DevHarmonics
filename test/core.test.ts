@@ -2623,6 +2623,26 @@ test("workflow documents parse with typed inputs and content-hash revision ident
     permissions: { autonomy: "supervised", allowExternalWrites: true },
   }));
   assert.equal(widened.ok, false, "ungated external writes are refused at parse time");
+
+  // Panel findings: duplicate input names are ambiguous, template placeholders
+  // must reference declared inputs, and zero evidence requirements is not a
+  // workflow — all refused at parse time, none discovered downstream.
+  const duplicateInputs = workflows.parseWorkflowDocument(JSON.stringify({
+    ...document,
+    inputs: [
+      { name: "repositoryId", type: "string", required: true, description: "one" },
+      { name: "repositoryId", type: "number", required: false, description: "two" },
+    ],
+  }));
+  assert.equal(duplicateInputs.ok, false, "duplicate input names are refused");
+  const typoPlaceholder = workflows.parseWorkflowDocument(JSON.stringify({
+    ...document,
+    objective: { ...document.objective, outcomeTemplate: "Every claim in ${repoId} matches." },
+  }));
+  assert.equal(typoPlaceholder.ok, false, "a placeholder naming no declared input is refused");
+  assert.match((typoPlaceholder as { issues: string[] }).issues.join(" "), /repoId/, "the offending placeholder is named");
+  const noEvidence = workflows.parseWorkflowDocument(JSON.stringify({ ...document, evidenceRequirements: [] }));
+  assert.equal(noEvidence.ok, false, "a workflow with no required evidence is refused");
 });
 
 test("workflow revisions persist immutably and runs pin the exact revision executed", async () => {
@@ -2670,6 +2690,11 @@ test("workflow revisions persist immutably and runs pin the exact revision execu
     ledger.linkRunWorkflowRevision(runId, hash);
     assert.equal(ledger.getRun(runId)?.workflowRevisionHash, hash);
     assert.throws(() => ledger.linkRunWorkflowRevision(runId, "0".repeat(64)), /unknown workflow revision/i, "a run cannot pin a revision the ledger never stored");
+    // Panel finding: the pin is an audit fact — re-linking to a DIFFERENT
+    // revision must be refused, while re-asserting the same pin is idempotent.
+    ledger.linkRunWorkflowRevision(runId, hash);
+    assert.throws(() => ledger.linkRunWorkflowRevision(runId, edited.revisionHash), /already pinned/i, "a pinned run can never be re-pointed at another revision");
+    assert.equal(ledger.getRun(runId)?.workflowRevisionHash, hash, "the original pin survives the refused attempt");
   } finally {
     ledger.close();
     await rm(root, { recursive: true, force: true });

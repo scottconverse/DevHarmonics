@@ -248,6 +248,8 @@ export interface DeliveryRepositoryRecord {
   status: DeliveryRepositoryStatus;
   pullRequestUrl: string | null;
   approvalId: string | null;
+  /** The release tag actually pushed for this repository, once tagged. */
+  releaseTag: string | null;
   error: string | null;
   createdAt: string;
   updatedAt: string;

@@ -2579,6 +2579,10 @@ test("delivery completes from the cockpit: receipted merge and tag, never blind"
   const commands: Array<{ command: string; args: string[] }> = [];
   let mergeable = "CONFLICTING";
   let prState = "OPEN";
+  let headRefOid = "b".repeat(40);
+  let checkRollup: Array<{ status: string; conclusion: string | null }> = [];
+  let localTagOid: string | null = null;
+  let failTagPushOnce = false;
   const runner = async (request: { command: string; args: string[] }) => {
     commands.push({ command: request.command, args: [...request.args] });
     const joined = request.args.join(" ");
@@ -2589,12 +2593,22 @@ test("delivery completes from the cockpit: receipted merge and tag, never blind"
       return { stdout: "https://github.com/civicsuite/example/pull/7\n", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
     }
     if (request.command === "gh" && request.args[1] === "view" && joined.includes("state,isDraft,mergeable")) {
-      return { stdout: JSON.stringify({ state: prState, isDraft: true, mergeable }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+      return { stdout: JSON.stringify({ state: prState, isDraft: true, mergeable, mergeStateStatus: "CLEAN", headRefOid, statusCheckRollup: checkRollup }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
     }
     if (request.command === "gh" && request.args[1] === "view" && joined.includes("mergeCommit")) {
       return { stdout: JSON.stringify({ state: "MERGED", mergeCommit: { oid: "c".repeat(40) } }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
     }
     if (request.command === "gh" && request.args[1] === "merge") prState = "MERGED";
+    if (request.command === "git" && request.args[0] === "rev-parse" && joined.includes("refs/tags/")) {
+      return localTagOid
+        ? { stdout: `${localTagOid}\n`, stderr: "", exitCode: 0, durationMs: 1, timedOut: false }
+        : { stdout: "", stderr: "", exitCode: 1, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "git" && request.args[0] === "tag") localTagOid = request.args[3] ?? null;
+    if (request.command === "git" && joined.startsWith("push origin refs/tags/") && failTagPushOnce) {
+      failTagPushOnce = false;
+      return { stdout: "", stderr: "network hiccup", exitCode: 1, durationMs: 1, timedOut: false };
+    }
     return { stdout: "", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
   };
   try {
@@ -2621,24 +2635,69 @@ test("delivery completes from the cockpit: receipted merge and tag, never blind"
       "a conflicting PR is never merged blind",
     );
     mergeable = "MERGEABLE";
+    // Panel: pending or failing status checks refuse the merge — red never ships.
+    checkRollup = [{ status: "IN_PROGRESS", conclusion: null }];
+    await assert.rejects(
+      () => service.execute({ runId, repositoryId: "repo:example", action: "merge_pr", config, approval: approval("approval-merge") }),
+      /still running/i,
+      "pending checks refuse the merge",
+    );
+    checkRollup = [{ status: "COMPLETED", conclusion: "FAILURE" }];
+    await assert.rejects(
+      () => service.execute({ runId, repositoryId: "repo:example", action: "merge_pr", config, approval: approval("approval-merge") }),
+      /failed.*never merged|red pull request/i,
+      "failing checks refuse the merge",
+    );
+    checkRollup = [];
+    // Panel: a PR head that is no longer the reviewed commit refuses the merge.
+    headRefOid = "e".repeat(40);
+    await assert.rejects(
+      () => service.execute({ runId, repositoryId: "repo:example", action: "merge_pr", config, approval: approval("approval-merge") }),
+      /no longer the reviewed commit/i,
+      "head drift refuses the merge",
+    );
+    headRefOid = "b".repeat(40);
     const merged = await service.execute({ runId, repositoryId: "repo:example", action: "merge_pr", config, approval: approval("approval-merge") });
     assert.equal(merged.status, "merged");
     assert.ok(commands.some((item) => item.command === "gh" && item.args[1] === "ready"), "a draft PR is marked ready before merging");
     assert.ok(commands.some((item) => item.command === "gh" && item.args[1] === "merge" && item.args.includes("--merge")));
+
+    // Panel: resuming past-completed steps reconciles instead of throwing.
+    assert.equal((await service.execute({ runId, repositoryId: "repo:example", action: "push_branch", config, approval: approval("approval-r1") })).status, "merged");
+    assert.equal((await service.execute({ runId, repositoryId: "repo:example", action: "create_draft_pr", config, approval: approval("approval-r2") })).status, "merged");
+    assert.equal((await service.execute({ runId, repositoryId: "repo:example", action: "merge_pr", config, approval: approval("approval-r3") })).status, "merged");
 
     await assert.rejects(
       () => service.execute({ runId, repositoryId: "repo:example", action: "tag_release", tag: "bad tag!", config, approval: approval("approval-tag") }),
       /tag/i,
       "an invalid tag name is refused",
     );
-    const tagged = await service.execute({ runId, repositoryId: "repo:example", action: "tag_release", tag: "v0.9.9", config, approval: approval("approval-tag") });
+    // Panel: a failed tag PUSH leaves a local tag behind — the retry reuses it
+    // instead of stranding the delivery.
+    failTagPushOnce = true;
+    await assert.rejects(
+      () => service.execute({ runId, repositoryId: "repo:example", action: "tag_release", tag: "v0.9.9", config, approval: approval("approval-tag") }),
+      /network hiccup|push failed/i,
+      "the real push failure reason is surfaced",
+    );
+    assert.equal(ledger.getRun(runId)?.delivery?.repositories[0]?.status, "merged", "a failed push falls back to merged, not failed");
+    const tagged = await service.execute({ runId, repositoryId: "repo:example", action: "tag_release", tag: "v0.9.9", config, approval: approval("approval-tag2") });
     assert.equal(tagged.status, "tagged");
+    assert.equal(tagged.releaseTag, "v0.9.9", "the applied tag is persisted on the record");
+    assert.equal(commands.filter((item) => item.command === "git" && item.args[0] === "tag").length, 1, "the retry reused the existing local tag instead of re-creating it");
     assert.ok(commands.some((item) => item.command === "git" && item.args[0] === "tag" && item.args.includes("v0.9.9") && item.args.includes("c".repeat(40))), "the tag lands on the actual merge commit");
     assert.ok(commands.some((item) => item.command === "git" && item.args.join(" ").includes("push origin refs/tags/v0.9.9")));
+    // Panel: a different tag on an already-tagged delivery refuses rather than
+    // reporting success it did not perform; the same tag reconciles.
+    await assert.rejects(
+      () => service.execute({ runId, repositoryId: "repo:example", action: "tag_release", tag: "v1.0.0", config, approval: approval("approval-tag3") }),
+      /already tagged as 'v0\.9\.9'/,
+    );
+    assert.equal((await service.execute({ runId, repositoryId: "repo:example", action: "tag_release", tag: "v0.9.9", config, approval: approval("approval-tag4") })).status, "tagged");
     assert.deepEqual(
       ledger.listToolPolicyReceipts(runId).filter((item) => item.outcome === "allow").map((item) => item.approvalId),
-      ["approval-push", "approval-pr", "approval-merge", "approval-merge", "approval-tag"],
-      "every consequential step carries its own owner receipt — including the conflict-refused merge attempt, which stays in the trail as evidence",
+      ["approval-push", "approval-pr", "approval-merge", "approval-merge", "approval-merge", "approval-merge", "approval-merge", "approval-tag", "approval-tag2"],
+      "every consequential attempt carries its receipt — five merge attempts (conflict, pending checks, failed checks, head drift, success), the failed tag push, and the successful retry all stay in the trail as evidence",
     );
   } finally {
     ledger.close();
@@ -3166,6 +3225,7 @@ test("ledger upgrades a v0.1 database transactionally and preserves a pre-migrat
           { version: 28, name: "live-run-steering" },
           { version: 29, name: "review-receipt-lens" },
           { version: 30, name: "delivery-merge-and-tag" },
+          { version: 31, name: "delivery-release-tag" },
         ],
       );
     } finally {
@@ -4616,7 +4676,7 @@ test("steering directives persist with actor, target, disposition, and supersede
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-steering-ledger-"));
   const ledger = new Ledger(path.join(root, "devharmonics.db"));
   try {
-    assert.equal(LEDGER_SCHEMA_VERSION, 30, "delivery merge/tag states advance the ledger schema");
+    assert.equal(LEDGER_SCHEMA_VERSION, 31, "delivery release-tag persistence advances the ledger schema");
     const runId = ledger.createRun("Steer me", root);
     ledger.savePlan(runId, {
       summary: "One task",

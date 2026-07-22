@@ -948,6 +948,11 @@ test("the delivery HTTP route serializes per repository, types its refusals, and
     // 9.9.9 about itself; a contradicting tag refuses with BOTH values, and
     // only an explicit owner confirmation mints it anyway.
     await writeFile(path.join(project, "package.json"), JSON.stringify({ name: "fixture", version: "9.9.9" }), "utf8");
+    // The delivery payload carries the declared version, so the cockpit's tag
+    // field can show the REAL proposed tag instead of decorative ghost text
+    // (owner finding, 2026-07-22).
+    const enriched = await fetch(`${dashboard.url}/api/runs/${runId}/delivery`).then((response) => response.json()) as { delivery: { repositories: Array<{ repositoryId: string; declaredVersion: string | null }> } };
+    assert.equal(enriched.delivery.repositories.find((repository) => repository.repositoryId === "repo:http")?.declaredVersion, "9.9.9", "the delivery payload names the version the repository declares");
     const contradicted = await deliver({ action: "tag_release", tag: "v1.0.0" });
     assert.equal(contradicted.status, 409, "a tag the repository contradicts refuses");
     const contradictedBody = (await contradicted.json()) as { error: string; versionMismatch?: { declaredVersion: string; requestedTag: string } };

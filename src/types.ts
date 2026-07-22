@@ -184,6 +184,14 @@ export interface ObjectiveInput {
   priority: ObjectivePriority;
   deadline?: string | undefined;
   policyNotes: string[];
+  /**
+   * Structural provenance: set ONLY by workflow instantiation. The run started
+   * from this objective derives its pinned revision from HERE — never from a
+   * client-supplied value, which would make the audit trail fabricable.
+   * Hand-editing the objective clears it: an edited objective is no longer the
+   * workflow's objective.
+   */
+  workflowRevisionHash?: string | undefined;
 }
 
 export interface ObjectiveRecord extends ObjectiveInput {

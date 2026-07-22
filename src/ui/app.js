@@ -629,7 +629,7 @@ async function refreshWorkflows() {
         <strong>${escapeHtml(workflow.name)}</strong>
         <p class="field-help">revision ${escapeHtml(workflow.revisionHash.slice(0, 12))} · recorded ${escapeHtml(workflow.createdAt.slice(0, 10))}</p>
       </button>`).join("")
-    : `<p class="field-help">No workflow revisions are recorded yet. Shipped documents live in <code>.devharmonics/workflows/</code>; record one with POST /api/workflows.</p>`;
+    : `<p class="field-help">No workflow revisions are recorded yet. Shipped documents live in the tracked <code>workflows/</code> directory of this repository; record one with POST /api/workflows.</p>`;
   $("#workflow-detail").classList.add("hidden");
 }
 

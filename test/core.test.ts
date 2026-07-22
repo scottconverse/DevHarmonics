@@ -2881,6 +2881,107 @@ test("workflow instantiation validates typed inputs and builds the objective thr
   assert.equal(workflows.instantiateWorkflow({ workflow: parsed.workflow, inputs: {}, projectPath: "p", repositoryIds: [] }).ok, false, "a missing required input refuses");
   assert.equal(workflows.instantiateWorkflow({ workflow: parsed.workflow, inputs: { repositoryId: 7 }, projectPath: "p", repositoryIds: [] }).ok, false, "a wrong-typed input refuses");
   assert.equal(workflows.instantiateWorkflow({ workflow: parsed.workflow, inputs: { repositoryId: "r", mystery: true }, projectPath: "p", repositoryIds: [] }).ok, false, "an undeclared input refuses");
+  // Panel finding: an empty or whitespace-only string would substitute a
+  // load-bearing placeholder into blankness — it is MISSING, not a value.
+  assert.equal(workflows.instantiateWorkflow({ workflow: parsed.workflow, inputs: { repositoryId: "" }, projectPath: "p", repositoryIds: [] }).ok, false, "an empty-string required input refuses");
+  assert.equal(workflows.instantiateWorkflow({ workflow: parsed.workflow, inputs: { repositoryId: "   " }, projectPath: "p", repositoryIds: [] }).ok, false, "a whitespace-only required input refuses");
+
+  // Panel critical: provenance is STRUCTURAL, not a policy note — the produced
+  // objective carries the revision hash in its own field, which is what the
+  // start route derives the run pin from (a client can never supply the pin).
+  assert.equal(instantiated.objective.workflowRevisionHash, instantiated.revisionHash, "the objective carries its workflow revision structurally");
+});
+
+test("objective workflow provenance persists through the ledger and a hand-edit clears it", async () => {
+  // The run pin is derived from the OBJECTIVE's stored provenance, so that
+  // provenance must survive persistence — and must NOT survive a hand-edit,
+  // because an edited objective no longer executes what the revision says.
+  const workflows = await import("../src/workflows.js") as Record<string, any>;
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-workflow-provenance-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db")) as Ledger & Record<string, any>;
+  try {
+    const parsed = workflows.parseWorkflowDocument(await readFile(path.join(process.cwd(), "workflows", "documentation-consistency.json"), "utf-8"));
+    assert.equal(parsed.ok, true);
+    ledger.recordWorkflowRevision({ workflow: parsed.workflow });
+    const instantiated = workflows.instantiateWorkflow({
+      workflow: parsed.workflow,
+      inputs: { repositoryId: "repo:docs" },
+      projectPath: root,
+      repositoryIds: [],
+    });
+    assert.equal(instantiated.ok, true);
+
+    const created = ledger.createObjective(instantiated.objective);
+    assert.equal(created.workflowRevisionHash, instantiated.revisionHash, "provenance persists on create");
+    assert.equal(ledger.getObjective(created.id)?.workflowRevisionHash, instantiated.revisionHash, "provenance survives a read-back");
+
+    const edited = ledger.updateObjective(created.id, { ...instantiated.objective, outcome: "Hand-edited outcome" }, created.revision);
+    assert.equal(edited.workflowRevisionHash, undefined, "a hand-edited objective is no longer the workflow's objective — provenance clears");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a promoted workflow revision can never silently widen the pilot's permissions", async () => {
+  // DH-810 acceptance: "promoting a pilot creates a new template revision
+  // without silently widening permissions". Widening = external writes
+  // switching on, autonomy escalating, or an approval point the pilot
+  // required disappearing. All refused loudly; narrowing and same-scope pass.
+  const workflows = await import("../src/workflows.js") as Record<string, any>;
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-workflow-promotion-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db")) as Ledger & Record<string, any>;
+  try {
+    const base = {
+      name: "pilot-audit",
+      description: "Pilot documentation audit.",
+      inputs: [{ name: "repositoryId", type: "string", required: true, description: "Repository to audit" }],
+      objective: { outcomeTemplate: "Audit ${repositoryId}.", acceptanceCriteria: ["Findings cite sources"], risk: "medium" },
+      evidenceRequirements: ["path:line citation"],
+      approvalPoints: ["plan", "spending"],
+      completionContract: { deliverable: "audit report", reviewLenses: ["artifact"] },
+      permissions: { autonomy: "supervised", allowExternalWrites: false },
+    };
+    const parsedBase = workflows.parseWorkflowDocument(JSON.stringify(base));
+    assert.equal(parsedBase.ok, true);
+    const recordedBase = ledger.recordWorkflowRevision({ workflow: parsedBase.workflow });
+
+    const promote = (document: unknown) => {
+      const parsed = workflows.parseWorkflowDocument(JSON.stringify(document));
+      assert.equal(parsed.ok, true, JSON.stringify((parsed as { issues?: string[] }).issues ?? []));
+      return ledger.recordWorkflowRevision({ workflow: parsed.workflow, promotedFrom: recordedBase.revisionHash });
+    };
+
+    assert.throws(
+      () => promote({ ...base, approvalPoints: ["plan", "spending", "external_write"], permissions: { autonomy: "supervised", allowExternalWrites: true } }),
+      /widen.*allowExternalWrites/is,
+      "external writes switching on is a widening",
+    );
+    assert.throws(
+      () => promote({ ...base, permissions: { autonomy: "bounded", allowExternalWrites: false } }),
+      /widen.*autonomy/is,
+      "autonomy escalation is a widening",
+    );
+    assert.throws(
+      () => promote({ ...base, approvalPoints: ["plan"] }),
+      /widen.*approval point removed: spending/is,
+      "removing an approval point the pilot required is a widening",
+    );
+    assert.throws(
+      () => ledger.recordWorkflowRevision({ workflow: parsedBase.workflow, promotedFrom: "0".repeat(64) }),
+      /unknown promotion base/i,
+      "a promotion base the ledger never stored refuses",
+    );
+
+    // Same scope and NARROWING both promote cleanly — the guard blocks
+    // widening, not evolution.
+    const promoted = promote({ ...base, description: "Promoted: proven on three repositories.", permissions: { autonomy: "observe", allowExternalWrites: false } });
+    assert.notEqual(promoted.revisionHash, recordedBase.revisionHash, "the promotion is a new revision");
+    assert.equal(ledger.getWorkflowRevision(recordedBase.revisionHash)!.workflow.description, base.description, "the pilot revision is untouched");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("the shipped workflows-of-record parse from disk and pin stable revisions", async () => {
@@ -3434,6 +3535,7 @@ test("ledger upgrades a v0.1 database transactionally and preserves a pre-migrat
           { version: 30, name: "delivery-merge-and-tag" },
           { version: 31, name: "delivery-release-tag" },
           { version: 32, name: "workflow-revisions" },
+          { version: 33, name: "objective-workflow-provenance" },
         ],
       );
     } finally {
@@ -4884,7 +4986,7 @@ test("steering directives persist with actor, target, disposition, and supersede
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-steering-ledger-"));
   const ledger = new Ledger(path.join(root, "devharmonics.db"));
   try {
-    assert.equal(LEDGER_SCHEMA_VERSION, 32, "workflow revisions advance the ledger schema");
+    assert.equal(LEDGER_SCHEMA_VERSION, 33, "objective workflow provenance advances the ledger schema");
     const runId = ledger.createRun("Steer me", root);
     ledger.savePlan(runId, {
       summary: "One task",

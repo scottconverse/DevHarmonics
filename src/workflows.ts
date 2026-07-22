@@ -123,7 +123,10 @@ export function instantiateWorkflow(input: {
   const declared = new Map(input.workflow.inputs.map((item) => [item.name, item]));
   for (const item of input.workflow.inputs) {
     const value = input.inputs[item.name];
-    if (value === undefined || value === null) {
+    // An empty or whitespace-only string is MISSING, not a value (panel
+    // finding: it would substitute a load-bearing placeholder into blankness).
+    const blank = value === undefined || value === null || (typeof value === "string" && !value.trim());
+    if (blank) {
       if (item.required) issues.push(`inputs.${item.name}: required and missing`);
       continue;
     }
@@ -140,6 +143,7 @@ export function instantiateWorkflow(input: {
     ok: true,
     revisionHash,
     objective: {
+      workflowRevisionHash: revisionHash,
       outcome,
       acceptanceCriteria: [...input.workflow.objective.acceptanceCriteria],
       constraints: [],

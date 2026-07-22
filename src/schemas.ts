@@ -97,6 +97,7 @@ export const objectiveInputSchema = z.object({
   priority: z.enum(["low", "normal", "high", "urgent"]),
   deadline: z.string().datetime({ offset: true }).optional(),
   policyNotes: z.array(z.string().trim().min(1).max(2_000)).max(200),
+  workflowRevisionHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 });
 
 export const planRevisionInputSchema = z.object({

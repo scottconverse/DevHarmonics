@@ -61,11 +61,14 @@ export interface CounterfactualReceipt {
 export interface RunCostCounterfactual {
   /** Always true: the counterfactual is a catalog-price projection, never a bill. */
   estimate: true;
+  /** Actual spend over exactly the invocations the counterfactual projects — a like-for-like pair. */
   actualUsd: number;
   counterfactualUsd: number;
   byRole: Array<{ role: string; actualUsd: number; counterfactualUsd: number; comparisonModelId: string; comparisonDisplayName: string }>;
   /** Roles with receipts but no priced comparison model — excluded, never invented. */
   excludedRoles: string[];
+  /** Spend the pair could not cover: excluded roles plus receipts without token counts. Visible, never folded in. */
+  unprojectedUsd: number;
 }
 
 function roundUsd(value: number): number {
@@ -89,6 +92,7 @@ export function runCostCounterfactual(input: {
   }
   const entries: RunCostCounterfactual["byRole"] = [];
   const excludedRoles: string[] = [];
+  let coveredUsd = 0;
   for (const [role, receipts] of byRole) {
     const comparison = input.priciestByRole[role];
     const projectable = receipts.filter((receipt) => receipt.inputTokens !== null && receipt.outputTokens !== null);
@@ -98,21 +102,28 @@ export function runCostCounterfactual(input: {
     }
     const inputTokens = projectable.reduce((sum, receipt) => sum + receipt.inputTokens!, 0);
     const outputTokens = projectable.reduce((sum, receipt) => sum + receipt.outputTokens!, 0);
+    // Both sides of the pair are computed over the SAME projectable receipts;
+    // spend the projection cannot cover goes to unprojectedUsd instead of
+    // silently skewing the comparison.
+    const actualUsd = roundUsd(projectable.reduce((sum, receipt) => sum + (receipt.costUsd ?? 0), 0));
+    coveredUsd += actualUsd;
     entries.push({
       role,
-      actualUsd: roundUsd(receipts.reduce((sum, receipt) => sum + (receipt.costUsd ?? 0), 0)),
+      actualUsd,
       counterfactualUsd: roundUsd(inputTokens * comparison.promptPriceUsdPerMTokens / 1_000_000 + outputTokens * comparison.completionPriceUsdPerMTokens / 1_000_000),
       comparisonModelId: comparison.modelId,
       comparisonDisplayName: comparison.displayName,
     });
   }
   if (!entries.length) return null;
+  const totalBilledUsd = input.receipts.reduce((sum, receipt) => sum + (receipt.costUsd ?? 0), 0);
   return {
     estimate: true,
-    actualUsd: roundUsd(input.receipts.reduce((sum, receipt) => sum + (receipt.costUsd ?? 0), 0)),
+    actualUsd: roundUsd(coveredUsd),
     counterfactualUsd: roundUsd(entries.reduce((sum, entry) => sum + entry.counterfactualUsd, 0)),
     byRole: entries.sort((left, right) => left.role.localeCompare(right.role)),
     excludedRoles: excludedRoles.sort(),
+    unprojectedUsd: roundUsd(totalBilledUsd - coveredUsd),
   };
 }
 

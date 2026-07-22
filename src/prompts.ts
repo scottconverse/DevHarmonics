@@ -289,6 +289,14 @@ ${bounded(input.checkSummary, 3_000)}
 In your final response, the fenced JSON object must additionally contain a "claimedChanges" array, one entry per file the reports claim was created, modified, or deleted: {"claimedChanges":[{"path":"relative/path","kind":"created|modified|deleted","taskId":"the claiming task"}]}. An empty array is a statement that the reports claim no repository changes at all.`;
 }
 
+/**
+ * The per-chunk JSON instruction for claims-lens reviews. The chunk runner's
+ * default contract names findings alone; if the claims lens relied on it, the
+ * last and most literal formatting instruction the model sees would contradict
+ * the header's manifest demand and the divergence gate would starve.
+ */
+export const CLAIMS_CHUNK_JSON_CONTRACT = `Finish with exactly one fenced JSON object shaped as {"findings":[{"id":"stable-short-id","severity":"low|medium|high|critical","location":"path:line or null","rationale":"evidence-backed reason","suggestedCorrection":"bounded correction","disposition":"open"}],"claimedChanges":[{"path":"relative/path","kind":"created|modified|deleted","taskId":"the claiming task"}]}. READY must use an empty findings array. claimedChanges must list every file-level change the supplied reports claim was created, modified, or deleted; an empty array is a statement that the reports claim no repository changes.`;
+
 /** The claims lens reviews the narration itself, chunked like any other evidence. */
 export function claimsReviewChunks(taskReports: string, maxChars = 8_000): Array<{ label: string; content: string }> {
   const content = taskReports.trim() || "No task reports were recorded.";

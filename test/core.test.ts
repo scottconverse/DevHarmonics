@@ -2212,7 +2212,7 @@ test("adaptive routing prefers the cheapest candidate at established empirical p
   assert.equal(typeof routingModule.preferCheapestAtParity, "function", "DH-320 requires the parity preference");
 
   const established = (rate: number) => ({ eligibleForAdaptiveWeighting: true, firstAttemptSuccessRate: rate, sampleSize: 40 });
-  const guards = { tierFit: 6, userPin: 0, preferredProvider: 0, fallbackProvider: 0, providerDiversity: 0 };
+  const guards = { tierFit: 6, reasoningFit: 2, userPin: 0, preferredProvider: 0, fallbackProvider: 0, empiricalLatency: 0, providerDiversity: 0 };
   const premium = { id: "premium-model", pinned: false, unitCostUsd: 12, empiricalWorkload: established(0.96), breakdown: { ...guards } };
   const budget = { id: "budget-model", pinned: false, unitCostUsd: 1.5, empiricalWorkload: established(0.94), breakdown: { ...guards } };
 
@@ -2239,6 +2239,14 @@ test("adaptive routing prefers the cheapest candidate at established empirical p
   // A diversity-boosted top is not displaced by a same-provider bargain.
   const diverseTop = { ...premium, breakdown: { ...guards, providerDiversity: 8 } };
   assert.equal(routingModule.preferCheapestAtParity([diverseTop, budget]), null);
+
+  // A materially slower model is not at parity, whatever its success rate.
+  const slower = { ...budget, breakdown: { ...guards, empiricalLatency: -2 } };
+  assert.equal(routingModule.preferCheapestAtParity([premium, slower]), null);
+
+  // Neither is one whose reasoning-effort setting fits the workload worse.
+  const worseFit = { ...budget, breakdown: { ...guards, reasoningFit: 0 } };
+  assert.equal(routingModule.preferCheapestAtParity([premium, worseFit]), null);
 });
 
 test("per-run cost counterfactual is an estimate from receipts, honest-absent without prices", async () => {
@@ -2260,10 +2268,29 @@ test("per-run cost counterfactual is an estimate from receipts, honest-absent wi
   assert.equal(result.byRole.find((entry: any) => entry.role === "worker").comparisonModelId, "premium-w");
   assert.equal(result.estimate, true, "the counterfactual is labeled an estimate");
   assert.deepEqual(result.excludedRoles, []);
+  assert.equal(result.unprojectedUsd, 0);
 
+  // Both sides of the comparison cover the SAME invocations: a role without a
+  // comparator drops out of the actual side too, and its spend is reported
+  // separately rather than skewing the pair.
   const partial = performanceModule.runCostCounterfactual({ receipts, priciestByRole: { worker: priciest.worker } });
   assert.deepEqual(partial.excludedRoles, ["reviewer"], "a role without a priced comparator is named, not invented");
   assert.equal(partial.counterfactualUsd, 4.5);
+  assert.equal(partial.actualUsd, 0.75, "the actual side is scoped to the invocations the counterfactual covers");
+  assert.equal(partial.unprojectedUsd, 0.6, "excluded spend is visible, not vanished");
+
+  // Within a role, a receipt with cost but no token counts cannot be projected:
+  // it leaves both sides of the pair and lands in unprojectedUsd.
+  const mixed = performanceModule.runCostCounterfactual({
+    receipts: [
+      { role: "worker", inputTokens: 100_000, outputTokens: 20_000, costUsd: 0.5 },
+      { role: "worker", inputTokens: null, outputTokens: null, costUsd: 0.3 },
+    ],
+    priciestByRole: priciest,
+  });
+  assert.equal(mixed.actualUsd, 0.5);
+  assert.equal(mixed.counterfactualUsd, 3);
+  assert.equal(mixed.unprojectedUsd, 0.3);
 
   assert.equal(performanceModule.runCostCounterfactual({ receipts, priciestByRole: {} }), null, "nothing computable shows nothing, not zero");
   assert.equal(
@@ -2271,6 +2298,44 @@ test("per-run cost counterfactual is an estimate from receipts, honest-absent wi
     null,
     "receipts without token counts cannot be projected",
   );
+});
+
+test("the assembled claims-lens chunk prompt demands the manifest the header promised", async () => {
+  // Panel finding A1: the per-chunk JSON instruction is the last and most
+  // literal formatting order the model sees; if it names findings alone, the
+  // header's claimedChanges demand is contradicted and the divergence gate
+  // starves. Prove the ASSEMBLED prompt, not the header in isolation.
+  const localReview = await import("../src/local-review.js") as Record<string, any>;
+  const promptsModule = await import("../src/prompts.js") as Record<string, any>;
+  const seen: string[] = [];
+  const adapter = {
+    connection: { id: "stub", provider: "stub", capabilities: { modelSettings: [] } },
+    invoke: async (request: { prompt: string }) => {
+      seen.push(request.prompt);
+      return { text: `READY\nok\n\`\`\`json\n{"findings":[],"claimedChanges":[]}\n\`\`\``, durationMs: 1, provider: "stub", connectionId: "stub", model: { resolvedModelId: "stub-model" }, usage: { inputTokens: 1, outputTokens: 1, costUsd: null } };
+    },
+  };
+  const chunks = [{ label: "task reports 1", content: "t1 [finding]: created result.txt" }];
+  const claims = await localReview.runContextOnlyReview({
+    adapter,
+    model: { requestedModelId: null, alias: null, settings: {} },
+    cwd: os.tmpdir(),
+    contextHeader: "claims header",
+    chunks,
+    jsonContract: promptsModule.CLAIMS_CHUNK_JSON_CONTRACT,
+  });
+  assert.match(seen[0]!, /claimedChanges/, "the chunk-level instruction must demand the manifest");
+  assert.match(claims.text, /claimedChanges/, "the synthesized response carries the manifest through");
+
+  seen.length = 0;
+  await localReview.runContextOnlyReview({
+    adapter,
+    model: { requestedModelId: null, alias: null, settings: {} },
+    cwd: os.tmpdir(),
+    contextHeader: "artifact header",
+    chunks,
+  });
+  assert.ok(!/claimedChanges/.test(seen[0]!), "non-claims reviews keep the findings-only contract");
 });
 
 test("verification-integrity gate fails closed on test weakening and reports bounded evidence", async () => {

@@ -354,7 +354,7 @@ export interface ParityCandidate {
   pinned: boolean;
   unitCostUsd: number | null;
   empiricalWorkload?: Pick<ModelPerformanceSlice, "eligibleForAdaptiveWeighting" | "firstAttemptSuccessRate"> | undefined;
-  breakdown: Pick<RoutingScoreBreakdown, "tierFit" | "userPin" | "preferredProvider" | "fallbackProvider" | "providerDiversity">;
+  breakdown: Pick<RoutingScoreBreakdown, "tierFit" | "reasoningFit" | "userPin" | "preferredProvider" | "fallbackProvider" | "empiricalLatency" | "providerDiversity">;
 }
 
 /** Success-rate difference at or under this is parity once both records are established (DH-250's ≥20-observation bar). */
@@ -373,7 +373,10 @@ export function preferCheapestAtParity(candidates: ReadonlyArray<ParityCandidate
   if (!top || top.pinned) return null;
   if (!top.empiricalWorkload?.eligibleForAdaptiveWeighting) return null;
   if (top.unitCostUsd === null || !Number.isFinite(top.unitCostUsd)) return null;
-  const guardKeys = ["tierFit", "userPin", "preferredProvider", "fallbackProvider", "providerDiversity"] as const;
+  // Every scored non-cost consideration must match — including latency and
+  // reasoning fit; a "parity" swap onto a materially slower or worse-fitting
+  // model is not parity, whatever the success rates say.
+  const guardKeys = ["tierFit", "reasoningFit", "userPin", "preferredProvider", "fallbackProvider", "empiricalLatency", "providerDiversity"] as const;
   const atParity = candidates.slice(1).filter((candidate) => {
     if (candidate.unitCostUsd === null || !Number.isFinite(candidate.unitCostUsd) || candidate.unitCostUsd >= top.unitCostUsd!) return false;
     if (!candidate.empiricalWorkload?.eligibleForAdaptiveWeighting) return false;

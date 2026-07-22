@@ -14,6 +14,7 @@ import { OllamaAdapter, syncOllamaRuntimes } from "./ollama.js";
 import { createRuntimeAdapter } from "./providers.js";
 import {
   architectPrompt,
+  CLAIMS_CHUNK_JSON_CONTRACT,
   claimsReviewChunks,
   claimsReviewerContextHeader,
   formatFailures,
@@ -870,6 +871,9 @@ export class Orchestrator {
         // The claims lens never gets repository tools: even a tool-capable
         // reviewer is routed through bounded chunks of the reports themselves,
         // so what it cannot see is a property of the bundle, not of the prompt.
+        // Observe runs are the stated exception (plan DH-460): no artifact diff
+        // exists, and the citation duty needs read-only repository access — the
+        // receipt still records the claims lens, and no manifest is expected.
         const claimsLensReview = firstReviewLens === "claims" && autonomy !== "observe";
         if (reviewer.connection.capabilities.providerManagedTools && !claimsLensReview) {
           const review = await reviewer.invoke({
@@ -898,6 +902,7 @@ export class Orchestrator {
             contextHeader: claimsLensReview
               ? claimsReviewerContextHeader({ goal: request.goal, constitution, plan, checkSummary, autonomy })
               : localReviewerContextHeader({ goal: request.goal, constitution, plan, checkSummary, taskReports: localTaskReports, autonomy, lens: firstReviewLens }),
+            ...(claimsLensReview ? { jsonContract: CLAIMS_CHUNK_JSON_CONTRACT } : {}),
             chunks,
             evidenceLabel: claimsLensReview ? "task report chunk" : autonomy === "observe" ? "diagnostic report" : "diff chunk",
             maxOutputTokens: 512,
@@ -1618,6 +1623,7 @@ export class Orchestrator {
             contextHeader: claimsLensReview
               ? claimsReviewerContextHeader({ goal: input.goal, constitution: input.constitution, plan: input.plan, checkSummary: input.checkSummary, autonomy: input.autonomy })
               : localReviewerContextHeader({ goal: input.goal, constitution: input.constitution, plan: input.plan, checkSummary: input.checkSummary, taskReports: localTaskReports, autonomy: input.autonomy, lens: input.lens ?? null }),
+            ...(claimsLensReview ? { jsonContract: CLAIMS_CHUNK_JSON_CONTRACT } : {}),
             chunks,
             evidenceLabel: claimsLensReview ? "task report chunk" : input.reviewEvidenceLabel ?? (input.autonomy === "observe" ? "diagnostic report" : "diff chunk"),
             maxOutputTokens: 512,

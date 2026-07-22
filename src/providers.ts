@@ -275,7 +275,8 @@ abstract class CliProvider implements ProviderAdapter {
  * Whether an adapter can STRUCTURALLY deny its file/shell tools for a single
  * invocation (Codex R2-001). Claims-lens reviews are routed only to adapters
  * that can: prompt wording and cwd placement are not enforcement.
- * - claude: yes — headless --disallowedTools removes the tools themselves.
+ * - claude: yes — headless --tools "" empties the built-in tool set, with
+ *   --strict-mcp-config and --safe-mode rejecting ambient MCP/plugin tools.
  * - local (Ollama HTTP): yes — the transport has no tools at all.
  * - api (OpenRouter): yes — chat completion, no tool execution surface.
  * - codex: no — its sandbox modes govern writes, not read scope.
@@ -321,10 +322,13 @@ export class ClaudeProvider extends CliProvider {
       "--permission-mode",
       request.writeAccess ? "acceptEdits" : "plan",
       // Plan mode blocks writes but not reads, and Claude Code's read scope is
-      // not bound to its cwd — a claims-lens review must deny the tools
-      // themselves or the evidence bundle is only prompt-deep.
+      // not bound to its cwd — a claims-lens review must shut the tool surface
+      // down completely, not deny an enumerated list (Codex R3-001: a named
+      // deny list is not a closed set). --tools "" disables every built-in
+      // tool; --strict-mcp-config with no servers rejects ambient MCP tools;
+      // --safe-mode disables plugins, hooks, and other ambient customization.
       ...(request.withoutRepositoryTools
-        ? ["--disallowedTools", "Read Glob Grep Bash Edit Write MultiEdit NotebookEdit WebFetch WebSearch Task Agent"]
+        ? ["--tools", "", "--strict-mcp-config", "--safe-mode"]
         : []),
     ];
   }

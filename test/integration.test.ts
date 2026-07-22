@@ -96,7 +96,8 @@ if (process.argv.includes("--version")) {
   console.log(JSON.stringify({result:JSON.stringify(plan)}));
 } else if (input.includes("You are the claims-lens reviewer")) {
   const manifest = JSON.stringify({findings:[],claimedChanges:[{path:"result.txt",kind:"created",taskId:"one"}]});
-  const toolsFlag = process.argv.includes("--disallowedTools") ? "denied" : "undenied";
+  const toolsIndex = process.argv.indexOf("--tools");
+  const toolsFlag = toolsIndex >= 0 && process.argv[toolsIndex + 1] === "" && process.argv.includes("--strict-mcp-config") && process.argv.includes("--safe-mode") ? "denied" : "undenied";
   const review = "READY\\n\\nClaims reviewed from cwd=" + process.cwd().replace(/\\\\/g, "/") + " toolsFlag=" + toolsFlag + " and they cohere with the receipts.\\n" + manifest;
   if (process.argv.includes("--json")) console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:review}}));
   else if (process.argv.includes("--output-format")) console.log(JSON.stringify({result:review}));

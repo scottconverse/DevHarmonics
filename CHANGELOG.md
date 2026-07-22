@@ -4,6 +4,15 @@ All notable DevHarmonics changes are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Tag-truth gate: tagging a delivery now reads the version the target repository declares about itself (package.json, then pyproject.toml) and refuses a contradicting tag with both values shown; the cockpit takes an explicit second owner confirmation before a mismatched tag is ever minted. The delivery payload carries each repository's declared version, and the cockpit's tag field pre-fills with it as an editable value — with a caption stating plainly that an empty field creates no tag.
+
+### Changed
+
+- The Evidence page's derived verdict now leads with what the verdict means and the exact reasons behind it (an INCONCLUSIVE names its missing or inconsistent evidence instead of implying breakage), followed by a scannable per-target list — one collapsible row per reviewed file with its own READY/NOT READY chip — in place of the previous single unbroken wall of review text.
+- Delivery card buttons carry emphasis by state: the next available step is the primary action; completed steps demote to "Branch pushed ✓ / Draft PR created ✓ / Merged ✓ / Tagged ✓".
+
 ## [0.6.0] - 2026-07-22
 
 ### Added

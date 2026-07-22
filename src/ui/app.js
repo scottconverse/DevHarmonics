@@ -930,7 +930,7 @@ function renderDelivery(run) {
       ${repository.remoteUrl ? `<a href="${escapeHtml(repository.remoteUrl)}" target="_blank" rel="noreferrer">${escapeHtml(repository.remoteUrl)}</a>` : ""}
       ${repository.pullRequestUrl ? `<a class="delivery-pr-link" href="${escapeHtml(repository.pullRequestUrl)}" target="_blank" rel="noreferrer">${merged ? "View merged pull request" : "Open draft pull request"}</a>` : ""}
       ${repository.error ? `<p class="error">${escapeHtml(repository.error)}</p>` : ""}
-      ${tagged ? `<p class="delivery-done">Delivered, merged, and tagged — this repository is fully shipped.</p>` : merged ? `<p class="delivery-done">Merged under your approval. Tag the release below when you are ready.</p>` : ""}
+      ${tagged ? `<p class="delivery-done">Delivered, merged, and tagged${repository.releaseTag ? ` as ${escapeHtml(repository.releaseTag)}` : ""} — this repository is fully shipped.</p>` : merged ? `<p class="delivery-done">Merged under your approval. Tag the release below when you are ready.</p>` : ""}
       <div class="plan-actions">
         <button class="secondary small" type="button" data-delivery-action="push_branch" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || pushed ? "disabled" : ""}>Approve &amp; push branch</button>
         <button class="secondary small" type="button" data-delivery-action="create_draft_pr" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || !pushed || created ? "disabled" : ""}>Approve &amp; create draft PR</button>
@@ -1661,9 +1661,9 @@ $("#delivery-repositories").addEventListener("click", async (event) => {
   const labels = {
     push_branch: { confirm: "push this exact reviewed branch to GitHub", op: "Pushing the exact reviewed branch", busy: "Pushing…" },
     create_draft_pr: { confirm: "create a draft pull request for this exact reviewed branch", op: "Creating the draft pull request", busy: "Creating draft PR…" },
-    merge_pr: { confirm: "mark the pull request ready and MERGE it into its base branch (only if GitHub reports it mergeable)", op: "Merging the approved pull request", busy: "Merging…" },
+    merge_pr: { confirm: `mark the pull request ready and MERGE it into its base branch — only if GitHub still shows the exact reviewed commit ${(button.dataset.headCommit || "").slice(0, 12)}, no conflicts, and green checks`, op: "Merging the approved pull request", busy: "Merging…" },
     tag_release: { confirm: `create and push release tag ${tag ?? "(enter a tag name first)"} on the merge commit`, op: "Tagging the release", busy: "Tagging…" },
-    complete_delivery: { confirm: `run the complete delivery: push, draft PR, merge${tag ? `, and tag ${tag}` : ""} — one approval covering each named step`, op: "Completing the delivery", busy: "Delivering…" },
+    complete_delivery: { confirm: `run the complete delivery of reviewed commit ${(button.dataset.headCommit || "").slice(0, 12)}: push, draft PR, merge${tag ? `, and tag ${tag}` : ""} — one approval covering each named step; the merge still refuses conflicts, red checks, or a changed PR head`, op: "Completing the delivery", busy: "Delivering…" },
   };
   const label = labels[action] ?? labels.push_branch;
   if (action === "tag_release" && !tag) { $("#delivery-error").textContent = "Enter a release tag name first."; return; }

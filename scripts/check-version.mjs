@@ -34,7 +34,17 @@ const expectations = [
   // with any release that changes the prior tag or the ledger schema.
   ["docs/ROLLBACK.md", `backup-v26-to-v33`],
   ["docs/ROLLBACK.md", `Ledger schema 26 → 33`],
-  ["README.md", `184 tests across`],
+  // Release-truth guard added at the v0.6.1 gate (R4-001): the 0.6-line
+  // "v0.6.1 -> v0.6.0" rollback section went stale the same way the v0.5.1
+  // one did, claiming a no-restore downgrade across an actual 34->33 schema
+  // change. This pair must be updated together with any release that moves
+  // LEDGER_SCHEMA_VERSION or renames the prior-tag rollback target.
+  ["docs/ROLLBACK.md", `backup-v33-to-v34`],
+  ["docs/ROLLBACK.md", `Ledger schema 33 → 34`],
+  // The test count below must be bumped by hand whenever the suite size
+  // changes (README.md:397) — this string match is not truth-sourced from
+  // the actual `npm test` output, only kept in sync manually. See R4-003.
+  ["README.md", `191 tests across`],
 ];
 
 const failures = [];

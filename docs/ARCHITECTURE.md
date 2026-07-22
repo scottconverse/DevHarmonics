@@ -33,6 +33,8 @@ Read-only architect -> typed task DAG -> dependency scheduler
 
 ## Components
 
+Selected components — the modules that carry the architecture's load-bearing decisions. Files not listed here (types, schemas, prompts, small helpers) support these.
+
 - `src/cli.ts`: command entry point for `serve`, `init`, `doctor`, and `run`.
 - `src/server.ts`: loopback-only HTTP server and static dashboard delivery.
 - `src/delivery.ts`: READY-run delivery service — separately approved exact-SHA branch pushes, draft GitHub pull requests, gated pull-request merges, and release tags; every external action requires its own owner approval.
@@ -48,6 +50,8 @@ Read-only architect -> typed task DAG -> dependency scheduler
 - `src/ollama.ts` and `src/openrouter.ts`: qualified read-only local inference and governed opt-in API inference.
 - `src/worktrees.ts` and `src/integration-sets.ts`: repository-local integration/task worktrees plus exact multi-repository integration-set coordination.
 - `src/validators.ts`: execution of user-configured validator allowlists.
+- `src/verification-integrity.ts`: deterministic integration-diff analysis for weakened verification — deleted/skipped/focused tests, weakened assertions, unconditional success, swallowed errors.
+- `src/policy.ts` and `src/local-tools.ts`: tool trust/side-effect policy receipts and the scoped local-model tool loop.
 - `src/repository-intelligence.ts`: non-mutating local Git identity, branch, remote, dirty-state, and compatibility inspection.
 - `src/product-intelligence.ts`: bounded canonical-source scanning, exact revision/hash provenance, explicit subject-aware claim extraction, and contradiction/missing-source analysis.
 - `src/ledger.ts`: SQLite-backed Workbench discussions, objective drafts, immutable plan revisions, source-backed product-intelligence snapshots, approved run linkage, exact integration-set state, and run/task/attempt/check/event receipts.

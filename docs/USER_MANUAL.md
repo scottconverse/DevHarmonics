@@ -85,7 +85,7 @@ The first Antigravity login requires both a browser-to-terminal code handoff and
 
 The one-time authorization code is a short-lived credential. Paste it only into the Antigravity terminal that requested it. Do not paste it into DevHarmonics, chat, documentation, screenshots, or issue reports.
 
-Antigravity is one signed-in connection that may expose Gemini, Claude, and GPT models. DevHarmonics keeps each model's vendor visible and treats Antigravity's **Gemini Models** and **Claude and GPT Models** quota groups independently. If one group reports exhaustion, models in that group wait until its reported reset while qualified models in the other group can remain eligible. Existing project files may still use the internal provider key `gemini`; that is a compatibility alias, not a claim that every Antigravity task uses a Gemini model.
+On Windows, an installed Antigravity can be found and reported READY even when `agy` is not on the PATH of the terminal that launched DevHarmonics (Windows resolves installed applications through more than the PATH variable). If you do not want it in the pool, disable its connection or untick it in the worker pool. Antigravity is one signed-in connection that may expose Gemini, Claude, and GPT models. DevHarmonics keeps each model's vendor visible and treats Antigravity's **Gemini Models** and **Claude and GPT Models** quota groups independently. If one group reports exhaustion, models in that group wait until its reported reset while qualified models in the other group can remain eligible. Existing project files may still use the internal provider key `gemini`; that is a compatibility alias, not a claim that every Antigravity task uses a Gemini model.
 
 ## 4. Check readiness
 
@@ -213,7 +213,7 @@ When a non-Observe run reaches **READY**, the **Approved delivery** card shows t
 1. Enable **Allow external writes** in Setup.
 2. Confirm **Approve & push branch** for the exact repository and HEAD shown. DevHarmonics pushes that exact commit without force-updating a conflicting remote branch.
 3. Separately confirm **Approve & create draft PR**.
-4. When you are satisfied the change should land, confirm **Approve & merge PR**. DevHarmonics checks the live pull-request state first and refuses to merge a conflict, a pull request with pending or failing status checks, or a head commit that is no longer the reviewed commit.
+4. When you are satisfied the change should land, confirm **Approve & merge**. DevHarmonics checks the live pull-request state first and refuses to merge a conflict, a pull request with pending or failing status checks, or a head commit that is no longer the reviewed commit.
 5. Optionally confirm **Approve & tag release** with a version tag. The tag lands on the actual merge commit and is recorded on the delivery; a failed tag push can be retried and reuses the already-created local tag.
 
 A **Complete delivery** control runs the remaining steps in order — still one explicit approval per consequential action. There is no automatic merge and no automatic tag: nothing external happens without your approval of that specific step. Each confirmation creates its own external-write approval and tool-policy receipt. Completed steps reconcile safely if you click them again, a second operation on the same repository is refused while one is in flight, and the card locks while a step runs. If the reviewed HEAD no longer matches the card, refresh instead of approving stale evidence. This capability is part of v0.6; it is not present in the earlier v0.5.1 release.

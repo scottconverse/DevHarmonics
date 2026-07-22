@@ -32,7 +32,7 @@ function githubRemote(value: string): { webUrl: string; repository: string } {
     repository = match?.[1] ?? null;
   }
   if (!repository || !/^[^/\s]+\/[^/\s]+$/.test(repository)) {
-    throw new Error("Approved delivery currently supports GitHub HTTPS or SSH origin URLs only");
+    throw new DeliveryRefusal("Approved delivery currently supports GitHub HTTPS or SSH origin URLs only");
   }
   return { repository, webUrl: `https://github.com/${repository}` };
 }
@@ -41,17 +41,26 @@ function failureMessage(result: ProcessResult, fallback: string): string {
   return result.stderr.trim() || result.stdout.trim() || fallback;
 }
 
+/**
+ * A refusal grounded in delivery STATE — wrong order, live pull-request
+ * conditions, an already-applied different tag, policy denial. The HTTP route
+ * reports these as client-visible conflicts (404/409), never as a server
+ * fault; a genuine execution failure (git/gh exiting non-zero) stays a plain
+ * Error. (Gate finding ENG-1, 2026-07-22.)
+ */
+export class DeliveryRefusal extends Error {}
+
 export class DeliveryService {
   constructor(private readonly ledger: Ledger, private readonly runner: ProcessRunner = runProcess) {}
 
   async execute(input: DeliveryExecutionInput): Promise<DeliveryRepositoryRecord> {
     const run = this.ledger.getRun(input.runId);
-    if (!run) throw new Error(`Run '${input.runId}' was not found`);
-    if (run.status !== "ready") throw new Error("Only a READY run can be delivered");
+    if (!run) throw new DeliveryRefusal(`Run '${input.runId}' was not found`);
+    if (run.status !== "ready") throw new DeliveryRefusal("Only a READY run can be delivered");
     const delivery = run.delivery?.repositories.find((repository) => repository.repositoryId === input.repositoryId);
-    if (!delivery) throw new Error(`Run '${input.runId}' has no reviewed delivery for '${input.repositoryId}'`);
+    if (!delivery) throw new DeliveryRefusal(`Run '${input.runId}' has no reviewed delivery for '${input.repositoryId}'`);
     if (input.expectedHeadCommit && input.expectedHeadCommit !== delivery.headCommit) {
-      throw new Error("The reviewed head changed; refresh the delivery evidence before approving");
+      throw new DeliveryRefusal("The reviewed head changed; refresh the delivery evidence before approving");
     }
     // Idempotent reconciliation FIRST, preconditions second (panel finding:
     // guards that fire before the already-done returns break resuming a
@@ -63,25 +72,25 @@ export class DeliveryService {
       // Same tag: already done. A DIFFERENT tag on a tagged delivery must not
       // report success it did not perform.
       if (input.tag && delivery.releaseTag && input.tag !== delivery.releaseTag) {
-        throw new Error(`This delivery is already tagged as '${delivery.releaseTag}'; it will not be re-tagged as '${input.tag}'`);
+        throw new DeliveryRefusal(`This delivery is already tagged as '${delivery.releaseTag}'; it will not be re-tagged as '${input.tag}'`);
       }
       return delivery;
     }
     if (input.action === "create_draft_pr" && delivery.status !== "branch_pushed") {
-      throw new Error("Push the reviewed branch first");
+      throw new DeliveryRefusal("Push the reviewed branch first");
     }
     if (input.action === "merge_pr" && delivery.status !== "draft_pr_created") {
-      throw new Error("Create the draft pull request first");
+      throw new DeliveryRefusal("Create the draft pull request first");
     }
     if (input.action === "tag_release") {
-      if (delivery.status !== "merged") throw new Error("Merge the pull request before tagging the release");
-      if (!input.tag || !RELEASE_TAG_PATTERN.test(input.tag)) throw new Error("Release tag names must be short version-like identifiers (letters, digits, dot, dash, underscore)");
+      if (delivery.status !== "merged") throw new DeliveryRefusal("Merge the pull request before tagging the release");
+      if (!input.tag || !RELEASE_TAG_PATTERN.test(input.tag)) throw new DeliveryRefusal("Release tag names must be short version-like identifiers (letters, digits, dot, dash, underscore)");
     }
 
     const remoteResult = await this.runner({ command: "git", args: ["remote", "get-url", "origin"], cwd: delivery.localPath, timeoutMs: 30_000 });
     if (remoteResult.exitCode !== 0) throw new Error(failureMessage(remoteResult, "Could not resolve the Git origin"));
     const remote = githubRemote(remoteResult.stdout);
-    if (delivery.remoteUrl && delivery.remoteUrl !== remote.webUrl) throw new Error("The live Git origin does not match the reviewed delivery remote");
+    if (delivery.remoteUrl && delivery.remoteUrl !== remote.webUrl) throw new DeliveryRefusal("The live Git origin does not match the reviewed delivery remote");
 
     const toolId = input.action === "push_branch"
       ? "github.branch_push"
@@ -122,7 +131,7 @@ export class DeliveryService {
       lockKeys: decision.lockKeys,
       approvalId: decision.approvalId,
     });
-    if (decision.outcome !== "allow") throw new Error(decision.reason);
+    if (decision.outcome !== "allow") throw new DeliveryRefusal(decision.reason);
 
     try {
       if (input.action === "push_branch") {
@@ -167,7 +176,7 @@ export class DeliveryService {
         return updated;
       }
 
-      if (!delivery.pullRequestUrl) throw new Error("The delivery record has no pull request URL");
+      if (!delivery.pullRequestUrl) throw new DeliveryRefusal("The delivery record has no pull request URL");
 
       if (input.action === "merge_pr") {
         // Never merge blind: read the LIVE pull-request state first. Three
@@ -177,20 +186,20 @@ export class DeliveryService {
         const view = await this.runner({ command: "gh", args: ["pr", "view", delivery.pullRequestUrl, "--json", "state,isDraft,mergeable,mergeStateStatus,headRefOid,statusCheckRollup"], cwd: delivery.localPath, timeoutMs: 60_000 });
         if (view.exitCode !== 0) throw new Error(failureMessage(view, "Could not read the live pull request state"));
         const state = JSON.parse(view.stdout) as { state: string; isDraft: boolean; mergeable: string; mergeStateStatus?: string; headRefOid?: string; statusCheckRollup?: Array<{ status?: string; conclusion?: string | null }> | null };
-        if (state.state === "CLOSED") throw new Error("The pull request was closed on GitHub; nothing to merge");
+        if (state.state === "CLOSED") throw new DeliveryRefusal("The pull request was closed on GitHub; nothing to merge");
         if (state.state !== "MERGED") {
           if (state.headRefOid && state.headRefOid !== delivery.headCommit) {
-            throw new Error(`The pull request head (${state.headRefOid.slice(0, 12)}) is no longer the reviewed commit (${delivery.headCommit.slice(0, 12)}); new commits landed after review — re-run the review before approving a merge`);
+            throw new DeliveryRefusal(`The pull request head (${state.headRefOid.slice(0, 12)}) is no longer the reviewed commit (${delivery.headCommit.slice(0, 12)}); new commits landed after review — re-run the review before approving a merge`);
           }
-          if (state.mergeable === "CONFLICTING") throw new Error("The pull request is not mergeable (conflicts with its base); resolve before approving the merge");
+          if (state.mergeable === "CONFLICTING") throw new DeliveryRefusal("The pull request is not mergeable (conflicts with its base); resolve before approving the merge");
           if (state.mergeStateStatus && ["DIRTY", "BLOCKED"].includes(state.mergeStateStatus)) {
-            throw new Error(`GitHub reports the pull request as ${state.mergeStateStatus.toLowerCase()}; resolve the blocking condition before approving the merge`);
+            throw new DeliveryRefusal(`GitHub reports the pull request as ${state.mergeStateStatus.toLowerCase()}; resolve the blocking condition before approving the merge`);
           }
           const checks = state.statusCheckRollup ?? [];
           const unfinished = checks.filter((check) => check.status && check.status !== "COMPLETED");
           const failed = checks.filter((check) => check.conclusion && !["SUCCESS", "NEUTRAL", "SKIPPED"].includes(check.conclusion));
-          if (unfinished.length) throw new Error(`${unfinished.length} status check(s) are still running; approve the merge again when they finish`);
-          if (failed.length) throw new Error(`${failed.length} status check(s) failed; a red pull request is never merged`);
+          if (unfinished.length) throw new DeliveryRefusal(`${unfinished.length} status check(s) are still running; approve the merge again when they finish`);
+          if (failed.length) throw new DeliveryRefusal(`${failed.length} status check(s) failed; a red pull request is never merged`);
           if (state.isDraft) {
             const ready = await this.runner({ command: "gh", args: ["pr", "ready", delivery.pullRequestUrl], cwd: delivery.localPath, timeoutMs: 60_000 });
             if (ready.exitCode !== 0) throw new Error(failureMessage(ready, "Could not mark the pull request ready for review"));
@@ -210,7 +219,7 @@ export class DeliveryService {
       const mergedView = await this.runner({ command: "gh", args: ["pr", "view", delivery.pullRequestUrl, "--json", "state,mergeCommit"], cwd: delivery.localPath, timeoutMs: 60_000 });
       if (mergedView.exitCode !== 0) throw new Error(failureMessage(mergedView, "Could not read the merged pull request"));
       const mergedState = JSON.parse(mergedView.stdout) as { state: string; mergeCommit: { oid: string } | null };
-      if (mergedState.state !== "MERGED" || !mergedState.mergeCommit?.oid) throw new Error("The pull request has no merge commit to tag");
+      if (mergedState.state !== "MERGED" || !mergedState.mergeCommit?.oid) throw new DeliveryRefusal("The pull request has no merge commit to tag");
       const fetch = await this.runner({ command: "git", args: ["fetch", "origin", delivery.baseBranch], cwd: delivery.localPath, timeoutMs: 120_000 });
       if (fetch.exitCode !== 0) throw new Error(failureMessage(fetch, "Could not fetch the merged base branch"));
       // A prior attempt may have created the local tag and failed only the
@@ -219,7 +228,7 @@ export class DeliveryService {
       const existingTag = await this.runner({ command: "git", args: ["rev-parse", "-q", "--verify", `refs/tags/${input.tag}^{commit}`], cwd: delivery.localPath, timeoutMs: 30_000 });
       const existingOid = existingTag.exitCode === 0 ? existingTag.stdout.trim() : null;
       if (existingOid && existingOid !== mergedState.mergeCommit.oid) {
-        throw new Error(`A local tag '${input.tag}' already exists on a different commit (${existingOid.slice(0, 12)}); delete or rename it before tagging this release`);
+        throw new DeliveryRefusal(`A local tag '${input.tag}' already exists on a different commit (${existingOid.slice(0, 12)}); delete or rename it before tagging this release`);
       }
       if (!existingOid) {
         const tagResult = await this.runner({ command: "git", args: ["tag", "-a", input.tag!, mergedState.mergeCommit.oid, "-m", `DevHarmonics approved release ${input.tag} (run ${input.runId})`], cwd: delivery.localPath, timeoutMs: 60_000 });

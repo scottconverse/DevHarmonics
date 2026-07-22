@@ -846,6 +846,109 @@ test("workflow provenance cannot be forged at the HTTP boundary and shipped work
   }
 });
 
+test("the delivery HTTP route serializes per repository, types its refusals, and completes end to end", async () => {
+  // Gate findings ENG-1 / TEST-1 / QA-1 / QA-2 (2026-07-22): the route that
+  // fronts irreversible external writes had zero HTTP-level coverage. This
+  // exercises the per-repository concurrency lock (one 200, one 409, lock
+  // released after), typed refusals (409 with the honest reason, not 500),
+  // the complete_delivery composite, and the client-error classification the
+  // whole API now uses.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-delivery-http-"));
+  const project = await createRepository(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.runPolicy.allowExternalWrites = true;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+  const seedLedger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  const runId = seedLedger.createRun("Deliver over HTTP", project);
+  seedLedger.setRunStatus(runId, "running");
+  seedLedger.setRunStatus(runId, "ready", "READY");
+  seedLedger.prepareDeliveryRepository({ runId, repositoryId: "repo:http", localPath: project, baseBranch: "main", baseCommit: "a".repeat(40), headCommit: "b".repeat(40), branch: "devharmonics/http1" });
+  seedLedger.close();
+
+  let prState = "OPEN";
+  let holdFirstPush: (() => void) | null = null;
+  const firstPushHeld = new Promise<void>((resolve) => { holdFirstPush = resolve; });
+  let pushCalls = 0;
+  const runner = async (request: { command: string; args: string[] }) => {
+    const joined = request.args.join(" ");
+    if (request.command === "git" && joined === "remote get-url origin") {
+      return { stdout: "https://github.com/civicsuite/http.git\n", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "git" && request.args[0] === "push" && !joined.includes("refs/tags/")) {
+      pushCalls += 1;
+      if (pushCalls === 1) await firstPushHeld; // hold the lock long enough for the racing request to arrive
+      return { stdout: "", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "create") {
+      return { stdout: "https://github.com/civicsuite/http/pull/9\n", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "view" && joined.includes("state,isDraft,mergeable")) {
+      return { stdout: JSON.stringify({ state: prState, isDraft: true, mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", headRefOid: "b".repeat(40), statusCheckRollup: [] }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "view" && joined.includes("mergeCommit")) {
+      return { stdout: JSON.stringify({ state: "MERGED", mergeCommit: { oid: "c".repeat(40) } }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "merge") prState = "MERGED";
+    if (request.command === "git" && request.args[0] === "rev-parse" && joined.includes("refs/tags/")) {
+      return { stdout: "", stderr: "", exitCode: 1, durationMs: 1, timedOut: false };
+    }
+    return { stdout: "", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+  };
+
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false, deliveryRunner: runner as never });
+  try {
+    const deliver = (body: Record<string, unknown>) => fetch(`${dashboard.url}/api/runs/${runId}/delivery`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repositoryId: "repo:http", expectedHeadCommit: "b".repeat(40), ...body }),
+    });
+
+    // Client-error classification (QA-1/QA-2): a JSON `null` body is a 400,
+    // not a TypeError-500; a wrong content type is a 400; a wrong method on a
+    // real collection path is a 405.
+    const nullBody = await fetch(`${dashboard.url}/api/objectives`, { method: "POST", headers: { "content-type": "application/json" }, body: "null" });
+    assert.equal(nullBody.status, 400, "a JSON null body is a client error");
+    const wrongType = await fetch(`${dashboard.url}/api/objectives`, { method: "POST", headers: { "content-type": "text/plain" }, body: "{}" });
+    assert.equal(wrongType.status, 400, "a wrong content type is a client error");
+    const noGoal = await fetch(`${dashboard.url}/api/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    assert.equal(noGoal.status, 400, "a run without a goal is a client error");
+    const wrongMethod = await fetch(`${dashboard.url}/api/objectives`, { method: "DELETE" });
+    assert.equal(wrongMethod.status, 405, "a wrong method on a known path is 405, not 404");
+
+    // A refusal grounded in delivery state is a typed 409 with the honest
+    // reason (ENG-1) — merging before the draft PR exists.
+    const premature = await deliver({ action: "merge_pr" });
+    assert.equal(premature.status, 409, "an out-of-order merge is a conflict, not a server fault");
+    assert.match(((await premature.json()) as { error: string }).error, /draft pull request first/i);
+
+    // Concurrency lock (TEST-1): two racing pushes — exactly one enters, the
+    // other is refused 409, and the lock releases after settlement.
+    const raceA = deliver({ action: "push_branch" });
+    await delay(150); // let the first request take the lock and block in the held runner
+    const raceB = await deliver({ action: "push_branch" });
+    assert.equal(raceB.status, 409, "an overlapping delivery operation on the same repository is refused");
+    assert.match(((await raceB.json()) as { error: string }).error, /already in progress/i);
+    holdFirstPush!();
+    assert.equal((await raceA).status, 200, "the first request completes normally");
+    const afterRelease = await deliver({ action: "push_branch" });
+    assert.equal(afterRelease.status, 200, "the lock releases after the operation settles (idempotent reconcile)");
+
+    // The composite completes the rest under one approval id.
+    const complete = await deliver({ action: "complete_delivery", tag: "v9.9.9" });
+    assert.equal(complete.status, 200, JSON.stringify(await complete.clone().json()));
+    const completed = (await complete.json()) as { delivery: { status: string; releaseTag: string | null }; completedSteps: string[]; approvalId: string };
+    assert.equal(completed.delivery.status, "tagged");
+    assert.equal(completed.delivery.releaseTag, "v9.9.9");
+    assert.deepEqual(completed.completedSteps, ["push_branch", "create_draft_pr", "merge_pr", "tag_release"]);
+    assert.ok(completed.approvalId, "the composite carries its single approval id");
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("run provenance pins before execution and survives pause and resume", async () => {
   // Audit DH810-AUD-001/002 at the orchestrator: an unknown pin refuses
   // BEFORE any run row exists, a valid pin is recorded at run creation, and a
@@ -1009,7 +1112,9 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ version: 2 }),
     });
-    assert.equal(invalidConfigResponse.status, 500);
+    // Gate finding QA-2 (2026-07-22): a config document the schema refuses is
+    // a CLIENT fault — 400, not the 500 this test previously accepted.
+    assert.equal(invalidConfigResponse.status, 400);
     assert.match(await invalidConfigResponse.text(), /application/);
     const connectionsResponse = await fetch(`${dashboard.url}/api/connections`);
     const connectionsValue = (await connectionsResponse.json()) as {

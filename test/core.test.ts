@@ -2488,7 +2488,29 @@ test("claims-lens reviews route only to adapters that can structurally deny tool
   assert.equal(providersModule.providerSupportsToolDenial("claude", "subscription_cli", { attestedNoManagedPolicy: false, managedPolicyDetected: false }), false, "no attestation, no capability — the default fails closed");
   assert.equal(providersModule.providerSupportsToolDenial("claude", "subscription_cli", { attestedNoManagedPolicy: true, managedPolicyDetected: true }), false, "client-visible policy overrides the attestation");
   assert.equal(providersModule.providerSupportsToolDenial("claude", "subscription_cli"), false, "the bare default is unattested and closed");
-  assert.equal(typeof providersModule.claudeManagedPolicyPresent, "function", "client-visible detection is a real filesystem/registry check");
+
+  // Codex R6-001: "could not check" is not a clear detection pass. The
+  // detector takes injectable probes; every result other than a definite
+  // absence fails closed, for files, drop-ins, and registry hives alike.
+  const absent = () => "absent" as const;
+  assert.equal(providersModule.claudeManagedPolicyPresent(absent, absent), false, "definite absence everywhere is the only clear pass");
+  assert.equal(providersModule.claudeManagedPolicyPresent(absent, () => "found"), true, "a policy file hit detects");
+  assert.equal(providersModule.claudeManagedPolicyPresent(absent, () => "inconclusive"), true, "an unreadable policy location is not a clear pass");
+  if (process.platform === "win32") {
+    assert.equal(providersModule.claudeManagedPolicyPresent(() => "found", absent), true, "a registry hit detects");
+    assert.equal(providersModule.claudeManagedPolicyPresent(() => "inconclusive", absent), true, "a failed or timed-out registry probe is not a clear pass");
+    const probed: string[] = [];
+    providersModule.claudeManagedPolicyPresent((keyPath: string) => { probed.push(keyPath); return "absent"; }, absent);
+    assert.deepEqual(probed, ["HKLM\\SOFTWARE\\Policies\\ClaudeCode", "HKCU\\SOFTWARE\\Policies\\ClaudeCode"], "both hives are checked");
+    const roots: string[] = [];
+    providersModule.claudeManagedPolicyPresent(absent, (candidate: string) => { roots.push(candidate); return "absent"; });
+    assert.deepEqual(roots, [
+      "C:\\Program Files\\ClaudeCode\\managed-settings.json",
+      "C:\\Program Files\\ClaudeCode\\managed-settings.d",
+      "C:\\ProgramData\\ClaudeCode\\managed-settings.json",
+      "C:\\ProgramData\\ClaudeCode\\managed-settings.d",
+    ], "current and legacy base files plus drop-in roots are all checked");
+  }
 });
 
 test("the assembled claims-lens chunk prompt demands the manifest the header promised", async () => {

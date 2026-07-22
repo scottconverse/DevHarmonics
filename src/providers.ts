@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import type {
@@ -285,28 +285,52 @@ abstract class CliProvider implements ProviderAdapter {
  * exactly why the capability additionally requires the owner's explicit
  * configuration attestation (Codex R5-001).
  */
-function clientVisibleClaudePolicyDetected(): boolean {
+export type PolicyProbeResult = "found" | "absent" | "inconclusive";
+
+/** A probe that cannot produce a trustworthy answer is NOT a clear pass (Codex R6-001). */
+function defaultRegistryProbe(keyPath: string): PolicyProbeResult {
+  const probe = spawnSync("reg", ["query", keyPath], { stdio: "ignore", timeout: 5_000 });
+  if (probe.error || probe.status === null) return "inconclusive";
+  // reg exits 0 when the key exists and 1 when it does not; anything else is
+  // an error, and "could not check" must fail closed.
+  if (probe.status === 0) return "found";
+  return probe.status === 1 ? "absent" : "inconclusive";
+}
+
+/** Only a definite does-not-exist counts as absent; permission and I/O errors fail closed. */
+function pathProbe(candidate: string, expectJsonEntries: boolean): PolicyProbeResult {
+  try {
+    statSync(candidate);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "inconclusive";
+  }
+  if (!expectJsonEntries) return "found";
+  try {
+    return readdirSync(candidate).some((entry) => entry.endsWith(".json")) ? "found" : "absent";
+  } catch {
+    return "inconclusive";
+  }
+}
+
+export function claudeManagedPolicyPresent(
+  registryProbe: (keyPath: string) => PolicyProbeResult = defaultRegistryProbe,
+  fileProbe: (candidate: string, expectJsonEntries: boolean) => PolicyProbeResult = pathProbe,
+): boolean {
   const roots = process.platform === "win32"
     ? ["C:\\Program Files\\ClaudeCode", "C:\\ProgramData\\ClaudeCode"]
     : process.platform === "darwin"
       ? ["/Library/Application Support/ClaudeCode"]
       : ["/etc/claude-code"];
   for (const root of roots) {
-    if (existsSync(join(root, "managed-settings.json"))) return true;
-    const dropIns = join(root, "managed-settings.d");
-    if (existsSync(dropIns) && readdirSync(dropIns).some((entry) => entry.endsWith(".json"))) return true;
+    if (fileProbe(join(root, "managed-settings.json"), false) !== "absent") return true;
+    if (fileProbe(join(root, "managed-settings.d"), true) !== "absent") return true;
   }
   if (process.platform === "win32") {
     for (const hive of ["HKLM", "HKCU"]) {
-      const probe = spawnSync("reg", ["query", `${hive}\\SOFTWARE\\Policies\\ClaudeCode`], { stdio: "ignore", timeout: 5_000 });
-      if (probe.status === 0) return true;
+      if (registryProbe(`${hive}\\SOFTWARE\\Policies\\ClaudeCode`) !== "absent") return true;
     }
   }
   return false;
-}
-
-export function claudeManagedPolicyPresent(): boolean {
-  return clientVisibleClaudePolicyDetected();
 }
 
 /**

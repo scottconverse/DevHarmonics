@@ -2946,6 +2946,41 @@ test("the Evidence page never claims a never-reviewed run passed review", async 
   assert.match(historicalGuidance, /Treat the READY as historical/, "the historical wording tells the owner what to do");
 });
 
+test("declining a tag mismatch records a CANCELLED operation — never succeeded, never failed", async () => {
+  // MINOR gate finding (2026-07-22), ROUND2-001: declining the version-mismatch
+  // override returns a cancellation SENTINEL from the delivery action, and
+  // withOperation must map that sentinel to a distinct "cancelled" end state so
+  // the activity strip reports honest "you declined" copy instead of "done".
+  // Drive the REAL shipped cancelledOperation + classifyOperationOutcome
+  // extracted from src/ui/app.js — the exact pure seam withOperation calls — so
+  // a future refactor that restores the false-success path fails HERE.
+  const appSource = readFileSync(path.join(process.cwd(), "src", "ui", "app.js"), "utf8");
+  const start = appSource.indexOf("const OPERATION_CANCELLED = Symbol");
+  const end = appSource.indexOf("\nfunction beginOperation(");
+  assert.ok(start >= 0 && end > start, "the operation-outcome seam must be extractable from app.js");
+  const helpers = new Function(
+    `${appSource.slice(start, end)}; return { OPERATION_CANCELLED, cancelledOperation, classifyOperationOutcome };`,
+  )() as {
+    OPERATION_CANCELLED: symbol;
+    cancelledOperation: (detail?: string) => Record<PropertyKey, unknown>;
+    classifyOperationOutcome: (result: unknown) => { status: string; detail: string };
+  };
+
+  // The decline branch's actual return value: cancelledOperation(reason).
+  const declined = helpers.cancelledOperation("Tag not applied — you declined tagging v1.0.0 over the declared 2.0.0.");
+  const cancelled = helpers.classifyOperationOutcome(declined);
+  assert.equal(cancelled.status, "cancelled", "a returned cancellation sentinel ends the operation as cancelled");
+  assert.notEqual(cancelled.status, "succeeded", "a declined mismatch is NEVER recorded as a success");
+  assert.notEqual(cancelled.status, "failed", "a declined mismatch is NEVER recorded as a failure (nothing broke)");
+  assert.equal(cancelled.detail, "Tag not applied — you declined tagging v1.0.0 over the declared 2.0.0.", "the decline reason rides through to the strip");
+
+  // Every ORDINARY resolved value is a plain success — the sentinel is the only
+  // thing that diverts to cancelled.
+  assert.equal(helpers.classifyOperationOutcome({ ok: true }).status, "succeeded", "a normal resolved value is a success");
+  assert.equal(helpers.classifyOperationOutcome(undefined).status, "succeeded", "an absent return value is a success");
+  assert.equal(helpers.classifyOperationOutcome(null).status, "succeeded", "a null return value is a success");
+});
+
 test("migration 30's delivery-table rebuild preserves row data from a physical schema-29 database", async () => {
   // Gate finding ENG-3 (2026-07-22): the CHECK-widening RENAME/rebuild in
   // migration 30 had no test proving a delivery row's VALUES survive it.

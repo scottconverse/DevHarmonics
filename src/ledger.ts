@@ -3520,6 +3520,21 @@ export class Ledger {
     }
   }
 
+  /** Per-invocation billing evidence for one run, in insertion order. */
+  listInvocationReceipts(runId: string): Array<{ role: string; provider: string; resolvedModelId: string | null; inputTokens: number | null; outputTokens: number | null; costUsd: number | null }> {
+    const rows = this.database.prepare(
+      "SELECT role, provider, resolved_model_id, input_tokens, output_tokens, cost_usd FROM invocation_receipts WHERE run_id = ? ORDER BY id",
+    ).all(runId) as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      role: String(row.role),
+      provider: String(row.provider),
+      resolvedModelId: row.resolved_model_id === null ? null : String(row.resolved_model_id),
+      inputTokens: row.input_tokens === null ? null : Number(row.input_tokens),
+      outputTokens: row.output_tokens === null ? null : Number(row.output_tokens),
+      costUsd: row.cost_usd === null ? null : Number(row.cost_usd),
+    }));
+  }
+
   listReviewReceipts(runId: string): ReviewReceiptRecord[] {
     const reviews = this.database.prepare(
       "SELECT * FROM review_receipts WHERE run_id = ? ORDER BY round, id",

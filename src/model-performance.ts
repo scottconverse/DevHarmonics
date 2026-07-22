@@ -44,6 +44,78 @@ export interface ModelPerformanceProfile extends ModelPerformanceSlice {
   workloads: Record<string, ModelPerformanceSlice>;
 }
 
+export interface CounterfactualComparisonModel {
+  modelId: string;
+  displayName: string;
+  promptPriceUsdPerMTokens: number;
+  completionPriceUsdPerMTokens: number;
+}
+
+export interface CounterfactualReceipt {
+  role: string;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: number | null;
+}
+
+export interface RunCostCounterfactual {
+  /** Always true: the counterfactual is a catalog-price projection, never a bill. */
+  estimate: true;
+  actualUsd: number;
+  counterfactualUsd: number;
+  byRole: Array<{ role: string; actualUsd: number; counterfactualUsd: number; comparisonModelId: string; comparisonDisplayName: string }>;
+  /** Roles with receipts but no priced comparison model — excluded, never invented. */
+  excludedRoles: string[];
+}
+
+function roundUsd(value: number): number {
+  return Math.round(value * 10_000) / 10_000;
+}
+
+/**
+ * DH-650: what this run actually cost beside what the same token volume would
+ * have cost on the priciest qualified candidate per role — the stratification
+ * saving made visible. Honest-absent: a role without a priced comparator or a
+ * receipt without token counts cannot be projected; when nothing at all can
+ * be projected the answer is null, not zero.
+ */
+export function runCostCounterfactual(input: {
+  receipts: ReadonlyArray<CounterfactualReceipt>;
+  priciestByRole: Readonly<Record<string, CounterfactualComparisonModel | undefined>>;
+}): RunCostCounterfactual | null {
+  const byRole = new Map<string, CounterfactualReceipt[]>();
+  for (const receipt of input.receipts) {
+    byRole.set(receipt.role, [...(byRole.get(receipt.role) ?? []), receipt]);
+  }
+  const entries: RunCostCounterfactual["byRole"] = [];
+  const excludedRoles: string[] = [];
+  for (const [role, receipts] of byRole) {
+    const comparison = input.priciestByRole[role];
+    const projectable = receipts.filter((receipt) => receipt.inputTokens !== null && receipt.outputTokens !== null);
+    if (!comparison || !projectable.length) {
+      excludedRoles.push(role);
+      continue;
+    }
+    const inputTokens = projectable.reduce((sum, receipt) => sum + receipt.inputTokens!, 0);
+    const outputTokens = projectable.reduce((sum, receipt) => sum + receipt.outputTokens!, 0);
+    entries.push({
+      role,
+      actualUsd: roundUsd(receipts.reduce((sum, receipt) => sum + (receipt.costUsd ?? 0), 0)),
+      counterfactualUsd: roundUsd(inputTokens * comparison.promptPriceUsdPerMTokens / 1_000_000 + outputTokens * comparison.completionPriceUsdPerMTokens / 1_000_000),
+      comparisonModelId: comparison.modelId,
+      comparisonDisplayName: comparison.displayName,
+    });
+  }
+  if (!entries.length) return null;
+  return {
+    estimate: true,
+    actualUsd: roundUsd(input.receipts.reduce((sum, receipt) => sum + (receipt.costUsd ?? 0), 0)),
+    counterfactualUsd: roundUsd(entries.reduce((sum, entry) => sum + entry.counterfactualUsd, 0)),
+    byRole: entries.sort((left, right) => left.role.localeCompare(right.role)),
+    excludedRoles: excludedRoles.sort(),
+  };
+}
+
 export function aggregateModelPerformance(
   observations: ReadonlyArray<ModelPerformanceObservation>,
 ): ModelPerformanceProfile[] {

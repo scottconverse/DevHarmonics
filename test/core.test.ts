@@ -2196,6 +2196,15 @@ test("claims/artifact divergence is a deterministic fail-closed finding", async 
   });
   assert.equal(manifestLess.passed, false, "a claims-lens review without a manifest cannot support a pass");
   assert.match(manifestLess.reasons.join(" "), /manifest/i);
+
+  // Observe runs have no artifact, so the manifest requirement is waived there.
+  const observeWaived = reviewModule.adjudicateReviewQuorum({
+    requirement: { ...requirement, requiredLenses: ["claims"], requiredReviewers: 1, minimumDistinctProviders: 1 },
+    implementationProviders: [],
+    reviews: [noManifest],
+    expectClaimsManifest: false,
+  });
+  assert.equal(observeWaived.passed, true, "an observe review is not failed for a manifest it was never asked for");
 });
 
 test("adaptive routing prefers the cheapest candidate at established empirical parity", async () => {
@@ -2230,6 +2239,38 @@ test("adaptive routing prefers the cheapest candidate at established empirical p
   // A diversity-boosted top is not displaced by a same-provider bargain.
   const diverseTop = { ...premium, breakdown: { ...guards, providerDiversity: 8 } };
   assert.equal(routingModule.preferCheapestAtParity([diverseTop, budget]), null);
+});
+
+test("per-run cost counterfactual is an estimate from receipts, honest-absent without prices", async () => {
+  const performanceModule = await import("../src/model-performance.js") as Record<string, any>;
+  assert.equal(typeof performanceModule.runCostCounterfactual, "function", "DH-650 requires the cost counterfactual");
+
+  const receipts = [
+    { role: "worker", inputTokens: 100_000, outputTokens: 20_000, costUsd: 0.5 },
+    { role: "worker", inputTokens: 50_000, outputTokens: 10_000, costUsd: 0.25 },
+    { role: "reviewer", inputTokens: 30_000, outputTokens: 5_000, costUsd: 0.6 },
+  ];
+  const priciest = {
+    worker: { modelId: "premium-w", displayName: "Premium W", promptPriceUsdPerMTokens: 15, completionPriceUsdPerMTokens: 75 },
+    reviewer: { modelId: "premium-r", displayName: "Premium R", promptPriceUsdPerMTokens: 10, completionPriceUsdPerMTokens: 40 },
+  };
+  const result = performanceModule.runCostCounterfactual({ receipts, priciestByRole: priciest });
+  assert.equal(result.actualUsd, 1.35);
+  assert.equal(result.counterfactualUsd, 5);
+  assert.equal(result.byRole.find((entry: any) => entry.role === "worker").comparisonModelId, "premium-w");
+  assert.equal(result.estimate, true, "the counterfactual is labeled an estimate");
+  assert.deepEqual(result.excludedRoles, []);
+
+  const partial = performanceModule.runCostCounterfactual({ receipts, priciestByRole: { worker: priciest.worker } });
+  assert.deepEqual(partial.excludedRoles, ["reviewer"], "a role without a priced comparator is named, not invented");
+  assert.equal(partial.counterfactualUsd, 4.5);
+
+  assert.equal(performanceModule.runCostCounterfactual({ receipts, priciestByRole: {} }), null, "nothing computable shows nothing, not zero");
+  assert.equal(
+    performanceModule.runCostCounterfactual({ receipts: [{ role: "worker", inputTokens: null, outputTokens: null, costUsd: 0.2 }], priciestByRole: priciest }),
+    null,
+    "receipts without token counts cannot be projected",
+  );
 });
 
 test("verification-integrity gate fails closed on test weakening and reports bounded evidence", async () => {

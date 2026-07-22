@@ -234,6 +234,11 @@ export function adjudicateReviewQuorum(input: {
   reviews: readonly StructuredReview[];
   /** Deterministic claims/artifact divergence findings; they block the quorum like any open finding. */
   divergence?: readonly ReviewFinding[];
+  /**
+   * False for observe runs: there is no artifact, so a claims-lens review is
+   * not required to return a claimed-changes manifest. Defaults to true.
+   */
+  expectClaimsManifest?: boolean;
 }): ReviewQuorumDecision {
   const providers = new Set(input.reviews.map((review) => review.provider));
   const implementors = new Set(input.implementationProviders);
@@ -257,7 +262,7 @@ export function adjudicateReviewQuorum(input: {
   if (divergenceFindings.length) {
     reasons.push(`Claims/artifact divergence: ${divergenceFindings.length} deterministic finding${divergenceFindings.length === 1 ? "" : "s"}.`);
   }
-  if (input.reviews.some((review) => review.lens === "claims" && review.claimedChanges === null)) {
+  if ((input.expectClaimsManifest ?? true) && input.reviews.some((review) => review.lens === "claims" && review.claimedChanges === null)) {
     reasons.push("A claims-lens review returned no claimed-changes manifest; the divergence check could not run.");
   }
   if (input.reviews.length < input.requirement.requiredReviewers) {

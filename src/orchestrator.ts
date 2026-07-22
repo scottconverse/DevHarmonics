@@ -1015,7 +1015,7 @@ export class Orchestrator {
     if (firstRoundDivergence.length) {
       this.ledger.addEvent(runId, "review.divergence", `${firstRoundDivergence.length} claims/artifact divergence finding${firstRoundDivergence.length === 1 ? "" : "s"} — the reports and the integrated diff disagree`, { findings: firstRoundDivergence });
     }
-    let finalQuorum = adjudicateReviewQuorum({ requirement: reviewPolicy, implementationProviders, reviews: structuredReviews, divergence: firstRoundDivergence });
+    let finalQuorum = adjudicateReviewQuorum({ requirement: reviewPolicy, implementationProviders, reviews: structuredReviews, divergence: firstRoundDivergence, expectClaimsManifest: autonomy !== "observe" });
     let finalReviews = structuredReviews;
     let finalReviewSha256 = integrationReviewSha256;
     for (let fixRound = 1; !finalQuorum.passed && finalQuorum.openFindings.length && autonomy !== "observe" && fixRound <= config.reviewPolicy.maxFixRounds; fixRound++) {
@@ -1745,7 +1745,7 @@ export class Orchestrator {
     }
     return {
       reviews,
-      decision: adjudicateReviewQuorum({ requirement, implementationProviders: input.implementationProviders, reviews, divergence }),
+      decision: adjudicateReviewQuorum({ requirement, implementationProviders: input.implementationProviders, reviews, divergence, expectClaimsManifest: input.autonomy !== "observe" }),
     };
   }
 

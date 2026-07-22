@@ -93,6 +93,12 @@ if (process.argv.includes("--version")) {
       }
     : {summary:"fixture plan",recommendedConcurrency:1,tasks:[task]};
   console.log(JSON.stringify({result:JSON.stringify(plan)}));
+} else if (input.includes("You are the claims-lens reviewer")) {
+  const manifest = JSON.stringify({findings:[],claimedChanges:[{path:"result.txt",kind:"created",taskId:"one"}]});
+  const review = "READY\\n\\nThe reports claim one created file and the claims cohere with the receipts.\\n" + manifest;
+  if (process.argv.includes("--json")) console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:review}}));
+  else if (process.argv.includes("--output-format")) console.log(JSON.stringify({result:review}));
+  else console.log(review);
 } else if (input.includes("You are reviewing bounded") || (args.includes("--new-project") && process.cwd().includes("integration"))) {
   const review = input.includes("repo:core/needs-fix.txt")
     ? "NOT READY\\n\\nA retained defect marker remains.\\n" + JSON.stringify({findings:[{id:"remove-core-defect-marker",severity:"high",location:"repo:core/needs-fix.txt:1",rationale:"The core repository still contains the defect marker.",suggestedCorrection:"Remove needs-fix.txt and create the corrected result.txt in repo:core.",disposition:"open"}]})

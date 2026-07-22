@@ -390,6 +390,17 @@ export function catalogUnitCost(model: ModelRecord): number | null {
   return prompt === null || completion === null ? null : prompt + completion;
 }
 
+/**
+ * Catalog prices in USD per million tokens, from the same metadata fields
+ * catalogUnitCost reads — one grammar for every consumer of catalog pricing.
+ */
+export function catalogPricesPerMTokens(model: ModelRecord): { promptPriceUsdPerMTokens: number; completionPriceUsdPerMTokens: number } | null {
+  const prompt = numericMetadata(model.metadata.promptPrice);
+  const completion = numericMetadata(model.metadata.completionPrice);
+  if (prompt === null || completion === null) return null;
+  return { promptPriceUsdPerMTokens: prompt * 1_000_000, completionPriceUsdPerMTokens: completion * 1_000_000 };
+}
+
 function numericMetadata(value: unknown): number | null {
   const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : Number.NaN;
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;

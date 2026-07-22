@@ -103,11 +103,20 @@ Review only the supplied evidence against the stated goal and acceptance criteri
   }
 
   const ready = receipts.every((receipt) => receipt.verdict === "READY");
-  const findings = receipts.flatMap((receipt) => parseReviewerResponse(receipt.response, {
+  const parsedResponses = receipts.map((receipt) => parseReviewerResponse(receipt.response, {
     provider: receipt.provider,
     modelId: receipt.resolvedModelId,
     connectionId: receipt.connectionId,
-  }).findings);
+  }));
+  const findings = parsedResponses.flatMap((parsed) => parsed.findings);
+  // The synthesized response must carry every field the chunks supplied in the
+  // shared review grammar. Rebuilding the JSON with findings alone silently
+  // discarded the claims lens's claimedChanges manifest — the exact
+  // gate-and-verifier-drift class DH-470 records.
+  const manifests = parsedResponses.map((parsed) => parsed.claimedChanges).filter((manifest) => manifest !== null);
+  const claimedChanges = manifests.length
+    ? [...new Map(manifests.flat().map((claim) => [`${claim.path}|${claim.kind}|${claim.taskId ?? ""}`, claim])).values()]
+    : null;
   const evidence = receipts.map((receipt) => {
     const detail = receipt.response
       .replace(/^(?:READY|NOT READY)\b[:\s-]*/i, "")
@@ -129,7 +138,7 @@ Material risks: ${ready ? "see the accepted chunk evidence; READY means the evid
 Required follow-up: ${ready ? "review and prioritize any risks documented in the accepted evidence" : "inspect the NOT READY chunk receipts before integration"}.
 
 \`\`\`json
-${JSON.stringify({ findings })}
+${JSON.stringify(claimedChanges === null ? { findings } : { findings, claimedChanges })}
 \`\`\``,
     receipts,
   };

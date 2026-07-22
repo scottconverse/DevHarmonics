@@ -935,14 +935,29 @@ test("the delivery HTTP route serializes per repository, types its refusals, and
     const afterRelease = await deliver({ action: "push_branch" });
     assert.equal(afterRelease.status, 200, "the lock releases after the operation settles (idempotent reconcile)");
 
-    // The composite completes the rest under one approval id.
-    const complete = await deliver({ action: "complete_delivery", tag: "v9.9.9" });
+    // The composite completes the rest under one approval id (no tag yet —
+    // the tag-truth gate is probed explicitly below).
+    const complete = await deliver({ action: "complete_delivery" });
     assert.equal(complete.status, 200, JSON.stringify(await complete.clone().json()));
-    const completed = (await complete.json()) as { delivery: { status: string; releaseTag: string | null }; completedSteps: string[]; approvalId: string };
-    assert.equal(completed.delivery.status, "tagged");
-    assert.equal(completed.delivery.releaseTag, "v9.9.9");
-    assert.deepEqual(completed.completedSteps, ["push_branch", "create_draft_pr", "merge_pr", "tag_release"]);
+    const completed = (await complete.json()) as { delivery: { status: string }; completedSteps: string[]; approvalId: string };
+    assert.equal(completed.delivery.status, "merged");
+    assert.deepEqual(completed.completedSteps, ["push_branch", "create_draft_pr", "merge_pr"]);
     assert.ok(completed.approvalId, "the composite carries its single approval id");
+
+    // Tag-truth gate (owner-requested, 2026-07-22): the repository declares
+    // 9.9.9 about itself; a contradicting tag refuses with BOTH values, and
+    // only an explicit owner confirmation mints it anyway.
+    await writeFile(path.join(project, "package.json"), JSON.stringify({ name: "fixture", version: "9.9.9" }), "utf8");
+    const contradicted = await deliver({ action: "tag_release", tag: "v1.0.0" });
+    assert.equal(contradicted.status, 409, "a tag the repository contradicts refuses");
+    const contradictedBody = (await contradicted.json()) as { error: string; versionMismatch?: { declaredVersion: string; requestedTag: string } };
+    assert.match(contradictedBody.error, /declare version 9\.9\.9/);
+    assert.deepEqual(contradictedBody.versionMismatch, { declaredVersion: "9.9.9", requestedTag: "v1.0.0" }, "the refusal carries both values so the cockpit can show the evidence");
+    // A MATCHING tag passes without any confirmation ("v" prefix is
+    // presentation, not identity).
+    const agreed = await deliver({ action: "tag_release", tag: "v9.9.9" });
+    assert.equal(agreed.status, 200, JSON.stringify(await agreed.clone().json()));
+    assert.equal(((await agreed.json()) as { delivery: { status: string; releaseTag: string | null } }).delivery.releaseTag, "v9.9.9");
   } finally {
     await dashboard.close();
     await rm(root, { recursive: true, force: true });

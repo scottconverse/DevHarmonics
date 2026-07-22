@@ -746,14 +746,87 @@ async function refreshEvidence() {
   $("#evidence-empty").classList.add("hidden");
   $("#evidence-content").classList.remove("hidden");
   $("#evidence-metrics").innerHTML = `<div class="metric"><span>Tasks</span><strong>${report.counts.tasks}</strong></div><div class="metric"><span>Attempts</span><strong>${report.counts.attempts}</strong></div><div class="metric"><span>Checks</span><strong>${report.counts.checks}</strong></div><div class="metric"><span>Reviews</span><strong>${report.counts.reviews}</strong></div><div class="metric"><span>Tool decisions</span><strong>${report.counts.toolReceipts}</strong></div>`;
-  const reportIssues = [...report.missingEvidence.map((item) => `Missing: ${item}`), ...report.inconsistencies];
-  $("#evidence-verdict").innerHTML = `<div><span class="connection-kind">DERIVED VERDICT</span><h3>${escapeHtml(report.verdict.replaceAll("_", " "))}</h3><p>${escapeHtml(report.summary)}</p></div><span class="status-pill report-${escapeHtml(report.verdict.toLowerCase())}">${escapeHtml(report.verdict.replaceAll("_", " "))}</span>${reportIssues.length ? `<ul>${reportIssues.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : '<p class="report-consistent">No missing or contradictory retained evidence detected.</p>'}`;
+  $("#evidence-verdict").innerHTML = derivedVerdictMarkup(report);
   $("#evidence-hash").textContent = evidence.integritySha256;
   $("#evidence-review-count").textContent = `${evidence.reviews.length} retained`;
   $("#evidence-reviews").innerHTML = evidence.reviews.length ? evidence.reviews.map((review) => `<article><div><strong>Round ${review.round} · ${escapeHtml(providerDisplayName(review.provider))}</strong><span>${escapeHtml(review.provider === "gemini" ? `${modelDisplayName(review.modelId)} requested (actual model unverified)` : review.modelId || "provider default")} · integration ${escapeHtml(review.integrationSha256.slice(0, 12))}</span></div><span class="lifecycle ${review.invalidatedAt ? "retired" : review.verdict === "READY" ? "qualified" : "degraded"}">${review.invalidatedAt ? "invalidated" : escapeHtml(review.verdict.replaceAll("_", " "))}</span><p class="evidence-report">${escapeHtml(review.summary)}${review.findings.length ? `\n${review.findings.map((finding) => `${finding.severity.toUpperCase()} ${finding.location || "no location"}: ${finding.rationale} [${finding.disposition}]`).join("\n")}` : ""}${review.invalidationReason ? `\nInvalidated: ${escapeHtml(review.invalidationReason)}` : ""}</p></article>`).join("") : '<div class="empty-state">No structured review receipts were retained for this run.</div>';
   $("#evidence-attempts").innerHTML = evidence.attempts.length ? evidence.attempts.map((attempt) => `<article><div><strong>${escapeHtml(attempt.task_id)}</strong><span>${escapeHtml(recordedModelIdentity(attempt.provider, attempt.model_id, attempt.model_resolution, attempt.connection_id))}</span></div><span class="lifecycle ${attempt.status === "completed" ? "qualified" : ""}">${escapeHtml(attempt.status)}</span><details class="evidence-report"><summary>View normalized report</summary><p>${escapeHtml(attempt.result_envelope?.summary || attempt.error || "No normalized summary")}</p></details></article>`).join("") : '<div class="empty-state">No attempts were started.</div>';
   $("#evidence-tool-count").textContent = `${evidence.toolReceipts.length} retained`;
   $("#evidence-tools").innerHTML = evidence.toolReceipts.length ? evidence.toolReceipts.map((receipt) => `<article><div><strong>${escapeHtml(receipt.toolId)}</strong><span>${escapeHtml(receipt.actorRole)} · ${escapeHtml(receipt.stage)} · ${escapeHtml(receipt.sideEffect)}</span></div><span class="lifecycle ${receipt.outcome === "allow" ? "qualified" : receipt.outcome === "deny" ? "retired" : "degraded"}">${escapeHtml(receipt.outcome.replaceAll("_", " "))}</span><p class="evidence-report">${escapeHtml(receipt.reason)}${receipt.lockKeys.length ? `\nLocks: ${escapeHtml(receipt.lockKeys.join(", "))}` : ""}</p></article>`).join("") : '<div class="empty-state">No tool policy decisions were retained for this run.</div>';
+}
+
+// Owner-reported (2026-07-22): the derived verdict rendered the entire review
+// as one collapsed paragraph — an unreadable wall — with the verdict's actual
+// REASONS below it and no answer to "now what do I do?". This block leads with
+// the verdict, what it means, and the reasons; the review body becomes a
+// scannable per-target list; the full text stays one click away.
+function evidenceInline(text) {
+  // Escape first, then allow exactly two safe inline forms from the
+  // reviewer's markdown habits: **bold** and `code`.
+  return escapeHtml(text)
+    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/`([^`\n]+)`/g, "<code>$1</code>");
+}
+
+function verdictGuidance(report, issueCount) {
+  if (report.verdict === "READY") return "The run is reviewed and its retained evidence is internally consistent. Deliver when you are ready.";
+  if (report.verdict === "NOT_READY") return "The review or the run itself did not pass. Open the review findings below — they name what must change.";
+  return issueCount
+    ? "The review passed at the time it ran, but the retained evidence no longer lines up — the reasons are listed below. This commonly happens when the repository moved after review (for example, the delivery was merged). Treat the READY as historical; re-run the review if you need a current verdict."
+    : "The run has not reached a reviewed state yet, so no verdict can be derived. Let the run finish, or open the run board to see what it is waiting on.";
+}
+
+function parseReviewTargets(summary) {
+  // The reporter's own grammar: per-target bullets of the form
+  // "- <target>: READY — <evidence...>". Everything before the first bullet is
+  // the header (integration set, quorum, reviewers); anything after the last
+  // bullet's evidence is the footer.
+  // Targets may themselves contain colons (github:owner/repo/path) — the
+  // reliable anchor is the ": VERDICT — " token, so the target match is lazy.
+  const pattern = /- (\S.*?): (READY|NOT[ _]READY|INCONCLUSIVE) — /g;
+  const matches = [...summary.matchAll(pattern)];
+  if (!matches.length) return null;
+  const header = summary.slice(0, matches[0].index).replace(/\s*Evidence:\s*$/, "").trim();
+  const targets = matches.map((match, index) => {
+    const bodyStart = match.index + match[0].length;
+    const bodyEnd = index + 1 < matches.length ? matches[index + 1].index : summary.length;
+    return { target: match[1].trim(), verdict: match[2].replace(" ", "_"), body: summary.slice(bodyStart, bodyEnd).trim() };
+  });
+  // A trailing reporter note (e.g. "Material risks: ...") rides inside the
+  // last body; split it out when present so it reads as the footer it is.
+  let footer = "";
+  const last = targets[targets.length - 1];
+  const footerIndex = last.body.search(/(?:^|\n)\s*Material risks:/);
+  if (footerIndex >= 0) {
+    footer = last.body.slice(footerIndex).trim();
+    last.body = last.body.slice(0, footerIndex).trim();
+  }
+  return { header, targets, footer };
+}
+
+function derivedVerdictMarkup(report) {
+  const reportIssues = [...report.missingEvidence.map((item) => `Missing: ${item}`), ...report.inconsistencies];
+  const verdictLabel = escapeHtml(report.verdict.replaceAll("_", " "));
+  const headline = `<div><span class="connection-kind">DERIVED VERDICT</span><h3>${verdictLabel}</h3><p>${escapeHtml(verdictGuidance(report, reportIssues.length))}</p></div>
+    <span class="status-pill report-${escapeHtml(report.verdict.toLowerCase())}">${verdictLabel}</span>
+    ${reportIssues.length ? `<ul class="verdict-reasons">${reportIssues.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : '<p class="report-consistent">No missing or contradictory retained evidence detected.</p>'}`;
+  const parsed = parseReviewTargets(report.summary || "");
+  if (!parsed) {
+    return `${headline}<details class="review-full"><summary>Full review text</summary><p class="review-body">${evidenceInline(report.summary || "No final review has been retained.")}</p></details>`;
+  }
+  const targetRows = parsed.targets.map((item) => `
+    <details class="review-target">
+      <summary><span class="status-pill report-${escapeHtml(item.verdict.toLowerCase())}">${escapeHtml(item.verdict.replaceAll("_", " "))}</span><code>${escapeHtml(item.target)}</code></summary>
+      <p class="review-body">${evidenceInline(item.body)}</p>
+    </details>`).join("");
+  const readyCount = parsed.targets.filter((item) => item.verdict === "READY").length;
+  return `${headline}
+    <div class="review-structure">
+      <p class="field-help">${escapeHtml(parsed.header)}</p>
+      <p class="review-target-count">${readyCount}/${parsed.targets.length} reviewed targets READY — expand any target for its evidence.</p>
+      ${targetRows}
+      ${parsed.footer ? `<p class="field-help review-footer">${evidenceInline(parsed.footer)}</p>` : ""}
+    </div>`;
 }
 
 function renderProviders() {
@@ -1792,11 +1865,24 @@ $("#delivery-repositories").addEventListener("click", async (event) => {
   card?.classList.add("delivery-busy");
   try {
     await withOperation(button, label.op, async () => {
-      await api(`/api/runs/${state.selectedRunId}/delivery`, {
+      const submit = (confirmVersionMismatch) => api(`/api/runs/${state.selectedRunId}/delivery`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repositoryId, action, expectedHeadCommit: button.dataset.headCommit, ...(tag ? { tag } : {}) }),
+        body: JSON.stringify({ repositoryId, action, expectedHeadCommit: button.dataset.headCommit, ...(tag ? { tag } : {}), ...(confirmVersionMismatch ? { confirmVersionMismatch: true } : {}) }),
       });
+      try {
+        await submit(false);
+      } catch (error) {
+        // Tag-truth gate: the repository's own files disagree with the typed
+        // tag — show both and take an explicit second owner confirmation.
+        const mismatch = error?.data?.versionMismatch;
+        if (!mismatch) throw error;
+        if (!window.confirm(`Hold on — this repository's own files declare version ${mismatch.declaredVersion}, but you typed ${mismatch.requestedTag}. A tag the repo contradicts is public and hard to undo.\n\nTag it as ${mismatch.requestedTag} anyway?`)) {
+          $("#delivery-error").textContent = `Tag not applied: the repository declares ${mismatch.declaredVersion}. Re-tag with the matching version, or confirm the mismatch deliberately.`;
+          return;
+        }
+        await submit(true);
+      }
       await refreshRuns();
     }, { onError: (message) => { $("#delivery-error").textContent = message; }, busyLabel: label.busy });
   } finally {

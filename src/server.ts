@@ -20,7 +20,7 @@ import { redactText } from "./redaction.js";
 import { createRunEvidenceExport, createRunReport } from "./reporter.js";
 import { observeLocalResources } from "./resources.js";
 import { inspectLocalRepository } from "./repository-intelligence.js";
-import { DeliveryRefusal, DeliveryService, type DeliveryAction } from "./delivery.js";
+import { DeliveryRefusal, DeliveryService, VersionMismatchRefusal, type DeliveryAction } from "./delivery.js";
 import { scanProductIntelligence } from "./product-intelligence.js";
 import { manualModelSchema, objectiveInputSchema, productRegistrationSchema, steeringDirectiveInputSchema, workbenchSessionInputSchema } from "./schemas.js";
 import type { ObjectiveInput, ProviderName, RunRequest, WorkbenchMessageRecord } from "./types.js";
@@ -992,11 +992,12 @@ async function route(
   }
   if (request.method === "POST" && deliveryMatch?.[1]) {
     requireJsonRequest(request);
-    const body = await readJson(request) as { repositoryId?: unknown; action?: unknown; expectedHeadCommit?: unknown; tag?: unknown };
+    const body = await readJson(request) as { repositoryId?: unknown; action?: unknown; expectedHeadCommit?: unknown; tag?: unknown; confirmVersionMismatch?: unknown };
     const repositoryId = typeof body.repositoryId === "string" ? body.repositoryId.trim() : "";
     const action = body.action as DeliveryAction | "complete_delivery";
     const expectedHeadCommit = typeof body.expectedHeadCommit === "string" ? body.expectedHeadCommit.trim() : "";
     const tag = typeof body.tag === "string" && body.tag.trim() ? body.tag.trim() : undefined;
+    const confirmVersionMismatch = body.confirmVersionMismatch === true;
     if (!repositoryId || !["push_branch", "create_draft_pr", "merge_pr", "tag_release", "complete_delivery"].includes(action) || !expectedHeadCommit) {
       throw new ClientRequestError("Delivery requires repositoryId, expectedHeadCommit, and a supported action");
     }
@@ -1027,7 +1028,7 @@ async function route(
       const steps: DeliveryAction[] = ["push_branch", "create_draft_pr", "merge_pr", ...(tag ? ["tag_release" as const] : [])];
       let result = null;
       for (const step of steps) {
-        result = await context.delivery.execute({ runId: run.id, repositoryId, action: step, expectedHeadCommit, config, approval, ...(step === "tag_release" && tag ? { tag } : {}) });
+        result = await context.delivery.execute({ runId: run.id, repositoryId, action: step, expectedHeadCommit, config, approval, confirmVersionMismatch, ...(step === "tag_release" && tag ? { tag } : {}) });
       }
       sendJson(response, 200, { delivery: result, completedSteps: steps, approvalId: approval.id });
       return;
@@ -1039,6 +1040,7 @@ async function route(
       expectedHeadCommit,
       config,
       approval,
+      confirmVersionMismatch,
       ...(tag ? { tag } : {}),
     });
     sendJson(response, 200, { delivery: result });
@@ -1049,6 +1051,12 @@ async function route(
       // already-tagged delivery) is a CONFLICT with live state — 404/409 with
       // the honest reason, never a generic 500. Execution failures (git/gh
       // exiting non-zero) still surface as server faults.
+      if (error instanceof VersionMismatchRefusal) {
+        // Tag-truth gate: the cockpit shows both values and takes an explicit
+        // second confirmation before a contradicting tag is ever minted.
+        sendJson(response, 409, { error: redactText(error.message), versionMismatch: { declaredVersion: error.declaredVersion, requestedTag: error.requestedTag } });
+        return;
+      }
       if (error instanceof DeliveryRefusal) {
         sendJson(response, /was not found/i.test(error.message) ? 404 : 409, { error: redactText(error.message) });
         return;

@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import type { Ledger } from "./ledger.js";
 import { evaluateToolRequest, type ToolApprovalReceipt } from "./policy.js";
 import { runProcess, type ProcessRequest, type ProcessResult } from "./process.js";
@@ -15,6 +17,12 @@ export interface DeliveryExecutionInput {
   expectedHeadCommit?: string;
   /** Release tag name; required for tag_release. */
   tag?: string;
+  /**
+   * Owner acknowledgement that the requested tag deliberately differs from the
+   * version the repository's own files declare (tag-truth gate). Absent, a
+   * mismatch refuses with both values so the owner decides with evidence.
+   */
+  confirmVersionMismatch?: boolean;
 }
 
 const RELEASE_TAG_PATTERN = /^v?[0-9A-Za-z][0-9A-Za-z_.-]{0,63}$/;
@@ -49,6 +57,43 @@ function failureMessage(result: ProcessResult, fallback: string): string {
  * Error. (Gate finding ENG-1, 2026-07-22.)
  */
 export class DeliveryRefusal extends Error {}
+
+/**
+ * Tag-truth gate (owner-reported, 2026-07-22): a release tag the repository's
+ * own files contradict is a standing public lie — a real dev team would say
+ * "hold on, the repo says 1.2.1" before tagging v1.0.0. The refusal carries
+ * both values so the cockpit can show the evidence and take an explicit
+ * owner confirmation; DevHarmonics never tags blind, and never decides alone.
+ */
+export class VersionMismatchRefusal extends DeliveryRefusal {
+  constructor(public readonly declaredVersion: string, public readonly requestedTag: string) {
+    super(`This repository's own files declare version ${declaredVersion}, but the requested tag is ${requestedTag}; confirm the mismatch to tag anyway`);
+  }
+}
+
+/** Best-effort read of the version the repository declares about itself: package.json first, then pyproject.toml. Null when no claim is discoverable. */
+export async function readDeclaredVersion(localPath: string): Promise<string | null> {
+  try {
+    const parsed = JSON.parse(await readFile(path.join(localPath, "package.json"), "utf-8")) as { version?: unknown };
+    if (typeof parsed.version === "string" && parsed.version.trim()) return parsed.version.trim();
+  } catch {
+    // no package.json or unparsable — fall through to pyproject
+  }
+  try {
+    const pyproject = await readFile(path.join(localPath, "pyproject.toml"), "utf-8");
+    const match = pyproject.match(/^\s*version\s*=\s*["']([^"']+)["']/m);
+    if (match?.[1]) return match[1].trim();
+  } catch {
+    // no pyproject either — the repository makes no discoverable version claim
+  }
+  return null;
+}
+
+/** "v1.2.1" and "1.2.1" are the same claim; case and a leading v are presentation, not identity. */
+function versionsAgree(tag: string, declared: string): boolean {
+  const normalize = (value: string) => value.trim().replace(/^v/i, "").toLowerCase();
+  return normalize(tag) === normalize(declared);
+}
 
 export class DeliveryService {
   constructor(private readonly ledger: Ledger, private readonly runner: ProcessRunner = runProcess) {}
@@ -85,6 +130,13 @@ export class DeliveryService {
     if (input.action === "tag_release") {
       if (delivery.status !== "merged") throw new DeliveryRefusal("Merge the pull request before tagging the release");
       if (!input.tag || !RELEASE_TAG_PATTERN.test(input.tag)) throw new DeliveryRefusal("Release tag names must be short version-like identifiers (letters, digits, dot, dash, underscore)");
+      // Tag-truth gate: when the repository declares a version about itself
+      // and the requested tag contradicts it, refuse with both values unless
+      // the owner has explicitly confirmed the mismatch.
+      const declaredVersion = await readDeclaredVersion(delivery.localPath);
+      if (declaredVersion && !versionsAgree(input.tag, declaredVersion) && !input.confirmVersionMismatch) {
+        throw new VersionMismatchRefusal(declaredVersion, input.tag);
+      }
     }
 
     const remoteResult = await this.runner({ command: "git", args: ["remote", "get-url", "origin"], cwd: delivery.localPath, timeoutMs: 30_000 });

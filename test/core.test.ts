@@ -2714,6 +2714,70 @@ test("workflow revisions persist immutably and runs pin the exact revision execu
   }
 });
 
+test("the tag-truth gate refuses a tag the repository's own files contradict unless the owner confirms", async () => {
+  // Owner-requested (2026-07-22): "if it's at 1.2.1 and I tag it 1.0.0, won't
+  // that screw up versioning across all surfaces?" — yes, so the tag step now
+  // reads the version the repository declares about itself and refuses a
+  // contradiction unless the mismatch is explicitly confirmed.
+  const workflows = await import("../src/delivery.js") as Record<string, any>;
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-tag-truth-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  let prState = "OPEN";
+  const runner = async (request: { command: string; args: string[] }) => {
+    const joined = request.args.join(" ");
+    if (request.command === "git" && joined === "remote get-url origin") {
+      return { stdout: "https://github.com/civicsuite/truth.git\n", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "create") {
+      return { stdout: "https://github.com/civicsuite/truth/pull/3\n", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "view" && joined.includes("state,isDraft,mergeable")) {
+      return { stdout: JSON.stringify({ state: prState, isDraft: true, mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", headRefOid: "b".repeat(40), statusCheckRollup: [] }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "view" && joined.includes("mergeCommit")) {
+      return { stdout: JSON.stringify({ state: "MERGED", mergeCommit: { oid: "c".repeat(40) } }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "merge") prState = "MERGED";
+    if (request.command === "git" && request.args[0] === "rev-parse" && joined.includes("refs/tags/")) {
+      return { stdout: "", stderr: "", exitCode: 1, durationMs: 1, timedOut: false };
+    }
+    return { stdout: "", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+  };
+  try {
+    assert.equal(await workflows.readDeclaredVersion(root), null, "no version claim is discoverable in an empty directory");
+    await writeFile(path.join(root, "pyproject.toml"), '[project]\nname = "truth"\nversion = "3.4.5"\n', "utf-8");
+    assert.equal(await workflows.readDeclaredVersion(root), "3.4.5", "pyproject declares the version when package.json is absent");
+    await writeFile(path.join(root, "package.json"), JSON.stringify({ name: "truth", version: "1.2.1" }), "utf-8");
+    assert.equal(await workflows.readDeclaredVersion(root), "1.2.1", "package.json wins when both exist");
+
+    const runId = ledger.createRun("Tag truthfully", root);
+    ledger.setRunStatus(runId, "running");
+    ledger.setRunStatus(runId, "ready", "READY");
+    ledger.prepareDeliveryRepository({ runId, repositoryId: "repo:truth", localPath: root, baseBranch: "main", baseCommit: "a".repeat(40), headCommit: "b".repeat(40), branch: "devharmonics/truth" });
+    const service = new DeliveryService(ledger, runner as never);
+    const config = structuredClone(defaultConfig);
+    config.runPolicy.allowExternalWrites = true;
+    const approval = (id: string) => ({ id, kind: "external_write" as const, approvedBy: "local-owner", approvedAt: new Date().toISOString() });
+    await service.execute({ runId, repositoryId: "repo:truth", action: "push_branch", config, approval: approval("a-push") });
+    await service.execute({ runId, repositoryId: "repo:truth", action: "create_draft_pr", config, approval: approval("a-pr") });
+    await service.execute({ runId, repositoryId: "repo:truth", action: "merge_pr", config, approval: approval("a-merge") });
+
+    await assert.rejects(
+      () => service.execute({ runId, repositoryId: "repo:truth", action: "tag_release", tag: "v1.0.0", config, approval: approval("a-tag1") }),
+      /declare version 1\.2\.1.*requested tag is v1\.0\.0/,
+      "a tag the repository contradicts refuses with both values",
+    );
+    assert.equal(ledger.getRun(runId)?.delivery?.repositories[0]?.status, "merged", "the refused tag changed nothing");
+    // An explicitly confirmed mismatch is the owner's deliberate decision.
+    const confirmed = await service.execute({ runId, repositoryId: "repo:truth", action: "tag_release", tag: "v1.0.0", config, approval: approval("a-tag2"), confirmVersionMismatch: true });
+    assert.equal(confirmed.status, "tagged");
+    assert.equal(confirmed.releaseTag, "v1.0.0");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("migration 30's delivery-table rebuild preserves row data from a physical schema-29 database", async () => {
   // Gate finding ENG-3 (2026-07-22): the CHECK-widening RENAME/rebuild in
   // migration 30 had no test proving a delivery row's VALUES survive it.

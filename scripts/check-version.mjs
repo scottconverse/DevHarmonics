@@ -34,7 +34,7 @@ const expectations = [
   // with any release that changes the prior tag or the ledger schema.
   ["docs/ROLLBACK.md", `backup-v26-to-v33`],
   ["docs/ROLLBACK.md", `Ledger schema 26 → 33`],
-  ["README.md", `183 tests across`],
+  ["README.md", `184 tests across`],
 ];
 
 const failures = [];

@@ -939,7 +939,7 @@ function renderDelivery(run) {
       <div class="plan-actions delivery-tag-row">
         <input class="delivery-tag-input" type="text" placeholder="v1.0.0" aria-label="Release tag for ${escapeHtml(repository.repositoryId)}" data-tag-for="${escapeHtml(repository.repositoryId)}" ${!externalWritesAllowed || !merged || tagged ? "disabled" : ""}>
         <button class="secondary small" type="button" data-delivery-action="tag_release" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || !merged || tagged ? "disabled" : ""}>Approve &amp; tag release</button>
-        <button class="primary small" type="button" data-delivery-action="complete_delivery" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || settled ? "disabled" : ""}>Complete delivery (push · PR · merge${externalWritesAllowed ? " · tag if named" : ""})</button>
+        ${merged ? "" : `<button class="primary small" type="button" data-delivery-action="complete_delivery" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed ? "disabled" : ""}>Complete delivery (push · PR · merge · tag if named)</button>`}
       </div>
     </article>`;
   }).join("");
@@ -1669,14 +1669,28 @@ $("#delivery-repositories").addEventListener("click", async (event) => {
   if (action === "tag_release" && !tag) { $("#delivery-error").textContent = "Enter a release tag name first."; return; }
   if (!window.confirm(`Approve DevHarmonics to ${label.confirm}? Your click is the approval receipt; nothing here happens without it.`)) return;
   $("#delivery-error").textContent = "";
-  await withOperation(button, label.op, async () => {
-    await api(`/api/runs/${state.selectedRunId}/delivery`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ repositoryId, action, expectedHeadCommit: button.dataset.headCommit, ...(tag ? { tag } : {}) }),
-    });
-    await refreshRuns();
-  }, { onError: (message) => { $("#delivery-error").textContent = message; }, busyLabel: label.busy });
+  // Whole-card lockout: while ANY action on this repository is in flight,
+  // every sibling control is disabled too — overlapping operations should be
+  // unreachable from honest clicking, not merely survivable.
+  const card = button.closest(".delivery-repository-card");
+  const siblings = card ? [...card.querySelectorAll("button, input")].filter((element) => element !== button) : [];
+  for (const element of siblings) element.disabled = true;
+  card?.classList.add("delivery-busy");
+  try {
+    await withOperation(button, label.op, async () => {
+      await api(`/api/runs/${state.selectedRunId}/delivery`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repositoryId, action, expectedHeadCommit: button.dataset.headCommit, ...(tag ? { tag } : {}) }),
+      });
+      await refreshRuns();
+    }, { onError: (message) => { $("#delivery-error").textContent = message; }, busyLabel: label.busy });
+  } finally {
+    card?.classList.remove("delivery-busy");
+    // refreshRuns re-renders the panel with true state; this restore only
+    // matters when the operation failed before a re-render.
+    for (const element of siblings) element.disabled = false;
+  }
 });
 $("#steering-hold").addEventListener("click", async (event) => {
   const runId = state.selectedRunId;

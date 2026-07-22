@@ -27,6 +27,8 @@ import { inferModelProfile } from "./model-intelligence.js";
 import type { ModelRecord } from "./registry.js";
 
 const uiDirectory = fileURLToPath(new URL("./ui/", import.meta.url));
+/** Per-repository delivery serialization: `${runId}:${repositoryId}` while an operation is executing. */
+const deliveryOperationsInFlight = new Set<string>();
 
 class ClientRequestError extends Error {}
 
@@ -843,6 +845,16 @@ async function route(
       return;
     }
     const config = await loadConfig(run.projectPath);
+    // Per-repository serialization: overlapping delivery operations are
+    // refused outright — idempotence makes outcomes safe, but two racing gh
+    // invocations should be unreachable, not merely survivable.
+    const inFlightKey = `${run.id}:${repositoryId}`;
+    if (deliveryOperationsInFlight.has(inFlightKey)) {
+      sendJson(response, 409, { error: "A delivery operation for this repository is already in progress; wait for it to finish" });
+      return;
+    }
+    deliveryOperationsInFlight.add(inFlightKey);
+    try {
     // The owner's click IS the approval; the receipt is minted here and every
     // tool invocation it covers records the same approval id.
     const approval = { id: randomUUID(), kind: "external_write" as const, approvedBy: "local-owner", approvedAt: new Date().toISOString() };
@@ -869,6 +881,9 @@ async function route(
     });
     sendJson(response, 200, { delivery: result });
     return;
+    } finally {
+      deliveryOperationsInFlight.delete(inFlightKey);
+    }
   }
 
   const steeringMatch = url.pathname.match(/^\/api\/runs\/([a-f0-9-]+)\/steering$/i);

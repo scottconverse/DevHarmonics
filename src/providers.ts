@@ -287,26 +287,42 @@ abstract class CliProvider implements ProviderAdapter {
  */
 export type PolicyProbeResult = "found" | "absent" | "inconclusive";
 
-/** A probe that cannot produce a trustworthy answer is NOT a clear pass (Codex R6-001). */
-function defaultRegistryProbe(keyPath: string): PolicyProbeResult {
-  const probe = spawnSync("reg", ["query", keyPath], { stdio: "ignore", timeout: 5_000 });
-  if (probe.error || probe.status === null) return "inconclusive";
-  // reg exits 0 when the key exists and 1 when it does not; anything else is
-  // an error, and "could not check" must fail closed.
-  if (probe.status === 0) return "found";
-  return probe.status === 1 ? "absent" : "inconclusive";
+/**
+ * Pure classifier for a `reg query` outcome (Codex R7-001: the CLASSIFIER is
+ * the safety boundary and is tested directly). reg exits 0 when the key
+ * exists and 1 when it does not; a launch error, a timeout (null status), or
+ * any other exit is "could not check" — which must fail closed.
+ */
+export function classifyRegistryOutcome(outcome: { error?: Error | undefined; status: number | null }): PolicyProbeResult {
+  if (outcome.error || outcome.status === null) return "inconclusive";
+  if (outcome.status === 0) return "found";
+  return outcome.status === 1 ? "absent" : "inconclusive";
 }
 
-/** Only a definite does-not-exist counts as absent; permission and I/O errors fail closed. */
-function pathProbe(candidate: string, expectJsonEntries: boolean): PolicyProbeResult {
+function defaultRegistryProbe(keyPath: string): PolicyProbeResult {
+  const probe = spawnSync("reg", ["query", keyPath], { stdio: "ignore", timeout: 5_000 });
+  return classifyRegistryOutcome({ error: probe.error, status: probe.status });
+}
+
+/**
+ * Filesystem probe with the fs facade injectable so the classification of raw
+ * outcomes is directly testable. Only a definite ENOENT counts as absent;
+ * permission and I/O errors fail closed, and a drop-in directory is absent
+ * only after a SUCCESSFUL enumeration finds no .json entry.
+ */
+export function pathProbe(
+  candidate: string,
+  expectJsonEntries: boolean,
+  fs: { statSync: (path: string) => unknown; readdirSync: (path: string) => string[] } = { statSync, readdirSync: (path) => readdirSync(path) },
+): PolicyProbeResult {
   try {
-    statSync(candidate);
+    fs.statSync(candidate);
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "inconclusive";
   }
   if (!expectJsonEntries) return "found";
   try {
-    return readdirSync(candidate).some((entry) => entry.endsWith(".json")) ? "found" : "absent";
+    return fs.readdirSync(candidate).some((entry) => entry.endsWith(".json")) ? "found" : "absent";
   } catch {
     return "inconclusive";
   }

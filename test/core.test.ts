@@ -2502,15 +2502,33 @@ test("claims-lens reviews route only to adapters that can structurally deny tool
     const probed: string[] = [];
     providersModule.claudeManagedPolicyPresent((keyPath: string) => { probed.push(keyPath); return "absent"; }, absent);
     assert.deepEqual(probed, ["HKLM\\SOFTWARE\\Policies\\ClaudeCode", "HKCU\\SOFTWARE\\Policies\\ClaudeCode"], "both hives are checked");
-    const roots: string[] = [];
-    providersModule.claudeManagedPolicyPresent(absent, (candidate: string) => { roots.push(candidate); return "absent"; });
+    const roots: Array<[string, boolean]> = [];
+    providersModule.claudeManagedPolicyPresent(absent, (candidate: string, expectJsonEntries: boolean) => { roots.push([candidate, expectJsonEntries]); return "absent"; });
     assert.deepEqual(roots, [
-      "C:\\Program Files\\ClaudeCode\\managed-settings.json",
-      "C:\\Program Files\\ClaudeCode\\managed-settings.d",
-      "C:\\ProgramData\\ClaudeCode\\managed-settings.json",
-      "C:\\ProgramData\\ClaudeCode\\managed-settings.d",
-    ], "current and legacy base files plus drop-in roots are all checked");
+      ["C:\\Program Files\\ClaudeCode\\managed-settings.json", false],
+      ["C:\\Program Files\\ClaudeCode\\managed-settings.d", true],
+      ["C:\\ProgramData\\ClaudeCode\\managed-settings.json", false],
+      ["C:\\ProgramData\\ClaudeCode\\managed-settings.d", true],
+    ], "current and legacy base files plus drop-in roots are all checked, with the drop-in flag");
   }
+
+  // Codex R7-001: the CLASSIFIERS are the safety boundary — test the raw
+  // outcome mappings directly, not just already-classified injections.
+  assert.equal(providersModule.classifyRegistryOutcome({ error: new Error("spawn reg ENOENT"), status: null }), "inconclusive", "a probe that cannot launch is not a clear pass");
+  assert.equal(providersModule.classifyRegistryOutcome({ status: null }), "inconclusive", "a timed-out probe is not a clear pass");
+  assert.equal(providersModule.classifyRegistryOutcome({ status: 0 }), "found");
+  assert.equal(providersModule.classifyRegistryOutcome({ status: 1 }), "absent");
+  assert.equal(providersModule.classifyRegistryOutcome({ status: 2 }), "inconclusive", "an unexpected reg exit is not a clear pass");
+
+  const enoent = Object.assign(new Error("missing"), { code: "ENOENT" });
+  const eperm = Object.assign(new Error("denied"), { code: "EPERM" });
+  const throwing = (error: Error) => ({ statSync: () => { throw error; }, readdirSync: () => [] as string[] });
+  assert.equal(providersModule.pathProbe("x", false, throwing(enoent)), "absent", "ENOENT is the only absent filesystem answer");
+  assert.equal(providersModule.pathProbe("x", false, throwing(eperm)), "inconclusive", "a permission error is not a clear pass");
+  assert.equal(providersModule.pathProbe("x", false, { statSync: () => ({}), readdirSync: () => [] }), "found", "an existing base file detects");
+  assert.equal(providersModule.pathProbe("x", true, { statSync: () => ({}), readdirSync: () => ["readme.txt"] }), "absent", "a drop-in root with no .json entries is a clear pass");
+  assert.equal(providersModule.pathProbe("x", true, { statSync: () => ({}), readdirSync: () => ["policy.json"] }), "found", "a drop-in .json detects");
+  assert.equal(providersModule.pathProbe("x", true, { statSync: () => ({}), readdirSync: () => { throw eperm; } }), "inconclusive", "an unenumerable drop-in root is not a clear pass");
 });
 
 test("the assembled claims-lens chunk prompt demands the manifest the header promised", async () => {

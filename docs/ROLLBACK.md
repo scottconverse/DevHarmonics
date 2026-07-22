@@ -1,5 +1,10 @@
 # Rolling back a DevHarmonics upgrade
 
+Within the 0.6 line (v0.6.1 → v0.6.0) no ledger change is involved — both run
+schema 33 — so a downgrade is just checking out the older tag and rebuilding;
+the ledger needs no restore. The plan below covers the schema-crossing
+downgrade to v0.5.1.
+
 Rollback plan for **v0.6.0 → v0.5.1**. The same pattern applies to any
 downgrade: reinstall the older source, restore the matching pre-upgrade ledger
 backup, and accept that ledger records created after the upgrade stay behind.

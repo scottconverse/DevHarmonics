@@ -4,6 +4,8 @@ All notable DevHarmonics changes are documented here.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-22
+
 ### Added
 
 - Tag-truth gate: tagging a delivery now reads the version the target repository declares about itself (package.json, then pyproject.toml) and refuses a contradicting tag with both values shown; the cockpit takes an explicit second owner confirmation before a mismatched tag is ever minted. The delivery payload carries each repository's declared version, and the cockpit's tag field pre-fills with it as an editable value — with a caption stating plainly that an empty field creates no tag.
@@ -195,6 +197,7 @@ All notable DevHarmonics changes are documented here.
 - Source installation, complete user manual, architecture, security policy, and published landing page.
 - Detailed Antigravity browser-code handoff and multi-screen onboarding instructions.
 
+[0.6.1]: https://github.com/scottconverse/DevHarmonics/releases/tag/v0.6.1
 [0.6.0]: https://github.com/scottconverse/DevHarmonics/releases/tag/v0.6.0
 [0.1.0]: https://github.com/scottconverse/DevHarmonics/releases/tag/v0.1.0
 [0.5.1]: https://github.com/scottconverse/DevHarmonics/releases/tag/v0.5.1

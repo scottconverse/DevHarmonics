@@ -1,3 +1,3 @@
 export const PRODUCT_NAME = "DevHarmonics";
 export const PRODUCT_SLUG = "devharmonics";
-export const VERSION = "0.6.0";
+export const VERSION = "0.6.1";

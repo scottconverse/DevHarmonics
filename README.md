@@ -11,7 +11,7 @@ DevHarmonics never merges anything without you. It hands you a reviewed branch a
 [Quick start](#quick-start) · [How a run works](#how-a-run-works) · [User manual](docs/USER_MANUAL.md) · [Architecture](docs/ARCHITECTURE.md) · [Product spec](docs/PRODUCT_SPEC.md) · [Landing page](https://scottconverse.github.io/DevHarmonics/)
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Latest release](https://img.shields.io/badge/release-v0.6.0-informational)](https://github.com/scottconverse/DevHarmonics/releases/tag/v0.6.0)
+[![Latest release](https://img.shields.io/badge/release-v0.6.1-informational)](https://github.com/scottconverse/DevHarmonics/releases/tag/v0.6.1)
 [![Node](https://img.shields.io/badge/node-%E2%89%A524-green)](package.json)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](#requirements)
 [![Status](https://img.shields.io/badge/status-early%20public%20preview-orange)](#project-status)
@@ -388,7 +388,7 @@ The dashboard binds only to `127.0.0.1`, and mutation endpoints require same-ori
 
 ## Project status
 
-**Early public preview, under active development.** Current release: **v0.6.0**.
+**Early public preview, under active development.** Current release: **v0.6.1**.
 
 What that judgement rests on, in both directions:
 

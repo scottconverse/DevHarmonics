@@ -1,7 +1,7 @@
 # DevHarmonics User Manual
 
-Manual version: **0.6.0**<br>
-Product release: **v0.6.0**
+Manual version: **0.6.1**<br>
+Product release: **v0.6.1**
 
 DevHarmonics is a local-first, provider-neutral software factory for product owners managing AI agents as development teams. It turns one software-development objective into a planned, parallel, validated run across Codex, Claude Code, and the Google Antigravity model catalog. It runs locally and uses the subscription sessions cached by the providers' official command-line tools.
 
@@ -41,7 +41,7 @@ npm.cmd link
 devharmonics --version
 ```
 
-Expected version output is `DevHarmonics 0.6.0`.
+Expected version output is `DevHarmonics 0.6.1`.
 
 ## 3. Sign in to providers
 

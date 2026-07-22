@@ -234,7 +234,7 @@ export interface IntegrationSetRecord {
   updatedAt: string;
 }
 
-export type DeliveryRepositoryStatus = "prepared" | "branch_pushed" | "draft_pr_created" | "failed";
+export type DeliveryRepositoryStatus = "prepared" | "branch_pushed" | "draft_pr_created" | "merged" | "tagged" | "failed";
 
 export interface DeliveryRepositoryRecord {
   runId: string;
@@ -248,6 +248,8 @@ export interface DeliveryRepositoryRecord {
   status: DeliveryRepositoryStatus;
   pullRequestUrl: string | null;
   approvalId: string | null;
+  /** The release tag actually pushed for this repository, once tagged. */
+  releaseTag: string | null;
   error: string | null;
   createdAt: string;
   updatedAt: string;

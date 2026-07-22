@@ -39,7 +39,7 @@ Normal subscription and local-model use requires no model API keys. Each subscri
 - Ledger-boundary redaction of common credentials in prompts, outputs, errors, checks, reviews, and events
 - Active-run cancellation from the dashboard
 
-The development branch after v0.5.1 also includes owner-approved delivery for READY runs: the run board shows exact reviewed commits, separately confirms an exact-SHA GitHub branch push and draft pull-request creation, retains both receipts, and never merges automatically. It also adds the first wave of visible operation feedback: immediate acknowledgement on every dashboard action, a global activity strip that keeps running work visible across screens, and evidence-based elapsed/heartbeat times on working tasks. These capabilities will ship with the v0.6 increment after its CivicSuite acceptance gates pass.
+The development branch after v0.5.1 also includes owner-approved delivery for READY runs, completing entirely from the cockpit: the run board shows exact reviewed commits, then push, draft pull request, merge, and release tag each run under your explicit approval — with live PR state checked before any merge, the tag landing on the actual merge commit, a one-click complete-delivery flow whose single receipt names every step, and every receipt retained. DevHarmonics never merges or tags on its own; it also never makes you leave the cockpit to finish. It also adds the first wave of visible operation feedback: immediate acknowledgement on every dashboard action, a global activity strip that keeps running work visible across screens, and evidence-based elapsed/heartbeat times on working tasks. These capabilities will ship with the v0.6 increment after its CivicSuite acceptance gates pass.
 
 ## Requirements
 

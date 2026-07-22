@@ -172,7 +172,7 @@ interface CheckRow {
   duration_ms: number;
 }
 
-export const LEDGER_SCHEMA_VERSION = 30;
+export const LEDGER_SCHEMA_VERSION = 32;
 
 export const REPOSITORY_ROLES = [
   "umbrella",
@@ -1253,6 +1253,56 @@ const MIGRATIONS: readonly LedgerMigration[] = [
   },
   {
     version: 30,
+    name: "delivery-merge-and-tag",
+    apply(database) {
+      // SQLite cannot widen a CHECK constraint in place; rebuild the table
+      // with the merged/tagged states (owner-corrected rule 2026-07-22: the
+      // cockpit completes the delivery — merge and tag are owner-receipted
+      // actions, never automatic). Idempotent and column-NAMED: a rebuild that
+      // SELECT *'s across schema evolution breaks the moment any later
+      // migration touched the table (the upgrade tests caught exactly that).
+      const tableSql = (database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'delivery_repositories'").get() as { sql?: string } | undefined)?.sql ?? "";
+      if (tableSql.includes("'merged'")) return;
+      database.exec(`
+        ALTER TABLE delivery_repositories RENAME TO delivery_repositories_v27;
+        CREATE TABLE delivery_repositories (
+          run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+          repository_id TEXT NOT NULL,
+          local_path TEXT NOT NULL,
+          base_branch TEXT NOT NULL,
+          base_commit TEXT NOT NULL,
+          head_commit TEXT NOT NULL,
+          branch TEXT NOT NULL,
+          remote_url TEXT,
+          status TEXT NOT NULL CHECK(status IN ('prepared', 'branch_pushed', 'draft_pr_created', 'merged', 'tagged', 'failed')),
+          pull_request_url TEXT,
+          approval_id TEXT,
+          error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (run_id, repository_id)
+        );
+        INSERT INTO delivery_repositories (run_id, repository_id, local_path, base_branch, base_commit, head_commit, branch, remote_url, status, pull_request_url, approval_id, error, created_at, updated_at)
+          SELECT run_id, repository_id, local_path, base_branch, base_commit, head_commit, branch, remote_url, status, pull_request_url, approval_id, error, created_at, updated_at
+          FROM delivery_repositories_v27;
+        DROP TABLE delivery_repositories_v27;
+        CREATE INDEX IF NOT EXISTS delivery_repositories_status
+          ON delivery_repositories(run_id, status);
+      `);
+    },
+  },
+  {
+    version: 31,
+    name: "delivery-release-tag",
+    apply(database) {
+      const columns = new Set(
+        (database.prepare("SELECT name FROM pragma_table_info('delivery_repositories')").all() as unknown as Array<{ name: string }>).map((column) => column.name),
+      );
+      if (!columns.has("release_tag")) database.exec("ALTER TABLE delivery_repositories ADD COLUMN release_tag TEXT;");
+    },
+  },
+  {
+    version: 32,
     name: "workflow-revisions",
     apply(database) {
       database.exec(`
@@ -1399,7 +1449,7 @@ const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
   workbench_sessions: ["id", "project_path", "title", "mode", "objective_id", "converted_at", "created_at", "updated_at"],
   workbench_messages: ["id", "session_id", "role", "content", "provider", "connection_id", "requested_model_id", "resolved_model_id", "status", "error", "input_tokens", "output_tokens", "cost_usd", "duration_ms", "paid_spend_reservation_id", "created_at"],
   paid_spend_reservations: ["id", "scope_type", "scope_id", "estimated_cost_usd", "state", "expected_receipt_count", "invoked_at", "created_at", "expires_at"],
-  delivery_repositories: ["run_id", "repository_id", "local_path", "base_branch", "base_commit", "head_commit", "branch", "remote_url", "status", "pull_request_url", "approval_id", "error", "created_at", "updated_at"],
+  delivery_repositories: ["run_id", "repository_id", "local_path", "base_branch", "base_commit", "head_commit", "branch", "remote_url", "status", "pull_request_url", "approval_id", "error", "created_at", "updated_at", "release_tag"],
   integration_sets: ["id", "run_id", "product_id", "status", "integration_conditions_json", "created_at", "updated_at"],
   integration_set_repositories: ["integration_set_id", "repository_id", "local_path", "base_commit", "integration_branch", "integration_worktree_path", "head_commit", "status", "error", "updated_at"],
   product_intelligence_snapshots: ["id", "product_id", "status", "snapshot_json", "created_at"],
@@ -2089,6 +2139,7 @@ export class Ledger {
       remoteUrl?: string | null;
       pullRequestUrl?: string | null;
       approvalId?: string | null;
+      releaseTag?: string | null;
       error?: string | null;
     },
   ): DeliveryRepositoryRecord {
@@ -2097,13 +2148,14 @@ export class Ledger {
     const now = new Date().toISOString();
     this.database.prepare(`
       UPDATE delivery_repositories
-      SET status = ?, remote_url = ?, pull_request_url = ?, approval_id = ?, error = ?, updated_at = ?
+      SET status = ?, remote_url = ?, pull_request_url = ?, approval_id = ?, release_tag = ?, error = ?, updated_at = ?
       WHERE run_id = ? AND repository_id = ?
     `).run(
       input.status,
       input.remoteUrl === undefined ? current.remoteUrl : input.remoteUrl,
       input.pullRequestUrl === undefined ? current.pullRequestUrl : input.pullRequestUrl,
       input.approvalId === undefined ? current.approvalId : input.approvalId,
+      input.releaseTag === undefined ? current.releaseTag : input.releaseTag,
       input.error === undefined ? current.error : input.error == null ? null : redactText(input.error),
       now,
       runId,
@@ -2127,17 +2179,22 @@ export class Ledger {
       status: String(row.status) as DeliveryRepositoryStatus,
       pullRequestUrl: row.pull_request_url === null ? null : String(row.pull_request_url),
       approvalId: row.approval_id === null ? null : String(row.approval_id),
+      releaseTag: row.release_tag === null || row.release_tag === undefined ? null : String(row.release_tag),
       error: row.error === null ? null : String(row.error),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
     }));
     const status: DeliveryRepositoryStatus = repositories.some((repository) => repository.status === "failed")
       ? "failed"
-      : repositories.every((repository) => repository.status === "draft_pr_created")
-        ? "draft_pr_created"
-        : repositories.every((repository) => ["branch_pushed", "draft_pr_created"].includes(repository.status))
-          ? "branch_pushed"
-          : "prepared";
+      : repositories.every((repository) => repository.status === "tagged")
+        ? "tagged"
+        : repositories.every((repository) => ["merged", "tagged"].includes(repository.status))
+          ? "merged"
+          : repositories.every((repository) => ["draft_pr_created", "merged", "tagged"].includes(repository.status))
+            ? "draft_pr_created"
+            : repositories.every((repository) => ["branch_pushed", "draft_pr_created", "merged", "tagged"].includes(repository.status))
+              ? "branch_pushed"
+              : "prepared";
     return { runId, status, repositories };
   }
 

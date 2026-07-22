@@ -758,7 +758,12 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
     assert.match(appText, /create_draft_pr/);
     assert.match(appText, /Approve &amp; push branch/);
     assert.match(appText, /Approve &amp; create draft PR/);
-    assert.doesNotMatch(appText, /data-delivery-action=["']merge|action:\s*["']merge/i, "the delivery UI must expose no merge action");
+    // Owner-corrected rule (2026-07-22): the cockpit COMPLETES the delivery.
+    // Merge and tag exist as owner-approved actions; what must never exist is
+    // a merge that happens without a confirmation carrying the approval.
+    assert.match(appText, /data-delivery-action="merge_pr"/, "the cockpit exposes an owner-approved merge action");
+    assert.match(appText, /data-delivery-action="tag_release"/, "the cockpit exposes an owner-approved tag action");
+    assert.match(appText, /window\.confirm/, "every delivery action runs behind an explicit owner confirmation");
     const bootstrap = await fetch(`${dashboard.url}/api/bootstrap`);
     const value = (await bootstrap.json()) as {
       product: { name: string; version: string };

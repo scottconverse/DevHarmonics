@@ -27,6 +27,8 @@ import { inferModelProfile } from "./model-intelligence.js";
 import type { ModelRecord } from "./registry.js";
 
 const uiDirectory = fileURLToPath(new URL("./ui/", import.meta.url));
+/** Per-repository delivery serialization: `${runId}:${repositoryId}` while an operation is executing. */
+const deliveryOperationsInFlight = new Set<string>();
 
 class ClientRequestError extends Error {}
 
@@ -828,29 +830,60 @@ async function route(
   }
   if (request.method === "POST" && deliveryMatch?.[1]) {
     requireJsonRequest(request);
-    const body = await readJson(request) as { repositoryId?: unknown; action?: unknown; expectedHeadCommit?: unknown };
+    const body = await readJson(request) as { repositoryId?: unknown; action?: unknown; expectedHeadCommit?: unknown; tag?: unknown };
     const repositoryId = typeof body.repositoryId === "string" ? body.repositoryId.trim() : "";
-    const action = body.action as DeliveryAction;
+    const action = body.action as DeliveryAction | "complete_delivery";
     const expectedHeadCommit = typeof body.expectedHeadCommit === "string" ? body.expectedHeadCommit.trim() : "";
-    if (!repositoryId || !["push_branch", "create_draft_pr"].includes(action) || !expectedHeadCommit) {
+    const tag = typeof body.tag === "string" && body.tag.trim() ? body.tag.trim() : undefined;
+    if (!repositoryId || !["push_branch", "create_draft_pr", "merge_pr", "tag_release", "complete_delivery"].includes(action) || !expectedHeadCommit) {
       throw new ClientRequestError("Delivery requires repositoryId, expectedHeadCommit, and a supported action");
     }
+    if (action === "tag_release" && !tag) throw new ClientRequestError("Tagging a release requires a tag name");
     const run = context.ledger.getRun(deliveryMatch[1]);
     if (!run) {
       sendJson(response, 404, { error: "Run not found" });
       return;
     }
     const config = await loadConfig(run.projectPath);
+    // Per-repository serialization: overlapping delivery operations are
+    // refused outright — idempotence makes outcomes safe, but two racing gh
+    // invocations should be unreachable, not merely survivable.
+    const inFlightKey = `${run.id}:${repositoryId}`;
+    if (deliveryOperationsInFlight.has(inFlightKey)) {
+      sendJson(response, 409, { error: "A delivery operation for this repository is already in progress; wait for it to finish" });
+      return;
+    }
+    deliveryOperationsInFlight.add(inFlightKey);
+    try {
+    // The owner's click IS the approval; the receipt is minted here and every
+    // tool invocation it covers records the same approval id.
+    const approval = { id: randomUUID(), kind: "external_write" as const, approvedBy: "local-owner", approvedAt: new Date().toISOString() };
+    if (action === "complete_delivery") {
+      // One click, one receipt, every named step under it: push -> draft PR ->
+      // merge -> (optional tag). A failing step stops the sequence at the last
+      // durable state; nothing is retried silently.
+      const steps: DeliveryAction[] = ["push_branch", "create_draft_pr", "merge_pr", ...(tag ? ["tag_release" as const] : [])];
+      let result = null;
+      for (const step of steps) {
+        result = await context.delivery.execute({ runId: run.id, repositoryId, action: step, expectedHeadCommit, config, approval, ...(step === "tag_release" && tag ? { tag } : {}) });
+      }
+      sendJson(response, 200, { delivery: result, completedSteps: steps, approvalId: approval.id });
+      return;
+    }
     const result = await context.delivery.execute({
       runId: run.id,
       repositoryId,
       action,
       expectedHeadCommit,
       config,
-      approval: { id: randomUUID(), kind: "external_write", approvedBy: "local-owner", approvedAt: new Date().toISOString() },
+      approval,
+      ...(tag ? { tag } : {}),
     });
     sendJson(response, 200, { delivery: result });
     return;
+    } finally {
+      deliveryOperationsInFlight.delete(inFlightKey);
+    }
   }
 
   const steeringMatch = url.pathname.match(/^\/api\/runs\/([a-f0-9-]+)\/steering$/i);

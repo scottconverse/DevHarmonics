@@ -911,24 +911,35 @@ function renderDelivery(run) {
   panel.classList.toggle("hidden", !delivery);
   if (!delivery) return;
   const externalWritesAllowed = Boolean(state.bootstrap?.config?.runPolicy?.allowExternalWrites);
+  const done = ["merged", "tagged"];
   $("#delivery-status").textContent = delivery.status.replaceAll("_", " ");
-  $("#delivery-status").className = `lifecycle ${delivery.status === "draft_pr_created" ? "qualified" : delivery.status === "failed" ? "degraded" : ""}`;
+  $("#delivery-status").className = `lifecycle ${done.includes(delivery.status) || delivery.status === "draft_pr_created" ? "qualified" : delivery.status === "failed" ? "degraded" : ""}`;
   $("#delivery-guidance").textContent = externalWritesAllowed
-    ? "Each action requires a separate confirmation. DevHarmonics creates draft pull requests and never merges them."
+    ? "Every step is your approval — push, draft PR, merge, and tag all run from here, and nothing happens without your click. DevHarmonics never merges or tags on its own."
     : "External writes are disabled. Enable them in Setup before approving a branch push or draft pull request.";
   $("#delivery-repositories").innerHTML = delivery.repositories.map((repository) => {
-    const pushed = ["branch_pushed", "draft_pr_created"].includes(repository.status);
-    const created = repository.status === "draft_pr_created";
+    const pushed = ["branch_pushed", "draft_pr_created", "merged", "tagged"].includes(repository.status);
+    const created = ["draft_pr_created", "merged", "tagged"].includes(repository.status);
+    const merged = ["merged", "tagged"].includes(repository.status);
+    const tagged = repository.status === "tagged";
+    const settled = tagged;
     return `<article class="integration-repository-card delivery-repository-card">
       <header><strong>${escapeHtml(repository.repositoryId)}</strong><span class="lifecycle ${created ? "qualified" : repository.status === "failed" ? "degraded" : ""}">${escapeHtml(repository.status.replaceAll("_", " "))}</span></header>
       <code class="integration-commit-range">${escapeHtml(repository.baseBranch)}: ${escapeHtml(repository.baseCommit)} → ${escapeHtml(repository.headCommit)}</code>
       <code>${escapeHtml(repository.branch)}</code>
       ${repository.remoteUrl ? `<a href="${escapeHtml(repository.remoteUrl)}" target="_blank" rel="noreferrer">${escapeHtml(repository.remoteUrl)}</a>` : ""}
-      ${repository.pullRequestUrl ? `<a href="${escapeHtml(repository.pullRequestUrl)}" target="_blank" rel="noreferrer">Open draft pull request</a>` : ""}
+      ${repository.pullRequestUrl ? `<a class="delivery-pr-link" href="${escapeHtml(repository.pullRequestUrl)}" target="_blank" rel="noreferrer">${merged ? "View merged pull request" : "Open draft pull request"}</a>` : ""}
       ${repository.error ? `<p class="error">${escapeHtml(repository.error)}</p>` : ""}
+      ${tagged ? `<p class="delivery-done">Delivered, merged, and tagged${repository.releaseTag ? ` as ${escapeHtml(repository.releaseTag)}` : ""} — this repository is fully shipped.</p>` : merged ? `<p class="delivery-done">Merged under your approval. Tag the release below when you are ready.</p>` : ""}
       <div class="plan-actions">
         <button class="secondary small" type="button" data-delivery-action="push_branch" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || pushed ? "disabled" : ""}>Approve &amp; push branch</button>
-        <button class="primary small" type="button" data-delivery-action="create_draft_pr" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || !pushed || created ? "disabled" : ""}>Approve &amp; create draft PR</button>
+        <button class="secondary small" type="button" data-delivery-action="create_draft_pr" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || !pushed || created ? "disabled" : ""}>Approve &amp; create draft PR</button>
+        <button class="primary small" type="button" data-delivery-action="merge_pr" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || !created || merged ? "disabled" : ""}>Approve &amp; merge</button>
+      </div>
+      <div class="plan-actions delivery-tag-row">
+        <input class="delivery-tag-input" type="text" placeholder="v1.0.0" aria-label="Release tag for ${escapeHtml(repository.repositoryId)}" data-tag-for="${escapeHtml(repository.repositoryId)}" ${!externalWritesAllowed || !merged || tagged ? "disabled" : ""}>
+        <button class="secondary small" type="button" data-delivery-action="tag_release" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || !merged || tagged ? "disabled" : ""}>Approve &amp; tag release</button>
+        ${merged ? "" : `<button class="primary small" type="button" data-delivery-action="complete_delivery" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed ? "disabled" : ""}>Complete delivery (push · PR · merge · tag if named)</button>`}
       </div>
     </article>`;
   }).join("");
@@ -1644,17 +1655,42 @@ $("#delivery-repositories").addEventListener("click", async (event) => {
   const button = event.target.closest("[data-delivery-action]");
   if (!button) return;
   const action = button.dataset.deliveryAction;
-  const label = action === "push_branch" ? "push this exact reviewed branch to GitHub" : "create a draft pull request for this exact reviewed branch";
-  if (!window.confirm(`Approve DevHarmonics to ${label}? This is a separate external write. DevHarmonics will not merge it.`)) return;
+  const repositoryId = button.dataset.repositoryId;
+  const tagInput = document.querySelector(`[data-tag-for="${CSS.escape(repositoryId)}"]`);
+  const tag = tagInput?.value.trim() || undefined;
+  const labels = {
+    push_branch: { confirm: "push this exact reviewed branch to GitHub", op: "Pushing the exact reviewed branch", busy: "Pushing…" },
+    create_draft_pr: { confirm: "create a draft pull request for this exact reviewed branch", op: "Creating the draft pull request", busy: "Creating draft PR…" },
+    merge_pr: { confirm: `mark the pull request ready and MERGE it into its base branch — only if GitHub still shows the exact reviewed commit ${(button.dataset.headCommit || "").slice(0, 12)}, no conflicts, and green checks`, op: "Merging the approved pull request", busy: "Merging…" },
+    tag_release: { confirm: `create and push release tag ${tag ?? "(enter a tag name first)"} on the merge commit`, op: "Tagging the release", busy: "Tagging…" },
+    complete_delivery: { confirm: `run the complete delivery of reviewed commit ${(button.dataset.headCommit || "").slice(0, 12)}: push, draft PR, merge${tag ? `, and tag ${tag}` : ""} — one approval covering each named step; the merge still refuses conflicts, red checks, or a changed PR head`, op: "Completing the delivery", busy: "Delivering…" },
+  };
+  const label = labels[action] ?? labels.push_branch;
+  if (action === "tag_release" && !tag) { $("#delivery-error").textContent = "Enter a release tag name first."; return; }
+  if (!window.confirm(`Approve DevHarmonics to ${label.confirm}? Your click is the approval receipt; nothing here happens without it.`)) return;
   $("#delivery-error").textContent = "";
-  await withOperation(button, action === "push_branch" ? "Pushing the exact reviewed branch" : "Creating the draft pull request", async () => {
-    await api(`/api/runs/${state.selectedRunId}/delivery`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ repositoryId: button.dataset.repositoryId, action, expectedHeadCommit: button.dataset.headCommit }),
-    });
-    await refreshRuns();
-  }, { onError: (message) => { $("#delivery-error").textContent = message; }, busyLabel: action === "push_branch" ? "Pushing…" : "Creating draft PR…" });
+  // Whole-card lockout: while ANY action on this repository is in flight,
+  // every sibling control is disabled too — overlapping operations should be
+  // unreachable from honest clicking, not merely survivable.
+  const card = button.closest(".delivery-repository-card");
+  const siblings = card ? [...card.querySelectorAll("button, input")].filter((element) => element !== button) : [];
+  for (const element of siblings) element.disabled = true;
+  card?.classList.add("delivery-busy");
+  try {
+    await withOperation(button, label.op, async () => {
+      await api(`/api/runs/${state.selectedRunId}/delivery`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repositoryId, action, expectedHeadCommit: button.dataset.headCommit, ...(tag ? { tag } : {}) }),
+      });
+      await refreshRuns();
+    }, { onError: (message) => { $("#delivery-error").textContent = message; }, busyLabel: label.busy });
+  } finally {
+    card?.classList.remove("delivery-busy");
+    // refreshRuns re-renders the panel with true state; this restore only
+    // matters when the operation failed before a re-render.
+    for (const element of siblings) element.disabled = false;
+  }
 });
 $("#steering-hold").addEventListener("click", async (event) => {
   const runId = state.selectedRunId;

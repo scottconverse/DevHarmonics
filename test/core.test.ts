@@ -2820,13 +2820,20 @@ test("the tag-truth gate judges by the version in the merge COMMIT, not the muta
   // The mutable checkout deliberately declares a DIFFERENT version than the commit.
   await writeFile(path.join(root, "package.json"), JSON.stringify({ name: "truth", version: "1.0.0" }), "utf-8");
   let prState = "OPEN";
+  let mergeCommitFetched = false;
   const runner = async (request: { command: string; args: string[] }) => {
     const joined = request.args.join(" ");
     if (request.command === "git" && joined === "remote get-url origin") {
       return { stdout: "https://github.com/civicsuite/truth.git\n", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
     }
-    // The merge commit ("c" * 40) declares 2.0.0 about itself.
+    // The merge commit ("c" * 40) declares 2.0.0 about itself — but only once
+    // it exists locally. GitHub creates the merge commit remotely; until
+    // `git fetch origin <base>` runs, `git show` on it MUST fail, so a gate
+    // that asks before fetching silently no-ops and this test goes red
+    // (boss-review ordering finding, 2026-07-22).
+    if (request.command === "git" && request.args[0] === "fetch") mergeCommitFetched = true;
     if (request.command === "git" && request.args[0] === "show" && joined.endsWith(":package.json")) {
+      if (!mergeCommitFetched) return { stdout: "", stderr: `fatal: invalid object name '${"c".repeat(40)}'`, exitCode: 128, durationMs: 1, timedOut: false };
       return { stdout: JSON.stringify({ name: "truth", version: "2.0.0" }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
     }
     if (request.command === "gh" && request.args[1] === "create") {

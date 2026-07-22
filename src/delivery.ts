@@ -311,16 +311,20 @@ export class DeliveryService {
       if (mergedView.exitCode !== 0) throw new Error(failureMessage(mergedView, "Could not read the merged pull request"));
       const mergedState = JSON.parse(mergedView.stdout) as { state: string; mergeCommit: { oid: string } | null };
       if (mergedState.state !== "MERGED" || !mergedState.mergeCommit?.oid) throw new DeliveryRefusal("The pull request has no merge commit to tag");
+      const fetch = await this.runner({ command: "git", args: ["fetch", "origin", delivery.baseBranch], cwd: delivery.localPath, timeoutMs: 120_000 });
+      if (fetch.exitCode !== 0) throw new Error(failureMessage(fetch, "Could not fetch the merged base branch"));
       // Tag-truth gate: resolve the declared version from the exact merge commit
-      // that will be tagged, not the checkout. When the merged artifact's own
-      // files contradict the requested tag, refuse with both values unless the
-      // owner explicitly confirmed the mismatch.
+      // that will be tagged, not the checkout. This MUST run after the fetch —
+      // the merge commit was just created on GitHub, and before the fetch it
+      // does not exist locally, so `git show` would fail and the gate would
+      // silently no-op on the most common real path (boss-review finding on
+      // the audit fix, 2026-07-22). When the merged artifact's own files
+      // contradict the requested tag, refuse with both values unless the owner
+      // explicitly confirmed the mismatch.
       const declaredVersion = await this.declaredVersionAtCommit(delivery.localPath, mergedState.mergeCommit.oid);
       if (declaredVersion && !versionsAgree(input.tag!, declaredVersion) && !input.confirmVersionMismatch) {
         throw new VersionMismatchRefusal(declaredVersion, input.tag!);
       }
-      const fetch = await this.runner({ command: "git", args: ["fetch", "origin", delivery.baseBranch], cwd: delivery.localPath, timeoutMs: 120_000 });
-      if (fetch.exitCode !== 0) throw new Error(failureMessage(fetch, "Could not fetch the merged base branch"));
       // A prior attempt may have created the local tag and failed only the
       // push (panel finding): reuse a local tag that points at the exact merge
       // commit; refuse one that points anywhere else.

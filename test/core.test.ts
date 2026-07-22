@@ -2738,17 +2738,22 @@ test("the tag-truth gate refuses a tag the repository's own files contradict unl
       return { stdout: JSON.stringify({ state: "MERGED", mergeCommit: { oid: "c".repeat(40) } }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
     }
     if (request.command === "gh" && request.args[1] === "merge") prState = "MERGED";
+    // The tag-truth gate reads the version from the IMMUTABLE merge commit
+    // ("c" * 40) via `git show <oid>:package.json`, not the checkout: this
+    // commit declares 1.2.1 about itself.
+    if (request.command === "git" && request.args[0] === "show" && joined.endsWith(":package.json")) {
+      return { stdout: JSON.stringify({ name: "truth", version: "1.2.1" }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
     if (request.command === "git" && request.args[0] === "rev-parse" && joined.includes("refs/tags/")) {
       return { stdout: "", stderr: "", exitCode: 1, durationMs: 1, timedOut: false };
     }
     return { stdout: "", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
   };
   try {
-    assert.equal(await workflows.readDeclaredVersion(root), null, "no version claim is discoverable in an empty directory");
-    await writeFile(path.join(root, "pyproject.toml"), '[project]\nname = "truth"\nversion = "3.4.5"\n', "utf-8");
-    assert.equal(await workflows.readDeclaredVersion(root), "3.4.5", "pyproject declares the version when package.json is absent");
-    await writeFile(path.join(root, "package.json"), JSON.stringify({ name: "truth", version: "1.2.1" }), "utf-8");
-    assert.equal(await workflows.readDeclaredVersion(root), "1.2.1", "package.json wins when both exist");
+    // The pure parser: package.json wins, pyproject reads ONLY [project].version.
+    assert.equal(workflows.parseDeclaredVersion(null, null), null, "no manifest text means no discoverable claim");
+    assert.equal(workflows.parseDeclaredVersion(null, '[project]\nname = "truth"\nversion = "3.4.5"\n'), "3.4.5", "pyproject declares the version when package.json is absent");
+    assert.equal(workflows.parseDeclaredVersion(JSON.stringify({ name: "truth", version: "1.2.1" }), '[project]\nversion = "3.4.5"\n'), "1.2.1", "package.json wins when both exist");
 
     const runId = ledger.createRun("Tag truthfully", root);
     ledger.setRunStatus(runId, "running");
@@ -2776,6 +2781,169 @@ test("the tag-truth gate refuses a tag the repository's own files contradict unl
     ledger.close();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("pyproject version parsing reads only [project].version, ignoring another table's version", async () => {
+  // MAJOR gate finding (2026-07-22): the old whole-file regex took the FIRST
+  // `version = "..."` anywhere, so a [tool.*] table's version before [project]
+  // masqueraded as the project's own — bypassing or falsely tripping the gate.
+  const workflows = await import("../src/delivery.js") as Record<string, any>;
+  const toml = [
+    "[tool.audit]",
+    'version = "1.0.0"',
+    "",
+    "[project]",
+    'name = "x"',
+    'version = "2.0.0"',
+    "",
+    "[project.scripts]",
+    'version = "9.9.9"',
+  ].join("\n");
+  assert.equal(workflows.parseDeclaredVersion(null, toml), "2.0.0", "a [tool.*] version before [project] must not be read as the project version");
+  assert.equal(workflows.parseDeclaredVersion(null, '[project]\r\nversion = "4.5.6"\r\n'), "4.5.6", "CRLF pyproject is parsed");
+  assert.equal(workflows.parseDeclaredVersion(null, '[project]\nname = "x"\ndynamic = ["version"]\n'), null, "a [project] with no static version makes no discoverable claim");
+  assert.equal(workflows.parseDeclaredVersion(JSON.stringify({ version: "3.0.0" }), toml), "3.0.0", "package.json still wins when both exist");
+});
+
+test("the tag-truth gate judges by the version in the merge COMMIT, not the mutable checkout", async () => {
+  // CRITICAL gate finding (2026-07-22): the gate read package.json from the
+  // working tree via fs, so a stale or locally edited primary checkout could
+  // both falsely refuse a correct tag and falsely approve a contradicted one.
+  // Here the checkout ON DISK declares 1.0.0 while the merge commit (served by
+  // `git show`) declares 2.0.0. The gate must judge by the COMMIT both ways.
+  // Against the OLD fs-based code this fails in both directions: it would tag
+  // v1.0.0 (the checkout agreed) though the commit says 2.0.0, and it would
+  // refuse v2.0.0 (the checkout disagreed) though the commit says 2.0.0.
+  const { DeliveryService } = await import("../src/delivery.js");
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-commit-truth-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  // The mutable checkout deliberately declares a DIFFERENT version than the commit.
+  await writeFile(path.join(root, "package.json"), JSON.stringify({ name: "truth", version: "1.0.0" }), "utf-8");
+  let prState = "OPEN";
+  let mergeCommitFetched = false;
+  const runner = async (request: { command: string; args: string[] }) => {
+    const joined = request.args.join(" ");
+    if (request.command === "git" && joined === "remote get-url origin") {
+      return { stdout: "https://github.com/civicsuite/truth.git\n", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    // The merge commit ("c" * 40) declares 2.0.0 about itself — but only once
+    // it exists locally. GitHub creates the merge commit remotely; until
+    // `git fetch origin <base>` runs, `git show` on it MUST fail, so a gate
+    // that asks before fetching silently no-ops and this test goes red
+    // (boss-review ordering finding, 2026-07-22).
+    if (request.command === "git" && request.args[0] === "fetch") mergeCommitFetched = true;
+    if (request.command === "git" && request.args[0] === "show" && joined.endsWith(":package.json")) {
+      if (!mergeCommitFetched) return { stdout: "", stderr: `fatal: invalid object name '${"c".repeat(40)}'`, exitCode: 128, durationMs: 1, timedOut: false };
+      return { stdout: JSON.stringify({ name: "truth", version: "2.0.0" }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "create") {
+      return { stdout: "https://github.com/civicsuite/truth/pull/7\n", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "view" && joined.includes("state,isDraft,mergeable")) {
+      return { stdout: JSON.stringify({ state: prState, isDraft: true, mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", headRefOid: "b".repeat(40), statusCheckRollup: [] }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "view" && joined.includes("mergeCommit")) {
+      return { stdout: JSON.stringify({ state: "MERGED", mergeCommit: { oid: "c".repeat(40) } }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "merge") prState = "MERGED";
+    if (request.command === "git" && request.args[0] === "rev-parse" && joined.includes("refs/tags/")) {
+      return { stdout: "", stderr: "", exitCode: 1, durationMs: 1, timedOut: false };
+    }
+    return { stdout: "", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+  };
+  try {
+    const runId = ledger.createRun("Tag by the commit", root);
+    ledger.setRunStatus(runId, "running");
+    ledger.setRunStatus(runId, "ready", "READY");
+    ledger.prepareDeliveryRepository({ runId, repositoryId: "repo:truth", localPath: root, baseBranch: "main", baseCommit: "a".repeat(40), headCommit: "b".repeat(40), branch: "devharmonics/truth" });
+    const service = new DeliveryService(ledger, runner as never);
+    const config = structuredClone(defaultConfig);
+    config.runPolicy.allowExternalWrites = true;
+    const approval = (id: string) => ({ id, kind: "external_write" as const, approvedBy: "local-owner", approvedAt: new Date().toISOString() });
+    await service.execute({ runId, repositoryId: "repo:truth", action: "push_branch", config, approval: approval("c-push") });
+    await service.execute({ runId, repositoryId: "repo:truth", action: "create_draft_pr", config, approval: approval("c-pr") });
+    await service.execute({ runId, repositoryId: "repo:truth", action: "merge_pr", config, approval: approval("c-merge") });
+
+    // Falsely-approve direction: the checkout declares 1.0.0, so old fs-based
+    // code would AGREE and tag v1.0.0 — but the COMMIT declares 2.0.0, so the
+    // commit-resolved gate refuses.
+    await assert.rejects(
+      () => service.execute({ runId, repositoryId: "repo:truth", action: "tag_release", tag: "v1.0.0", config, approval: approval("c-tag1") }),
+      /declare version 2\.0\.0.*requested tag is v1\.0\.0/,
+      "a tag matching only the stale checkout, not the merge commit, is refused",
+    );
+    assert.equal(ledger.getRun(runId)?.delivery?.repositories[0]?.status, "merged", "the refused tag left the delivery merged, untagged");
+
+    // Falsely-refuse direction: the checkout declares 1.0.0, so old fs-based
+    // code would REFUSE v2.0.0 — but the COMMIT declares 2.0.0, so the
+    // commit-resolved gate approves it without any mismatch confirmation.
+    const tagged = await service.execute({ runId, repositoryId: "repo:truth", action: "tag_release", tag: "v2.0.0", config, approval: approval("c-tag2") });
+    assert.equal(tagged.status, "tagged", "the tag matching the merge commit is applied");
+    assert.equal(tagged.releaseTag, "v2.0.0");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the Evidence page never claims a never-reviewed run passed review", async () => {
+  // MAJOR gate finding (2026-07-22): derivedVerdictMarkup keyed the historical
+  // "the review passed at the time it ran" wording off ISSUE COUNT, so an
+  // ordinary in-progress / never-reviewed run (INCONCLUSIVE with issues) was
+  // told its review had passed. Drive the REAL built createRunReport for two
+  // states through the REAL verdictGuidance extracted from src/ui/app.js.
+  const reporterModule = await import("../src/reporter.js") as { createRunReport: (evidence: Record<string, unknown>) => Record<string, any> };
+
+  // Extract the (pure) verdictGuidance from the shipped UI source. It reads only
+  // report.verdict / .missingEvidence / .inconsistencies, so it runs headless.
+  const appSource = readFileSync(path.join(process.cwd(), "src", "ui", "app.js"), "utf8");
+  const start = appSource.indexOf("function verdictGuidance(report)");
+  const end = appSource.indexOf("\nfunction parseReviewTargets(");
+  assert.ok(start >= 0 && end > start, "verdictGuidance must exist as an extractable function in app.js");
+  const verdictGuidance = new Function(`${appSource.slice(start, end)}; return verdictGuidance;`)() as (report: Record<string, any>) => string;
+
+  // (a) An in-progress run that has never been reviewed: finalReview is null.
+  const inProgress = {
+    version: 2,
+    integritySha256: "b".repeat(64),
+    run: { id: "run-open", goal: "Building", status: "running", finalReview: null, plan: { summary: "bounded", tasks: [] }, tasks: [], events: [] },
+    attempts: [],
+    blackboard: [],
+    toolReceipts: [],
+    reviews: [],
+  };
+  const openReport = reporterModule.createRunReport(inProgress);
+  assert.equal(openReport.verdict, "INCONCLUSIVE", "a never-reviewed in-progress run is INCONCLUSIVE");
+  assert.ok(openReport.missingEvidence.includes("final review"), "the reporter records the absent review");
+  const openGuidance = verdictGuidance(openReport);
+  assert.match(openGuidance, /has not reached a reviewed state/, "an unreviewed run is described as not yet reviewed");
+  assert.doesNotMatch(openGuidance, /passed at the time it ran/, "an unreviewed run is NEVER told its review passed");
+
+  // (b) A run whose retained review WAS READY but whose evidence later went
+  // inconsistent (the integration set moved after review): the historical
+  // wording is earned here and only here.
+  const runPlan = { summary: "bounded", recommendedConcurrency: 1, tasks: [] };
+  const runTasks = [{ id: "one", status: "passed", checks: [{ name: "test", passed: true }] }];
+  const evidenceBinding = createReviewEvidenceBinding({ autonomy: "bounded", plan: runPlan, taskReports: "retained", diff: [{ path: "result.txt", diff: "+done" }], checks: runTasks.map((task) => ({ id: task.id, checks: task.checks })), repositories: [{ repositoryId: "C:/fixture", baseCommit: "base", headCommit: "head" }] });
+  const reviewedThenInconsistent = {
+    version: 2,
+    integritySha256: "c".repeat(64),
+    run: { id: "run-historical", goal: "Shipped", status: "ready", finalReview: "READY\n\nAll retained gates passed.", plan: runPlan, tasks: runTasks, events: [] },
+    attempts: [{ id: 1, status: "completed" }],
+    blackboard: [],
+    toolReceipts: [{ id: 1, outcome: "allow" }],
+    reviews: [{ id: 1, verdict: "READY", integrationSha256: reviewEvidenceBindingSha256(evidenceBinding), evidenceBinding, invalidatedAt: null }],
+    // The integration set moved after review — a retained READY invalidated by
+    // later inconsistency, not a missing review.
+    integrationSet: { status: "ready", repositories: [{ repositoryId: "C:/fixture", baseCommit: "base", headCommit: "different-head" }] },
+  };
+  const historicalReport = reporterModule.createRunReport(reviewedThenInconsistent);
+  assert.equal(historicalReport.verdict, "INCONCLUSIVE");
+  assert.deepEqual([...historicalReport.missingEvidence], [], "a retained READY leaves no review evidence missing");
+  assert.ok(historicalReport.inconsistencies.length > 0, "the retained READY is invalidated by later inconsistency");
+  const historicalGuidance = verdictGuidance(historicalReport);
+  assert.match(historicalGuidance, /passed at the time it ran/, "a retained READY gone inconsistent keeps the historical wording");
+  assert.match(historicalGuidance, /Treat the READY as historical/, "the historical wording tells the owner what to do");
 });
 
 test("migration 30's delivery-table rebuild preserves row data from a physical schema-29 database", async () => {

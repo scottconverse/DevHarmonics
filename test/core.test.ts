@@ -2159,6 +2159,19 @@ test("claims/artifact divergence is a deterministic fail-closed finding", async 
   );
   assert.equal(partiallyMalformed.claimedChanges, null, "a partially invalid manifest fails closed too");
 
+  // Codex R2-003: exact grammar, no coercion — an unknown kind is not
+  // "modified", and a missing task attribution is not an unattributed claim.
+  const badKind = reviewModule.parseReviewerResponse(
+    `READY\nOk.\n\`\`\`json\n{"claimedChanges":[{"path":"src/a.ts","kind":"renamed","taskId":"t1"}]}\n\`\`\``,
+    { provider: "gemini", connectionId: "gemini", lens: "claims" },
+  );
+  assert.equal(badKind.claimedChanges, null, "an unrecognized kind invalidates the manifest");
+  const missingTask = reviewModule.parseReviewerResponse(
+    `READY\nOk.\n\`\`\`json\n{"claimedChanges":[{"path":"src/a.ts","kind":"modified"}]}\n\`\`\``,
+    { provider: "gemini", connectionId: "gemini", lens: "claims" },
+  );
+  assert.equal(missingTask.claimedChanges, null, "a claim without its claiming task invalidates the manifest");
+
   assert.equal(typeof reviewModule.claimsArtifactDivergence, "function", "DH-460 requires the deterministic divergence gate");
 
   // Exact agreement: no findings.
@@ -2237,8 +2250,8 @@ test("adaptive routing prefers the cheapest candidate at established empirical p
 
   const established = (rate: number) => ({ eligibleForAdaptiveWeighting: true, firstAttemptSuccessRate: rate, sampleSize: 40 });
   const guards = { tierFit: 6, reasoningFit: 2, userPin: 0, preferredProvider: 0, fallbackProvider: 0, empiricalLatency: 0, providerDiversity: 0 };
-  const premium = { id: "premium-model", pinned: false, unitCostUsd: 12, empiricalWorkload: established(0.96), breakdown: { ...guards } };
-  const budget = { id: "budget-model", pinned: false, unitCostUsd: 1.5, empiricalWorkload: established(0.94), breakdown: { ...guards } };
+  const premium = { id: "premium-model", provider: "claude", pinned: false, unitCostUsd: 12, empiricalWorkload: established(0.96), breakdown: { ...guards } };
+  const budget = { id: "budget-model", provider: "codex", pinned: false, unitCostUsd: 1.5, empiricalWorkload: established(0.94), breakdown: { ...guards } };
 
   // Parity within tolerance: the cheaper candidate displaces the top.
   const displaced = routingModule.preferCheapestAtParity([premium, budget]);
@@ -2272,10 +2285,19 @@ test("adaptive routing prefers the cheapest candidate at established empirical p
   const worseFit = { ...budget, breakdown: { ...guards, reasoningFit: 0 } };
   assert.equal(routingModule.preferCheapestAtParity([premium, worseFit]), null);
 
-  // A provider-preference nudge does NOT shield a pricier top — that is the
-  // one place the parity rule can fire at all once cost is in the score.
+  // A soft provider-affinity nudge does NOT shield a pricier top — that is
+  // the one place the parity rule can fire at all once cost is in the score.
   const preferredTop = { ...premium, breakdown: { ...guards, preferredProvider: 8 } };
   assert.equal(routingModule.preferCheapestAtParity([preferredTop, budget])?.id, "budget-model");
+
+  // Codex R2-002: a DIRECTED provider — architect-planned or owner-reassigned —
+  // is a hard constraint. Parity never routes off it to another provider...
+  assert.equal(routingModule.preferCheapestAtParity([premium, budget], { preferredProvider: "claude" }), null, "an owner's provider choice is not advisory");
+  // ...but a cheaper model on the SAME directed provider may still win...
+  const budgetSameProvider = { ...budget, id: "budget-claude", provider: "claude" };
+  assert.equal(routingModule.preferCheapestAtParity([premium, budgetSameProvider], { preferredProvider: "claude" })?.id, "budget-claude");
+  // ...and direction toward a provider the top doesn't hold constrains nothing.
+  assert.equal(routingModule.preferCheapestAtParity([premium, budget], { preferredProvider: "gemini" })?.id, "budget-model");
 
   // Codex F-008: pin the exact tolerance boundary so the constant cannot
   // drift unnoticed — exactly 0.05 is parity, 0.0501 is not.
@@ -2429,10 +2451,35 @@ test("the production router applies the parity preference at the route boundary"
     });
     assert.ok(String(decision.model.requestedModelId).includes("z-budget"), `expected the cheaper parity candidate, routed ${String(decision.model.requestedModelId)}: ${decision.factors.join("; ")}`);
     assert.match(decision.factors.join(" "), /parity/i, "the routing explanation must name parity");
+
+    // Codex R2-002 at the route boundary: an explicitly directed provider
+    // (architect-planned or owner-reassigned) is never walked back by parity.
+    const directed = new ModelRouter(ledger).route({
+      role: "reviewer",
+      config: defaultConfig,
+      fallbackProvider: "claude",
+      allowedProviders: ["codex", "claude"],
+      permission: "read_only",
+      task: { id: "t1", title: "directed", description: "", dependencies: [], preferredProvider: "claude", checks: [] },
+    });
+    assert.ok(String(directed.model.requestedModelId).includes("a-premium"), `a directed provider holds: routed ${String(directed.model.requestedModelId)}: ${directed.factors.join("; ")}`);
+    assert.doesNotMatch(directed.factors.join(" "), /parity/i, "no parity displacement off a directed provider");
   } finally {
     ledger.close();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("claims-lens reviews route only to adapters that can structurally deny tools", async () => {
+  // Codex R2-001: capability, not prompt wording, is the gate. Codex CLI
+  // sandbox modes govern writes, not read scope; Gemini's add-dir boundary is
+  // undemonstrated. Tool-less transports and claude's --disallowedTools are in.
+  const providersModule = await import("../src/providers.js") as Record<string, any>;
+  assert.equal(providersModule.providerSupportsToolDenial("claude", "subscription_cli"), true);
+  assert.equal(providersModule.providerSupportsToolDenial("codex", "subscription_cli"), false);
+  assert.equal(providersModule.providerSupportsToolDenial("gemini", "subscription_cli"), false);
+  assert.equal(providersModule.providerSupportsToolDenial("ollama", "local"), true);
+  assert.equal(providersModule.providerSupportsToolDenial("openrouter", "api"), true);
 });
 
 test("the assembled claims-lens chunk prompt demands the manifest the header promised", async () => {

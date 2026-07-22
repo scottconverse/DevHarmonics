@@ -96,7 +96,8 @@ if (process.argv.includes("--version")) {
   console.log(JSON.stringify({result:JSON.stringify(plan)}));
 } else if (input.includes("You are the claims-lens reviewer")) {
   const manifest = JSON.stringify({findings:[],claimedChanges:[{path:"result.txt",kind:"created",taskId:"one"}]});
-  const review = "READY\\n\\nClaims reviewed from cwd=" + process.cwd().replace(/\\\\/g, "/") + " and they cohere with the receipts.\\n" + manifest;
+  const toolsFlag = process.argv.includes("--disallowedTools") ? "denied" : "undenied";
+  const review = "READY\\n\\nClaims reviewed from cwd=" + process.cwd().replace(/\\\\/g, "/") + " toolsFlag=" + toolsFlag + " and they cohere with the receipts.\\n" + manifest;
   if (process.argv.includes("--json")) console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:review}}));
   else if (process.argv.includes("--output-format")) console.log(JSON.stringify({result:review}));
   else console.log(review);
@@ -506,6 +507,11 @@ test("high-risk orchestration requires two independent provider reviews", async 
     const integrationRoot = path.join(os.tmpdir(), "devharmonics", runId);
     const relation = path.relative(path.resolve(observedCwd!), integrationRoot);
     assert.ok(relation.startsWith(".."), `the claims cwd must not be an ancestor of the integration worktree (relation: ${relation})`);
+    // Codex R2-001: tool denial must be structural. The claims slot may only
+    // route to an adapter that can deny its tools (here: claude), and the
+    // reviewer process must actually receive the denial in its effective argv.
+    assert.equal(claimsReceipt.provider, "claude", "claims reviews route only to tool-denial-capable adapters");
+    assert.match(claimsReceipt.rawText, /toolsFlag=denied/, "the claims reviewer's effective invocation must carry the tool denial");
     assert.ok(run?.events.some((event) => event.kind === "review.quorum_passed"));
   } finally {
     ledger.close();

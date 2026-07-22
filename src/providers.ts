@@ -271,6 +271,21 @@ abstract class CliProvider implements ProviderAdapter {
   }
 }
 
+/**
+ * Whether an adapter can STRUCTURALLY deny its file/shell tools for a single
+ * invocation (Codex R2-001). Claims-lens reviews are routed only to adapters
+ * that can: prompt wording and cwd placement are not enforcement.
+ * - claude: yes — headless --disallowedTools removes the tools themselves.
+ * - local (Ollama HTTP): yes — the transport has no tools at all.
+ * - api (OpenRouter): yes — chat completion, no tool execution surface.
+ * - codex: no — its sandbox modes govern writes, not read scope.
+ * - gemini: no until its --add-dir boundary is demonstrated by execution.
+ */
+export function providerSupportsToolDenial(provider: string, transport: string): boolean {
+  if (transport === "local" || transport === "api") return true;
+  return provider === "claude";
+}
+
 export class CodexProvider extends CliProvider {
   readonly name = "codex" as const;
   readonly displayName = "OpenAI Codex";

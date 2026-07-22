@@ -148,11 +148,12 @@ export class ModelRouter {
         // only when the established empirical record proves the parity.
         const parityChoice = preferCheapestAtParity(candidates.map((candidate) => ({
           id: candidate.model.id,
+          provider: candidate.connection.provider,
           pinned: candidate.model.pinned,
           unitCostUsd: catalogUnitCost(candidate.model),
           empiricalWorkload: candidate.empiricalWorkload,
           breakdown: candidate.breakdown,
-        })));
+        })), { preferredProvider: input.task?.preferredProvider ?? null });
         const selected = parityChoice ? candidates.find((candidate) => candidate.model.id === parityChoice.id)! : top;
         return this.decisionForModel(input, workload, selected.model, selected.connection, selected.breakdown, [
           `adaptive ${workload.complexity} workload`,
@@ -351,6 +352,7 @@ export function relativeCatalogCostScores(candidates: ReadonlyArray<{ id: string
 
 export interface ParityCandidate {
   id: string;
+  provider: string;
   pinned: boolean;
   unitCostUsd: number | null;
   empiricalWorkload?: Pick<ModelPerformanceSlice, "eligibleForAdaptiveWeighting" | "firstAttemptSuccessRate"> | undefined;
@@ -368,11 +370,25 @@ export const PARITY_SUCCESS_RATE_TOLERANCE = 0.05;
  * diversity) identical. Returns the displacing candidate, or null when the top
  * selection stands. A pinned top is the user's decision and is never displaced.
  */
-export function preferCheapestAtParity(candidates: ReadonlyArray<ParityCandidate>): ParityCandidate | null {
+export function preferCheapestAtParity(
+  candidates: ReadonlyArray<ParityCandidate>,
+  options?: {
+    /**
+     * The task's directed provider — architect-planned or applied via an owner
+     * reassign directive. A DIRECTED provider is a hard constraint (Codex
+     * R2-002): parity may override soft fallback affinity, but never an
+     * explicit owner choice — a reassignment that routing silently walks back
+     * would make a direct control advisory without saying so.
+     */
+    preferredProvider?: string | null;
+  },
+): ParityCandidate | null {
   const top = candidates[0];
   if (!top || top.pinned) return null;
   if (!top.empiricalWorkload?.eligibleForAdaptiveWeighting) return null;
   if (top.unitCostUsd === null || !Number.isFinite(top.unitCostUsd)) return null;
+  const directedProvider = options?.preferredProvider ?? null;
+  const topIsDirected = directedProvider !== null && top.provider === directedProvider;
   // Every QUALITY consideration must match — tier, reasoning fit, latency,
   // pins, and independence; a "parity" swap onto a materially slower or
   // worse-fitting model is not parity, whatever the success rates say.
@@ -382,6 +398,7 @@ export function preferCheapestAtParity(candidates: ReadonlyArray<ParityCandidate
   // the score, preference-protected tops are the only place parity can fire.
   const guardKeys = ["tierFit", "reasoningFit", "userPin", "empiricalLatency", "providerDiversity"] as const;
   const atParity = candidates.slice(1).filter((candidate) => {
+    if (topIsDirected && candidate.provider !== directedProvider) return false;
     if (candidate.unitCostUsd === null || !Number.isFinite(candidate.unitCostUsd) || candidate.unitCostUsd >= top.unitCostUsd!) return false;
     if (!candidate.empiricalWorkload?.eligibleForAdaptiveWeighting) return false;
     // Epsilon: a success-rate delta of exactly the tolerance must be parity

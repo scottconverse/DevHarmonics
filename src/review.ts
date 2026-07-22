@@ -113,15 +113,17 @@ function normalizeChangePath(value: string): string {
 }
 
 function normalizeClaimedChange(value: unknown): ClaimedChange | null {
+  // Exact grammar, no coercion (Codex R2-003): a manifest entry is valid only
+  // with a non-empty path, an enumerated kind, and the claiming task's id.
+  // Guessing "modified" for an unknown kind or dropping attribution would let
+  // a malformed entry misstate the claimed operation. Extra keys are ignored.
   if (!value || typeof value !== "object") return null;
   const item = value as Record<string, unknown>;
   const rawPath = typeof item.path === "string" ? normalizeChangePath(item.path) : "";
   if (!rawPath) return null;
-  const kind = ["created", "modified", "deleted"].includes(String(item.kind))
-    ? String(item.kind) as ClaimedChange["kind"]
-    : "modified";
-  const taskId = typeof item.taskId === "string" && item.taskId.trim() ? item.taskId.trim() : null;
-  return { path: rawPath, kind, taskId };
+  if (item.kind !== "created" && item.kind !== "modified" && item.kind !== "deleted") return null;
+  if (typeof item.taskId !== "string" || !item.taskId.trim()) return null;
+  return { path: rawPath, kind: item.kind, taskId: item.taskId.trim() };
 }
 
 function normalizeFinding(value: unknown, index: number): ReviewFinding | null {

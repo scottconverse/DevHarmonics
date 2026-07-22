@@ -12,7 +12,7 @@ import { loadConfig, loadConstitution, resolveProviderCommand, devHarmonicsDirec
 import { inspectProviders } from "./doctor.js";
 import { Ledger, type ReviewEvidenceBinding } from "./ledger.js";
 import { OllamaAdapter, syncOllamaRuntimes } from "./ollama.js";
-import { createRuntimeAdapter } from "./providers.js";
+import { createRuntimeAdapter, providerSupportsToolDenial } from "./providers.js";
 import {
   architectPrompt,
   CLAIMS_CHUNK_JSON_CONTRACT,
@@ -828,14 +828,22 @@ export class Orchestrator {
     let completedReviewerIdentity: { provider: string; modelId: string | null; connectionId: string; lens?: ReviewLens | null } | null = null;
     let reviewerFallbackReason: string | null = null;
     let lastReviewerError: Error | null = null;
+    // Codex R2-001: a claims-lens slot may only route to an adapter that can
+    // STRUCTURALLY deny its file tools — capability, not prompt, is the gate.
+    const toolDenialIncapable = firstReviewLens === "claims" && autonomy !== "observe"
+      ? this.ledger.listConnections().filter((connection) => !providerSupportsToolDenial(connection.provider, connection.transport)).map((connection) => connection.id)
+      : [];
     for (let reviewAttempt = 1; reviewAttempt <= config.application.retry.maxAttempts; reviewAttempt++) {
+      const effectiveExcludedConnections = toolDenialIncapable.length
+        ? new Set([...excludedReviewerConnections, ...toolDenialIncapable])
+        : excludedReviewerConnections;
       const reviewerStart = reviewerName ? reviewerProviders.indexOf(reviewerName) : -1;
       const qualificationProviders = reviewerProviders.map((_, index) => reviewerProviders[(Math.max(0, reviewerStart) + reviewAttempt - 1 + index) % reviewerProviders.length]!);
       // No subscription candidate to qualify leaves the router to choose among
       // already-qualified local reviewers, exactly as the worker path does.
       let reviewerFallbackProvider: ProviderName | null = (qualificationProviders[0] ?? null) as ProviderName | null;
       for (const qualificationProvider of qualificationProviders) {
-        const qualification = await ensureSchedulerCandidateQualified({ ledger: this.ledger, config, cwd: worktrees.integrationPath, role: "reviewer", preferredProvider: qualificationProvider, permission: "read_only", excludedModelIds: excludedReviewerModels, excludedConnectionIds: excludedReviewerConnections });
+        const qualification = await ensureSchedulerCandidateQualified({ ledger: this.ledger, config, cwd: worktrees.integrationPath, role: "reviewer", preferredProvider: qualificationProvider, permission: "read_only", excludedModelIds: excludedReviewerModels, excludedConnectionIds: effectiveExcludedConnections });
         this.recordSchedulerQualification(runId, qualification, "reviewer");
         if (qualification?.attempted && !qualification.passed) {
           excludedReviewerModels.add(qualification.modelId);
@@ -857,7 +865,7 @@ export class Orchestrator {
           allowedProviders: reviewerProviders,
           permission: "read_only",
           excludedModelIds: excludedReviewerModels,
-          excludedConnectionIds: excludedReviewerConnections,
+          excludedConnectionIds: effectiveExcludedConnections,
           avoidProviders: implementationProviders,
         });
       } catch (error) {
@@ -1553,7 +1561,15 @@ export class Orchestrator {
     const router = new ModelRouter(this.ledger);
     let lastError: Error | null = null;
     let fallbackReason: string | null = null;
+    // Codex R2-001: claims-lens slots route only to adapters that can
+    // structurally deny their file tools.
+    const toolDenialIncapable = input.lens === "claims" && input.autonomy !== "observe"
+      ? this.ledger.listConnections().filter((connection) => !providerSupportsToolDenial(connection.provider, connection.transport)).map((connection) => connection.id)
+      : [];
     for (let reviewAttempt = 1; reviewAttempt <= input.config.application.retry.maxAttempts; reviewAttempt++) {
+      const effectiveExcludedConnections = toolDenialIncapable.length
+        ? new Set([...input.excludedReviewerConnections, ...toolDenialIncapable])
+        : input.excludedReviewerConnections;
       const start = input.reviewerName ? input.reviewerProviders.indexOf(input.reviewerName) : -1;
       const qualificationProviders = input.reviewerProviders.map((_, index) => input.reviewerProviders[(Math.max(0, start) + input.reviewSlot + reviewAttempt - 2 + index) % input.reviewerProviders.length]!);
       // Null with no subscription candidate left: the router chooses among the
@@ -1568,7 +1584,7 @@ export class Orchestrator {
           preferredProvider: provider,
           permission: "read_only",
           excludedModelIds: input.excludedReviewerModels,
-          excludedConnectionIds: input.excludedReviewerConnections,
+          excludedConnectionIds: effectiveExcludedConnections,
         });
         this.recordSchedulerQualification(input.runId, qualification, "reviewer");
         if (qualification?.attempted && !qualification.passed) {
@@ -1591,7 +1607,7 @@ export class Orchestrator {
           allowedProviders: input.reviewerProviders,
           permission: "read_only",
           excludedModelIds: input.excludedReviewerModels,
-          excludedConnectionIds: input.excludedReviewerConnections,
+          excludedConnectionIds: effectiveExcludedConnections,
           avoidProviders: input.implementationProviders,
         });
       } catch (error) {

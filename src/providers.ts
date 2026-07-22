@@ -104,6 +104,7 @@ abstract class CliProvider implements ProviderAdapter {
       prompt: request.prompt,
       cwd: request.cwd,
       writeAccess: request.permission === "workspace_write",
+      ...(request.withoutRepositoryTools ? { withoutRepositoryTools: true } : {}),
       ...(request.timeoutMs === null ? {} : { timeoutMs: request.timeoutMs }),
     };
     const metadata = await this.metadata();
@@ -304,6 +305,12 @@ export class ClaudeProvider extends CliProvider {
       "json",
       "--permission-mode",
       request.writeAccess ? "acceptEdits" : "plan",
+      // Plan mode blocks writes but not reads, and Claude Code's read scope is
+      // not bound to its cwd — a claims-lens review must deny the tools
+      // themselves or the evidence bundle is only prompt-deep.
+      ...(request.withoutRepositoryTools
+        ? ["--disallowedTools", "Read Glob Grep Bash Edit Write MultiEdit NotebookEdit WebFetch WebSearch Task Agent"]
+        : []),
     ];
   }
 

@@ -55,6 +55,8 @@ export async function runContextOnlyReview(input: {
   maxOutputTokens?: number;
   /** Lens-specific per-chunk JSON instruction; the default names findings alone. */
   jsonContract?: string;
+  /** Deny the runtime's file/shell tools for every chunk invocation (claims lens). */
+  withoutRepositoryTools?: boolean;
   onChunk?: (receipt: ChunkReviewReceipt, index: number, total: number) => void;
 }): Promise<{ text: string; receipts: ChunkReviewReceipt[] }> {
   const receipts: ChunkReviewReceipt[] = [];
@@ -77,6 +79,7 @@ Review only the supplied evidence against the stated goal and acceptance criteri
       prompt,
       cwd: input.cwd,
       permission: "read_only",
+      ...(input.withoutRepositoryTools ? { withoutRepositoryTools: true } : {}),
       timeoutMs: input.timeoutMs ?? 120_000,
       ...(input.maxOutputTokens === undefined ? {} : { maxOutputTokens: input.maxOutputTokens }),
       model: {

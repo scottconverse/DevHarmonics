@@ -377,22 +377,22 @@ async function route(
       return;
     }
     const receipts = context.ledger.listInvocationReceipts(runCostMatch[1]);
-    // Comparison model per role: the priciest currently-qualified model with
-    // known catalog prices. An estimate by design — the counterfactual names
-    // its comparison model and shows nothing where no priced comparator exists.
-    const priciestByRole = Object.fromEntries([...new Set(receipts.map((receipt) => receipt.role))].map((role) => {
-      const candidates = context.ledger.listModels()
-        .filter((model) => model.qualified && !model.excluded && !model.retired)
+    // Every priced, currently-qualified candidate per role goes in; the
+    // counterfactual itself chooses the priciest FOR THE OBSERVED TOKEN MIX
+    // (Codex F-003 — a summed rate card can pick the wrong model). An estimate
+    // by design; roles without a priced comparator show nothing.
+    const candidatesByRole = Object.fromEntries([...new Set(receipts.map((receipt) => receipt.role))].map((role) => [
+      role,
+      context.ledger.listModels()
+        .filter((model) => model.qualified && !model.qualificationStale && !model.excluded && !model.retired)
         .filter((model) => context.ledger.listModelQualifications(model.id).some((qualification) =>
           qualification.passed && qualification.fingerprint === model.qualificationFingerprint && (qualification.role === "general" || qualification.role === role)))
         .flatMap((model) => {
           const prices = catalogPricesPerMTokens(model);
           return prices ? [{ modelId: model.id, displayName: model.canonicalName, ...prices }] : [];
-        })
-        .sort((left, right) => (right.promptPriceUsdPerMTokens + right.completionPriceUsdPerMTokens) - (left.promptPriceUsdPerMTokens + left.completionPriceUsdPerMTokens));
-      return [role, candidates[0]];
-    }));
-    sendJson(response, 200, { cost: runCostCounterfactual({ receipts, priciestByRole }) });
+        }),
+    ]));
+    sendJson(response, 200, { cost: runCostCounterfactual({ receipts, candidatesByRole }) });
     return;
   }
 

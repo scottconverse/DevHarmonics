@@ -350,12 +350,16 @@ export const devHarmonicsConfigSchema = z.object({
     }).default({ low: ["artifact"], medium: ["artifact"], high: ["artifact", "claims"] }),
     maxFixRounds: z.number().int().min(0).max(5),
   }).superRefine((policy, context) => {
-    // More required lenses than reviewers is a quorum that can never pass;
-    // refuse it at parse time instead of failing every run at review time.
+    // A quorum requirement that arithmetic can never satisfy is refused at
+    // parse time instead of failing every run at review time. Same invariant
+    // class for every per-risk cardinality (Codex F-007 caught the sibling).
     for (const risk of ["low", "medium", "high"] as const) {
       const lenses = new Set(policy.requiredLensesByRisk[risk]).size;
       if (lenses > policy.reviewerCountByRisk[risk]) {
         context.addIssue({ code: z.ZodIssueCode.custom, path: ["requiredLensesByRisk", risk], message: `${risk} risk requires ${lenses} distinct lenses but only ${policy.reviewerCountByRisk[risk]} reviewer(s); lens coverage can never be satisfied` });
+      }
+      if (policy.minimumDistinctProvidersByRisk[risk] > policy.reviewerCountByRisk[risk]) {
+        context.addIssue({ code: z.ZodIssueCode.custom, path: ["minimumDistinctProvidersByRisk", risk], message: `${risk} risk requires ${policy.minimumDistinctProvidersByRisk[risk]} distinct providers but only ${policy.reviewerCountByRisk[risk]} reviewer(s); the provider quorum can never be satisfied` });
       }
     }
   }).default({

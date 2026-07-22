@@ -1,5 +1,6 @@
 import os from "node:os";
 import path from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { projectLegacyProvider } from "./compatibility.js";
 import { CapacityBroker } from "./capacity.js";
@@ -893,12 +894,17 @@ export class Orchestrator {
             ? claimsReviewChunks(taskReports)
             : autonomy === "observe" ? this.diagnosticReportChunks(runId) : chunkDiffFiles(diffFiles);
           const localTaskReports = autonomy === "observe" ? "Each accepted diagnostic report is supplied as an independent evidence chunk." : taskReports;
+          // Codex F-001: the OS temp root is the ANCESTOR of every integration
+          // worktree, so it is exactly the wrong cwd for the claims lens. The
+          // claims review runs from a fresh empty sibling directory AND with
+          // the runtime's file tools denied — the isolation is a property of
+          // the invocation, not of prompt wording or path luck.
+          const claimsCwd = claimsLensReview ? mkdtempSync(path.join(os.tmpdir(), "dh-claims-")) : null;
           const performReview = (paidSpendReservationId?: string) => runContextOnlyReview({
             adapter: reviewer,
             model: reviewerDecision.model,
-            // A CLI reviewer runs in its cwd and can read whatever is there; the
-            // claims lens therefore never runs inside the integration worktree.
-            cwd: claimsLensReview ? os.tmpdir() : worktrees.integrationPath,
+            cwd: claimsCwd ?? worktrees.integrationPath,
+            ...(claimsLensReview ? { withoutRepositoryTools: true } : {}),
             contextHeader: claimsLensReview
               ? claimsReviewerContextHeader({ goal: request.goal, constitution, plan, checkSummary, autonomy })
               : localReviewerContextHeader({ goal: request.goal, constitution, plan, checkSummary, taskReports: localTaskReports, autonomy, lens: firstReviewLens }),
@@ -915,10 +921,14 @@ export class Orchestrator {
           const selected = reviewerDecision.model.requestedModelId ? this.ledger.getModel(String(reviewerDecision.model.requestedModelId)) : null;
           if (reviewerDecision.provider === "openrouter" && !selected) throw new Error("OpenRouter paid routing requires an exact selected model");
           const costCeiling = reviewerDecision.provider === "openrouter" ? requireInvocationCostCeiling(selected!, "", 512) * chunks.length : 0;
-          const review = reviewerDecision.provider === "openrouter"
-            ? await new OpenRouterService(this.ledger).withPaidRoutingAllowed(config, runId, costCeiling, (reservation) => performReview(reservation.id), chunks.length)
-            : await performReview();
-          reviewText = review.text;
+          try {
+            const review = reviewerDecision.provider === "openrouter"
+              ? await new OpenRouterService(this.ledger).withPaidRoutingAllowed(config, runId, costCeiling, (reservation) => performReview(reservation.id), chunks.length)
+              : await performReview();
+            reviewText = review.text;
+          } finally {
+            if (claimsCwd) rmSync(claimsCwd, { recursive: true, force: true });
+          }
         }
         completedReviewerIdentity = {
           provider: reviewerDecision.provider,
@@ -1616,10 +1626,15 @@ export class Orchestrator {
               ? this.diagnosticReportChunks(input.runId)
               : chunkDiffFiles(await input.worktrees!.integrationDiffFiles()));
           const localTaskReports = input.autonomy === "observe" ? "Each accepted diagnostic report is supplied as an independent evidence chunk." : input.taskReports;
+          // Codex F-001: fresh empty sibling directory + denied file tools;
+          // the temp ROOT is an ancestor of every worktree and must not host
+          // a claims review.
+          const claimsCwd = claimsLensReview ? mkdtempSync(path.join(os.tmpdir(), "dh-claims-")) : null;
           const performReview = (paidSpendReservationId?: string) => runContextOnlyReview({
             adapter: reviewer,
             model: decision.model,
-            cwd: claimsLensReview ? os.tmpdir() : reviewCwd,
+            cwd: claimsCwd ?? reviewCwd,
+            ...(claimsLensReview ? { withoutRepositoryTools: true } : {}),
             contextHeader: claimsLensReview
               ? claimsReviewerContextHeader({ goal: input.goal, constitution: input.constitution, plan: input.plan, checkSummary: input.checkSummary, autonomy: input.autonomy })
               : localReviewerContextHeader({ goal: input.goal, constitution: input.constitution, plan: input.plan, checkSummary: input.checkSummary, taskReports: localTaskReports, autonomy: input.autonomy, lens: input.lens ?? null }),
@@ -1636,10 +1651,14 @@ export class Orchestrator {
           const selected = decision.model.requestedModelId ? this.ledger.getModel(String(decision.model.requestedModelId)) : null;
           if (decision.provider === "openrouter" && !selected) throw new Error("OpenRouter paid routing requires an exact selected model");
           const costCeiling = decision.provider === "openrouter" ? requireInvocationCostCeiling(selected!, "", 512) * chunks.length : 0;
-          const review = decision.provider === "openrouter"
-            ? await new OpenRouterService(this.ledger).withPaidRoutingAllowed(input.config, input.runId, costCeiling, (reservation) => performReview(reservation.id), chunks.length)
-            : await performReview();
-          text = review.text;
+          try {
+            const review = decision.provider === "openrouter"
+              ? await new OpenRouterService(this.ledger).withPaidRoutingAllowed(input.config, input.runId, costCeiling, (reservation) => performReview(reservation.id), chunks.length)
+              : await performReview();
+            text = review.text;
+          } finally {
+            if (claimsCwd) rmSync(claimsCwd, { recursive: true, force: true });
+          }
         }
         this.recordConnectionOutcome(reviewer.connection.id, { success: true });
         if (decision.model.requestedModelId) {

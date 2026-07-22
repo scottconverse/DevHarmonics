@@ -156,9 +156,13 @@ export function parseReviewerResponse(
   const normalized = parsed.findings
     .map(normalizeFinding)
     .filter((finding): finding is ReviewFinding => Boolean(finding));
-  const claimedChanges = parsed.claimedChanges === null
+  // Codex F-002: an entry that fails normalization poisons the whole manifest.
+  // Dropping bad entries silently would let a malformed manifest masquerade as
+  // a valid empty one and slip past the manifest requirement.
+  const normalizedChanges = parsed.claimedChanges === null ? null : parsed.claimedChanges.map(normalizeClaimedChange);
+  const claimedChanges = normalizedChanges === null || normalizedChanges.some((change) => change === null)
     ? null
-    : parsed.claimedChanges.map(normalizeClaimedChange).filter((change): change is ClaimedChange => Boolean(change));
+    : normalizedChanges as ClaimedChange[];
   const body = text.trim().split(/\r?\n/).slice(1).join("\n").replace(/```json[\s\S]*?```/gi, "").trim();
   const findings = verdict === "NOT_READY" && normalized.length === 0
     ? [{

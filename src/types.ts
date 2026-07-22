@@ -127,6 +127,8 @@ export interface ProviderRequest {
   prompt: string;
   cwd: string;
   writeAccess: boolean;
+  /** Deny the runtime's file/shell tools entirely — for reviews whose evidence must all arrive in the prompt. */
+  withoutRepositoryTools?: boolean;
   timeoutMs?: number;
 }
 

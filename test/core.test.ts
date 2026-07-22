@@ -2018,6 +2018,16 @@ test("review lens coverage is a quorum dimension and receipts record the lens", 
   });
   assert.equal(unsatisfiable.success, false, "a policy demanding more lenses than reviewers is refused at parse time");
 
+  // Codex F-007: the sibling cardinality invariant — providers, same rule.
+  const unsatisfiableProviders = devHarmonicsConfigSchema.shape.reviewPolicy.safeParse({
+    reviewerCountByRisk: { low: 1, medium: 1, high: 2 },
+    minimumDistinctProvidersByRisk: { low: 2, medium: 1, high: 2 },
+    requireImplementorIndependenceByRisk: { low: false, medium: true, high: true },
+    requiredLensesByRisk: { low: ["artifact"], medium: ["artifact"], high: ["artifact", "claims"] },
+    maxFixRounds: 2,
+  });
+  assert.equal(unsatisfiableProviders.success, false, "a policy demanding more distinct providers than reviewers is refused at parse time");
+
   const legacyPolicy = devHarmonicsConfigSchema.shape.reviewPolicy.parse({
     reviewerCountByRisk: { low: 1, medium: 1, high: 2 },
     minimumDistinctProvidersByRisk: { low: 1, medium: 1, high: 2 },
@@ -2135,6 +2145,20 @@ test("claims/artifact divergence is a deterministic fail-closed finding", async 
   const noManifest = reviewModule.parseReviewerResponse("READY\nOk.", { provider: "gemini", connectionId: "gemini", lens: "claims" });
   assert.equal(noManifest.claimedChanges, null, "an absent manifest is not an empty manifest");
 
+  // Codex F-002: a syntactically present but structurally invalid manifest must
+  // not masquerade as a valid empty one — invalid entries fail the whole
+  // manifest closed, exactly like absence.
+  const malformed = reviewModule.parseReviewerResponse(
+    `READY\nOk.\n\`\`\`json\n{"findings":[],"claimedChanges":[{}]}\n\`\`\``,
+    { provider: "gemini", connectionId: "gemini", lens: "claims" },
+  );
+  assert.equal(malformed.claimedChanges, null, "an invalid manifest entry poisons the manifest");
+  const partiallyMalformed = reviewModule.parseReviewerResponse(
+    `READY\nOk.\n\`\`\`json\n{"claimedChanges":[{"path":"src/a.ts","kind":"modified","taskId":"t1"},{"kind":"modified"}]}\n\`\`\``,
+    { provider: "gemini", connectionId: "gemini", lens: "claims" },
+  );
+  assert.equal(partiallyMalformed.claimedChanges, null, "a partially invalid manifest fails closed too");
+
   assert.equal(typeof reviewModule.claimsArtifactDivergence, "function", "DH-460 requires the deterministic divergence gate");
 
   // Exact agreement: no findings.
@@ -2247,6 +2271,19 @@ test("adaptive routing prefers the cheapest candidate at established empirical p
   // Neither is one whose reasoning-effort setting fits the workload worse.
   const worseFit = { ...budget, breakdown: { ...guards, reasoningFit: 0 } };
   assert.equal(routingModule.preferCheapestAtParity([premium, worseFit]), null);
+
+  // A provider-preference nudge does NOT shield a pricier top — that is the
+  // one place the parity rule can fire at all once cost is in the score.
+  const preferredTop = { ...premium, breakdown: { ...guards, preferredProvider: 8 } };
+  assert.equal(routingModule.preferCheapestAtParity([preferredTop, budget])?.id, "budget-model");
+
+  // Codex F-008: pin the exact tolerance boundary so the constant cannot
+  // drift unnoticed — exactly 0.05 is parity, 0.0501 is not.
+  assert.equal(routingModule.PARITY_SUCCESS_RATE_TOLERANCE, 0.05);
+  const atBoundary = { ...budget, empiricalWorkload: established(0.96 - 0.05) };
+  assert.equal(routingModule.preferCheapestAtParity([premium, atBoundary])?.id, "budget-model", "exactly the tolerance is parity");
+  const pastBoundary = { ...budget, empiricalWorkload: established(0.96 - 0.0501) };
+  assert.equal(routingModule.preferCheapestAtParity([premium, pastBoundary]), null, "just past the tolerance is not");
 });
 
 test("per-run cost counterfactual is an estimate from receipts, honest-absent without prices", async () => {
@@ -2259,10 +2296,13 @@ test("per-run cost counterfactual is an estimate from receipts, honest-absent wi
     { role: "reviewer", inputTokens: 30_000, outputTokens: 5_000, costUsd: 0.6 },
   ];
   const priciest = {
-    worker: { modelId: "premium-w", displayName: "Premium W", promptPriceUsdPerMTokens: 15, completionPriceUsdPerMTokens: 75 },
-    reviewer: { modelId: "premium-r", displayName: "Premium R", promptPriceUsdPerMTokens: 10, completionPriceUsdPerMTokens: 40 },
+    worker: [
+      { modelId: "cheap-w", displayName: "Cheap W", promptPriceUsdPerMTokens: 1, completionPriceUsdPerMTokens: 2 },
+      { modelId: "premium-w", displayName: "Premium W", promptPriceUsdPerMTokens: 15, completionPriceUsdPerMTokens: 75 },
+    ],
+    reviewer: [{ modelId: "premium-r", displayName: "Premium R", promptPriceUsdPerMTokens: 10, completionPriceUsdPerMTokens: 40 }],
   };
-  const result = performanceModule.runCostCounterfactual({ receipts, priciestByRole: priciest });
+  const result = performanceModule.runCostCounterfactual({ receipts, candidatesByRole: priciest });
   assert.equal(result.actualUsd, 1.35);
   assert.equal(result.counterfactualUsd, 5);
   assert.equal(result.byRole.find((entry: any) => entry.role === "worker").comparisonModelId, "premium-w");
@@ -2273,7 +2313,7 @@ test("per-run cost counterfactual is an estimate from receipts, honest-absent wi
   // Both sides of the comparison cover the SAME invocations: a role without a
   // comparator drops out of the actual side too, and its spend is reported
   // separately rather than skewing the pair.
-  const partial = performanceModule.runCostCounterfactual({ receipts, priciestByRole: { worker: priciest.worker } });
+  const partial = performanceModule.runCostCounterfactual({ receipts, candidatesByRole: { worker: priciest.worker } });
   assert.deepEqual(partial.excludedRoles, ["reviewer"], "a role without a priced comparator is named, not invented");
   assert.equal(partial.counterfactualUsd, 4.5);
   assert.equal(partial.actualUsd, 0.75, "the actual side is scoped to the invocations the counterfactual covers");
@@ -2286,18 +2326,113 @@ test("per-run cost counterfactual is an estimate from receipts, honest-absent wi
       { role: "worker", inputTokens: 100_000, outputTokens: 20_000, costUsd: 0.5 },
       { role: "worker", inputTokens: null, outputTokens: null, costUsd: 0.3 },
     ],
-    priciestByRole: priciest,
+    candidatesByRole: priciest,
   });
   assert.equal(mixed.actualUsd, 0.5);
   assert.equal(mixed.counterfactualUsd, 3);
   assert.equal(mixed.unprojectedUsd, 0.3);
 
-  assert.equal(performanceModule.runCostCounterfactual({ receipts, priciestByRole: {} }), null, "nothing computable shows nothing, not zero");
+  // Codex F-004a: known tokens with UNKNOWN billed cost must not appear as a
+  // $0 actual — the receipt leaves the pair and is counted, not invented.
+  const unpriced2 = performanceModule.runCostCounterfactual({
+    receipts: [
+      { role: "worker", inputTokens: 100_000, outputTokens: 20_000, costUsd: 0.5 },
+      { role: "worker", inputTokens: 10_000, outputTokens: 2_000, costUsd: null },
+    ],
+    candidatesByRole: priciest,
+  });
+  assert.equal(unpriced2.actualUsd, 0.5);
+  assert.equal(unpriced2.counterfactualUsd, 3, "the counterfactual side is scoped to the same paired receipts");
+  assert.equal(unpriced2.unknownCostReceipts, 1, "unknown billed cost is counted, never presented as zero");
   assert.equal(
-    performanceModule.runCostCounterfactual({ receipts: [{ role: "worker", inputTokens: null, outputTokens: null, costUsd: 0.2 }], priciestByRole: priciest }),
+    performanceModule.runCostCounterfactual({ receipts: [{ role: "worker", inputTokens: 100_000, outputTokens: 20_000, costUsd: null }], candidatesByRole: priciest }),
+    null,
+    "a run whose only receipts have unknown cost has no honest pair to show",
+  );
+
+  // Codex F-004b: sub-cent spends must never produce negative unprojected
+  // spend from per-role rounding.
+  const subCent = performanceModule.runCostCounterfactual({
+    receipts: [
+      { role: "worker", inputTokens: 1_000, outputTokens: 100, costUsd: 0.00006 },
+      { role: "reviewer", inputTokens: 1_000, outputTokens: 100, costUsd: 0.00006 },
+    ],
+    candidatesByRole: priciest,
+  });
+  assert.ok(subCent.unprojectedUsd >= 0, "rounding must not invent negative unprojected spend");
+
+  // Codex F-003: "priciest" means priciest FOR THIS RUN'S TOKEN MIX, not the
+  // highest summed rate card. An output-heavy role must pick the
+  // output-expensive comparator.
+  const asymmetric = performanceModule.runCostCounterfactual({
+    receipts: [{ role: "worker", inputTokens: 0, outputTokens: 1_000_000, costUsd: 0.1 }],
+    candidatesByRole: {
+      worker: [
+        { modelId: "input-expensive", displayName: "In-heavy", promptPriceUsdPerMTokens: 100, completionPriceUsdPerMTokens: 0 },
+        { modelId: "output-expensive", displayName: "Out-heavy", promptPriceUsdPerMTokens: 0, completionPriceUsdPerMTokens: 90 },
+      ],
+    },
+  });
+  assert.equal(asymmetric.byRole[0].comparisonModelId, "output-expensive");
+  assert.equal(asymmetric.counterfactualUsd, 90);
+
+  assert.equal(performanceModule.runCostCounterfactual({ receipts, candidatesByRole: {} }), null, "nothing computable shows nothing, not zero");
+  assert.equal(
+    performanceModule.runCostCounterfactual({ receipts: [{ role: "worker", inputTokens: null, outputTokens: null, costUsd: 0.2 }], candidatesByRole: priciest }),
     null,
     "receipts without token counts cannot be projected",
   );
+});
+
+test("the production router applies the parity preference at the route boundary", async () => {
+  // Codex F-005: the helper was tested while the route() wiring could be
+  // deleted with the suite green. This exercises ModelRouter.route itself:
+  // the fallback-provider nudge tops the pricier model, and the established
+  // parity record displaces it onto the cheaper candidate, explained.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-parity-route-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db")) as Ledger & Record<string, any>;
+  try {
+    for (const provider of ["codex", "claude"] as const) {
+      ledger.upsertConnection({
+        id: `subscription-cli:${provider}`, provider, transport: "subscription_cli", authentication: "subscription",
+        displayName: provider, enabled: true, installed: true, authenticated: true, visible: true, healthy: true,
+        available: true, entitlement: "unknown", capacity: "unknown", adapterVersion: "t", runtimeVersion: "t", metadata: {},
+      });
+    }
+    const premiumProfile = { tier: "premium", family: "fixture", capabilities: ["text", "analysis"], source: "catalog" };
+    const seed = (id: string, connectionId: string, promptPrice: number, completionPrice: number) => {
+      const model = ledger.addManualModel({
+        id, connectionId, canonicalName: id, displayName: id, lifecycle: "verified", visible: true, verified: true,
+        qualified: true, active: true, metadata: { devHarmonicsProfile: premiumProfile, promptPrice, completionPrice },
+      });
+      ledger.recordModelQualification({ modelId: id, fixtureVersion: "t", role: "general", passed: true, score: 1, evidence: {}, fingerprint: model.qualificationFingerprint });
+    };
+    seed("manual:claude:a-premium", "subscription-cli:claude", 0.00002, 0.00006);
+    seed("manual:codex:z-budget", "subscription-cli:codex", 0.000001, 0.000002);
+    const runId = ledger.createRun("parity route fixture", root);
+    for (const modelId of ["manual:claude:a-premium", "manual:codex:z-budget"]) {
+      for (let index = 0; index < 25; index++) {
+        ledger.recordInvocationReceipt({
+          runId, role: "reviewer", provider: modelId.includes("claude") ? "claude" : "codex",
+          connectionId: modelId.includes("claude") ? "subscription-cli:claude" : "subscription-cli:codex",
+          requestedModelId: modelId, resolvedModelId: modelId, inputTokens: 10, outputTokens: 10, costUsd: 0.001,
+          durationMs: 100, workloadClass: "complex:premium",
+        });
+      }
+    }
+    const decision = new ModelRouter(ledger).route({
+      role: "reviewer",
+      config: defaultConfig,
+      fallbackProvider: "claude",
+      allowedProviders: ["codex", "claude"],
+      permission: "read_only",
+    });
+    assert.ok(String(decision.model.requestedModelId).includes("z-budget"), `expected the cheaper parity candidate, routed ${String(decision.model.requestedModelId)}: ${decision.factors.join("; ")}`);
+    assert.match(decision.factors.join(" "), /parity/i, "the routing explanation must name parity");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("the assembled claims-lens chunk prompt demands the manifest the header promised", async () => {

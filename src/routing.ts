@@ -354,7 +354,7 @@ export interface ParityCandidate {
   pinned: boolean;
   unitCostUsd: number | null;
   empiricalWorkload?: Pick<ModelPerformanceSlice, "eligibleForAdaptiveWeighting" | "firstAttemptSuccessRate"> | undefined;
-  breakdown: Pick<RoutingScoreBreakdown, "tierFit" | "reasoningFit" | "userPin" | "preferredProvider" | "fallbackProvider" | "empiricalLatency" | "providerDiversity">;
+  breakdown: Pick<RoutingScoreBreakdown, "tierFit" | "reasoningFit" | "userPin" | "empiricalLatency" | "providerDiversity">;
 }
 
 /** Success-rate difference at or under this is parity once both records are established (DH-250's ≥20-observation bar). */
@@ -373,14 +373,20 @@ export function preferCheapestAtParity(candidates: ReadonlyArray<ParityCandidate
   if (!top || top.pinned) return null;
   if (!top.empiricalWorkload?.eligibleForAdaptiveWeighting) return null;
   if (top.unitCostUsd === null || !Number.isFinite(top.unitCostUsd)) return null;
-  // Every scored non-cost consideration must match — including latency and
-  // reasoning fit; a "parity" swap onto a materially slower or worse-fitting
-  // model is not parity, whatever the success rates say.
-  const guardKeys = ["tierFit", "reasoningFit", "userPin", "preferredProvider", "fallbackProvider", "empiricalLatency", "providerDiversity"] as const;
+  // Every QUALITY consideration must match — tier, reasoning fit, latency,
+  // pins, and independence; a "parity" swap onto a materially slower or
+  // worse-fitting model is not parity, whatever the success rates say.
+  // Provider-preference nudges (preferred/fallback provider) deliberately do
+  // NOT guard: shielding a pricier selection behind a habit preference is the
+  // exact behavior this preference exists to end — with cost already nudging
+  // the score, preference-protected tops are the only place parity can fire.
+  const guardKeys = ["tierFit", "reasoningFit", "userPin", "empiricalLatency", "providerDiversity"] as const;
   const atParity = candidates.slice(1).filter((candidate) => {
     if (candidate.unitCostUsd === null || !Number.isFinite(candidate.unitCostUsd) || candidate.unitCostUsd >= top.unitCostUsd!) return false;
     if (!candidate.empiricalWorkload?.eligibleForAdaptiveWeighting) return false;
-    if (Math.abs(candidate.empiricalWorkload.firstAttemptSuccessRate - top.empiricalWorkload!.firstAttemptSuccessRate) > PARITY_SUCCESS_RATE_TOLERANCE) return false;
+    // Epsilon: a success-rate delta of exactly the tolerance must be parity
+    // even when floating point renders it as 0.050000000000000044.
+    if (Math.abs(candidate.empiricalWorkload.firstAttemptSuccessRate - top.empiricalWorkload!.firstAttemptSuccessRate) - PARITY_SUCCESS_RATE_TOLERANCE > 1e-9) return false;
     return guardKeys.every((key) => candidate.breakdown[key] === top.breakdown[key]);
   });
   if (!atParity.length) return null;

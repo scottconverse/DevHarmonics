@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -28,6 +28,37 @@ import { inferModelProfile } from "./model-intelligence.js";
 import type { ModelRecord } from "./registry.js";
 
 const uiDirectory = fileURLToPath(new URL("./ui/", import.meta.url));
+
+/**
+ * DH810-AUD-005: the two workflows-of-record ship with the PRODUCT (the
+ * tracked workflows/ directory of the DevHarmonics install), so a fresh
+ * cockpit must actually contain them — a manual that says "two ship" while a
+ * fresh ledger lists zero is a dead end. Recording is content-hash idempotent,
+ * so re-seeding on every start is a no-op after the first. This deliberately
+ * reads only the install's own fixtures — scanning the TARGET repository for
+ * workflow files remains deferred.
+ */
+export async function seedShippedWorkflows(ledger: Ledger): Promise<void> {
+  const shippedDirectory = fileURLToPath(new URL("../../workflows/", import.meta.url));
+  let filenames: string[];
+  try {
+    filenames = (await readdir(shippedDirectory)).filter((name) => name.endsWith(".json")).sort();
+  } catch {
+    return; // no shipped directory in this install layout — nothing to seed
+  }
+  for (const filename of filenames) {
+    try {
+      const parsed = parseWorkflowDocument(await readFile(path.join(shippedDirectory, filename), "utf-8"));
+      if (parsed.ok) {
+        ledger.recordWorkflowRevision({ workflow: parsed.workflow });
+      } else {
+        console.warn(`Shipped workflow ${filename} was not recorded: ${parsed.issues.join("; ")}`);
+      }
+    } catch (error) {
+      console.warn(`Shipped workflow ${filename} was not recorded: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
 /** Per-repository delivery serialization: `${runId}:${repositoryId}` while an operation is executing. */
 const deliveryOperationsInFlight = new Set<string>();
 
@@ -42,6 +73,7 @@ export async function startDashboard(options: {
   await initializeProject(defaultProject);
   const ledger = new Ledger(path.join(devHarmonicsDirectory(defaultProject), "devharmonics.db"));
   ledger.reconcileInterruptedRuns();
+  await seedShippedWorkflows(ledger);
   const orchestrator = new Orchestrator(ledger);
   const catalog = new ModelCatalogCoordinator(ledger, defaultProject);
   const openRouter = new OpenRouterService(ledger);
@@ -650,6 +682,10 @@ async function route(
       return;
     }
     const raw = await readJson(request) as Record<string, unknown>;
+    if ("workflowRevisionHash" in raw) {
+      sendJson(response, 400, { error: "workflowRevisionHash is structural provenance set only by workflow instantiation; it cannot be supplied on an objective request" });
+      return;
+    }
     const policyNotes = Array.isArray(raw.policyNotes) ? raw.policyNotes : [];
     const parsed = objectiveInputSchema.safeParse({
       ...raw,
@@ -669,6 +705,10 @@ async function route(
   if (request.method === "POST" && url.pathname === "/api/objectives") {
     requireJsonRequest(request);
     const raw = await readJson(request) as Record<string, unknown>;
+    if ("workflowRevisionHash" in raw) {
+      sendJson(response, 400, { error: "workflowRevisionHash is structural provenance set only by workflow instantiation; it cannot be supplied on an objective request" });
+      return;
+    }
     const parsed = objectiveInputSchema.safeParse({ ...raw, projectPath: path.resolve(String(raw.projectPath || context.defaultProject)) });
     if (!parsed.success) {
       sendJson(response, 400, { error: "Objective is invalid", issues: parsed.error.issues });
@@ -700,8 +740,31 @@ async function route(
       sendJson(response, 400, { error: "Workflow document is invalid", issues: parsedDocument.issues });
       return;
     }
-    const promotedFrom = typeof body.promotedFrom === "string" && /^[a-f0-9]{64}$/i.test(body.promotedFrom) ? body.promotedFrom.toLowerCase() : undefined;
-    sendJson(response, 201, { revision: context.ledger.recordWorkflowRevision({ workflow: parsedDocument.workflow, ...(promotedFrom ? { promotedFrom } : {}) }) });
+    // DH810-AUD-006: an attempted promotion is never quietly reinterpreted as
+    // an ordinary recording — a malformed base refuses, an unknown base is
+    // 404, and a permission widening is a 409 conflict, not a generic 500.
+    let promotedFrom: string | undefined;
+    if (body.promotedFrom !== undefined) {
+      if (typeof body.promotedFrom !== "string" || !/^[a-f0-9]{64}$/i.test(body.promotedFrom)) {
+        sendJson(response, 400, { error: "promotedFrom must be the 64-character content hash of a stored workflow revision" });
+        return;
+      }
+      promotedFrom = body.promotedFrom.toLowerCase();
+    }
+    try {
+      sendJson(response, 201, { revision: context.ledger.recordWorkflowRevision({ workflow: parsedDocument.workflow, ...(promotedFrom ? { promotedFrom } : {}) }) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/unknown promotion base/i.test(message)) {
+        sendJson(response, 404, { error: message });
+        return;
+      }
+      if (/would widen permissions/i.test(message)) {
+        sendJson(response, 409, { error: message });
+        return;
+      }
+      throw error;
+    }
     return;
   }
   const workflowDetailMatch = url.pathname.match(/^\/api\/workflows\/([a-f0-9]{64})$/i);
@@ -756,6 +819,10 @@ async function route(
   if (request.method === "PUT" && objectiveMatch?.[1]) {
     requireJsonRequest(request);
     const raw = await readJson(request) as Record<string, unknown>;
+    if ("workflowRevisionHash" in raw) {
+      sendJson(response, 400, { error: "workflowRevisionHash is structural provenance set only by workflow instantiation; it cannot be supplied on an objective request" });
+      return;
+    }
     const expectedRevision = Number(raw.expectedRevision);
     const parsed = objectiveInputSchema.safeParse({ ...raw, projectPath: path.resolve(String(raw.projectPath || context.defaultProject)) });
     if (!Number.isInteger(expectedRevision) || expectedRevision < 1) {
@@ -820,18 +887,17 @@ async function route(
     const body = await readJson(request) as { agents?: number | "auto"; enabledProviders?: ProviderName[] };
     const revision = context.ledger.approvePlanRevision(objective.id, revisionNumber);
     const agents = body.agents === "auto" ? "auto" : Number(body.agents);
+    // DH-810: the pinned revision derives from the OBJECTIVE'S OWN structural
+    // provenance — never from client input, which would make the audit trail
+    // fabricable. The orchestrator verifies the revision and records the pin
+    // BEFORE execution launches (audit DH810-AUD-001: no run ever starts and
+    // acquires its pedigree afterwards).
     const runId = context.orchestrator.beginApprovedObjective({
       objective,
       revision,
       agents: agents === "auto" || Number.isInteger(agents) && agents > 0 ? agents : "auto",
       ...(body.enabledProviders ? { enabledProviders: body.enabledProviders } : {}),
     });
-    // DH-810: the pinned revision derives from the OBJECTIVE'S OWN structural
-    // provenance — never from client input, which would make the audit trail
-    // fabricable (panel critical: any run could claim any workflow pedigree).
-    if (objective.workflowRevisionHash) {
-      context.ledger.linkRunWorkflowRevision(runId, objective.workflowRevisionHash);
-    }
     sendJson(response, 202, { runId, objectiveId: objective.id, approvedPlanRevision: revision.revision, ...(objective.workflowRevisionHash ? { workflowRevisionHash: objective.workflowRevisionHash } : {}) });
     return;
   }

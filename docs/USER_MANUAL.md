@@ -152,10 +152,10 @@ The agent count is not artificially capped. High settings can consume substantia
 
 ### Run a saved workflow (development builds after v0.5.1)
 
-A **workflow** is a reusable, versioned job description — for example "audit the documentation for stale version claims" — stored as a JSON document in the repository's tracked `workflows/` directory and recorded in the ledger by content hash, so every revision is permanent and identifiable. Two ship with DevHarmonics: `documentation-consistency` and `release-truth-audit`.
+A **workflow** is a reusable, versioned job description — for example "audit the documentation for stale version claims" — stored as a JSON document in the install's tracked `workflows/` directory and recorded in the ledger by content hash, so every revision is permanent and identifiable. Two ship with DevHarmonics — `documentation-consistency` and `release-truth-audit` — and they are recorded automatically the first time the server starts, so a fresh cockpit already lists them.
 
-1. Open **Workflows** and select a recorded revision. The full document is shown — inputs, acceptance criteria, required evidence, approval points, and permissions — so you can review exactly what will run before anything moves.
-2. Fill in the typed inputs (an empty value does not count for a required input) and the repository scope, then click **Create objective**.
+1. Open **Workflows** and select a recorded revision. The full document is shown — inputs, acceptance criteria, required evidence, approval points, and permissions — so you can review exactly what will run before anything moves. The evidence, approval-point, and completion-contract fields are advisory in this release: they travel into the objective as policy notes that inform planning, while actual gating still comes from your run policy and review policy in Setup.
+2. Fill in the typed inputs (an empty value does not count for a required input). To scope repositories, select the owning product and tick its repositories — repository scope always belongs to a product, exactly as in the objective composer; leave it on Standalone to run against the server project folder. Then click **Create objective**.
 3. The workflow becomes a normal objective in **Runs**: propose a plan, approve the exact revision, and start it like any other run.
 
 The run permanently records which workflow revision it executed. Editing a workflow never changes what a past run did — an edit is a new revision beside the old one — and a revision recorded as a promotion of an earlier pilot is refused if it tries to widen the pilot's permissions (turning on external writes, escalating autonomy, or dropping an approval point). To record a new workflow or revision, POST its document to `/api/workflows`.

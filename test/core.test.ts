@@ -2601,10 +2601,23 @@ test("workflow documents parse with typed inputs and content-hash revision ident
   assert.equal(parsed.workflow.name, "documentation-consistency");
   assert.equal(parsed.workflow.inputs[0].required, true);
 
-  // Identity: stable under key order, changed by content.
+  // Identity: stable under key order, changed by content. (Audit
+  // DH810-AUD-010: the reordered object must GENUINELY change key insertion
+  // order, at the top level and in a nested object — a spread that overwrites
+  // an existing key does not.)
   const hashA = workflows.workflowRevisionHash(parsed.workflow);
-  const reordered = workflows.parseWorkflowDocument(JSON.stringify({ ...document, description: document.description }));
-  assert.equal(workflows.workflowRevisionHash(reordered.workflow), hashA, "identical content hashes identically");
+  const reordered = workflows.parseWorkflowDocument(JSON.stringify({
+    permissions: { allowExternalWrites: document.permissions.allowExternalWrites, autonomy: document.permissions.autonomy },
+    completionContract: document.completionContract,
+    approvalPoints: document.approvalPoints,
+    evidenceRequirements: document.evidenceRequirements,
+    objective: { risk: document.objective.risk, acceptanceCriteria: document.objective.acceptanceCriteria, outcomeTemplate: document.objective.outcomeTemplate },
+    inputs: document.inputs,
+    description: document.description,
+    name: document.name,
+  }));
+  assert.equal(reordered.ok, true);
+  assert.equal(workflows.workflowRevisionHash(reordered.workflow), hashA, "identical content hashes identically regardless of key order");
   const edited = workflows.parseWorkflowDocument(JSON.stringify({ ...document, description: "changed" }));
   assert.notEqual(workflows.workflowRevisionHash(edited.workflow), hashA, "any content change is a new revision");
 
@@ -2916,7 +2929,18 @@ test("objective workflow provenance persists through the ledger and a hand-edit 
     assert.equal(ledger.getObjective(created.id)?.workflowRevisionHash, instantiated.revisionHash, "provenance survives a read-back");
 
     const edited = ledger.updateObjective(created.id, { ...instantiated.objective, outcome: "Hand-edited outcome" }, created.revision);
-    assert.equal(edited.workflowRevisionHash, undefined, "a hand-edited objective is no longer the workflow's objective — provenance clears");
+    // Audit DH810-AUD-008: the cleared pin is an explicit null — the same
+    // string-or-null public shape as RunSummary — never a silently missing key.
+    assert.equal(edited.workflowRevisionHash, null, "a hand-edited objective is no longer the workflow's objective — provenance clears to null");
+    assert.ok(Object.hasOwn(edited, "workflowRevisionHash"), "the cleared provenance is present as null, not omitted");
+
+    // Defense in depth (audit DH810-AUD-001): an objective can never be
+    // CREATED claiming a revision the ledger has not stored.
+    assert.throws(
+      () => ledger.createObjective({ ...instantiated.objective, workflowRevisionHash: "0".repeat(64) }),
+      /unknown workflow revision/i,
+      "unknown provenance refuses at objective creation",
+    );
   } finally {
     ledger.close();
     await rm(root, { recursive: true, force: true });
@@ -2974,12 +2998,93 @@ test("a promoted workflow revision can never silently widen the pilot's permissi
     );
 
     // Same scope and NARROWING both promote cleanly — the guard blocks
-    // widening, not evolution.
-    const promoted = promote({ ...base, description: "Promoted: proven on three repositories.", permissions: { autonomy: "observe", allowExternalWrites: false } });
-    assert.notEqual(promoted.revisionHash, recordedBase.revisionHash, "the promotion is a new revision");
+    // widening, not evolution. (Audit DH810-AUD-010: the same-scope case is a
+    // distinct claim from narrowing and is exercised separately.)
+    const sameScope = promote({ ...base, description: "Promoted: proven on three repositories." });
+    assert.notEqual(sameScope.revisionHash, recordedBase.revisionHash, "a changed-content, identical-permission promotion is a new revision");
+    const narrowed = promote({ ...base, description: "Promoted and narrowed.", permissions: { autonomy: "observe", allowExternalWrites: false } });
+    assert.notEqual(narrowed.revisionHash, recordedBase.revisionHash, "the narrowing promotion is a new revision");
     assert.equal(ledger.getWorkflowRevision(recordedBase.revisionHash)!.workflow.description, base.description, "the pilot revision is untouched");
   } finally {
     ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("migrations 32 and 33 physically execute against a real schema-31 database", async () => {
+  // Audit DH810-AUD-007: the existing upgrade test resets migration HISTORY
+  // but leaves the current physical schema in place, so the new CREATE/ALTER
+  // paths run as no-ops. This test reconstructs a database that physically
+  // LACKS the workflow table and provenance columns — exactly what a v31 user
+  // has — and proves the migrations build them.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-migration-31-"));
+  const filename = path.join(root, "devharmonics.db");
+  const seeded = new Ledger(filename);
+  const sentinelRun = seeded.createRun("Survive the 31-to-33 upgrade", root);
+  const sentinelObjective = seeded.createObjective({
+    outcome: "Survive the upgrade",
+    acceptanceCriteria: ["Still present at schema 33"],
+    constraints: [],
+    projectPath: root,
+    repositoryIds: [],
+    risk: "low",
+    autonomy: "observe",
+    priority: "normal",
+    policyNotes: [],
+  });
+  seeded.close();
+
+  const surgery = new DatabaseSync(filename);
+  surgery.exec(`
+    DROP TABLE workflow_revisions;
+    ALTER TABLE runs DROP COLUMN workflow_revision_hash;
+    ALTER TABLE objectives DROP COLUMN workflow_revision_hash;
+    DELETE FROM schema_migrations WHERE version > 31;
+    PRAGMA user_version = 31;
+  `);
+  surgery.close();
+
+  const upgraded = new Ledger(filename) as Ledger & Record<string, any>;
+  try {
+    assert.equal(upgraded.getSchemaVersion(), LEDGER_SCHEMA_VERSION, "the physical v31 database reaches the current schema");
+    assert.equal(upgraded.getRun(sentinelRun)?.goal, "Survive the 31-to-33 upgrade", "sentinel run survives");
+    assert.equal(upgraded.getObjective(sentinelObjective.id)?.outcome, "Survive the upgrade", "sentinel objective survives");
+    assert.equal(upgraded.getObjective(sentinelObjective.id)?.workflowRevisionHash, null, "a pre-workflow objective reads as unprovenance, not an error");
+
+    // The migrated schema must be structurally identical to a fresh one.
+    const freshRoot = await mkdtemp(path.join(os.tmpdir(), "devharmonics-migration-fresh-"));
+    const freshFilename = path.join(freshRoot, "devharmonics.db");
+    new Ledger(freshFilename).close();
+    const migrated = new DatabaseSync(filename);
+    const fresh = new DatabaseSync(freshFilename);
+    try {
+      const schemaOf = (database: InstanceType<typeof DatabaseSync>) => {
+        const objects = (database.prepare("SELECT type, name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all() as Array<{ type: string; name: string }>).map((row) => `${row.type}:${row.name}`);
+        const tables = (database.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<{ name: string }>).map((row) => row.name);
+        const columns = Object.fromEntries(tables.map((table) => [table, (database.prepare(`SELECT name FROM pragma_table_info('${table}')`).all() as Array<{ name: string }>).map((row) => row.name).sort()]));
+        return { objects, columns };
+      };
+      assert.deepEqual(schemaOf(migrated), schemaOf(fresh), "the migrated schema matches a fresh database exactly");
+    } finally {
+      migrated.close();
+      fresh.close();
+      await rm(freshRoot, { recursive: true, force: true });
+    }
+
+    // The freshly built structures actually work: record, provenance, pin.
+    const workflows = await import("../src/workflows.js") as Record<string, any>;
+    const parsed = workflows.parseWorkflowDocument(await readFile(path.join(process.cwd(), "workflows", "documentation-consistency.json"), "utf-8"));
+    assert.equal(parsed.ok, true);
+    const recorded = upgraded.recordWorkflowRevision({ workflow: parsed.workflow });
+    const instantiated = workflows.instantiateWorkflow({ workflow: parsed.workflow, inputs: { repositoryId: "repo:docs" }, projectPath: root, repositoryIds: [] });
+    assert.equal(instantiated.ok, true);
+    const provenanced = upgraded.createObjective(instantiated.objective);
+    assert.equal(provenanced.workflowRevisionHash, recorded.revisionHash);
+    const pinnedRun = upgraded.createRun("workflow run on migrated schema", root);
+    upgraded.linkRunWorkflowRevision(pinnedRun, recorded.revisionHash);
+    assert.equal(upgraded.getRun(pinnedRun)?.workflowRevisionHash, recorded.revisionHash);
+  } finally {
+    upgraded.close();
     await rm(root, { recursive: true, force: true });
   }
 });

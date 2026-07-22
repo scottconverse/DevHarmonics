@@ -39,24 +39,36 @@ const uiDirectory = fileURLToPath(new URL("./ui/", import.meta.url));
  * workflow files remains deferred.
  */
 export async function seedShippedWorkflows(ledger: Ledger): Promise<void> {
-  const shippedDirectory = fileURLToPath(new URL("../../workflows/", import.meta.url));
-  let filenames: string[];
+  // "../workflows/" resolves identically in both supported layouts (audit
+  // DH810-R3-001): from src/ it is the repository's tracked workflows/
+  // directory; from dist/src/ it is dist/workflows/, which the build copies
+  // from the same tracked directory. A missing directory or fixture is a
+  // LOUD degraded state, never a silent empty cockpit.
+  const shippedDirectory = fileURLToPath(new URL("../workflows/", import.meta.url));
+  const required = ["documentation-consistency.json", "release-truth-audit.json"];
+  const seeded: string[] = [];
+  let filenames: string[] = [];
   try {
     filenames = (await readdir(shippedDirectory)).filter((name) => name.endsWith(".json")).sort();
-  } catch {
-    return; // no shipped directory in this install layout — nothing to seed
+  } catch (error) {
+    console.error(`DEGRADED: shipped workflows directory is missing at ${shippedDirectory} (${error instanceof Error ? error.message : String(error)}) — the Workflows view will start empty`);
+    return;
   }
   for (const filename of filenames) {
     try {
       const parsed = parseWorkflowDocument(await readFile(path.join(shippedDirectory, filename), "utf-8"));
       if (parsed.ok) {
         ledger.recordWorkflowRevision({ workflow: parsed.workflow });
+        seeded.push(filename);
       } else {
-        console.warn(`Shipped workflow ${filename} was not recorded: ${parsed.issues.join("; ")}`);
+        console.error(`DEGRADED: shipped workflow ${filename} was not recorded: ${parsed.issues.join("; ")}`);
       }
     } catch (error) {
-      console.warn(`Shipped workflow ${filename} was not recorded: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(`DEGRADED: shipped workflow ${filename} was not recorded: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+  for (const filename of required) {
+    if (!seeded.includes(filename)) console.error(`DEGRADED: required shipped workflow ${filename} is absent from ${shippedDirectory}`);
   }
 }
 /** Per-repository delivery serialization: `${runId}:${repositoryId}` while an operation is executing. */
@@ -904,7 +916,13 @@ async function route(
 
   if (request.method === "POST" && url.pathname === "/api/runs") {
     requireJsonRequest(request);
-    const body = (await readJson(request)) as Partial<RunRequest>;
+    const body = (await readJson(request)) as Partial<RunRequest> & Record<string, unknown>;
+    // DH810-R3-002: the reserved structural pin is refused here exactly as on
+    // the objective routes — a reserved field is never silently ignored.
+    if ("workflowRevisionHash" in body) {
+      sendJson(response, 400, { error: "workflowRevisionHash is structural provenance set only by workflow instantiation; it cannot be supplied on a run request" });
+      return;
+    }
     if (!body.goal?.trim()) throw new Error("Goal is required");
     const projectPath = path.resolve(body.projectPath || context.defaultProject);
     const details = await stat(projectPath);

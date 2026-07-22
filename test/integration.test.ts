@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -739,12 +739,27 @@ test("workflow provenance cannot be forged at the HTTP boundary and shipped work
     assert.equal(legit.status, 201);
     const legitObjective = ((await legit.json()) as { objective: { id: string; workflowRevisionHash: string | null } }).objective;
     assert.equal(legitObjective.workflowRevisionHash, null, "a hand-authored objective has explicit null provenance");
-    const forgedUpdate = await fetch(`${dashboard.url}/api/objectives/${legitObjective.id}`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ...objectiveBody, expectedRevision: 1, workflowRevisionHash: knownHash }),
-    });
-    assert.equal(forgedUpdate.status, 400, "an objective update cannot inject provenance");
+    for (const forged of [knownHash, "a".repeat(64)]) {
+      const forgedUpdate = await fetch(`${dashboard.url}/api/objectives/${legitObjective.id}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...objectiveBody, expectedRevision: 1, workflowRevisionHash: forged }),
+      });
+      assert.equal(forgedUpdate.status, 400, "an objective update cannot inject provenance");
+    }
+
+    // DH810-R3-002: the public run route refuses the reserved field the same
+    // way — never a silent 202 that ignores it.
+    for (const forged of [knownHash, "a".repeat(64)]) {
+      const forgedRun = await fetch(`${dashboard.url}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ goal: "Forge a run pedigree", projectPath: project, workflowRevisionHash: forged }),
+      });
+      assert.equal(forgedRun.status, 400, "a run request cannot supply the reserved provenance field");
+    }
+    const runsAfterForgeries = await fetch(`${dashboard.url}/api/runs`).then((response) => response.json()) as { runs: unknown[] };
+    assert.equal(runsAfterForgeries.runs.length, 0, "the refused run forgeries created no run");
 
     // The Workbench conversion route refuses the pin as well.
     const session = ((await (await fetch(`${dashboard.url}/api/workbench`, {
@@ -752,12 +767,24 @@ test("workflow provenance cannot be forged at the HTTP boundary and shipped work
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ projectPath: project, title: "Provenance probe" }),
     })).json()) as { session: { id: string } }).session;
-    const forgedConvert = await fetch(`${dashboard.url}/api/workbench/${session.id}/convert`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ...objectiveBody, workflowRevisionHash: knownHash }),
-    });
-    assert.equal(forgedConvert.status, 400, "Workbench conversion cannot inject provenance");
+    for (const forged of [knownHash, "a".repeat(64)]) {
+      const forgedConvert = await fetch(`${dashboard.url}/api/workbench/${session.id}/convert`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...objectiveBody, workflowRevisionHash: forged }),
+      });
+      assert.equal(forgedConvert.status, 400, "Workbench conversion cannot inject provenance");
+    }
+
+    // DH810-R3-001: both supported server layouts must resolve the shipped
+    // fixtures — src/../workflows (the tracked directory) and
+    // dist/src/../workflows (copied by the build). A missing copy would make
+    // `npm run dev` seed nothing while the compiled product seeds two.
+    for (const layoutDirectory of [path.join(process.cwd(), "workflows"), path.join(process.cwd(), "dist", "workflows")]) {
+      for (const fixture of ["documentation-consistency.json", "release-truth-audit.json"]) {
+        await stat(path.join(layoutDirectory, fixture));
+      }
+    }
 
     // The ONLY path that sets provenance: instantiation of a stored revision.
     const instantiated = await fetch(`${dashboard.url}/api/workflows/${knownHash}/instantiate`, {
@@ -845,14 +872,36 @@ test("run provenance pins before execution and survives pause and resume", async
     assert.equal(parsed.ok, true);
     const recorded = (ledger as Ledger & Record<string, any>).recordWorkflowRevision({ workflow: parsed.workflow });
 
-    const runId = orchestrator.begin({ goal: "workflow run", projectPath: project, autonomy: "observe", workflowRevisionHash: recorded.revisionHash });
+    // The pinned run also carries a real objective/plan linkage, so resume
+    // must preserve BOTH (round-3 note on AUD-002: the hash alone is not the
+    // whole provenance chain).
+    const instantiated = workflows.instantiateWorkflow({ workflow: parsed.workflow, inputs: { repositoryId: "repo:docs", tag: "v0.0.1" }, projectPath: project, repositoryIds: [] });
+    assert.equal(instantiated.ok, true, JSON.stringify(instantiated.issues ?? []));
+    const objective = ledger.createObjective(instantiated.objective);
+    ledger.appendPlanRevision(objective.id, {
+      summary: "Audit the release",
+      recommendedConcurrency: 1,
+      tasks: [{ id: "audit", title: "Audit", description: "Audit the release claims", dependencies: [], preferredProvider: "codex" as const, checks: ["diff-check"] }],
+    }, "Single audit task");
+    const approved = ledger.approvePlanRevision(objective.id, 1);
+
+    const runId = orchestrator.begin({
+      goal: "workflow run",
+      projectPath: project,
+      autonomy: "observe",
+      workflowRevisionHash: recorded.revisionHash,
+      objectiveLink: { objectiveId: objective.id, approvedPlanRevision: approved.revision },
+    });
     assert.equal(ledger.getRun(runId)?.workflowRevisionHash, recorded.revisionHash, "the pin is recorded at run creation, before execution");
     orchestrator.pause(runId);
     await new Promise((resolve) => setTimeout(resolve, 50));
     if (ledger.getRun(runId)?.status !== "paused") ledger.pauseRun(runId);
     const resumedId = orchestrator.resume(runId);
     assert.ok(resumedId, "the paused run resumes");
-    assert.equal(ledger.getRun(resumedId!)?.workflowRevisionHash, recorded.revisionHash, "the recovery run keeps the exact workflow revision");
+    const resumed = ledger.getRun(resumedId!);
+    assert.equal(resumed?.workflowRevisionHash, recorded.revisionHash, "the recovery run keeps the exact workflow revision");
+    assert.equal(resumed?.objectiveId, objective.id, "the recovery run keeps the objective linkage");
+    assert.equal(resumed?.approvedPlanRevision, approved.revision, "the recovery run keeps the approved plan revision");
   } finally {
     await orchestrator.shutdown();
     ledger.close();

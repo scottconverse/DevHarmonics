@@ -53,6 +53,13 @@ export interface InvocationRequest {
    * answer. Runtimes without the capability ignore it.
    */
   disableThinking?: boolean;
+  /**
+   * Deny the runtime's file/shell tools entirely. The claims lens sets this:
+   * its isolation must be a property of the invocation, not of the prompt —
+   * cwd placement alone still leaves absolute-path reads open to a CLI whose
+   * read scope is not bound to its working directory.
+   */
+  withoutRepositoryTools?: boolean;
   model: ModelSelection;
 }
 

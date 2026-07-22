@@ -6,6 +6,8 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { initializeProject, loadConfig, saveConfig, devHarmonicsDirectory } from "./config.js";
 import { inspectProviders } from "./doctor.js";
+import { catalogPricesPerMTokens } from "./routing.js";
+import { runCostCounterfactual } from "./model-performance.js";
 import { Ledger, STEERABLE_RUN_STATUSES, STEERABLE_TASK_STATUSES } from "./ledger.js";
 import { Orchestrator } from "./orchestrator.js";
 import { ModelCatalogCoordinator } from "./catalog.js";
@@ -365,6 +367,32 @@ async function route(
       events,
       nextCursor: events.at(-1)?.cursor ?? after,
     });
+    return;
+  }
+
+  const runCostMatch = url.pathname.match(/^\/api\/runs\/([a-f0-9-]+)\/cost$/i);
+  if (request.method === "GET" && runCostMatch?.[1]) {
+    if (!context.ledger.getRun(runCostMatch[1])) {
+      sendJson(response, 404, { error: "Run not found" });
+      return;
+    }
+    const receipts = context.ledger.listInvocationReceipts(runCostMatch[1]);
+    // Every priced, currently-qualified candidate per role goes in; the
+    // counterfactual itself chooses the priciest FOR THE OBSERVED TOKEN MIX
+    // (Codex F-003 — a summed rate card can pick the wrong model). An estimate
+    // by design; roles without a priced comparator show nothing.
+    const candidatesByRole = Object.fromEntries([...new Set(receipts.map((receipt) => receipt.role))].map((role) => [
+      role,
+      context.ledger.listModels()
+        .filter((model) => model.qualified && !model.qualificationStale && !model.excluded && !model.retired)
+        .filter((model) => context.ledger.listModelQualifications(model.id).some((qualification) =>
+          qualification.passed && qualification.fingerprint === model.qualificationFingerprint && (qualification.role === "general" || qualification.role === role)))
+        .flatMap((model) => {
+          const prices = catalogPricesPerMTokens(model);
+          return prices ? [{ modelId: model.id, displayName: model.canonicalName, ...prices }] : [];
+        }),
+    ]));
+    sendJson(response, 200, { cost: runCostCounterfactual({ receipts, candidatesByRole }) });
     return;
   }
 

@@ -151,6 +151,7 @@ export const RUN_EVENT_KINDS = [
   "review.completed",
   "review.quorum_passed",
   "review.quorum_failed",
+  "review.divergence",
   "review.invalidated",
   "fixer.started",
   "fixer.completed",

@@ -1,3 +1,6 @@
+import { readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import type {
   ProviderConfig,
   ProviderName,
@@ -104,6 +107,7 @@ abstract class CliProvider implements ProviderAdapter {
       prompt: request.prompt,
       cwd: request.cwd,
       writeAccess: request.permission === "workspace_write",
+      ...(request.withoutRepositoryTools ? { withoutRepositoryTools: true } : {}),
       ...(request.timeoutMs === null ? {} : { timeoutMs: request.timeoutMs }),
     };
     const metadata = await this.metadata();
@@ -270,6 +274,108 @@ abstract class CliProvider implements ProviderAdapter {
   }
 }
 
+/**
+ * CLIENT-VISIBLE locations where Claude Code managed policy can be delivered
+ * on this platform (base file, managed-settings.d drop-ins, and on Windows
+ * the Policies registry keys). Managed policy can configure hooks that
+ * `--safe-mode` explicitly does NOT disable ("Admin-managed (policy) settings
+ * still apply"), so any hit here means argv cannot close the ambient
+ * executable surface. This detection is DEFENSE IN DEPTH, not an attestation:
+ * server-managed and MDM-delivered policy are not client-enumerable, which is
+ * exactly why the capability additionally requires the owner's explicit
+ * configuration attestation (Codex R5-001).
+ */
+export type PolicyProbeResult = "found" | "absent" | "inconclusive";
+
+/**
+ * Pure classifier for a `reg query` outcome (Codex R7-001: the CLASSIFIER is
+ * the safety boundary and is tested directly). reg exits 0 when the key
+ * exists and 1 when it does not; a launch error, a timeout (null status), or
+ * any other exit is "could not check" — which must fail closed.
+ */
+export function classifyRegistryOutcome(outcome: { error?: Error | undefined; status: number | null }): PolicyProbeResult {
+  if (outcome.error || outcome.status === null) return "inconclusive";
+  if (outcome.status === 0) return "found";
+  return outcome.status === 1 ? "absent" : "inconclusive";
+}
+
+function defaultRegistryProbe(keyPath: string): PolicyProbeResult {
+  const probe = spawnSync("reg", ["query", keyPath], { stdio: "ignore", timeout: 5_000 });
+  return classifyRegistryOutcome({ error: probe.error, status: probe.status });
+}
+
+/**
+ * Filesystem probe with the fs facade injectable so the classification of raw
+ * outcomes is directly testable. Only a definite ENOENT counts as absent;
+ * permission and I/O errors fail closed, and a drop-in directory is absent
+ * only after a SUCCESSFUL enumeration finds no .json entry.
+ */
+export function pathProbe(
+  candidate: string,
+  expectJsonEntries: boolean,
+  fs: { statSync: (path: string) => unknown; readdirSync: (path: string) => string[] } = { statSync, readdirSync: (path) => readdirSync(path) },
+): PolicyProbeResult {
+  try {
+    fs.statSync(candidate);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "inconclusive";
+  }
+  if (!expectJsonEntries) return "found";
+  try {
+    return fs.readdirSync(candidate).some((entry) => entry.endsWith(".json")) ? "found" : "absent";
+  } catch {
+    return "inconclusive";
+  }
+}
+
+export function claudeManagedPolicyPresent(
+  registryProbe: (keyPath: string) => PolicyProbeResult = defaultRegistryProbe,
+  fileProbe: (candidate: string, expectJsonEntries: boolean) => PolicyProbeResult = pathProbe,
+): boolean {
+  const roots = process.platform === "win32"
+    ? ["C:\\Program Files\\ClaudeCode", "C:\\ProgramData\\ClaudeCode"]
+    : process.platform === "darwin"
+      ? ["/Library/Application Support/ClaudeCode"]
+      : ["/etc/claude-code"];
+  for (const root of roots) {
+    if (fileProbe(join(root, "managed-settings.json"), false) !== "absent") return true;
+    if (fileProbe(join(root, "managed-settings.d"), true) !== "absent") return true;
+  }
+  if (process.platform === "win32") {
+    for (const hive of ["HKLM", "HKCU"]) {
+      if (registryProbe(`${hive}\\SOFTWARE\\Policies\\ClaudeCode`) !== "absent") return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether an adapter can STRUCTURALLY deny its file/shell tools for a single
+ * invocation (Codex R2-001). Claims-lens reviews are routed only to adapters
+ * that can: prompt wording and cwd placement are not enforcement.
+ * - claude: conditional — headless --tools "" empties the built-in tool set,
+ *   --strict-mcp-config rejects ambient MCP, --safe-mode disables ordinary
+ *   customization; but admin-managed POLICY hooks survive all three, and
+ *   server-managed/MDM policy is not client-enumerable. The capability
+ *   therefore requires BOTH the owner's explicit configuration attestation
+ *   that no managed Claude policy governs this machine AND no client-visible
+ *   policy detection hit. Default is unattested — fail closed.
+ * - local (Ollama HTTP): yes — the transport has no tools at all.
+ * - api (OpenRouter): yes — chat completion, no tool execution surface.
+ * - codex: no — its sandbox modes govern writes, not read scope.
+ * - gemini: no until its --add-dir boundary is demonstrated by execution.
+ */
+export function providerSupportsToolDenial(
+  provider: string,
+  transport: string,
+  options?: { attestedNoManagedPolicy?: boolean; managedPolicyDetected?: boolean },
+): boolean {
+  if (transport === "local" || transport === "api") return true;
+  if (provider !== "claude") return false;
+  if (!(options?.attestedNoManagedPolicy ?? false)) return false;
+  return !(options?.managedPolicyDetected ?? claudeManagedPolicyPresent());
+}
+
 export class CodexProvider extends CliProvider {
   readonly name = "codex" as const;
   readonly displayName = "OpenAI Codex";
@@ -304,6 +410,22 @@ export class ClaudeProvider extends CliProvider {
       "json",
       "--permission-mode",
       request.writeAccess ? "acceptEdits" : "plan",
+      // Plan mode blocks writes but not reads, and Claude Code's read scope is
+      // not bound to its cwd — a claims-lens review must shut the tool surface
+      // down, not deny an enumerated list (Codex R3-001: a named deny list is
+      // not a closed set). --tools "" disables every built-in tool;
+      // --strict-mcp-config with no servers rejects ambient MCP tools;
+      // --safe-mode disables ordinary customization (plugins, hooks, skills).
+      // BOUNDARY (Codex R4-001): admin-managed POLICY hooks survive all three
+      // flags — providerSupportsToolDenial therefore grants this capability
+      // only on machines attested free of managed policy settings.
+      // --bare additionally skips hooks, plugin sync, auto-memory, and
+      // CLAUDE.md discovery per its own help; it is belt-and-suspenders here,
+      // not the proof — the managed-policy residual is handled by the owner
+      // attestation gating the capability itself.
+      ...(request.withoutRepositoryTools
+        ? ["--tools", "", "--strict-mcp-config", "--safe-mode", "--bare"]
+        : []),
     ];
   }
 

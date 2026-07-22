@@ -29,7 +29,7 @@ import {
   type InvocationEvent,
 } from "../src/runtime.js";
 import type { DevHarmonicsConfig, PlannedTask, RunPlan, SteeringDirectiveRecord } from "../src/types.js";
-import { manualModelSchema, objectiveInputSchema, runPlanSchema, steeringPayloadSchema } from "../src/schemas.js";
+import { devHarmonicsConfigSchema, manualModelSchema, objectiveInputSchema, runPlanSchema, steeringPayloadSchema } from "../src/schemas.js";
 import { runProcess, subscriptionEnvironment } from "../src/process.js";
 import { REDACTED, redactText } from "../src/redaction.js";
 import { parseNvidiaSmi } from "../src/resources.js";
@@ -1923,9 +1923,9 @@ test("risk-based review quorum fails closed on weak independence and open findin
     [{ id: "low", risk: "low" }, { id: "critical", risk: "high" }],
     defaultConfig.reviewPolicy,
   );
-  assert.deepEqual(requirement, { risk: "high", requiredReviewers: 2, minimumDistinctProviders: 2, requireImplementorIndependence: true });
+  assert.deepEqual(requirement, { risk: "high", requiredReviewers: 2, minimumDistinctProviders: 2, requireImplementorIndependence: true, requiredLenses: ["artifact", "claims"] });
 
-  const ready = reviewModule.parseReviewerResponse("READY\nNo material findings.", { provider: "claude", modelId: "sonnet", connectionId: "claude" });
+  const ready = reviewModule.parseReviewerResponse("READY\nNo material findings.", { provider: "claude", modelId: "sonnet", connectionId: "claude", lens: "artifact" });
   assert.equal(ready.verdict, "READY");
   assert.deepEqual(ready.findings, []);
   const notReady = reviewModule.parseReviewerResponse(`NOT READY\n\n\`\`\`json\n{"findings":[{"severity":"high","location":"src/a.ts:7","rationale":"Unsafe bypass remains.","suggestedCorrection":"Remove the bypass.","disposition":"open"}]}\n\`\`\``, { provider: "codex", modelId: "terra", connectionId: "codex" });
@@ -1935,7 +1935,7 @@ test("risk-based review quorum fails closed on weak independence and open findin
   const passing = reviewModule.adjudicateReviewQuorum({
     requirement,
     implementationProviders: ["codex"],
-    reviews: [ready, { ...ready, provider: "gemini", modelId: "gemini-pro", connectionId: "gemini" }],
+    reviews: [ready, reviewModule.parseReviewerResponse(`READY\nClaims cohere.\n\`\`\`json\n{"findings":[],"claimedChanges":[]}\n\`\`\``, { provider: "gemini", modelId: "gemini-pro", connectionId: "gemini", lens: "claims" })],
   });
   assert.equal(passing.passed, true);
   assert.equal(passing.distinctProviders, 2);
@@ -1974,6 +1974,8 @@ test("ledger retains structured reviews and invalidates them when fixer evidence
         provider: "claude",
         modelId: "sonnet",
         connectionId: "subscription-cli:claude",
+        lens: null,
+        claimedChanges: null,
         summary: "A blocking defect remains.",
         rawText: "NOT READY",
         findings: [{ id: "unsafe", severity: "high", location: "src/a.ts:7", rationale: "Unsafe bypass remains.", suggestedCorrection: "Remove it.", disposition: "open" }],
@@ -1996,6 +1998,575 @@ test("ledger retains structured reviews and invalidates them when fixer evidence
     ledger.close();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("review lens coverage is a quorum dimension and receipts record the lens", async () => {
+  const reviewModule = await import("../src/review.js") as Record<string, any>;
+
+  assert.deepEqual(defaultConfig.reviewPolicy.requiredLensesByRisk, {
+    low: ["artifact"],
+    medium: ["artifact"],
+    high: ["artifact", "claims"],
+  }, "DH-460 requires lens coverage defaults by risk; lens count never exceeds reviewer count");
+
+  const unsatisfiable = devHarmonicsConfigSchema.shape.reviewPolicy.safeParse({
+    reviewerCountByRisk: { low: 1, medium: 1, high: 2 },
+    minimumDistinctProvidersByRisk: { low: 1, medium: 1, high: 2 },
+    requireImplementorIndependenceByRisk: { low: false, medium: true, high: true },
+    requiredLensesByRisk: { low: ["artifact"], medium: ["artifact", "claims"], high: ["artifact", "claims"] },
+    maxFixRounds: 2,
+  });
+  assert.equal(unsatisfiable.success, false, "a policy demanding more lenses than reviewers is refused at parse time");
+
+  // Codex F-007: the sibling cardinality invariant — providers, same rule.
+  const unsatisfiableProviders = devHarmonicsConfigSchema.shape.reviewPolicy.safeParse({
+    reviewerCountByRisk: { low: 1, medium: 1, high: 2 },
+    minimumDistinctProvidersByRisk: { low: 2, medium: 1, high: 2 },
+    requireImplementorIndependenceByRisk: { low: false, medium: true, high: true },
+    requiredLensesByRisk: { low: ["artifact"], medium: ["artifact"], high: ["artifact", "claims"] },
+    maxFixRounds: 2,
+  });
+  assert.equal(unsatisfiableProviders.success, false, "a policy demanding more distinct providers than reviewers is refused at parse time");
+
+  const legacyPolicy = devHarmonicsConfigSchema.shape.reviewPolicy.parse({
+    reviewerCountByRisk: { low: 1, medium: 1, high: 2 },
+    minimumDistinctProvidersByRisk: { low: 1, medium: 1, high: 2 },
+    requireImplementorIndependenceByRisk: { low: false, medium: true, high: true },
+    maxFixRounds: 2,
+  });
+  assert.deepEqual(legacyPolicy.requiredLensesByRisk.high, ["artifact", "claims"], "a config written before lenses existed still parses with lens defaults");
+
+  const requirement = reviewModule.reviewRequirement([{ id: "critical", risk: "high" }], defaultConfig.reviewPolicy);
+  assert.deepEqual(requirement.requiredLenses, ["artifact", "claims"]);
+
+  const artifactReady = reviewModule.parseReviewerResponse("READY\nNo material findings.", { provider: "claude", modelId: "sonnet", connectionId: "claude", lens: "artifact" });
+  assert.equal(artifactReady.lens, "artifact");
+  const claimsReady = reviewModule.parseReviewerResponse(`READY\nClaims cohere with receipts.\n\`\`\`json\n{"findings":[],"claimedChanges":[]}\n\`\`\``, { provider: "gemini", modelId: "gemini-pro", connectionId: "gemini", lens: "claims" });
+
+  const singleLens = reviewModule.adjudicateReviewQuorum({
+    requirement,
+    implementationProviders: ["codex"],
+    reviews: [artifactReady, { ...artifactReady, provider: "gemini", connectionId: "gemini" }],
+  });
+  assert.equal(singleLens.passed, false, "two reviews through one lens must not satisfy a two-lens requirement");
+  assert.equal(singleLens.singleLens, true);
+  assert.match(singleLens.reasons.join(" "), /lens/i);
+
+  const covered = reviewModule.adjudicateReviewQuorum({
+    requirement,
+    implementationProviders: ["codex"],
+    reviews: [artifactReady, claimsReady],
+  });
+  assert.equal(covered.passed, true);
+  assert.equal(covered.singleLens, false);
+  assert.deepEqual([...covered.lensesCovered].sort(), ["artifact", "claims"]);
+
+  const undeclared = reviewModule.parseReviewerResponse("READY\nOk.", { provider: "ollama", connectionId: "ollama" });
+  assert.equal(undeclared.lens, null, "a review that never declared a lens records none");
+  const withUndeclared = reviewModule.adjudicateReviewQuorum({ requirement, implementationProviders: ["codex"], reviews: [artifactReady, undeclared] });
+  assert.equal(withUndeclared.passed, false, "an undeclared lens covers nothing");
+  assert.match(withUndeclared.reasons.join(" "), /claims/i);
+
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-review-lens-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db")) as Ledger & Record<string, any>;
+  try {
+    const runId = ledger.createRun("Lens receipts", root);
+    const evidenceBinding = createReviewEvidenceBinding({ autonomy: "bounded", plan: { summary: "lens", recommendedConcurrency: 1, tasks: [] }, taskReports: "", diff: [], checks: [], repositories: [{ repositoryId: root, baseCommit: "base", headCommit: "head" }] });
+    ledger.recordReviewReceipt({ runId, round: 1, integrationSha256: reviewEvidenceBindingSha256(evidenceBinding), evidenceBinding, review: { ...artifactReady, findings: [] } });
+    ledger.recordReviewReceipt({
+      runId,
+      round: 1,
+      integrationSha256: reviewEvidenceBindingSha256(evidenceBinding),
+      evidenceBinding,
+      review: { verdict: "READY", provider: "ollama", modelId: null, connectionId: "ollama", summary: "No lens declared.", rawText: "READY", findings: [], lens: null, claimedChanges: null },
+    });
+    const receipts = ledger.listReviewReceipts(runId);
+    assert.equal(receipts.length, 2);
+    assert.equal(receipts[0]!.lens, "artifact", "the receipt must retain which lens produced the review");
+    assert.equal(receipts[1]!.lens, null);
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("review lens bundles decorrelate what each reviewer is shown", async () => {
+  const promptsModule = await import("../src/prompts.js") as Record<string, any>;
+  const reviewModule = await import("../src/review.js") as Record<string, any>;
+
+  assert.equal(typeof reviewModule.lensForSlot, "function", "DH-460 requires deterministic lens assignment");
+  assert.equal(reviewModule.lensForSlot(["artifact", "claims"], 1), "artifact");
+  assert.equal(reviewModule.lensForSlot(["artifact", "claims"], 2), "claims");
+  assert.equal(reviewModule.lensForSlot(["artifact", "claims"], 3), "artifact");
+  assert.equal(reviewModule.lensForSlot([], 1), null);
+
+  assert.equal(typeof reviewModule.applicableReviewLenses, "function", "observe runs have no artifact to review");
+  assert.deepEqual(reviewModule.applicableReviewLenses({ requiredLenses: ["artifact", "claims"] }, "observe"), ["claims"]);
+  assert.deepEqual(reviewModule.applicableReviewLenses({ requiredLenses: ["artifact", "claims"] }, "bounded"), ["artifact", "claims"]);
+
+  const plan = { summary: "lens bundles", recommendedConcurrency: 1, tasks: [] };
+  const narrationSentinel = "NARRATION-SENTINEL-73f1";
+  const workspaceSentinel = "C:/sentinel/integration-worktree";
+  const common = { goal: "Ship the lens", constitution: "Be honest.", plan, checkSummary: "checks: 1 passed", autonomy: "bounded" };
+
+  const artifactPrompt = promptsModule.reviewerPrompt({ ...common, taskReports: narrationSentinel, workspacePath: workspaceSentinel, lens: "artifact" });
+  assert.ok(!artifactPrompt.includes(narrationSentinel), "the artifact lens must not see implementor narration");
+  assert.ok(artifactPrompt.includes(workspaceSentinel), "the artifact lens keeps the worktree");
+  assert.match(artifactPrompt, /withheld/i);
+
+  const legacyPrompt = promptsModule.reviewerPrompt({ ...common, taskReports: narrationSentinel, workspacePath: workspaceSentinel });
+  assert.ok(legacyPrompt.includes(narrationSentinel), "an unassigned lens keeps today's combined bundle");
+
+  const claimsHeader = promptsModule.claimsReviewerContextHeader(common);
+  assert.ok(!claimsHeader.includes(workspaceSentinel), "the claims lens must not learn the worktree location");
+  assert.match(claimsHeader, /no repository access|do not have repository/i);
+  assert.match(claimsHeader, /claimedChanges/, "the claims lens must be contracted to return a claimed-changes manifest");
+
+  const claimsChunks = promptsModule.claimsReviewChunks(narrationSentinel);
+  assert.ok(claimsChunks.length >= 1);
+  assert.ok(claimsChunks[0].content.includes(narrationSentinel), "the claims lens reviews the narration itself");
+
+  const artifactHeader = promptsModule.localReviewerContextHeader({ ...common, taskReports: narrationSentinel, lens: "artifact" });
+  assert.ok(!artifactHeader.includes(narrationSentinel), "a tool-less artifact-lens reviewer is narration-free too");
+});
+
+test("claims/artifact divergence is a deterministic fail-closed finding", async () => {
+  const reviewModule = await import("../src/review.js") as Record<string, any>;
+
+  // The claims lens returns a structured manifest inside the same fenced JSON.
+  const claims = reviewModule.parseReviewerResponse(
+    `READY\nClaims cohere.\n\`\`\`json\n{"findings":[],"claimedChanges":[{"path":"src\\\\alpha.ts","kind":"modified","taskId":"t1"},{"path":"src/beta.ts","kind":"created","taskId":"t2"}]}\n\`\`\``,
+    { provider: "gemini", modelId: "gemini-pro", connectionId: "gemini", lens: "claims" },
+  );
+  assert.deepEqual(claims.claimedChanges, [
+    { path: "src/alpha.ts", kind: "modified", taskId: "t1" },
+    { path: "src/beta.ts", kind: "created", taskId: "t2" },
+  ], "manifest paths are normalized and retained");
+  const noManifest = reviewModule.parseReviewerResponse("READY\nOk.", { provider: "gemini", connectionId: "gemini", lens: "claims" });
+  assert.equal(noManifest.claimedChanges, null, "an absent manifest is not an empty manifest");
+
+  // Codex F-002: a syntactically present but structurally invalid manifest must
+  // not masquerade as a valid empty one — invalid entries fail the whole
+  // manifest closed, exactly like absence.
+  const malformed = reviewModule.parseReviewerResponse(
+    `READY\nOk.\n\`\`\`json\n{"findings":[],"claimedChanges":[{}]}\n\`\`\``,
+    { provider: "gemini", connectionId: "gemini", lens: "claims" },
+  );
+  assert.equal(malformed.claimedChanges, null, "an invalid manifest entry poisons the manifest");
+  const partiallyMalformed = reviewModule.parseReviewerResponse(
+    `READY\nOk.\n\`\`\`json\n{"claimedChanges":[{"path":"src/a.ts","kind":"modified","taskId":"t1"},{"kind":"modified"}]}\n\`\`\``,
+    { provider: "gemini", connectionId: "gemini", lens: "claims" },
+  );
+  assert.equal(partiallyMalformed.claimedChanges, null, "a partially invalid manifest fails closed too");
+
+  // Codex R2-003: exact grammar, no coercion — an unknown kind is not
+  // "modified", and a missing task attribution is not an unattributed claim.
+  const badKind = reviewModule.parseReviewerResponse(
+    `READY\nOk.\n\`\`\`json\n{"claimedChanges":[{"path":"src/a.ts","kind":"renamed","taskId":"t1"}]}\n\`\`\``,
+    { provider: "gemini", connectionId: "gemini", lens: "claims" },
+  );
+  assert.equal(badKind.claimedChanges, null, "an unrecognized kind invalidates the manifest");
+  const missingTask = reviewModule.parseReviewerResponse(
+    `READY\nOk.\n\`\`\`json\n{"claimedChanges":[{"path":"src/a.ts","kind":"modified"}]}\n\`\`\``,
+    { provider: "gemini", connectionId: "gemini", lens: "claims" },
+  );
+  assert.equal(missingTask.claimedChanges, null, "a claim without its claiming task invalidates the manifest");
+
+  assert.equal(typeof reviewModule.claimsArtifactDivergence, "function", "DH-460 requires the deterministic divergence gate");
+
+  // Exact agreement: no findings.
+  const agree = reviewModule.claimsArtifactDivergence({
+    reviews: [claims],
+    diffPaths: ["src/alpha.ts", "src\\beta.ts"],
+    passedTaskIds: new Set(["t1", "t2"]),
+  });
+  assert.deepEqual(agree, []);
+
+  // A claimed change absent from the diff fails closed (defect-22 class),
+  // even when the diff is nonempty.
+  const phantom = reviewModule.claimsArtifactDivergence({
+    reviews: [claims],
+    diffPaths: ["src/alpha.ts"],
+    passedTaskIds: new Set(["t1", "t2"]),
+  });
+  assert.equal(phantom.length, 1);
+  assert.equal(phantom[0].severity, "high");
+  assert.match(phantom[0].rationale, /src\/beta\.ts/);
+  assert.match(phantom[0].rationale, /t2/);
+  assert.equal(phantom[0].disposition, "open");
+
+  // A claim from a task that never passed is a fallback echo, not a divergence.
+  const failedTask = reviewModule.claimsArtifactDivergence({
+    reviews: [claims],
+    diffPaths: ["src/alpha.ts"],
+    passedTaskIds: new Set(["t1"]),
+  });
+  assert.deepEqual(failedTask, []);
+
+  // An integrated change nobody claimed is an unexplained change.
+  const unexplained = reviewModule.claimsArtifactDivergence({
+    reviews: [claims],
+    diffPaths: ["src/alpha.ts", "src/beta.ts", "src/gamma.ts"],
+    passedTaskIds: new Set(["t1", "t2"]),
+  });
+  assert.equal(unexplained.length, 1);
+  assert.equal(unexplained[0].severity, "medium");
+  assert.match(unexplained[0].rationale, /src\/gamma\.ts/);
+
+  // Divergence findings and a manifest-less claims review both block the quorum.
+  const requirement = { risk: "high", requiredReviewers: 2, minimumDistinctProviders: 2, requireImplementorIndependence: false, requiredLenses: ["artifact", "claims"] };
+  const artifactReady = reviewModule.parseReviewerResponse("READY\nArtifact holds.", { provider: "claude", modelId: "sonnet", connectionId: "claude", lens: "artifact" });
+  const blocked = reviewModule.adjudicateReviewQuorum({
+    requirement,
+    implementationProviders: [],
+    reviews: [artifactReady, claims],
+    divergence: phantom,
+  });
+  assert.equal(blocked.passed, false);
+  assert.match(blocked.reasons.join(" "), /divergence/i);
+  assert.equal(blocked.openFindings.some((finding: any) => finding.id === phantom[0].id), true);
+
+  const manifestLess = reviewModule.adjudicateReviewQuorum({
+    requirement,
+    implementationProviders: [],
+    reviews: [artifactReady, noManifest],
+  });
+  assert.equal(manifestLess.passed, false, "a claims-lens review without a manifest cannot support a pass");
+  assert.match(manifestLess.reasons.join(" "), /manifest/i);
+
+  // Observe runs have no artifact, so the manifest requirement is waived there.
+  const observeWaived = reviewModule.adjudicateReviewQuorum({
+    requirement: { ...requirement, requiredLenses: ["claims"], requiredReviewers: 1, minimumDistinctProviders: 1 },
+    implementationProviders: [],
+    reviews: [noManifest],
+    expectClaimsManifest: false,
+  });
+  assert.equal(observeWaived.passed, true, "an observe review is not failed for a manifest it was never asked for");
+});
+
+test("adaptive routing prefers the cheapest candidate at established empirical parity", async () => {
+  const routingModule = await import("../src/routing.js") as Record<string, any>;
+  assert.equal(typeof routingModule.preferCheapestAtParity, "function", "DH-320 requires the parity preference");
+
+  const established = (rate: number) => ({ eligibleForAdaptiveWeighting: true, firstAttemptSuccessRate: rate, sampleSize: 40 });
+  const guards = { tierFit: 6, reasoningFit: 2, userPin: 0, preferredProvider: 0, fallbackProvider: 0, empiricalLatency: 0, providerDiversity: 0 };
+  const premium = { id: "premium-model", provider: "claude", pinned: false, unitCostUsd: 12, empiricalWorkload: established(0.96), breakdown: { ...guards } };
+  const budget = { id: "budget-model", provider: "codex", pinned: false, unitCostUsd: 1.5, empiricalWorkload: established(0.94), breakdown: { ...guards } };
+
+  // Parity within tolerance: the cheaper candidate displaces the top.
+  const displaced = routingModule.preferCheapestAtParity([premium, budget]);
+  assert.equal(displaced?.id, "budget-model");
+
+  // A real quality gap is not parity.
+  const weaker = { ...budget, empiricalWorkload: established(0.7) };
+  assert.equal(routingModule.preferCheapestAtParity([premium, weaker]), null);
+
+  // An emerging record cannot claim parity.
+  const emerging = { ...budget, empiricalWorkload: { ...established(0.94), eligibleForAdaptiveWeighting: false } };
+  assert.equal(routingModule.preferCheapestAtParity([premium, emerging]), null);
+
+  // A pinned top is the user's decision, not the router's.
+  const pinnedTop = { ...premium, pinned: true };
+  assert.equal(routingModule.preferCheapestAtParity([pinnedTop, budget]), null);
+
+  // Unknown prices produce no preference rather than an invented one.
+  const unpriced = { ...budget, unitCostUsd: null };
+  assert.equal(routingModule.preferCheapestAtParity([premium, unpriced]), null);
+
+  // A diversity-boosted top is not displaced by a same-provider bargain.
+  const diverseTop = { ...premium, breakdown: { ...guards, providerDiversity: 8 } };
+  assert.equal(routingModule.preferCheapestAtParity([diverseTop, budget]), null);
+
+  // A materially slower model is not at parity, whatever its success rate.
+  const slower = { ...budget, breakdown: { ...guards, empiricalLatency: -2 } };
+  assert.equal(routingModule.preferCheapestAtParity([premium, slower]), null);
+
+  // Neither is one whose reasoning-effort setting fits the workload worse.
+  const worseFit = { ...budget, breakdown: { ...guards, reasoningFit: 0 } };
+  assert.equal(routingModule.preferCheapestAtParity([premium, worseFit]), null);
+
+  // A soft provider-affinity nudge does NOT shield a pricier top — that is
+  // the one place the parity rule can fire at all once cost is in the score.
+  const preferredTop = { ...premium, breakdown: { ...guards, preferredProvider: 8 } };
+  assert.equal(routingModule.preferCheapestAtParity([preferredTop, budget])?.id, "budget-model");
+
+  // Codex R2-002: a DIRECTED provider — architect-planned or owner-reassigned —
+  // is a hard constraint. Parity never routes off it to another provider...
+  assert.equal(routingModule.preferCheapestAtParity([premium, budget], { preferredProvider: "claude" }), null, "an owner's provider choice is not advisory");
+  // ...but a cheaper model on the SAME directed provider may still win...
+  const budgetSameProvider = { ...budget, id: "budget-claude", provider: "claude" };
+  assert.equal(routingModule.preferCheapestAtParity([premium, budgetSameProvider], { preferredProvider: "claude" })?.id, "budget-claude");
+  // ...and direction toward a provider the top doesn't hold constrains nothing.
+  assert.equal(routingModule.preferCheapestAtParity([premium, budget], { preferredProvider: "gemini" })?.id, "budget-model");
+
+  // Codex F-008: pin the exact tolerance boundary so the constant cannot
+  // drift unnoticed — exactly 0.05 is parity, 0.0501 is not.
+  assert.equal(routingModule.PARITY_SUCCESS_RATE_TOLERANCE, 0.05);
+  const atBoundary = { ...budget, empiricalWorkload: established(0.96 - 0.05) };
+  assert.equal(routingModule.preferCheapestAtParity([premium, atBoundary])?.id, "budget-model", "exactly the tolerance is parity");
+  const pastBoundary = { ...budget, empiricalWorkload: established(0.96 - 0.0501) };
+  assert.equal(routingModule.preferCheapestAtParity([premium, pastBoundary]), null, "just past the tolerance is not");
+});
+
+test("per-run cost counterfactual is an estimate from receipts, honest-absent without prices", async () => {
+  const performanceModule = await import("../src/model-performance.js") as Record<string, any>;
+  assert.equal(typeof performanceModule.runCostCounterfactual, "function", "DH-650 requires the cost counterfactual");
+
+  const receipts = [
+    { role: "worker", inputTokens: 100_000, outputTokens: 20_000, costUsd: 0.5 },
+    { role: "worker", inputTokens: 50_000, outputTokens: 10_000, costUsd: 0.25 },
+    { role: "reviewer", inputTokens: 30_000, outputTokens: 5_000, costUsd: 0.6 },
+  ];
+  const priciest = {
+    worker: [
+      { modelId: "cheap-w", displayName: "Cheap W", promptPriceUsdPerMTokens: 1, completionPriceUsdPerMTokens: 2 },
+      { modelId: "premium-w", displayName: "Premium W", promptPriceUsdPerMTokens: 15, completionPriceUsdPerMTokens: 75 },
+    ],
+    reviewer: [{ modelId: "premium-r", displayName: "Premium R", promptPriceUsdPerMTokens: 10, completionPriceUsdPerMTokens: 40 }],
+  };
+  const result = performanceModule.runCostCounterfactual({ receipts, candidatesByRole: priciest });
+  assert.equal(result.actualUsd, 1.35);
+  assert.equal(result.counterfactualUsd, 5);
+  assert.equal(result.byRole.find((entry: any) => entry.role === "worker").comparisonModelId, "premium-w");
+  assert.equal(result.estimate, true, "the counterfactual is labeled an estimate");
+  assert.deepEqual(result.excludedRoles, []);
+  assert.equal(result.unprojectedUsd, 0);
+
+  // Both sides of the comparison cover the SAME invocations: a role without a
+  // comparator drops out of the actual side too, and its spend is reported
+  // separately rather than skewing the pair.
+  const partial = performanceModule.runCostCounterfactual({ receipts, candidatesByRole: { worker: priciest.worker } });
+  assert.deepEqual(partial.excludedRoles, ["reviewer"], "a role without a priced comparator is named, not invented");
+  assert.equal(partial.counterfactualUsd, 4.5);
+  assert.equal(partial.actualUsd, 0.75, "the actual side is scoped to the invocations the counterfactual covers");
+  assert.equal(partial.unprojectedUsd, 0.6, "excluded spend is visible, not vanished");
+
+  // Within a role, a receipt with cost but no token counts cannot be projected:
+  // it leaves both sides of the pair and lands in unprojectedUsd.
+  const mixed = performanceModule.runCostCounterfactual({
+    receipts: [
+      { role: "worker", inputTokens: 100_000, outputTokens: 20_000, costUsd: 0.5 },
+      { role: "worker", inputTokens: null, outputTokens: null, costUsd: 0.3 },
+    ],
+    candidatesByRole: priciest,
+  });
+  assert.equal(mixed.actualUsd, 0.5);
+  assert.equal(mixed.counterfactualUsd, 3);
+  assert.equal(mixed.unprojectedUsd, 0.3);
+
+  // Codex F-004a: known tokens with UNKNOWN billed cost must not appear as a
+  // $0 actual — the receipt leaves the pair and is counted, not invented.
+  const unpriced2 = performanceModule.runCostCounterfactual({
+    receipts: [
+      { role: "worker", inputTokens: 100_000, outputTokens: 20_000, costUsd: 0.5 },
+      { role: "worker", inputTokens: 10_000, outputTokens: 2_000, costUsd: null },
+    ],
+    candidatesByRole: priciest,
+  });
+  assert.equal(unpriced2.actualUsd, 0.5);
+  assert.equal(unpriced2.counterfactualUsd, 3, "the counterfactual side is scoped to the same paired receipts");
+  assert.equal(unpriced2.unknownCostReceipts, 1, "unknown billed cost is counted, never presented as zero");
+  assert.equal(
+    performanceModule.runCostCounterfactual({ receipts: [{ role: "worker", inputTokens: 100_000, outputTokens: 20_000, costUsd: null }], candidatesByRole: priciest }),
+    null,
+    "a run whose only receipts have unknown cost has no honest pair to show",
+  );
+
+  // Codex F-004b: sub-cent spends must never produce negative unprojected
+  // spend from per-role rounding.
+  const subCent = performanceModule.runCostCounterfactual({
+    receipts: [
+      { role: "worker", inputTokens: 1_000, outputTokens: 100, costUsd: 0.00006 },
+      { role: "reviewer", inputTokens: 1_000, outputTokens: 100, costUsd: 0.00006 },
+    ],
+    candidatesByRole: priciest,
+  });
+  assert.ok(subCent.unprojectedUsd >= 0, "rounding must not invent negative unprojected spend");
+
+  // Codex F-003: "priciest" means priciest FOR THIS RUN'S TOKEN MIX, not the
+  // highest summed rate card. An output-heavy role must pick the
+  // output-expensive comparator.
+  const asymmetric = performanceModule.runCostCounterfactual({
+    receipts: [{ role: "worker", inputTokens: 0, outputTokens: 1_000_000, costUsd: 0.1 }],
+    candidatesByRole: {
+      worker: [
+        { modelId: "input-expensive", displayName: "In-heavy", promptPriceUsdPerMTokens: 100, completionPriceUsdPerMTokens: 0 },
+        { modelId: "output-expensive", displayName: "Out-heavy", promptPriceUsdPerMTokens: 0, completionPriceUsdPerMTokens: 90 },
+      ],
+    },
+  });
+  assert.equal(asymmetric.byRole[0].comparisonModelId, "output-expensive");
+  assert.equal(asymmetric.counterfactualUsd, 90);
+
+  assert.equal(performanceModule.runCostCounterfactual({ receipts, candidatesByRole: {} }), null, "nothing computable shows nothing, not zero");
+  assert.equal(
+    performanceModule.runCostCounterfactual({ receipts: [{ role: "worker", inputTokens: null, outputTokens: null, costUsd: 0.2 }], candidatesByRole: priciest }),
+    null,
+    "receipts without token counts cannot be projected",
+  );
+});
+
+test("the production router applies the parity preference at the route boundary", async () => {
+  // Codex F-005: the helper was tested while the route() wiring could be
+  // deleted with the suite green. This exercises ModelRouter.route itself:
+  // the fallback-provider nudge tops the pricier model, and the established
+  // parity record displaces it onto the cheaper candidate, explained.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-parity-route-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db")) as Ledger & Record<string, any>;
+  try {
+    for (const provider of ["codex", "claude"] as const) {
+      ledger.upsertConnection({
+        id: `subscription-cli:${provider}`, provider, transport: "subscription_cli", authentication: "subscription",
+        displayName: provider, enabled: true, installed: true, authenticated: true, visible: true, healthy: true,
+        available: true, entitlement: "unknown", capacity: "unknown", adapterVersion: "t", runtimeVersion: "t", metadata: {},
+      });
+    }
+    const premiumProfile = { tier: "premium", family: "fixture", capabilities: ["text", "analysis"], source: "catalog" };
+    const seed = (id: string, connectionId: string, promptPrice: number, completionPrice: number) => {
+      const model = ledger.addManualModel({
+        id, connectionId, canonicalName: id, displayName: id, lifecycle: "verified", visible: true, verified: true,
+        qualified: true, active: true, metadata: { devHarmonicsProfile: premiumProfile, promptPrice, completionPrice },
+      });
+      ledger.recordModelQualification({ modelId: id, fixtureVersion: "t", role: "general", passed: true, score: 1, evidence: {}, fingerprint: model.qualificationFingerprint });
+    };
+    seed("manual:claude:a-premium", "subscription-cli:claude", 0.00002, 0.00006);
+    seed("manual:codex:z-budget", "subscription-cli:codex", 0.000001, 0.000002);
+    const runId = ledger.createRun("parity route fixture", root);
+    for (const modelId of ["manual:claude:a-premium", "manual:codex:z-budget"]) {
+      for (let index = 0; index < 25; index++) {
+        ledger.recordInvocationReceipt({
+          runId, role: "reviewer", provider: modelId.includes("claude") ? "claude" : "codex",
+          connectionId: modelId.includes("claude") ? "subscription-cli:claude" : "subscription-cli:codex",
+          requestedModelId: modelId, resolvedModelId: modelId, inputTokens: 10, outputTokens: 10, costUsd: 0.001,
+          durationMs: 100, workloadClass: "complex:premium",
+        });
+      }
+    }
+    const decision = new ModelRouter(ledger).route({
+      role: "reviewer",
+      config: defaultConfig,
+      fallbackProvider: "claude",
+      allowedProviders: ["codex", "claude"],
+      permission: "read_only",
+    });
+    assert.ok(String(decision.model.requestedModelId).includes("z-budget"), `expected the cheaper parity candidate, routed ${String(decision.model.requestedModelId)}: ${decision.factors.join("; ")}`);
+    assert.match(decision.factors.join(" "), /parity/i, "the routing explanation must name parity");
+
+    // Codex R2-002 at the route boundary: an explicitly directed provider
+    // (architect-planned or owner-reassigned) is never walked back by parity.
+    const directed = new ModelRouter(ledger).route({
+      role: "reviewer",
+      config: defaultConfig,
+      fallbackProvider: "claude",
+      allowedProviders: ["codex", "claude"],
+      permission: "read_only",
+      task: { id: "t1", title: "directed", description: "", dependencies: [], preferredProvider: "claude", checks: [] },
+    });
+    assert.ok(String(directed.model.requestedModelId).includes("a-premium"), `a directed provider holds: routed ${String(directed.model.requestedModelId)}: ${directed.factors.join("; ")}`);
+    assert.doesNotMatch(directed.factors.join(" "), /parity/i, "no parity displacement off a directed provider");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("claims-lens reviews route only to adapters that can structurally deny tools", async () => {
+  // Codex R2-001: capability, not prompt wording, is the gate. Codex CLI
+  // sandbox modes govern writes, not read scope; Gemini's add-dir boundary is
+  // undemonstrated. Tool-less transports and claude's --disallowedTools are in.
+  const providersModule = await import("../src/providers.js") as Record<string, any>;
+  const attested = { attestedNoManagedPolicy: true, managedPolicyDetected: false };
+  assert.equal(providersModule.providerSupportsToolDenial("codex", "subscription_cli", attested), false);
+  assert.equal(providersModule.providerSupportsToolDenial("gemini", "subscription_cli", attested), false);
+  assert.equal(providersModule.providerSupportsToolDenial("ollama", "local"), true);
+  assert.equal(providersModule.providerSupportsToolDenial("openrouter", "api"), true);
+  // Codex R4-001/R5-001: --safe-mode does not disable admin-managed POLICY
+  // hooks, and server/MDM-delivered policy is not client-enumerable. Claude's
+  // capability therefore requires the OWNER'S explicit attestation AND no
+  // client-visible policy detection — and defaults closed without both.
+  assert.equal(providersModule.providerSupportsToolDenial("claude", "subscription_cli", attested), true);
+  assert.equal(providersModule.providerSupportsToolDenial("claude", "subscription_cli", { attestedNoManagedPolicy: false, managedPolicyDetected: false }), false, "no attestation, no capability — the default fails closed");
+  assert.equal(providersModule.providerSupportsToolDenial("claude", "subscription_cli", { attestedNoManagedPolicy: true, managedPolicyDetected: true }), false, "client-visible policy overrides the attestation");
+  assert.equal(providersModule.providerSupportsToolDenial("claude", "subscription_cli"), false, "the bare default is unattested and closed");
+
+  // Codex R6-001: "could not check" is not a clear detection pass. The
+  // detector takes injectable probes; every result other than a definite
+  // absence fails closed, for files, drop-ins, and registry hives alike.
+  const absent = () => "absent" as const;
+  assert.equal(providersModule.claudeManagedPolicyPresent(absent, absent), false, "definite absence everywhere is the only clear pass");
+  assert.equal(providersModule.claudeManagedPolicyPresent(absent, () => "found"), true, "a policy file hit detects");
+  assert.equal(providersModule.claudeManagedPolicyPresent(absent, () => "inconclusive"), true, "an unreadable policy location is not a clear pass");
+  if (process.platform === "win32") {
+    assert.equal(providersModule.claudeManagedPolicyPresent(() => "found", absent), true, "a registry hit detects");
+    assert.equal(providersModule.claudeManagedPolicyPresent(() => "inconclusive", absent), true, "a failed or timed-out registry probe is not a clear pass");
+    const probed: string[] = [];
+    providersModule.claudeManagedPolicyPresent((keyPath: string) => { probed.push(keyPath); return "absent"; }, absent);
+    assert.deepEqual(probed, ["HKLM\\SOFTWARE\\Policies\\ClaudeCode", "HKCU\\SOFTWARE\\Policies\\ClaudeCode"], "both hives are checked");
+    const roots: Array<[string, boolean]> = [];
+    providersModule.claudeManagedPolicyPresent(absent, (candidate: string, expectJsonEntries: boolean) => { roots.push([candidate, expectJsonEntries]); return "absent"; });
+    assert.deepEqual(roots, [
+      ["C:\\Program Files\\ClaudeCode\\managed-settings.json", false],
+      ["C:\\Program Files\\ClaudeCode\\managed-settings.d", true],
+      ["C:\\ProgramData\\ClaudeCode\\managed-settings.json", false],
+      ["C:\\ProgramData\\ClaudeCode\\managed-settings.d", true],
+    ], "current and legacy base files plus drop-in roots are all checked, with the drop-in flag");
+  }
+
+  // Codex R7-001: the CLASSIFIERS are the safety boundary — test the raw
+  // outcome mappings directly, not just already-classified injections.
+  assert.equal(providersModule.classifyRegistryOutcome({ error: new Error("spawn reg ENOENT"), status: null }), "inconclusive", "a probe that cannot launch is not a clear pass");
+  assert.equal(providersModule.classifyRegistryOutcome({ status: null }), "inconclusive", "a timed-out probe is not a clear pass");
+  assert.equal(providersModule.classifyRegistryOutcome({ status: 0 }), "found");
+  assert.equal(providersModule.classifyRegistryOutcome({ status: 1 }), "absent");
+  assert.equal(providersModule.classifyRegistryOutcome({ status: 2 }), "inconclusive", "an unexpected reg exit is not a clear pass");
+
+  const enoent = Object.assign(new Error("missing"), { code: "ENOENT" });
+  const eperm = Object.assign(new Error("denied"), { code: "EPERM" });
+  const throwing = (error: Error) => ({ statSync: () => { throw error; }, readdirSync: () => [] as string[] });
+  assert.equal(providersModule.pathProbe("x", false, throwing(enoent)), "absent", "ENOENT is the only absent filesystem answer");
+  assert.equal(providersModule.pathProbe("x", false, throwing(eperm)), "inconclusive", "a permission error is not a clear pass");
+  assert.equal(providersModule.pathProbe("x", false, { statSync: () => ({}), readdirSync: () => [] }), "found", "an existing base file detects");
+  assert.equal(providersModule.pathProbe("x", true, { statSync: () => ({}), readdirSync: () => ["readme.txt"] }), "absent", "a drop-in root with no .json entries is a clear pass");
+  assert.equal(providersModule.pathProbe("x", true, { statSync: () => ({}), readdirSync: () => ["policy.json"] }), "found", "a drop-in .json detects");
+  assert.equal(providersModule.pathProbe("x", true, { statSync: () => ({}), readdirSync: () => { throw eperm; } }), "inconclusive", "an unenumerable drop-in root is not a clear pass");
+});
+
+test("the assembled claims-lens chunk prompt demands the manifest the header promised", async () => {
+  // Panel finding A1: the per-chunk JSON instruction is the last and most
+  // literal formatting order the model sees; if it names findings alone, the
+  // header's claimedChanges demand is contradicted and the divergence gate
+  // starves. Prove the ASSEMBLED prompt, not the header in isolation.
+  const localReview = await import("../src/local-review.js") as Record<string, any>;
+  const promptsModule = await import("../src/prompts.js") as Record<string, any>;
+  const seen: string[] = [];
+  const adapter = {
+    connection: { id: "stub", provider: "stub", capabilities: { modelSettings: [] } },
+    invoke: async (request: { prompt: string }) => {
+      seen.push(request.prompt);
+      return { text: `READY\nok\n\`\`\`json\n{"findings":[],"claimedChanges":[]}\n\`\`\``, durationMs: 1, provider: "stub", connectionId: "stub", model: { resolvedModelId: "stub-model" }, usage: { inputTokens: 1, outputTokens: 1, costUsd: null } };
+    },
+  };
+  const chunks = [{ label: "task reports 1", content: "t1 [finding]: created result.txt" }];
+  const claims = await localReview.runContextOnlyReview({
+    adapter,
+    model: { requestedModelId: null, alias: null, settings: {} },
+    cwd: os.tmpdir(),
+    contextHeader: "claims header",
+    chunks,
+    jsonContract: promptsModule.CLAIMS_CHUNK_JSON_CONTRACT,
+  });
+  assert.match(seen[0]!, /claimedChanges/, "the chunk-level instruction must demand the manifest");
+  assert.match(claims.text, /claimedChanges/, "the synthesized response carries the manifest through");
+
+  seen.length = 0;
+  await localReview.runContextOnlyReview({
+    adapter,
+    model: { requestedModelId: null, alias: null, settings: {} },
+    cwd: os.tmpdir(),
+    contextHeader: "artifact header",
+    chunks,
+  });
+  assert.ok(!/claimedChanges/.test(seen[0]!), "non-claims reviews keep the findings-only contract");
 });
 
 test("verification-integrity gate fails closed on test weakening and reports bounded evidence", async () => {
@@ -2516,6 +3087,7 @@ test("ledger upgrades a v0.1 database transactionally and preserves a pre-migrat
           { version: 26, name: "paid-spend-reservation-lifecycle" },
           { version: 27, name: "approved-delivery-handoffs" },
           { version: 28, name: "live-run-steering" },
+          { version: 29, name: "review-receipt-lens" },
         ],
       );
     } finally {
@@ -3966,7 +4538,7 @@ test("steering directives persist with actor, target, disposition, and supersede
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-steering-ledger-"));
   const ledger = new Ledger(path.join(root, "devharmonics.db"));
   try {
-    assert.equal(LEDGER_SCHEMA_VERSION, 28, "live run steering advances the ledger schema");
+    assert.equal(LEDGER_SCHEMA_VERSION, 29, "review-receipt lens advances the ledger schema");
     const runId = ledger.createRun("Steer me", root);
     ledger.savePlan(runId, {
       summary: "One task",

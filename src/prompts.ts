@@ -1,4 +1,8 @@
 import type { CheckResult, ObjectiveRecord, PlannedTask, ProviderName, RunAutonomy, RunPlan } from "./types.js";
+import type { ReviewLens } from "./review.js";
+
+const NARRATION_WITHHELD =
+  "Implementor task reports are deliberately withheld from this review lens. Judge only the artifact itself — the repository state, the combined diff, and the executed check receipts. Do not assume anything a report might have claimed.";
 
 export function objectivePromptText(objective: Pick<ObjectiveRecord,
   "outcome" | "acceptanceCriteria" | "constraints" | "risk" | "priority" | "deadline" | "policyNotes" | "repositoryIds">): string {
@@ -159,6 +163,7 @@ export function reviewerPrompt(input: {
   taskReports: string;
   workspacePath: string;
   autonomy: RunAutonomy;
+  lens?: ReviewLens | null;
 }): string {
   const reviewSubject = input.autonomy === "observe"
     ? "Review the diagnostic task reports and repository state. Confirm that the reports answer the goal with concrete evidence, that no repository changes were made, and that conclusions distinguish fact from inference."
@@ -172,7 +177,18 @@ export function reviewerPrompt(input: {
   // reports that actually went through it. Telling a reviewer that an
   // implementation task's citations were mechanically verified is a claim the
   // product has not earned.
-  const citationDuty = citationDutyText(input.plan);
+  // The citation duty is about judging report citations; the artifact lens has
+  // no reports to judge, so the duty would dangle there.
+  const citationDuty = input.lens === "artifact" ? "" : ` ${citationDutyText(input.plan)}`;
+  // The artifact lens sees no implementor narration: reviewers that all read
+  // the same worker claims share the same blind spot, so this bundle keeps
+  // only what actually exists — the worktree, the diff, and the receipts.
+  const reportsSection = input.lens === "artifact"
+    ? NARRATION_WITHHELD
+    : `Diagnostic task reports and handoffs:\n${input.taskReports || "No task reports were recorded."}`;
+  const artifactReviewSubject = input.lens === "artifact" && input.autonomy !== "observe"
+    ? "Review the combined diff and repository state."
+    : reviewSubject;
   return `You are the final reviewer. Inspect the integration worktree in read-only mode.
 
 Exact isolated workspace root: ${input.workspacePath}
@@ -190,14 +206,22 @@ ${JSON.stringify(input.plan, null, 2)}
 Executed check receipts:
 ${input.checkSummary}
 
-Diagnostic task reports and handoffs:
-${input.taskReports || "No task reports were recorded."}
+${reportsSection}
 
-${reviewSubject} ${citationDuty} Return a concise verdict beginning with exactly READY or NOT READY. After the verdict, explain the evidence and material risks. Then include exactly one fenced JSON object with this shape:
+${artifactReviewSubject}${citationDuty} Return a concise verdict beginning with exactly READY or NOT READY. After the verdict, explain the evidence and material risks. Then include exactly one fenced JSON object with this shape:
 \`\`\`json
 {"findings":[{"id":"stable-short-id","severity":"low|medium|high|critical","location":"path:line or null","rationale":"evidence-backed reason","suggestedCorrection":"bounded correction","disposition":"open"}]}
 \`\`\`
 READY must use an empty findings array. NOT READY must include every blocking finding. Do not inherit implementor claims as fact, do not modify files, and do not emit another verdict after the first line.`;
+}
+
+function taskContractLines(plan: RunPlan): string {
+  return plan.tasks.map((task) => [
+    `${task.id}: ${task.title}`,
+    `scope=${(task.repositoryScope ?? ["."]).join(", ")}`,
+    `permission=${task.permission ?? "workspace_write"}`,
+    `acceptance=${(task.acceptanceCriteria ?? []).join(" | ") || "assigned checks pass"}`,
+  ].join("; ")).join("\n");
 }
 
 export function localReviewerContextHeader(input: {
@@ -207,16 +231,18 @@ export function localReviewerContextHeader(input: {
   checkSummary: string;
   taskReports: string;
   autonomy: RunAutonomy;
+  lens?: ReviewLens | null;
 }): string {
-  const contracts = input.plan.tasks.map((task) => [
-    `${task.id}: ${task.title}`,
-    `scope=${(task.repositoryScope ?? ["."]).join(", ")}`,
-    `permission=${task.permission ?? "workspace_write"}`,
-    `acceptance=${(task.acceptanceCriteria ?? []).join(" | ") || "assigned checks pass"}`,
-  ].join("; ")).join("\n");
+  const contracts = taskContractLines(input.plan);
+  const reportsSection = input.lens === "artifact"
+    ? NARRATION_WITHHELD
+    : `${input.autonomy === "observe" ? "Diagnostic task reports" : "Task reports and handoffs"}:\n${bounded(input.taskReports || "No task reports were recorded.", 12_000)}`;
+  const citationDuty = input.lens === "artifact"
+    ? "Judge only what the provided chunks actually contain."
+    : `${citationDutyText(input.plan)} Where the provided chunks do not include the cited content, say plainly that support could not be assessed rather than assuming it.`;
   return `You are the final context-only reviewer for an isolated integration branch. You do not have repository tools; the orchestrator will provide the combined diff in bounded chunks.
 
-${citationDutyText(input.plan)} Where the provided chunks do not include the cited content, say plainly that support could not be assessed rather than assuming it.
+${citationDuty}
 
 Goal:
 ${bounded(input.goal, 3_000)}
@@ -230,8 +256,55 @@ ${bounded(contracts, 4_000)}
 Executed check receipts:
 ${bounded(input.checkSummary, 3_000)}
 
-${input.autonomy === "observe" ? "Diagnostic task reports" : "Task reports and handoffs"}:
-${bounded(input.taskReports || "No task reports were recorded.", 12_000)}`;
+${reportsSection}`;
+}
+
+/**
+ * The claims lens reviews what the implementors SAID, never what they did: it
+ * has no repository access and never learns the worktree location, so its
+ * judgment cannot be anchored by the artifact — and its extracted manifest is
+ * what the divergence gate compares against the real diff.
+ */
+export function claimsReviewerContextHeader(input: {
+  goal: string;
+  constitution: string;
+  plan: RunPlan;
+  checkSummary: string;
+  autonomy: RunAutonomy;
+}): string {
+  return `You are the claims-lens reviewer. You have no repository access and will never see the diff; the orchestrator supplies the implementors' task reports in bounded chunks. Your duties: (1) extract every concrete claim the reports make — files changed, behaviors added or fixed, checks run — and judge whether the claims cohere with each other and with the executed check receipts below; (2) return the file-level claims as a claimedChanges manifest. A report that narrates intent ("I will apply...", "I would edit...") without stating a completed change is a finding, not a claim.
+
+Goal:
+${bounded(input.goal, 3_000)}
+
+Constitution:
+${bounded(input.constitution, 2_000)}
+
+Task contracts:
+${bounded(taskContractLines(input.plan), 4_000)}
+
+Executed check receipts:
+${bounded(input.checkSummary, 3_000)}
+
+In your final response, the fenced JSON object must additionally contain a "claimedChanges" array, one entry per file the reports claim was created, modified, or deleted: {"claimedChanges":[{"path":"relative/path","kind":"created|modified|deleted","taskId":"the claiming task"}]}. An empty array is a statement that the reports claim no repository changes at all.`;
+}
+
+/**
+ * The per-chunk JSON instruction for claims-lens reviews. The chunk runner's
+ * default contract names findings alone; if the claims lens relied on it, the
+ * last and most literal formatting instruction the model sees would contradict
+ * the header's manifest demand and the divergence gate would starve.
+ */
+export const CLAIMS_CHUNK_JSON_CONTRACT = `Finish with exactly one fenced JSON object shaped as {"findings":[{"id":"stable-short-id","severity":"low|medium|high|critical","location":"path:line or null","rationale":"evidence-backed reason","suggestedCorrection":"bounded correction","disposition":"open"}],"claimedChanges":[{"path":"relative/path","kind":"created|modified|deleted","taskId":"the claiming task"}]}. READY must use an empty findings array. claimedChanges must list every file-level change the supplied reports claim was created, modified, or deleted; an empty array is a statement that the reports claim no repository changes. Every claimedChanges entry requires all three fields exactly: kind must be one of created, modified, or deleted, and taskId must name the claiming task — an entry missing any of them invalidates the whole manifest.`;
+
+/** The claims lens reviews the narration itself, chunked like any other evidence. */
+export function claimsReviewChunks(taskReports: string, maxChars = 8_000): Array<{ label: string; content: string }> {
+  const content = taskReports.trim() || "No task reports were recorded.";
+  const chunks: Array<{ label: string; content: string }> = [];
+  for (let start = 0; start < content.length; start += maxChars) {
+    chunks.push({ label: `task reports ${chunks.length + 1}`, content: content.slice(start, start + maxChars) });
+  }
+  return chunks.length ? chunks : [{ label: "task reports 1", content }];
 }
 
 export function formatFailures(results: CheckResult[]): string {

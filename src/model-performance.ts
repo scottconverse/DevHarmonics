@@ -44,6 +44,106 @@ export interface ModelPerformanceProfile extends ModelPerformanceSlice {
   workloads: Record<string, ModelPerformanceSlice>;
 }
 
+export interface CounterfactualComparisonModel {
+  modelId: string;
+  displayName: string;
+  promptPriceUsdPerMTokens: number;
+  completionPriceUsdPerMTokens: number;
+}
+
+export interface CounterfactualReceipt {
+  role: string;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: number | null;
+}
+
+export interface RunCostCounterfactual {
+  /** Always true: the counterfactual is a catalog-price projection, never a bill. */
+  estimate: true;
+  /** Actual spend over exactly the invocations the counterfactual projects — a like-for-like pair. */
+  actualUsd: number;
+  counterfactualUsd: number;
+  byRole: Array<{ role: string; actualUsd: number; counterfactualUsd: number; comparisonModelId: string; comparisonDisplayName: string }>;
+  /** Roles with receipts but no priced comparison model — excluded, never invented. */
+  excludedRoles: string[];
+  /** Known spend the pair could not cover: excluded roles plus receipts without token counts. Visible, never folded in. */
+  unprojectedUsd: number;
+  /** Receipts whose billed cost is unknown — counted, never presented as zero spend. */
+  unknownCostReceipts: number;
+}
+
+function roundUsd(value: number): number {
+  return Math.round(value * 10_000) / 10_000;
+}
+
+/**
+ * DH-650: what this run actually cost beside what the same token volume would
+ * have cost on the priciest qualified candidate per role — the stratification
+ * saving made visible. Honest-absent: a role without a priced comparator or a
+ * receipt without token counts cannot be projected; when nothing at all can
+ * be projected the answer is null, not zero.
+ */
+export function runCostCounterfactual(input: {
+  receipts: ReadonlyArray<CounterfactualReceipt>;
+  /** Every priced qualified candidate per role; the priciest is chosen per role FOR ITS OBSERVED TOKEN MIX (Codex F-003). */
+  candidatesByRole: Readonly<Record<string, ReadonlyArray<CounterfactualComparisonModel> | undefined>>;
+}): RunCostCounterfactual | null {
+  const byRole = new Map<string, CounterfactualReceipt[]>();
+  for (const receipt of input.receipts) {
+    byRole.set(receipt.role, [...(byRole.get(receipt.role) ?? []), receipt]);
+  }
+  const entries: RunCostCounterfactual["byRole"] = [];
+  const excludedRoles: string[] = [];
+  // All accumulation is unrounded; only display fields round, so the parts can
+  // never round their way into a negative remainder (Codex F-004b).
+  let coveredUsd = 0;
+  let coveredCounterfactualUsd = 0;
+  const covered = new Set<CounterfactualReceipt>();
+  for (const [role, receipts] of byRole) {
+    const candidates = input.candidatesByRole[role] ?? [];
+    // The pair is like-for-like: a receipt joins it only when BOTH sides are
+    // knowable — token counts for the projection AND billed cost for the
+    // actual. Unknown cost is counted, never invented as zero (Codex F-004a).
+    const pairable = receipts.filter((receipt) => receipt.inputTokens !== null && receipt.outputTokens !== null && receipt.costUsd !== null);
+    if (!candidates.length || !pairable.length) {
+      excludedRoles.push(role);
+      continue;
+    }
+    const inputTokens = pairable.reduce((sum, receipt) => sum + receipt.inputTokens!, 0);
+    const outputTokens = pairable.reduce((sum, receipt) => sum + receipt.outputTokens!, 0);
+    const actualUsd = pairable.reduce((sum, receipt) => sum + receipt.costUsd!, 0);
+    // Priciest for THIS mix: project every candidate over the role's observed
+    // token volume and take the maximum — a summed rate card is not that.
+    const projected = candidates
+      .map((candidate) => ({ candidate, usd: inputTokens * candidate.promptPriceUsdPerMTokens / 1_000_000 + outputTokens * candidate.completionPriceUsdPerMTokens / 1_000_000 }))
+      .sort((left, right) => right.usd - left.usd || left.candidate.modelId.localeCompare(right.candidate.modelId))[0]!;
+    const comparison = projected.candidate;
+    const counterfactualUsd = projected.usd;
+    coveredUsd += actualUsd;
+    coveredCounterfactualUsd += counterfactualUsd;
+    for (const receipt of pairable) covered.add(receipt);
+    entries.push({
+      role,
+      actualUsd: roundUsd(actualUsd),
+      counterfactualUsd: roundUsd(counterfactualUsd),
+      comparisonModelId: comparison.modelId,
+      comparisonDisplayName: comparison.displayName,
+    });
+  }
+  if (!entries.length) return null;
+  const uncoveredKnownUsd = input.receipts.reduce((sum, receipt) => sum + (covered.has(receipt) || receipt.costUsd === null ? 0 : receipt.costUsd), 0);
+  return {
+    estimate: true,
+    actualUsd: roundUsd(coveredUsd),
+    counterfactualUsd: roundUsd(coveredCounterfactualUsd),
+    byRole: entries.sort((left, right) => left.role.localeCompare(right.role)),
+    excludedRoles: excludedRoles.sort(),
+    unprojectedUsd: roundUsd(uncoveredKnownUsd),
+    unknownCostReceipts: input.receipts.filter((receipt) => receipt.costUsd === null).length,
+  };
+}
+
 export function aggregateModelPerformance(
   observations: ReadonlyArray<ModelPerformanceObservation>,
 ): ModelPerformanceProfile[] {

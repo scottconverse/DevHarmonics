@@ -138,15 +138,27 @@ export class ModelRouter {
             providerDiversity: input.avoidProviders?.length && !input.avoidProviders.includes(connection.provider) ? 8 : 0,
             costAwareness: costScores.get(model.id) ?? 0,
           });
-          return [{ model, connection, profile, score: scoreTotal(breakdown), breakdown }];
+          return [{ model, connection, profile, empiricalWorkload, score: scoreTotal(breakdown), breakdown }];
         })
         .flat()
         .sort((left, right) => right.score - left.score || left.model.id.localeCompare(right.model.id));
-      const selected = candidates[0];
-      if (selected) {
+      const top = candidates[0];
+      if (top) {
+        // DH-320: quality parity at a lower price beats the tier premium, but
+        // only when the established empirical record proves the parity.
+        const parityChoice = preferCheapestAtParity(candidates.map((candidate) => ({
+          id: candidate.model.id,
+          provider: candidate.connection.provider,
+          pinned: candidate.model.pinned,
+          unitCostUsd: catalogUnitCost(candidate.model),
+          empiricalWorkload: candidate.empiricalWorkload,
+          breakdown: candidate.breakdown,
+        })), { preferredProvider: input.task?.preferredProvider ?? null });
+        const selected = parityChoice ? candidates.find((candidate) => candidate.model.id === parityChoice.id)! : top;
         return this.decisionForModel(input, workload, selected.model, selected.connection, selected.breakdown, [
           `adaptive ${workload.complexity} workload`,
           `${selected.profile.tier} model tier satisfies ${workload.requiredTier}`,
+          ...(parityChoice ? [`cheapest qualified candidate at established empirical parity (kept over ${top.model.canonicalName})`] : []),
           ...(selected.profile.reasoningEffort ? [`${selected.profile.reasoningEffort} reasoning setting fits workload`] : []),
           ...workload.factors,
           ...(selected.model.pinned ? ["user pin"] : []),
@@ -338,10 +350,81 @@ export function relativeCatalogCostScores(candidates: ReadonlyArray<{ id: string
   }));
 }
 
-function catalogUnitCost(model: ModelRecord): number | null {
+export interface ParityCandidate {
+  id: string;
+  provider: string;
+  pinned: boolean;
+  unitCostUsd: number | null;
+  empiricalWorkload?: Pick<ModelPerformanceSlice, "eligibleForAdaptiveWeighting" | "firstAttemptSuccessRate"> | undefined;
+  breakdown: Pick<RoutingScoreBreakdown, "tierFit" | "reasoningFit" | "userPin" | "empiricalLatency" | "providerDiversity">;
+}
+
+/** Success-rate difference at or under this is parity once both records are established (DH-250's ≥20-observation bar). */
+export const PARITY_SUCCESS_RATE_TOLERANCE = 0.05;
+
+/**
+ * DH-320: among score-ranked candidates (best first), pick the cheaper model
+ * over the top one only when the empirical record actually supports it — both
+ * slices established, success rates at parity, both prices known, and every
+ * non-cost routing consideration (tier fit, pins, provider preferences,
+ * diversity) identical. Returns the displacing candidate, or null when the top
+ * selection stands. A pinned top is the user's decision and is never displaced.
+ */
+export function preferCheapestAtParity(
+  candidates: ReadonlyArray<ParityCandidate>,
+  options?: {
+    /**
+     * The task's directed provider — architect-planned or applied via an owner
+     * reassign directive. A DIRECTED provider is a hard constraint (Codex
+     * R2-002): parity may override soft fallback affinity, but never an
+     * explicit owner choice — a reassignment that routing silently walks back
+     * would make a direct control advisory without saying so.
+     */
+    preferredProvider?: string | null;
+  },
+): ParityCandidate | null {
+  const top = candidates[0];
+  if (!top || top.pinned) return null;
+  if (!top.empiricalWorkload?.eligibleForAdaptiveWeighting) return null;
+  if (top.unitCostUsd === null || !Number.isFinite(top.unitCostUsd)) return null;
+  const directedProvider = options?.preferredProvider ?? null;
+  const topIsDirected = directedProvider !== null && top.provider === directedProvider;
+  // Every QUALITY consideration must match — tier, reasoning fit, latency,
+  // pins, and independence; a "parity" swap onto a materially slower or
+  // worse-fitting model is not parity, whatever the success rates say.
+  // Provider-preference nudges (preferred/fallback provider) deliberately do
+  // NOT guard: shielding a pricier selection behind a habit preference is the
+  // exact behavior this preference exists to end — with cost already nudging
+  // the score, preference-protected tops are the only place parity can fire.
+  const guardKeys = ["tierFit", "reasoningFit", "userPin", "empiricalLatency", "providerDiversity"] as const;
+  const atParity = candidates.slice(1).filter((candidate) => {
+    if (topIsDirected && candidate.provider !== directedProvider) return false;
+    if (candidate.unitCostUsd === null || !Number.isFinite(candidate.unitCostUsd) || candidate.unitCostUsd >= top.unitCostUsd!) return false;
+    if (!candidate.empiricalWorkload?.eligibleForAdaptiveWeighting) return false;
+    // Epsilon: a success-rate delta of exactly the tolerance must be parity
+    // even when floating point renders it as 0.050000000000000044.
+    if (Math.abs(candidate.empiricalWorkload.firstAttemptSuccessRate - top.empiricalWorkload!.firstAttemptSuccessRate) - PARITY_SUCCESS_RATE_TOLERANCE > 1e-9) return false;
+    return guardKeys.every((key) => candidate.breakdown[key] === top.breakdown[key]);
+  });
+  if (!atParity.length) return null;
+  return atParity.reduce((cheapest, candidate) => (candidate.unitCostUsd! < cheapest.unitCostUsd! ? candidate : cheapest));
+}
+
+export function catalogUnitCost(model: ModelRecord): number | null {
   const prompt = numericMetadata(model.metadata.promptPrice);
   const completion = numericMetadata(model.metadata.completionPrice);
   return prompt === null || completion === null ? null : prompt + completion;
+}
+
+/**
+ * Catalog prices in USD per million tokens, from the same metadata fields
+ * catalogUnitCost reads — one grammar for every consumer of catalog pricing.
+ */
+export function catalogPricesPerMTokens(model: ModelRecord): { promptPriceUsdPerMTokens: number; completionPriceUsdPerMTokens: number } | null {
+  const prompt = numericMetadata(model.metadata.promptPrice);
+  const completion = numericMetadata(model.metadata.completionPrice);
+  if (prompt === null || completion === null) return null;
+  return { promptPriceUsdPerMTokens: prompt * 1_000_000, completionPriceUsdPerMTokens: completion * 1_000_000 };
 }
 
 function numericMetadata(value: unknown): number | null {

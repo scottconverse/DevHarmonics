@@ -1,4 +1,6 @@
+import os from "node:os";
 import path from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { projectLegacyProvider } from "./compatibility.js";
 import { CapacityBroker } from "./capacity.js";
@@ -10,9 +12,12 @@ import { loadConfig, loadConstitution, resolveProviderCommand, devHarmonicsDirec
 import { inspectProviders } from "./doctor.js";
 import { Ledger, type ReviewEvidenceBinding } from "./ledger.js";
 import { OllamaAdapter, syncOllamaRuntimes } from "./ollama.js";
-import { createRuntimeAdapter } from "./providers.js";
+import { createRuntimeAdapter, providerSupportsToolDenial } from "./providers.js";
 import {
   architectPrompt,
+  CLAIMS_CHUNK_JSON_CONTRACT,
+  claimsReviewChunks,
+  claimsReviewerContextHeader,
   formatFailures,
   localReviewerContextHeader,
   objectivePromptText,
@@ -42,7 +47,7 @@ import { syncSubscriptionConnections } from "./registry.js";
 import { ModelRouter, type RouteInput } from "./routing.js";
 import { observeLocalResources } from "./resources.js";
 import { evaluateToolRequest, type ToolStage } from "./policy.js";
-import { adjudicateReviewQuorum, parseReviewerResponse, reviewRequirement, type ReviewFinding, type ReviewQuorumDecision, type ReviewRequirement, type StructuredReview } from "./review.js";
+import { adjudicateReviewQuorum, applicableReviewLenses, claimsArtifactDivergence, lensForSlot, parseReviewerResponse, reviewRequirement, type ReviewFinding, type ReviewLens, type ReviewQuorumDecision, type ReviewRequirement, type StructuredReview } from "./review.js";
 import { OPENROUTER_MAX_OUTPUT_TOKENS, OpenRouterService, requireInvocationCostCeiling, type PaidSpendReservation } from "./openrouter.js";
 import { ensureSchedulerCandidateQualified, ensureSchedulerProviderCandidateQualified, hasQualifiableCandidate, type SchedulerQualificationResult } from "./qualification.js";
 import { mergeRepositoryValidators, resolveValidatorCwd, runValidator, unknownValidator } from "./validators.js";
@@ -809,7 +814,9 @@ export class Orchestrator {
         .filter((task) => task.id !== "__integration__" && task.provider)
         .map((task) => String(task.provider)),
     )];
-    const reviewPolicy = reviewRequirement(plan.tasks, config.reviewPolicy);
+    const baseReviewRequirement = reviewRequirement(plan.tasks, config.reviewPolicy);
+    const reviewPolicy: ReviewRequirement = { ...baseReviewRequirement, requiredLenses: applicableReviewLenses(baseReviewRequirement, autonomy) };
+    const firstReviewLens = lensForSlot(reviewPolicy.requiredLenses, 1);
     const excludedReviewerModels = new Set<string>();
     const excludedReviewerConnections = new Set<string>();
     if (reviewPolicy.requireImplementorIndependence) {
@@ -818,17 +825,25 @@ export class Orchestrator {
       }
     }
     let reviewText: string | null = null;
-    let completedReviewerIdentity: { provider: string; modelId: string | null; connectionId: string } | null = null;
+    let completedReviewerIdentity: { provider: string; modelId: string | null; connectionId: string; lens?: ReviewLens | null } | null = null;
     let reviewerFallbackReason: string | null = null;
     let lastReviewerError: Error | null = null;
+    // Codex R2-001: a claims-lens slot may only route to an adapter that can
+    // STRUCTURALLY deny its file tools — capability, not prompt, is the gate.
+    const toolDenialIncapable = firstReviewLens === "claims" && autonomy !== "observe"
+      ? this.ledger.listConnections().filter((connection) => !providerSupportsToolDenial(connection.provider, connection.transport, { attestedNoManagedPolicy: config.reviewPolicy.attestNoManagedClaudePolicy })).map((connection) => connection.id)
+      : [];
     for (let reviewAttempt = 1; reviewAttempt <= config.application.retry.maxAttempts; reviewAttempt++) {
+      const effectiveExcludedConnections = toolDenialIncapable.length
+        ? new Set([...excludedReviewerConnections, ...toolDenialIncapable])
+        : excludedReviewerConnections;
       const reviewerStart = reviewerName ? reviewerProviders.indexOf(reviewerName) : -1;
       const qualificationProviders = reviewerProviders.map((_, index) => reviewerProviders[(Math.max(0, reviewerStart) + reviewAttempt - 1 + index) % reviewerProviders.length]!);
       // No subscription candidate to qualify leaves the router to choose among
       // already-qualified local reviewers, exactly as the worker path does.
       let reviewerFallbackProvider: ProviderName | null = (qualificationProviders[0] ?? null) as ProviderName | null;
       for (const qualificationProvider of qualificationProviders) {
-        const qualification = await ensureSchedulerCandidateQualified({ ledger: this.ledger, config, cwd: worktrees.integrationPath, role: "reviewer", preferredProvider: qualificationProvider, permission: "read_only", excludedModelIds: excludedReviewerModels, excludedConnectionIds: excludedReviewerConnections });
+        const qualification = await ensureSchedulerCandidateQualified({ ledger: this.ledger, config, cwd: worktrees.integrationPath, role: "reviewer", preferredProvider: qualificationProvider, permission: "read_only", excludedModelIds: excludedReviewerModels, excludedConnectionIds: effectiveExcludedConnections });
         this.recordSchedulerQualification(runId, qualification, "reviewer");
         if (qualification?.attempted && !qualification.passed) {
           excludedReviewerModels.add(qualification.modelId);
@@ -850,7 +865,7 @@ export class Orchestrator {
           allowedProviders: reviewerProviders,
           permission: "read_only",
           excludedModelIds: excludedReviewerModels,
-          excludedConnectionIds: excludedReviewerConnections,
+          excludedConnectionIds: effectiveExcludedConnections,
           avoidProviders: implementationProviders,
         });
       } catch (error) {
@@ -862,10 +877,17 @@ export class Orchestrator {
       const reviewer = await this.provider(reviewerDecision.provider, config, reviewerDecision.connectionId);
       this.ledger.addEvent(runId, "review.started", `${reviewerDecision.provider} is reviewing the ${autonomy === "observe" ? "diagnostic reports" : "integration branch"}${reviewAttempt > 1 ? ` (fallback ${reviewAttempt})` : ""}`, { routing: reviewerDecision, reviewAttempt, fallbackReason: reviewerFallbackReason });
       try {
-        if (reviewer.connection.capabilities.providerManagedTools) {
+        // The claims lens never gets repository tools: even a tool-capable
+        // reviewer is routed through bounded chunks of the reports themselves,
+        // so what it cannot see is a property of the bundle, not of the prompt.
+        // Observe runs are the stated exception (plan DH-460): no artifact diff
+        // exists, and the citation duty needs read-only repository access — the
+        // receipt still records the claims lens, and no manifest is expected.
+        const claimsLensReview = firstReviewLens === "claims" && autonomy !== "observe";
+        if (reviewer.connection.capabilities.providerManagedTools && !claimsLensReview) {
           const review = await reviewer.invoke({
             role: "reviewer",
-            prompt: reviewerPrompt({ goal: request.goal, constitution, plan, checkSummary, taskReports, workspacePath: worktrees.integrationPath, autonomy }),
+            prompt: reviewerPrompt({ goal: request.goal, constitution, plan, checkSummary, taskReports, workspacePath: worktrees.integrationPath, autonomy, lens: firstReviewLens }),
             cwd: worktrees.integrationPath,
             permission: "read_only",
             timeoutMs: null,
@@ -875,16 +897,28 @@ export class Orchestrator {
           this.recordInvocation(runId, null, "reviewer", reviewerDecision, review, reviewerFallbackReason);
           reviewText = review.text;
         } else {
-          const diffFiles = await worktrees.integrationDiffFiles();
-          const chunks = autonomy === "observe" ? this.diagnosticReportChunks(runId) : chunkDiffFiles(diffFiles);
+          const diffFiles = claimsLensReview ? [] : await worktrees.integrationDiffFiles();
+          const chunks = claimsLensReview
+            ? claimsReviewChunks(taskReports)
+            : autonomy === "observe" ? this.diagnosticReportChunks(runId) : chunkDiffFiles(diffFiles);
           const localTaskReports = autonomy === "observe" ? "Each accepted diagnostic report is supplied as an independent evidence chunk." : taskReports;
+          // Codex F-001: the OS temp root is the ANCESTOR of every integration
+          // worktree, so it is exactly the wrong cwd for the claims lens. The
+          // claims review runs from a fresh empty sibling directory AND with
+          // the runtime's file tools denied — the isolation is a property of
+          // the invocation, not of prompt wording or path luck.
+          const claimsCwd = claimsLensReview ? mkdtempSync(path.join(os.tmpdir(), "dh-claims-")) : null;
           const performReview = (paidSpendReservationId?: string) => runContextOnlyReview({
             adapter: reviewer,
             model: reviewerDecision.model,
-            cwd: worktrees.integrationPath,
-            contextHeader: localReviewerContextHeader({ goal: request.goal, constitution, plan, checkSummary, taskReports: localTaskReports, autonomy }),
+            cwd: claimsCwd ?? worktrees.integrationPath,
+            ...(claimsLensReview ? { withoutRepositoryTools: true } : {}),
+            contextHeader: claimsLensReview
+              ? claimsReviewerContextHeader({ goal: request.goal, constitution, plan, checkSummary, autonomy })
+              : localReviewerContextHeader({ goal: request.goal, constitution, plan, checkSummary, taskReports: localTaskReports, autonomy, lens: firstReviewLens }),
+            ...(claimsLensReview ? { jsonContract: CLAIMS_CHUNK_JSON_CONTRACT } : {}),
             chunks,
-            evidenceLabel: autonomy === "observe" ? "diagnostic report" : "diff chunk",
+            evidenceLabel: claimsLensReview ? "task report chunk" : autonomy === "observe" ? "diagnostic report" : "diff chunk",
             maxOutputTokens: 512,
             signal,
             onChunk: (receipt, index, total) => {
@@ -895,15 +929,20 @@ export class Orchestrator {
           const selected = reviewerDecision.model.requestedModelId ? this.ledger.getModel(String(reviewerDecision.model.requestedModelId)) : null;
           if (reviewerDecision.provider === "openrouter" && !selected) throw new Error("OpenRouter paid routing requires an exact selected model");
           const costCeiling = reviewerDecision.provider === "openrouter" ? requireInvocationCostCeiling(selected!, "", 512) * chunks.length : 0;
-          const review = reviewerDecision.provider === "openrouter"
-            ? await new OpenRouterService(this.ledger).withPaidRoutingAllowed(config, runId, costCeiling, (reservation) => performReview(reservation.id), chunks.length)
-            : await performReview();
-          reviewText = review.text;
+          try {
+            const review = reviewerDecision.provider === "openrouter"
+              ? await new OpenRouterService(this.ledger).withPaidRoutingAllowed(config, runId, costCeiling, (reservation) => performReview(reservation.id), chunks.length)
+              : await performReview();
+            reviewText = review.text;
+          } finally {
+            if (claimsCwd) rmSync(claimsCwd, { recursive: true, force: true });
+          }
         }
         completedReviewerIdentity = {
           provider: reviewerDecision.provider,
           modelId: reviewerDecision.model.requestedModelId ? String(reviewerDecision.model.requestedModelId) : null,
           connectionId: String(reviewer.connection.id),
+          lens: firstReviewLens,
         };
         this.recordConnectionOutcome(reviewer.connection.id, { success: true });
         if (reviewerDecision.model.requestedModelId) {
@@ -965,6 +1004,7 @@ export class Orchestrator {
         runId,
         reviewSlot,
         requiredReviewers: reviewPolicy.requiredReviewers,
+        lens: lensForSlot(reviewPolicy.requiredLenses, reviewSlot),
         reviewerName,
         reviewerProviders,
         implementationProviders,
@@ -991,7 +1031,14 @@ export class Orchestrator {
         }
       }
     }
-    let finalQuorum = adjudicateReviewQuorum({ requirement: reviewPolicy, implementationProviders, reviews: structuredReviews });
+    const passedTaskIds = new Set((this.ledger.getRun(runId)?.tasks ?? []).filter((task) => task.status === "passed").map((task) => task.id));
+    const firstRoundDivergence = autonomy === "observe"
+      ? []
+      : claimsArtifactDivergence({ reviews: structuredReviews, diffPaths: (await worktrees.integrationDiffFiles()).map((file) => file.path), passedTaskIds });
+    if (firstRoundDivergence.length) {
+      this.ledger.addEvent(runId, "review.divergence", `${firstRoundDivergence.length} claims/artifact divergence finding${firstRoundDivergence.length === 1 ? "" : "s"} — the reports and the integrated diff disagree`, { findings: firstRoundDivergence });
+    }
+    let finalQuorum = adjudicateReviewQuorum({ requirement: reviewPolicy, implementationProviders, reviews: structuredReviews, divergence: firstRoundDivergence, expectClaimsManifest: autonomy !== "observe" });
     let finalReviews = structuredReviews;
     let finalReviewSha256 = integrationReviewSha256;
     for (let fixRound = 1; !finalQuorum.passed && finalQuorum.openFindings.length && autonomy !== "observe" && fixRound <= config.reviewPolicy.maxFixRounds; fixRound++) {
@@ -1487,6 +1534,8 @@ export class Orchestrator {
     runId: string;
     reviewSlot: number;
     requiredReviewers: number;
+    /** The evidence bundle this review slot is shown; null keeps the combined legacy bundle. */
+    lens?: ReviewLens | null;
     /** Null when only qualified local reviewers remain; the router then chooses among them. */
     reviewerName: ProviderName | null;
     reviewerProviders: readonly string[];
@@ -1512,7 +1561,15 @@ export class Orchestrator {
     const router = new ModelRouter(this.ledger);
     let lastError: Error | null = null;
     let fallbackReason: string | null = null;
+    // Codex R2-001: claims-lens slots route only to adapters that can
+    // structurally deny their file tools.
+    const toolDenialIncapable = input.lens === "claims" && input.autonomy !== "observe"
+      ? this.ledger.listConnections().filter((connection) => !providerSupportsToolDenial(connection.provider, connection.transport, { attestedNoManagedPolicy: input.config.reviewPolicy.attestNoManagedClaudePolicy })).map((connection) => connection.id)
+      : [];
     for (let reviewAttempt = 1; reviewAttempt <= input.config.application.retry.maxAttempts; reviewAttempt++) {
+      const effectiveExcludedConnections = toolDenialIncapable.length
+        ? new Set([...input.excludedReviewerConnections, ...toolDenialIncapable])
+        : input.excludedReviewerConnections;
       const start = input.reviewerName ? input.reviewerProviders.indexOf(input.reviewerName) : -1;
       const qualificationProviders = input.reviewerProviders.map((_, index) => input.reviewerProviders[(Math.max(0, start) + input.reviewSlot + reviewAttempt - 2 + index) % input.reviewerProviders.length]!);
       // Null with no subscription candidate left: the router chooses among the
@@ -1527,7 +1584,7 @@ export class Orchestrator {
           preferredProvider: provider,
           permission: "read_only",
           excludedModelIds: input.excludedReviewerModels,
-          excludedConnectionIds: input.excludedReviewerConnections,
+          excludedConnectionIds: effectiveExcludedConnections,
         });
         this.recordSchedulerQualification(input.runId, qualification, "reviewer");
         if (qualification?.attempted && !qualification.passed) {
@@ -1550,7 +1607,7 @@ export class Orchestrator {
           allowedProviders: input.reviewerProviders,
           permission: "read_only",
           excludedModelIds: input.excludedReviewerModels,
-          excludedConnectionIds: input.excludedReviewerConnections,
+          excludedConnectionIds: effectiveExcludedConnections,
           avoidProviders: input.implementationProviders,
         });
       } catch (error) {
@@ -1563,10 +1620,13 @@ export class Orchestrator {
       this.ledger.addEvent(input.runId, "review.started", `${decision.provider} is completing quorum review ${input.reviewSlot}/${input.requiredReviewers}${reviewAttempt > 1 ? ` (fallback ${reviewAttempt})` : ""}`, { routing: decision, reviewSlot: input.reviewSlot, requiredReviewers: input.requiredReviewers, reviewAttempt, fallbackReason });
       try {
         let text: string;
-        if (!input.reviewChunks && reviewer.connection.capabilities.providerManagedTools) {
+        // The claims lens never gets repository tools or diff chunks — its
+        // bundle is the reports themselves, regardless of adapter capability.
+        const claimsLensReview = input.lens === "claims" && input.autonomy !== "observe";
+        if (!input.reviewChunks && reviewer.connection.capabilities.providerManagedTools && !claimsLensReview) {
           const review = await reviewer.invoke({
             role: "reviewer",
-            prompt: reviewerPrompt({ goal: input.goal, constitution: input.constitution, plan: input.plan, checkSummary: input.checkSummary, taskReports: input.taskReports, workspacePath: reviewCwd, autonomy: input.autonomy }),
+            prompt: reviewerPrompt({ goal: input.goal, constitution: input.constitution, plan: input.plan, checkSummary: input.checkSummary, taskReports: input.taskReports, workspacePath: reviewCwd, autonomy: input.autonomy, lens: input.lens ?? null }),
             cwd: reviewCwd,
             permission: "read_only",
             timeoutMs: null,
@@ -1576,17 +1636,27 @@ export class Orchestrator {
           this.recordInvocation(input.runId, null, "reviewer", decision, review, fallbackReason);
           text = review.text;
         } else {
-          const chunks = input.reviewChunks ?? (input.autonomy === "observe"
-            ? this.diagnosticReportChunks(input.runId)
-            : chunkDiffFiles(await input.worktrees!.integrationDiffFiles()));
+          const chunks = claimsLensReview
+            ? claimsReviewChunks(input.taskReports)
+            : input.reviewChunks ?? (input.autonomy === "observe"
+              ? this.diagnosticReportChunks(input.runId)
+              : chunkDiffFiles(await input.worktrees!.integrationDiffFiles()));
           const localTaskReports = input.autonomy === "observe" ? "Each accepted diagnostic report is supplied as an independent evidence chunk." : input.taskReports;
+          // Codex F-001: fresh empty sibling directory + denied file tools;
+          // the temp ROOT is an ancestor of every worktree and must not host
+          // a claims review.
+          const claimsCwd = claimsLensReview ? mkdtempSync(path.join(os.tmpdir(), "dh-claims-")) : null;
           const performReview = (paidSpendReservationId?: string) => runContextOnlyReview({
             adapter: reviewer,
             model: decision.model,
-            cwd: reviewCwd,
-            contextHeader: localReviewerContextHeader({ goal: input.goal, constitution: input.constitution, plan: input.plan, checkSummary: input.checkSummary, taskReports: localTaskReports, autonomy: input.autonomy }),
+            cwd: claimsCwd ?? reviewCwd,
+            ...(claimsLensReview ? { withoutRepositoryTools: true } : {}),
+            contextHeader: claimsLensReview
+              ? claimsReviewerContextHeader({ goal: input.goal, constitution: input.constitution, plan: input.plan, checkSummary: input.checkSummary, autonomy: input.autonomy })
+              : localReviewerContextHeader({ goal: input.goal, constitution: input.constitution, plan: input.plan, checkSummary: input.checkSummary, taskReports: localTaskReports, autonomy: input.autonomy, lens: input.lens ?? null }),
+            ...(claimsLensReview ? { jsonContract: CLAIMS_CHUNK_JSON_CONTRACT } : {}),
             chunks,
-            evidenceLabel: input.reviewEvidenceLabel ?? (input.autonomy === "observe" ? "diagnostic report" : "diff chunk"),
+            evidenceLabel: claimsLensReview ? "task report chunk" : input.reviewEvidenceLabel ?? (input.autonomy === "observe" ? "diagnostic report" : "diff chunk"),
             maxOutputTokens: 512,
             signal: input.signal,
             onChunk: (receipt, index, total) => {
@@ -1597,10 +1667,14 @@ export class Orchestrator {
           const selected = decision.model.requestedModelId ? this.ledger.getModel(String(decision.model.requestedModelId)) : null;
           if (decision.provider === "openrouter" && !selected) throw new Error("OpenRouter paid routing requires an exact selected model");
           const costCeiling = decision.provider === "openrouter" ? requireInvocationCostCeiling(selected!, "", 512) * chunks.length : 0;
-          const review = decision.provider === "openrouter"
-            ? await new OpenRouterService(this.ledger).withPaidRoutingAllowed(input.config, input.runId, costCeiling, (reservation) => performReview(reservation.id), chunks.length)
-            : await performReview();
-          text = review.text;
+          try {
+            const review = decision.provider === "openrouter"
+              ? await new OpenRouterService(this.ledger).withPaidRoutingAllowed(input.config, input.runId, costCeiling, (reservation) => performReview(reservation.id), chunks.length)
+              : await performReview();
+            text = review.text;
+          } finally {
+            if (claimsCwd) rmSync(claimsCwd, { recursive: true, force: true });
+          }
         }
         this.recordConnectionOutcome(reviewer.connection.id, { success: true });
         if (decision.model.requestedModelId) {
@@ -1613,6 +1687,7 @@ export class Orchestrator {
           provider: decision.provider,
           modelId: decision.model.requestedModelId ? String(decision.model.requestedModelId) : null,
           connectionId: String(reviewer.connection.id),
+          lens: input.lens ?? null,
         });
       } catch (error) {
         if (input.signal.aborted) throw error;
@@ -1662,6 +1737,8 @@ export class Orchestrator {
     reviewCwd?: string;
     reviewChunks?: readonly ReviewChunk[];
     reviewEvidenceLabel?: string;
+    /** Integrated diff paths for the deterministic claims/artifact divergence check; derived from worktrees when omitted. */
+    diffPaths?: readonly string[];
     eventContext?: Record<string, unknown>;
     signal: AbortSignal;
     goal: string;
@@ -1679,11 +1756,13 @@ export class Orchestrator {
       }
     }
     const reviews: StructuredReview[] = [];
-    for (let reviewSlot = 1; reviewSlot <= input.requirement.requiredReviewers; reviewSlot++) {
+    const requirement: ReviewRequirement = { ...input.requirement, requiredLenses: applicableReviewLenses(input.requirement, input.autonomy) };
+    for (let reviewSlot = 1; reviewSlot <= requirement.requiredReviewers; reviewSlot++) {
       const review = await this.completeQuorumReview({
         ...input,
         reviewSlot,
-        requiredReviewers: input.requirement.requiredReviewers,
+        requiredReviewers: requirement.requiredReviewers,
+        lens: lensForSlot(requirement.requiredLenses, reviewSlot),
         excludedReviewerModels: excludedModels,
         excludedReviewerConnections: excludedConnections,
       });
@@ -1698,9 +1777,16 @@ export class Orchestrator {
         }
       }
     }
+    const diffPaths = input.diffPaths
+      ?? (input.worktrees && input.autonomy !== "observe" ? (await input.worktrees.integrationDiffFiles()).map((file) => file.path) : null);
+    const passedTaskIds = new Set((this.ledger.getRun(input.runId)?.tasks ?? []).filter((task) => task.status === "passed").map((task) => task.id));
+    const divergence = diffPaths ? claimsArtifactDivergence({ reviews, diffPaths, passedTaskIds }) : [];
+    if (divergence.length) {
+      this.ledger.addEvent(input.runId, "review.divergence", `${divergence.length} claims/artifact divergence finding${divergence.length === 1 ? "" : "s"} — the reports and the integrated diff disagree`, { ...input.eventContext, findings: divergence });
+    }
     return {
       reviews,
-      decision: adjudicateReviewQuorum({ requirement: input.requirement, implementationProviders: input.implementationProviders, reviews }),
+      decision: adjudicateReviewQuorum({ requirement, implementationProviders: input.implementationProviders, reviews, divergence, expectClaimsManifest: input.autonomy !== "observe" }),
     };
   }
 

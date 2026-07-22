@@ -170,7 +170,7 @@ interface CheckRow {
   duration_ms: number;
 }
 
-export const LEDGER_SCHEMA_VERSION = 28;
+export const LEDGER_SCHEMA_VERSION = 29;
 
 export const REPOSITORY_ROLES = [
   "umbrella",
@@ -464,6 +464,7 @@ export interface ReviewReceiptRecord {
   provider: string;
   modelId: string | null;
   connectionId: string;
+  lens: StructuredReview["lens"];
   summary: string;
   rawText: string;
   findings: ReviewFinding[];
@@ -1238,6 +1239,16 @@ const MIGRATIONS: readonly LedgerMigration[] = [
       `);
     },
   },
+  {
+    version: 29,
+    name: "review-receipt-lens",
+    apply(database) {
+      const columns = new Set(
+        (database.prepare("SELECT name FROM pragma_table_info('review_receipts')").all() as unknown as Array<{ name: string }>).map((column) => column.name),
+      );
+      if (!columns.has("lens")) database.exec("ALTER TABLE review_receipts ADD COLUMN lens TEXT CHECK(lens IN ('artifact', 'claims') OR lens IS NULL);");
+    },
+  },
 ];
 
 function summarizeGoal(goal: string, maxLength = 180): string {
@@ -1359,7 +1370,7 @@ const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
   provider_catalog_models: ["id", "provider", "canonical_name", "display_name", "metadata_json", "first_seen_at", "last_seen_at", "missing_observations", "retired"],
   invocation_receipts: ["id", "run_id", "task_id", "role", "provider", "connection_id", "requested_model_id", "resolved_model_id", "model_resolution", "input_tokens", "output_tokens", "cost_usd", "duration_ms", "workload_class", "fallback_reason", "paid_spend_reservation_id", "created_at"],
   tool_policy_receipts: ["id", "run_id", "task_id", "attempt_id", "tool_id", "actor_role", "stage", "side_effect", "outcome", "reason", "request_json", "lock_keys_json", "approval_id", "created_at"],
-  review_receipts: ["id", "run_id", "round", "integration_sha256", "evidence_binding_json", "verdict", "provider", "model_id", "connection_id", "summary", "raw_text", "invalidated_at", "invalidation_reason", "created_at"],
+  review_receipts: ["id", "run_id", "round", "integration_sha256", "evidence_binding_json", "verdict", "provider", "model_id", "connection_id", "lens", "summary", "raw_text", "invalidated_at", "invalidation_reason", "created_at"],
   review_findings: ["id", "review_receipt_id", "finding_id", "severity", "location", "rationale", "suggested_correction", "disposition", "created_at"],
   objectives: ["id", "outcome", "acceptance_criteria_json", "constraints_json", "project_path", "product_id", "repository_ids_json", "risk", "autonomy", "priority", "deadline", "policy_notes_json", "revision", "created_at", "updated_at"],
   plan_revisions: ["objective_id", "revision", "plan_json", "rationale", "approved", "created_at", "approved_at"],
@@ -3466,9 +3477,9 @@ export class Ledger {
     try {
       const result = this.database.prepare(
         `INSERT INTO review_receipts
-         (run_id, round, integration_sha256, evidence_binding_json, verdict, provider, model_id, connection_id,
+         (run_id, round, integration_sha256, evidence_binding_json, verdict, provider, model_id, connection_id, lens,
           summary, raw_text, invalidated_at, invalidation_reason, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
       ).run(
         input.runId,
         input.round,
@@ -3478,6 +3489,7 @@ export class Ledger {
         input.review.provider,
         input.review.modelId,
         input.review.connectionId,
+        input.review.lens,
         redactText(input.review.summary),
         redactText(input.review.rawText),
         now,
@@ -3508,6 +3520,21 @@ export class Ledger {
     }
   }
 
+  /** Per-invocation billing evidence for one run, in insertion order. */
+  listInvocationReceipts(runId: string): Array<{ role: string; provider: string; resolvedModelId: string | null; inputTokens: number | null; outputTokens: number | null; costUsd: number | null }> {
+    const rows = this.database.prepare(
+      "SELECT role, provider, resolved_model_id, input_tokens, output_tokens, cost_usd FROM invocation_receipts WHERE run_id = ? ORDER BY id",
+    ).all(runId) as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      role: String(row.role),
+      provider: String(row.provider),
+      resolvedModelId: row.resolved_model_id === null ? null : String(row.resolved_model_id),
+      inputTokens: row.input_tokens === null ? null : Number(row.input_tokens),
+      outputTokens: row.output_tokens === null ? null : Number(row.output_tokens),
+      costUsd: row.cost_usd === null ? null : Number(row.cost_usd),
+    }));
+  }
+
   listReviewReceipts(runId: string): ReviewReceiptRecord[] {
     const reviews = this.database.prepare(
       "SELECT * FROM review_receipts WHERE run_id = ? ORDER BY round, id",
@@ -3525,6 +3552,7 @@ export class Ledger {
       provider: String(review.provider),
       modelId: review.model_id === null ? null : String(review.model_id),
       connectionId: String(review.connection_id),
+      lens: review.lens === null || review.lens === undefined ? null : String(review.lens) as StructuredReview["lens"],
       summary: String(review.summary),
       rawText: String(review.raw_text),
       invalidatedAt: review.invalidated_at === null ? null : String(review.invalidated_at),

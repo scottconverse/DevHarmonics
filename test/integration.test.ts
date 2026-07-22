@@ -15,6 +15,7 @@ import { Orchestrator, repositoryTaskIds } from "../src/orchestrator.js";
 import { syncOllamaRuntimes } from "../src/ollama.js";
 import { runProcess } from "../src/process.js";
 import { startDashboard } from "../src/server.js";
+import { ModelCatalogCoordinator } from "../src/catalog.js";
 
 async function git(cwd: string, args: string[]) {
   const result = await runProcess({ command: "git", args, cwd, timeoutMs: 30_000 });
@@ -93,6 +94,14 @@ if (process.argv.includes("--version")) {
       }
     : {summary:"fixture plan",recommendedConcurrency:1,tasks:[task]};
   console.log(JSON.stringify({result:JSON.stringify(plan)}));
+} else if (input.includes("You are the claims-lens reviewer")) {
+  const manifest = JSON.stringify({findings:[],claimedChanges:[{path:"result.txt",kind:"created",taskId:"one"}]});
+  const toolsIndex = process.argv.indexOf("--tools");
+  const toolsFlag = toolsIndex >= 0 && process.argv[toolsIndex + 1] === "" && process.argv.includes("--strict-mcp-config") && process.argv.includes("--safe-mode") && process.argv.includes("--bare") ? "denied" : "undenied";
+  const review = "READY\\n\\nClaims reviewed from cwd=" + process.cwd().replace(/\\\\/g, "/") + " toolsFlag=" + toolsFlag + " and they cohere with the receipts.\\n" + manifest;
+  if (process.argv.includes("--json")) console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:review}}));
+  else if (process.argv.includes("--output-format")) console.log(JSON.stringify({result:review}));
+  else console.log(review);
 } else if (input.includes("You are reviewing bounded") || (args.includes("--new-project") && process.cwd().includes("integration"))) {
   const review = input.includes("repo:core/needs-fix.txt")
     ? "NOT READY\\n\\nA retained defect marker remains.\\n" + JSON.stringify({findings:[{id:"remove-core-defect-marker",severity:"high",location:"repo:core/needs-fix.txt:1",rationale:"The core repository still contains the defect marker.",suggestedCorrection:"Remove needs-fix.txt and create the corrected result.txt in repo:core.",disposition:"open"}]})
@@ -471,6 +480,9 @@ test("high-risk orchestration requires two independent provider reviews", async 
   config.product.reviewer = "gemini";
   config.product.workers = ["codex"];
   config.routing.reviewer.preferredTier = "standard";
+  // The owner attestation is what admits a Claude CLI reviewer to a claims
+  // slot at all; this fixture machine is its test double.
+  config.reviewPolicy.attestNoManagedClaudePolicy = true;
   for (const provider of ["codex", "claude", "gemini"] as const) {
     config.connections[provider].command = command;
     config.connections[provider].timeoutMs = 30_000;
@@ -486,9 +498,88 @@ test("high-risk orchestration requires two independent provider reviews", async 
     assert.equal(new Set(reviews.map((review) => review.provider)).size, 2);
     assert.ok(reviews.every((review) => review.provider !== "codex"), "both reviewers must be independent from the implementor provider");
     assert.ok(reviews.every((review) => review.verdict === "READY"));
+    assert.deepEqual(reviews.map((review) => review.lens).sort(), ["artifact", "claims"], "high risk covers both lenses");
+    // Codex F-001: the claims reviewer's effective working directory — as the
+    // reviewer process itself observed it — must be a fresh claims-review
+    // directory that is NOT an ancestor of the run's integration worktree.
+    // (The temp ROOT is such an ancestor; running there hands the reviewer a
+    // route to the repository.)
+    const claimsReceipt = reviews.find((review) => review.lens === "claims")!;
+    const observedCwd = claimsReceipt.rawText.match(/cwd=([^\s]+)/)?.[1];
+    assert.ok(observedCwd, `the claims fixture must report its cwd: ${claimsReceipt.rawText.slice(0, 200)}`);
+    assert.match(path.basename(observedCwd!), /^dh-claims-/, "claims reviews run from a dedicated empty directory");
+    const integrationRoot = path.join(os.tmpdir(), "devharmonics", runId);
+    const relation = path.relative(path.resolve(observedCwd!), integrationRoot);
+    assert.ok(relation.startsWith(".."), `the claims cwd must not be an ancestor of the integration worktree (relation: ${relation})`);
+    // Codex R2-001: tool denial must be structural. The claims slot may only
+    // route to an adapter that can deny its tools (here: claude), and the
+    // reviewer process must actually receive the denial in its effective argv.
+    assert.equal(claimsReceipt.provider, "claude", "claims reviews route only to tool-denial-capable adapters");
+    assert.match(claimsReceipt.rawText, /toolsFlag=denied/, "the claims reviewer's effective invocation must carry the tool denial");
     assert.ok(run?.events.some((event) => event.kind === "review.quorum_passed"));
   } finally {
     ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the run cost endpoint serves a mix-aware counterfactual from ledger evidence", async () => {
+  // Codex F-006: the endpoint had no regression test — it could be deleted
+  // with the suite green, and its comparator picked by summed rate card
+  // (F-003) instead of the run's observed token mix.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-cost-endpoint-"));
+  const project = await createRepository(root);
+  await initializeProject(project);
+  const seedLedger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  seedLedger.upsertConnection({
+    id: "subscription-cli:codex", provider: "codex", transport: "subscription_cli", authentication: "subscription",
+    displayName: "Codex", enabled: true, installed: true, authenticated: true, visible: true, healthy: true,
+    available: true, entitlement: "unknown", capacity: "unknown", adapterVersion: "t", runtimeVersion: "t", metadata: {},
+  });
+  const seedModel = (id: string, promptPrice: number, completionPrice: number) => {
+    seedLedger.addManualModel({
+      id, connectionId: "subscription-cli:codex", canonicalName: id, displayName: id, lifecycle: "verified",
+      visible: true, verified: true, qualified: true, active: true,
+      metadata: { devHarmonicsProfile: { tier: "premium", family: "fixture", capabilities: ["text"], source: "catalog" }, promptPrice, completionPrice },
+    });
+  };
+  seedModel("manual:codex:input-expensive", 0.0001, 0);   // 100 USD/MTok in, 0 out
+  seedModel("manual:codex:output-expensive", 0, 0.00009); // 0 in, 90 USD/MTok out
+  // The dashboard refreshes the catalog at startup, which stamps model
+  // fingerprints; qualify AGAINST the refreshed fingerprint so the
+  // qualification is current in the server process, exactly as a real
+  // qualified fleet would be.
+  const seedCatalog = new ModelCatalogCoordinator(seedLedger, project);
+  await seedCatalog.refresh(true, "application_launch");
+  seedCatalog.stop();
+  for (const id of ["manual:codex:input-expensive", "manual:codex:output-expensive"]) {
+    seedLedger.recordModelQualification({ modelId: id, fixtureVersion: "t", role: "general", passed: true, score: 1, evidence: {}, fingerprint: seedLedger.getModel(id)!.qualificationFingerprint });
+  }
+  const runId = seedLedger.createRun("Cost endpoint fixture", project);
+  seedLedger.recordInvocationReceipt({
+    runId, role: "worker", provider: "codex", connectionId: "subscription-cli:codex",
+    requestedModelId: null, resolvedModelId: "fixture-worker", inputTokens: 0, outputTokens: 1_000_000, costUsd: 0.1,
+    durationMs: 10, workloadClass: "standard:standard",
+  });
+  const emptyRunId = seedLedger.createRun("No receipts", project);
+  seedLedger.close();
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  try {
+    const missing = await fetch(`${dashboard.url}/api/runs/aaaaaaaa-0000-0000-0000-000000000000/cost`);
+    assert.equal(missing.status, 404);
+    const empty = await fetch(`${dashboard.url}/api/runs/${emptyRunId}/cost`).then((response) => response.json()) as { cost: unknown };
+    assert.equal(empty.cost, null, "a run with no receipts shows nothing, not zero");
+    const value = await fetch(`${dashboard.url}/api/runs/${runId}/cost`).then((response) => response.json()) as {
+      cost: { estimate: boolean; actualUsd: number; counterfactualUsd: number; byRole: Array<{ role: string; comparisonModelId: string }> };
+    };
+    assert.equal(value.cost.estimate, true);
+    assert.equal(value.cost.actualUsd, 0.1);
+    // The priciest model FOR THIS MIX (all output tokens) is the
+    // output-expensive one, not the higher summed rate card.
+    assert.equal(value.cost.byRole[0]!.comparisonModelId, "manual:codex:output-expensive");
+    assert.equal(value.cost.counterfactualUsd, 90);
+  } finally {
+    await dashboard.close();
     await rm(root, { recursive: true, force: true });
   }
 });

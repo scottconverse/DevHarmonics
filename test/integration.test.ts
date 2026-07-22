@@ -1093,14 +1093,19 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
     const page = await fetch(dashboard.url);
     assert.equal(page.status, 200);
     const pageText = await page.text();
-    assert.match(pageText, /Assemble a verified agent team/);
+    // Slice A: the composer's own h1 lost its bespoke copy in favor of a
+    // shared VIEW_DESCRIPTIONS title + purpose sentence rendered in the
+    // topbar for every view — this pins the new canonical Runs purpose line.
+    assert.match(pageText, /Define an objective, approve the team's plan, and watch the work happen\./);
     assert.match(pageText, /aria-label="Agent count"/);
     assert.match(pageText, /id="run-autonomy"/);
     assert.match(pageText, /id="delivery-panel"/);
     const appText = await fetch(`${dashboard.url}/app.js`).then((response) => response.text());
     assert.match(appText, /create_draft_pr/);
     assert.match(appText, /Approve &amp; push branch/);
-    assert.match(appText, /Approve &amp; create draft PR/);
+    // Slice A: "PR" was unexplained shorthand — the button now spells out
+    // "pull request" to match the rest of the delivery panel's wording.
+    assert.match(appText, /Approve &amp; create draft pull request/);
     // Owner-corrected rule (2026-07-22): the cockpit COMPLETES the delivery.
     // Merge and tag exist as owner-approved actions; what must never exist is
     // a merge that happens without a confirmation carrying the approval.

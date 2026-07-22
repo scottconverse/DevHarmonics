@@ -155,7 +155,7 @@ function quietMarkup(lastActivityAt) {
   // The ticking duration stays permanently aria-hidden so the polite live region
   // never announces a clock; the warning note is separate, static text that is
   // announced once when it appears.
-  return `<span class="op-quiet ${warn ? "warn" : ""}" data-quiet-since="${lastActivityAt}"><span class="op-quiet-time" aria-hidden="true">quiet for ${operationElapsed(lastActivityAt)}</span>${warn ? '<span class="op-quiet-note"> — the provider call may still be running</span>' : ""}</span>`;
+  return `<span class="op-quiet ${warn ? "warn" : ""}" data-quiet-since="${lastActivityAt}" title="DevHarmonics doesn't get progress updates while an AI provider is generating a reply — &quot;quiet&quot; just means we're still waiting on them, not that anything has stalled. This note appears after 5 minutes of silence."><span class="op-quiet-time" aria-hidden="true">quiet for ${operationElapsed(lastActivityAt)}</span>${warn ? '<span class="op-quiet-note"> — the provider call may still be running</span>' : ""}</span>`;
 }
 
 let activityStripSignature = "";
@@ -183,7 +183,10 @@ function renderActivityStrip() {
   if (signature === activityStripSignature) return;
   activityStripSignature = signature;
   strip.classList.toggle("hidden", !items.length);
-  strip.innerHTML = items.join("");
+  // Gap fixed (Slice A): the floating strip had no heading of its own — a
+  // reader seeing it appear had no visible cue what it was without the
+  // screen-reader-only aria-label.
+  strip.innerHTML = items.length ? `<p class="strip-label">Working now</p>${items.join("")}` : "";
 }
 
 setInterval(() => {
@@ -204,8 +207,24 @@ setInterval(() => {
 }, 1_000);
 
 function providerDisplayName(provider) {
-  return provider === "gemini" ? "Google Antigravity" : provider || "Unassigned";
+  // Slice A: readers who signed in under the name "Gemini" (Google's own name
+  // for it) would not recognize "Google Antigravity" as the same product —
+  // the familiar name stays visible alongside the current product name.
+  return provider === "gemini" ? "Google Antigravity (Gemini)" : provider || "Unassigned";
 }
+
+// Slice A pattern #1: every view gets exactly one title and one purpose
+// sentence, rendered from this single source instead of a page-title ternary
+// that used to carry different, inconsistent copy per branch.
+const VIEW_DESCRIPTIONS = {
+  runs: { title: "Runs", purpose: "Define an objective, approve the team's plan, and watch the work happen." },
+  workbench: { title: "Workbench", purpose: "Ask one or more models questions about a project — read-only, nothing runs, nothing changes. Turn a good discussion into an objective when you're ready." },
+  products: { title: "Products", purpose: "Register the real products and repositories the team works on, and see what DevHarmonics has verified about them." },
+  workflows: { title: "Workflows", purpose: "Reusable, versioned job descriptions. Pick one, fill in its inputs, and it becomes a normal run." },
+  setup: { title: "Setup", purpose: "The rules every run follows: who plans, who builds, who reviews, and what the team may do without asking you." },
+  models: { title: "Models", purpose: "Every model DevHarmonics can use, what each has proven it can do, and why work gets routed where it does." },
+  evidence: { title: "Evidence", purpose: "The permanent record of a run: what was done, what was checked, who reviewed it, and whether it all still holds together." },
+};
 
 function connectionDisplayName(connectionId, provider) {
   return state.connections.find((connection) => connection.id === connectionId)?.displayName || providerDisplayName(provider);
@@ -238,6 +257,12 @@ function recordedModelIdentity(provider, modelId, resolution, connectionId) {
   return `${connection} / ${model}`;
 }
 
+// Slice A: "can edit files" / "read-only" is used at every place a task
+// shows its write permission — plan preview, board card, and task drawer.
+function permissionLabel(permission) {
+  return permission === "workspace_write" ? "can edit files" : permission === "read_only" ? "read-only" : String(permission || "").replaceAll("_", " ");
+}
+
 function eventDisplayMessage(event) {
   const routing = event.data?.routing;
   if (routing?.provider && event.message.startsWith(routing.provider)) {
@@ -251,6 +276,7 @@ function eventDisplayMessage(event) {
 }
 
 async function initialize() {
+  showView(state.view);
   $("#models-view").insertBefore($("#openrouter-panel"), $("#model-filter-bar"));
   state.bootstrap = await api("/api/bootstrap");
   $("#project-path").value = state.bootstrap.defaultProject;
@@ -440,15 +466,17 @@ function renderOpenRouterStatus() {
 // identical control — the same live consequence line is reused for both
 // instead of leaving Setup's copy unexplained (DESIGN-DECISIONS.md).
 function renderRunAutonomyHelp(selectId = "run-autonomy", helpId = "run-autonomy-help") {
+  // Slice A: the first clause is bolded so the consequence can't be skimmed
+  // past — this is the single highest-stakes control on the page.
   const help = {
-    observe: "Observe only — read-only diagnostics and evidence, no repository changes.",
-    supervised: "Supervised — agents may prepare repository changes after you approve the plan.",
-    bounded: "Bounded autonomy — agents may execute within the configured tool and repository boundaries.",
+    observe: "<strong>Nothing is changed.</strong> The AI only reads your code and reports back.",
+    supervised: "<strong>AI workers can write code,</strong> but a change only reaches your repository after you approve the plan.",
+    bounded: "<strong>AI workers can commit changes on their own,</strong> limited to the permissions and repositories you've allowed in Setup. Change what's allowed under Setup → Default team setup → policy checkboxes.",
   };
   const select = $(`#${selectId}`);
   const helpElement = $(`#${helpId}`);
   if (!select || !helpElement) return;
-  helpElement.textContent = help[select.value] || help.supervised;
+  helpElement.innerHTML = help[select.value] || help.supervised;
 }
 
 function requiresSpecialistBenchmark(model) {
@@ -711,15 +739,13 @@ function showView(view) {
   if (view === "runs") {
     $("#composer").classList.toggle("hidden", Boolean(state.selectedRunId) && !state.composing);
     $("#run-view").classList.toggle("hidden", !state.selectedRunId || state.composing);
-    $("#page-title").textContent = state.selectedRunId && !state.composing ? "Verified agent run" : "Assemble a verified agent team";
   } else {
     $("#composer").classList.add("hidden");
     $("#run-view").classList.add("hidden");
-    // Slice A: Setup and Models now carry their own single title + purpose
-    // sentence in the view body (see index.html); the topbar just names the
-    // section instead of repeating a second, differently-worded headline.
-    $("#page-title").textContent = view === "setup" ? "Setup" : view === "models" ? "Models" : view === "products" ? "Operate across real products" : view === "workbench" ? "Explore before you execute" : view === "workflows" ? "Run a versioned workflow" : "Inspect retained evidence";
   }
+  const description = VIEW_DESCRIPTIONS[view] || VIEW_DESCRIPTIONS.runs;
+  $("#page-title").textContent = description.title;
+  $("#page-purpose").textContent = description.purpose;
 }
 
 async function refreshWorkflows() {
@@ -850,7 +876,7 @@ async function refreshEvidence() {
   $("#evidence-verdict").innerHTML = derivedVerdictMarkup(report);
   $("#evidence-hash").textContent = evidence.integritySha256;
   $("#evidence-review-count").textContent = `${evidence.reviews.length} retained`;
-  $("#evidence-reviews").innerHTML = evidence.reviews.length ? evidence.reviews.map((review) => `<article><div><strong>Round ${review.round} · ${escapeHtml(providerDisplayName(review.provider))}</strong><span>${escapeHtml(review.provider === "gemini" ? `${modelDisplayName(review.modelId)} requested (actual model unverified)` : review.modelId || "provider default")} · integration ${escapeHtml(review.integrationSha256.slice(0, 12))}</span></div><span class="lifecycle ${review.invalidatedAt ? "retired" : review.verdict === "READY" ? "qualified" : "degraded"}">${review.invalidatedAt ? "invalidated" : escapeHtml(review.verdict.replaceAll("_", " "))}</span><p class="evidence-report">${escapeHtml(review.summary)}${review.findings.length ? `\n${review.findings.map((finding) => `${finding.severity.toUpperCase()} ${finding.location || "no location"}: ${finding.rationale} [${finding.disposition}]`).join("\n")}` : ""}${review.invalidationReason ? `\nInvalidated: ${escapeHtml(review.invalidationReason)}` : ""}</p></article>`).join("") : '<div class="empty-state">No structured review receipts were retained for this run.</div>';
+  $("#evidence-reviews").innerHTML = evidence.reviews.length ? evidence.reviews.map((review) => `<article><div><strong>Round ${review.round}</strong><span>${escapeHtml(recordedModelIdentity(review.provider, review.modelId, review.provider === "gemini" ? "requested_unverified" : null, review.connectionId))} · integration ${escapeHtml(review.integrationSha256.slice(0, 12))}</span></div><span class="lifecycle ${review.invalidatedAt ? "retired" : review.verdict === "READY" ? "qualified" : "degraded"}">${review.invalidatedAt ? "invalidated" : escapeHtml(review.verdict.replaceAll("_", " "))}</span><p class="evidence-report">${escapeHtml(review.summary)}${review.findings.length ? `\n${review.findings.map((finding) => `${finding.severity.toUpperCase()} ${finding.location || "no location"}: ${finding.rationale} [${finding.disposition}]`).join("\n")}` : ""}${review.invalidationReason ? `\nInvalidated: ${escapeHtml(review.invalidationReason)}` : ""}</p></article>`).join("") : '<div class="empty-state">No structured review receipts were retained for this run.</div>';
   $("#evidence-attempts").innerHTML = evidence.attempts.length ? evidence.attempts.map((attempt) => `<article><div><strong>${escapeHtml(attempt.task_id)}</strong><span>${escapeHtml(recordedModelIdentity(attempt.provider, attempt.model_id, attempt.model_resolution, attempt.connection_id))}</span></div><span class="lifecycle ${attempt.status === "completed" ? "qualified" : ""}">${escapeHtml(attempt.status)}</span><details class="evidence-report"><summary>View normalized report</summary><p>${escapeHtml(attempt.result_envelope?.summary || attempt.error || "No normalized summary")}</p></details></article>`).join("") : '<div class="empty-state">No attempts were started.</div>';
   $("#evidence-tool-count").textContent = `${evidence.toolReceipts.length} retained`;
   $("#evidence-tools").innerHTML = evidence.toolReceipts.length ? evidence.toolReceipts.map((receipt) => `<article><div><strong>${escapeHtml(receipt.toolId)}</strong><span>${escapeHtml(receipt.actorRole)} · ${escapeHtml(receipt.stage)} · ${escapeHtml(receipt.sideEffect)}</span></div><span class="lifecycle ${receipt.outcome === "allow" ? "qualified" : receipt.outcome === "deny" ? "retired" : "degraded"}">${escapeHtml(receipt.outcome.replaceAll("_", " "))}</span><p class="evidence-report">${escapeHtml(receipt.reason)}${receipt.lockKeys.length ? `\nLocks: ${escapeHtml(receipt.lockKeys.join(", "))}` : ""}</p></article>`).join("") : '<div class="empty-state">No tool policy decisions were retained for this run.</div>';
@@ -930,6 +956,18 @@ function derivedVerdictMarkup(report) {
     </div>`;
 }
 
+// Slice A pattern #3: these five words are a status system used throughout
+// the provider strip and worker pool, so each gets a one-line definition a
+// reader can find instead of guessing "Disabled" (you turned it off) apart
+// from "Unavailable" (something is actually broken).
+const PROVIDER_STATUS_DEFINITIONS = {
+  Ready: "Connected and usable right now.",
+  Disabled: "You've turned this provider off — flip it back on above.",
+  "Install required": "The provider's software isn't on this computer yet.",
+  "Sign-in required": "Installed but not logged in.",
+  Unavailable: "Installed and signed in, but something else is stopping it — check the detail line below the name.",
+};
+
 function renderProviders() {
   const providers = state.bootstrap.providers;
   const ready = (provider) => provider.available;
@@ -945,11 +983,21 @@ function renderProviders() {
   $("#provider-status").innerHTML = providers
     .map((provider) => `<span class="provider-chip ${ready(provider) ? "online" : ""}" title="${escapeHtml(provider.summary)}"><i></i>${escapeHtml(providerDisplayName(provider.name))}</span>`)
     .join("");
+  // Gap fixed (Slice A): the reason a toggle is greyed out used to live only
+  // in a hover `title` — invisible on touch devices and easy to miss on
+  // desktop. It now prints as small visible text under the toggle too.
   $("#provider-toggles").innerHTML = providers
-    .map((provider) => `<label class="toggle" title="${escapeHtml(provider.summary)}"><input type="checkbox" name="provider" value="${provider.name}" ${ready(provider) ? "checked" : "disabled"}><span>${escapeHtml(providerDisplayName(provider.name))}</span></label>`)
+    .map((provider) => {
+      const label = statusLabel(provider);
+      const reason = ready(provider) ? "" : `<small class="toggle-reason">${escapeHtml(label)} — ${escapeHtml(provider.summary)}</small>`;
+      return `<label class="toggle" title="${escapeHtml(provider.summary)}"><input type="checkbox" name="provider" value="${provider.name}" ${ready(provider) ? "checked" : "disabled"}><span>${escapeHtml(providerDisplayName(provider.name))}</span>${reason}</label>`;
+    })
     .join("");
   $("#provider-help-content").innerHTML = providers
-    .map((provider) => `<section class="provider-help-card"><div><strong>${escapeHtml(providerDisplayName(provider.name))} <span class="auth-label ${ready(provider) ? "ready" : "required"}">${statusLabel(provider)}</span></strong><code>${escapeHtml(provider.loginCommand)}</code></div><p class="muted">${escapeHtml(provider.summary)}</p><ol>${provider.setupSteps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></section>`)
+    .map((provider) => {
+      const label = statusLabel(provider);
+      return `<section class="provider-help-card"><div><strong>${escapeHtml(providerDisplayName(provider.name))} <span class="auth-label ${ready(provider) ? "ready" : "required"}" title="${escapeHtml(PROVIDER_STATUS_DEFINITIONS[label] || "")}">${escapeHtml(label)}</span></strong></div><p class="muted">${escapeHtml(PROVIDER_STATUS_DEFINITIONS[label] || "")}</p><p class="muted">${escapeHtml(provider.summary)}</p><p class="field-help">Copy this exact line into a terminal window and press Enter:</p><code>${escapeHtml(provider.loginCommand)}</code><ol>${provider.setupSteps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></section>`;
+    })
     .join("");
   const unavailable = providers.filter((provider) => !ready(provider));
   $("#provider-auth-gate").classList.toggle("hidden", unavailable.length === 0);
@@ -1044,7 +1092,6 @@ function renderSelectedRun() {
   if (state.view !== "runs") return;
   $("#composer").classList.add("hidden");
   $("#run-view").classList.remove("hidden");
-  $("#page-title").textContent = "Verified agent run";
   const autonomyLabel = run.autonomy === "observe" ? "Observe only" : run.autonomy === "bounded" ? "Bounded autonomy" : "Supervised";
   $("#run-project").textContent = `${run.projectPath} · ${autonomyLabel}`;
   const goalSummary = run.goalSummary || run.goal;
@@ -1098,10 +1145,10 @@ function renderSteering(run) {
     ? requested.kind === "hold_admission" ? "holding" : "resuming"
     : held ? "held" : "admitting";
   const admissionLabel = {
-    holding: "Hold requested — takes effect at the next admission boundary",
-    resuming: "Resume requested — takes effect at the next admission boundary",
-    held: "Admission held",
-    admitting: "Admitting tasks",
+    holding: "Pause requested — takes effect once the current task finishes",
+    resuming: "Resume requested — takes effect once the current task finishes",
+    held: "New tasks are paused",
+    admitting: "New tasks are starting normally",
   }[admissionState];
   $("#steering-admission").textContent = admissionLabel;
   $("#steering-admission").className = `lifecycle ${admissionState === "held" ? "warn" : admissionState === "admitting" ? "" : "pending"}`;
@@ -1120,7 +1167,7 @@ function renderSteering(run) {
     ? steerableTasks
       .map((task) => `<option value="${escapeHtml(task.id)}">${escapeHtml(task.title)} — ${escapeHtml(task.status)}</option>`)
       .join("")
-    : '<option value="">No steerable tasks right now</option>';
+    : '<option value="">No tasks can be steered right now — they\'re either finished or not yet queued.</option>';
   if (steerableTasks.some((task) => task.id === previous)) select.value = previous;
   // Only 'working' means a provider invocation is actually in flight. 'verifying'
   // runs DevHarmonics' own validators and 'retry' is a backoff gap — offering
@@ -1149,6 +1196,13 @@ function renderSteering(run) {
   renderSteeringDirectives(directives);
 }
 
+const STEERING_DISPOSITION_DEFINITIONS = {
+  applied: "This instruction has taken effect.",
+  pending: "Queued — takes effect at the next safe point.",
+  rejected: "DevHarmonics could not apply this — see the reason next to it.",
+  superseded: "A later instruction replaced this one before it took effect.",
+};
+
 function renderSteeringDirectives(directives) {
   const container = $("#steering-directives");
   if (!directives.length) {
@@ -1162,7 +1216,7 @@ function renderSteeringDirectives(directives) {
       return `<article class="steering-directive ${escapeHtml(directive.disposition)}">
         <div class="steering-directive-head">
           <strong>${escapeHtml(directive.kind.replaceAll("_", " "))}${directive.targetTaskId ? ` · ${escapeHtml(directive.targetTaskId)}` : ""}</strong>
-          <span class="steering-disposition ${escapeHtml(directive.disposition)}">${escapeHtml(directive.disposition)}</span>
+          <span class="steering-disposition ${escapeHtml(directive.disposition)}" title="${escapeHtml(STEERING_DISPOSITION_DEFINITIONS[directive.disposition] || "")}">${escapeHtml(directive.disposition)}</span>
         </div>
         ${detail ? `<p>${escapeHtml(detail)}</p>` : ""}
         <small>${escapeHtml(directive.actor)} · ${new Date(directive.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${directive.dispositionReason ? ` · ${escapeHtml(directive.dispositionReason)}` : ""}${directive.appliedAttemptId ? ` · attempt ${directive.appliedAttemptId}` : ""}</small>
@@ -1193,6 +1247,15 @@ async function submitSteering(button, runId, body, label) {
   }, { onError: (message) => { $("#steering-error").textContent = message; }, busyLabel: "Sending…" });
 }
 
+const DELIVERY_STATUS_DEFINITIONS = {
+  pending: "Nothing has been pushed for this repository yet.",
+  branch_pushed: "Your reviewed code is on GitHub, but not yet in a pull request.",
+  draft_pr_created: "A pull request exists on GitHub but hasn't been merged.",
+  merged: "The change is now in the base branch.",
+  tagged: "The change is merged and the release is tagged.",
+  failed: "The last delivery step for this repository didn't complete — see the error below.",
+};
+
 function renderDelivery(run) {
   const panel = $("#delivery-panel");
   const delivery = run.delivery;
@@ -1204,7 +1267,7 @@ function renderDelivery(run) {
   $("#delivery-status").className = `lifecycle ${done.includes(delivery.status) || delivery.status === "draft_pr_created" ? "qualified" : delivery.status === "failed" ? "degraded" : ""}`;
   $("#delivery-guidance").textContent = externalWritesAllowed
     ? "Every step is your approval — push, draft PR, merge, and tag all run from here, and nothing happens without your click. DevHarmonics never merges or tags on its own."
-    : "External writes are disabled. Enable them in Setup before approving a branch push or draft pull request.";
+    : "Delivery is turned off. Turn on \"Allow GitHub delivery actions\" in Setup before you can push a branch or open a pull request.";
   $("#delivery-repositories").innerHTML = delivery.repositories.map((repository) => {
     const pushed = ["branch_pushed", "draft_pr_created", "merged", "tagged"].includes(repository.status);
     const created = ["draft_pr_created", "merged", "tagged"].includes(repository.status);
@@ -1212,7 +1275,8 @@ function renderDelivery(run) {
     const tagged = repository.status === "tagged";
     const settled = tagged;
     return `<article class="integration-repository-card delivery-repository-card">
-      <header><strong>${escapeHtml(repository.repositoryId)}</strong><span class="lifecycle ${created ? "qualified" : repository.status === "failed" ? "degraded" : ""}">${escapeHtml(repository.status.replaceAll("_", " "))}</span></header>
+      <header><strong>${escapeHtml(repository.repositoryId)}</strong><span class="lifecycle ${created ? "qualified" : repository.status === "failed" ? "degraded" : ""}" title="${escapeHtml(DELIVERY_STATUS_DEFINITIONS[repository.status] || "")}">${escapeHtml(repository.status.replaceAll("_", " "))}</span></header>
+      <small class="muted">commit range</small>
       <code class="integration-commit-range">${escapeHtml(repository.baseBranch)}: ${escapeHtml(repository.baseCommit)} → ${escapeHtml(repository.headCommit)}</code>
       <code>${escapeHtml(repository.branch)}</code>
       ${repository.remoteUrl ? `<a href="${escapeHtml(repository.remoteUrl)}" target="_blank" rel="noreferrer">${escapeHtml(repository.remoteUrl)}</a>` : ""}
@@ -1221,13 +1285,13 @@ function renderDelivery(run) {
       ${tagged ? `<p class="delivery-done">Delivered, merged, and tagged${repository.releaseTag ? ` as ${escapeHtml(repository.releaseTag)}` : ""} — this repository is fully shipped.</p>` : merged ? `<p class="delivery-done">Merged under your approval. Tag the release below when you are ready.</p>` : ""}
       <div class="plan-actions">
         <button class="secondary small" type="button" data-delivery-action="push_branch" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || pushed ? "disabled" : ""}>${pushed ? "Branch pushed ✓" : "Approve &amp; push branch"}</button>
-        <button class="secondary small" type="button" data-delivery-action="create_draft_pr" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || !pushed || created ? "disabled" : ""}>${created ? "Draft PR created ✓" : "Approve &amp; create draft PR"}</button>
+        <button class="secondary small" type="button" data-delivery-action="create_draft_pr" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || !pushed || created ? "disabled" : ""}>${created ? "Draft PR created ✓" : "Approve &amp; create draft pull request"}</button>
         <button class="${merged ? "secondary" : "primary"} small" type="button" data-delivery-action="merge_pr" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || !created || merged ? "disabled" : ""}>${merged ? "Merged ✓" : "Approve &amp; merge"}</button>
       </div>
       <div class="plan-actions delivery-tag-row">
-        <input class="delivery-tag-input" type="text" placeholder="no tag" aria-label="Release tag for ${escapeHtml(repository.repositoryId)}" data-tag-for="${escapeHtml(repository.repositoryId)}" ${!externalWritesAllowed || !merged || tagged ? "disabled" : ""}>
+        <input class="delivery-tag-input" type="text" placeholder="leave blank to skip tagging" aria-label="Release tag for ${escapeHtml(repository.repositoryId)}" data-tag-for="${escapeHtml(repository.repositoryId)}" ${!externalWritesAllowed || !merged || tagged ? "disabled" : ""}>
         <button class="${merged && !tagged ? "primary" : "secondary"} small" type="button" data-delivery-action="tag_release" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || !merged || tagged ? "disabled" : ""}>${tagged ? "Tagged ✓" : "Approve &amp; tag release"}</button>
-        ${merged ? "" : `<button class="primary small" type="button" data-delivery-action="complete_delivery" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed ? "disabled" : ""}>Complete delivery (push · PR · merge · tag if named)</button>`}
+        ${merged ? "" : `<button class="primary small" type="button" data-delivery-action="complete_delivery" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed ? "disabled" : ""}>Do everything at once (push, open PR, merge, tag)</button>`}
       </div>
       <p class="field-help delivery-tag-help" data-tag-help-for="${escapeHtml(repository.repositoryId)}">${tagged ? `Tagged ${escapeHtml(repository.releaseTag || "")}.` : "Empty tag field = no tag is created. Reading this repository's declared version…"}</p>
     </article>`;
@@ -1259,7 +1323,7 @@ async function fillDeclaredTagVersions(run) {
         // The field is absent entirely — a server built before version
         // enrichment. Say that, never "declares no version" (which would be a
         // claim about the repository this client cannot back).
-        help.textContent = "Declared-version lookup needs a server restart on the current build. Empty tag field = no tag is created.";
+        help.textContent = "We can't check this repository's declared version right now — ask an engineer to restart the server. Until then: empty tag field = no tag is created.";
       }
     }
   } catch {
@@ -1275,8 +1339,8 @@ function renderIntegrationSet(run) {
   $("#integration-set-status").textContent = integrationSet.status.replaceAll("_", " ");
   $("#integration-set-status").className = `lifecycle ${integrationSet.status === "ready" ? "qualified" : integrationSet.status === "failed" || integrationSet.status === "not_ready" ? "degraded" : ""}`;
   $("#integration-set-conditions").textContent = integrationSet.integrationConditions.length
-    ? `Integration conditions: ${integrationSet.integrationConditions.join(" · ")}`
-    : "No cross-repository integration conditions were retained.";
+    ? `Sync rules: ${integrationSet.integrationConditions.join(" · ")}`
+    : "No extra rules were needed to keep these repositories in sync.";
   $("#integration-set-repositories").innerHTML = integrationSet.repositories.map((repository) => `
     <article class="integration-repository-card">
       <header><strong>${escapeHtml(repository.repositoryId)}</strong><span class="lifecycle ${repository.status === "ready" ? "qualified" : repository.status === "failed" ? "degraded" : ""}">${escapeHtml(repository.status)}</span></header>
@@ -1288,15 +1352,18 @@ function renderIntegrationSet(run) {
 }
 
 function renderBoard(run) {
+  // Slice A: "Plan" as a column name collided with the separate "plan
+  // preview" step earlier in the flow — "Queued" says what's actually true
+  // (waiting to start) without reusing an already-loaded word.
   const columns = [
-    ["Plan", ["queued"]],
+    ["Queued", ["queued"]],
     ["Working", ["working", "retry"]],
     ["Verifying", ["verifying"]],
     ["Resolved", ["passed", "paused", "failed", "blocked", "cancelled"]],
   ];
   $("#board").innerHTML = columns.map(([title, statuses]) => {
     const tasks = run.tasks.filter((task) => statuses.includes(task.status));
-    return `<section class="column"><div class="column-head"><span>${title}</span><b>${tasks.length}</b></div>${tasks.map((task) => taskCard(task, run)).join("") || '<div class="empty-state">No tasks</div>'}</section>`;
+    return `<section class="column"><div class="column-head"><span>${title}</span><b>${tasks.length}</b></div>${tasks.map((task) => taskCard(task, run)).join("") || '<div class="empty-state">No tasks in this column yet</div>'}</section>`;
   }).join("");
 }
 
@@ -1308,7 +1375,7 @@ function taskCard(task, run) {
     const elapsed = startedAt ? `<span class="op-spinner" aria-hidden="true"></span>active <span data-elapsed-since="${startedAt}" aria-hidden="true">${operationElapsed(startedAt)}</span>` : `<span class="op-spinner" aria-hidden="true"></span>starting`;
     timing = `<div class="task-timing">${elapsed}${quietMarkup(lastActivityAt)}</div>`;
   }
-  return `<button class="task-card ${task.status}" data-task-id="${escapeHtml(task.id)}"><strong>${escapeHtml(task.title)}</strong>${task.repositoryIds?.length ? `<small>${escapeHtml(task.repositoryIds.join(", "))}</small>` : ""}<div class="task-contract"><span>${escapeHtml(task.permission.replaceAll("_", " "))}</span><span>${escapeHtml(task.risk)} risk</span></div><div class="task-meta"><span class="provider-tag">${escapeHtml(routingIdentity(taskRouting(run, task.id), task.provider))}</span><span>${passed}/${task.checks.length} checks · ${task.attemptCount} tries</span></div>${timing}</button>`;
+  return `<button class="task-card ${task.status}" data-task-id="${escapeHtml(task.id)}"><strong>${escapeHtml(task.title)}</strong>${task.repositoryIds?.length ? `<small>${escapeHtml(task.repositoryIds.join(", "))}</small>` : ""}<div class="task-contract"><span>${escapeHtml(permissionLabel(task.permission))}</span><span>${escapeHtml(task.risk)} risk</span></div><div class="task-meta"><span class="provider-tag">${escapeHtml(routingIdentity(taskRouting(run, task.id), task.provider))}</span><span>${passed}/${task.checks.length} checks · ${task.attemptCount} tries</span></div>${timing}</button>`;
 }
 
 function renderActivity(run) {
@@ -1320,7 +1387,7 @@ function renderActivity(run) {
 function renderVerdict(run) {
   if (!run.finalReview) {
     $("#verdict").className = "empty-state";
-    $("#verdict").textContent = "The reviewer’s verdict will appear after integration.";
+    $("#verdict").textContent = "The independent reviewer's verdict will appear here once the run finishes and its changes are combined.";
     return;
   }
   const ready = run.finalReview.trimStart().startsWith("READY");
@@ -1334,24 +1401,25 @@ function openTask(taskId) {
   if (!task) return;
   const routing = taskRouting(run, taskId);
   $("#drawer-content").innerHTML = `
-    <p class="drawer-kicker">${escapeHtml(task.status)}</p>
+    <p class="drawer-kicker" title="Queued: waiting to start. Working: an AI is actively writing code. Verifying: DevHarmonics is running its own checks on the result. Passed / failed / blocked / cancelled: finished.">${escapeHtml(task.status)}</p>
     <h2 class="drawer-title">${escapeHtml(task.title)}</h2>
     <p class="drawer-meta">${escapeHtml(routingIdentity(routing, task.provider))} · ${task.attemptCount} attempts</p>
-    <h3>Task contract</h3>
+    <h3>What this task is allowed to do</h3>
     <dl class="contract-details">
-      <div><dt>Permission</dt><dd>${escapeHtml(task.permission.replaceAll("_", " "))}</dd></div>
+      <div><dt>Permission</dt><dd>${escapeHtml(permissionLabel(task.permission))}</dd></div>
       <div><dt>Risk</dt><dd>${escapeHtml(task.risk)}</dd></div>
-      <div><dt>Kind</dt><dd>${escapeHtml(task.kind)}</dd></div>
+      <div><dt>Type of work</dt><dd>${escapeHtml(task.kind)}</dd></div>
       <div><dt>Repositories</dt><dd>${task.repositoryIds?.length ? task.repositoryIds.map(escapeHtml).join("<br>") : "Current project"}</dd></div>
-      <div><dt>Repository scope</dt><dd>${task.repositoryScope.map(escapeHtml).join("<br>")}</dd></div>
+      <div><dt>Exactly what files it can touch</dt><dd>${task.repositoryScope.map(escapeHtml).join("<br>")}</dd></div>
     </dl>
+    <p class="field-help">Permission = can this task change files, or only look. Risk = how closely the result gets checked before it's accepted. Type of work = what category of task this is (e.g. write code, run tests, review). "Exactly what files it can touch" is the specific paths this task is restricted to — even in Bounded autonomy, it cannot write outside this list.</p>
     <p>${escapeHtml(task.description)}</p>
     ${routingEvidenceMarkup(routing)}
     <h3>Acceptance criteria</h3>
     ${task.acceptanceCriteria.length ? `<ul>${task.acceptanceCriteria.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : '<div class="empty-state">No acceptance criteria supplied.</div>'}
-    <h3>Expected artifacts</h3>
+    <h3>Files this task should produce</h3>
     ${task.expectedArtifacts.length ? `<ul>${task.expectedArtifacts.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : '<div class="empty-state">No expected artifacts supplied.</div>'}
-    <h3>Verification receipts</h3>
+    <h3>Checks run so far</h3>
     ${task.checks.length ? task.checks.map(checkMarkup).join("") : '<div class="empty-state">No checks have run yet.</div>'}
   `;
   $("#task-drawer").scrollTop = 0;
@@ -1363,7 +1431,7 @@ function openTask(taskId) {
 
 function checkMarkup(check) {
   const output = [check.stdout, check.stderr].filter(Boolean).join("\n") || "No output";
-  return `<div class="check"><div class="check-head"><strong>${escapeHtml(check.name)}</strong><span class="${check.passed ? "pass" : "fail"}">${check.passed ? "PASS" : `FAIL ${check.exitCode}`}</span></div><pre>${escapeHtml(output)}</pre></div>`;
+  return `<div class="check"><div class="check-head"><strong>${escapeHtml(check.name)}</strong><span class="${check.passed ? "pass" : "fail"}" title="Exit code: the number the check command returned — 0 always means pass; anything else is the check's own failure signal.">${check.passed ? "PASS" : `FAIL (code ${check.exitCode})`}</span></div><pre>${escapeHtml(output)}</pre></div>`;
 }
 
 function closeTask() {
@@ -1453,12 +1521,13 @@ function renderPlanPreview() {
   const highRisk = plan.tasks.filter((task) => task.risk === "high").length;
   const impacts = plan.repositoryImpact || [];
   const affectedRepositories = impacts.filter((impact) => impact.disposition === "affected").length;
-  $("#plan-metrics").innerHTML = `<div class="metric"><span>Tasks</span><strong>${plan.tasks.length}</strong></div><div class="metric"><span>Affected repositories</span><strong>${affectedRepositories}</strong></div><div class="metric"><span>Workspace writes</span><strong>${writeTasks}</strong></div><div class="metric"><span>High risk</span><strong>${highRisk}</strong></div><div class="metric"><span>Planned agents</span><strong>${state.planPreview.capacity.effectiveConcurrency}</strong></div>`;
+  $("#plan-metrics").innerHTML = `<div class="metric"><span>Tasks</span><strong>${plan.tasks.length}</strong></div><div class="metric"><span>Affected repositories</span><strong>${affectedRepositories}</strong></div><div class="metric"><span>Tasks that change files</span><strong>${writeTasks}</strong></div><div class="metric"><span>High risk</span><strong>${highRisk}</strong></div><div class="metric"><span>AI workers planned</span><strong>${state.planPreview.capacity.effectiveConcurrency}</strong></div>`;
   $("#plan-repository-impact").innerHTML = impacts.map((impact) => `<article class="repository-impact ${escapeHtml(impact.disposition)}"><strong>${escapeHtml(impact.repositoryId)} · ${escapeHtml(impact.disposition)}</strong><span>${escapeHtml(impact.rationale)}</span></article>`).join("");
   $("#plan-task-list").innerHTML = plan.tasks.map((task) => {
     const assignment = state.planPreview.assignments.find((item) => item.taskId === task.id);
     const dependencyText = task.dependencies.length ? `After ${task.dependencies.join(", ")}` : "No dependencies";
-    return `<article class="plan-task"><h3>${escapeHtml(task.title)}</h3><div class="plan-task-meta"><span>${escapeHtml(task.permission.replaceAll("_", " "))}</span><span>${escapeHtml(task.risk)} risk</span><span>${escapeHtml(assignment?.tier || "unassigned")}</span></div><p>${escapeHtml(task.description)}</p><details><summary>${escapeHtml(dependencyText)} · ${escapeHtml(providerDisplayName(assignment?.provider || "unassigned"))} / ${escapeHtml(assignment?.modelId ? `${modelDisplayName(assignment.modelId)} (requested)` : "provider default (actual model unverified)")} · ${task.checks.length} checks</summary><p>Repositories: ${(task.repositoryIds || []).map(escapeHtml).join(", ") || "Current workspace"}<br>Scope: ${task.repositoryScope.map(escapeHtml).join(", ")}<br>Acceptance: ${task.acceptanceCriteria.map(escapeHtml).join("; ") || "Not supplied"}<br>Capabilities: ${task.capabilityNeeds.map(escapeHtml).join(", ")}</p></details></article>`;
+    const identity = recordedModelIdentity(assignment?.provider || "unassigned", assignment?.modelId, assignment?.modelId ? "requested_unverified" : "provider_default_unresolved", assignment?.connectionId);
+    return `<article class="plan-task"><h3>${escapeHtml(task.title)}</h3><div class="plan-task-meta"><span>${escapeHtml(permissionLabel(task.permission))}</span><span>${escapeHtml(task.risk)} risk</span><span title="The quality/cost tier of AI model assigned — higher tiers cost more and are used for harder tasks.">${escapeHtml(assignment?.tier || "unassigned")}</span></div><p>${escapeHtml(task.description)}</p><details><summary>${escapeHtml(dependencyText)} · ${escapeHtml(identity)} · ${task.checks.length} checks</summary><p>Repositories: ${(task.repositoryIds || []).map(escapeHtml).join(", ") || "Current workspace"}<br>Exactly what it can touch: ${task.repositoryScope.map(escapeHtml).join(", ")}<br>Acceptance: ${task.acceptanceCriteria.map(escapeHtml).join("; ") || "Not supplied"}<br>What the AI needs to be able to do: ${task.capabilityNeeds.map(escapeHtml).join(", ") || "Nothing beyond a normal file edit"}</p></details></article>`;
   }).join("");
   const execution = state.planPreview.execution || { supported: true, reason: "Single workspace execution is available." };
   $("#plan-execution-note").textContent = execution.supported ? `Execution available: ${execution.reason}` : `Planning only: ${execution.reason}`;
@@ -1499,7 +1568,6 @@ function showComposer() {
   $("#plan-preview").classList.add("hidden");
   $("#composer").classList.remove("hidden");
   $("#run-view").classList.add("hidden");
-  $("#page-title").textContent = "Assemble a verified agent team";
   renderRunList();
   $("#goal").focus();
 }
@@ -1518,6 +1586,10 @@ $("#refresh-provider-status").addEventListener("click", refreshProviderStatus);
 $("#cancel-run").addEventListener("click", async () => {
   const runId = state.selectedRunId;
   if (!runId) return;
+  // Gap fixed (Slice A): every other consequential action in this view
+  // (delivery push/merge/tag, steering interrupt) already confirms before
+  // acting — cancel was the one stray click that could not be undone.
+  if (!window.confirm("Cancel this run? Work in progress stops; evidence already recorded is kept.")) return;
   showError("");
   await withOperation($("#cancel-run"), "Cancelling the run", async () => {
     await api(`/api/runs/${runId}/cancel`, {
@@ -1990,7 +2062,7 @@ $("#delivery-repositories").addEventListener("click", async (event) => {
     create_draft_pr: { confirm: "create a draft pull request for this exact reviewed branch", op: "Creating the draft pull request", busy: "Creating draft PR…" },
     merge_pr: { confirm: `mark the pull request ready and MERGE it into its base branch — only if GitHub still shows the exact reviewed commit ${(button.dataset.headCommit || "").slice(0, 12)}, no conflicts, and green checks`, op: "Merging the approved pull request", busy: "Merging…" },
     tag_release: { confirm: `create and push release tag ${tag ?? "(enter a tag name first)"} on the merge commit`, op: "Tagging the release", busy: "Tagging…" },
-    complete_delivery: { confirm: `run the complete delivery of reviewed commit ${(button.dataset.headCommit || "").slice(0, 12)}: push, draft PR, merge${tag ? `, and tag ${tag}` : ""} — one approval covering each named step; the merge still refuses conflicts, red checks, or a changed PR head`, op: "Completing the delivery", busy: "Delivering…" },
+    complete_delivery: { confirm: `run the complete delivery of reviewed commit ${(button.dataset.headCommit || "").slice(0, 12)}: push, draft PR, merge${tag ? `, and tag ${tag}` : ""} — one approval covering each named step; the merge step still refuses to run if there's a conflict, a red check, or if the pull request has changed since you approved it`, op: "Completing the delivery", busy: "Delivering…" },
   };
   const label = labels[action] ?? labels.push_branch;
   if (action === "tag_release" && !tag) { $("#delivery-error").textContent = "Enter a release tag name first."; return; }

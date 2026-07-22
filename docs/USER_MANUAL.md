@@ -115,20 +115,20 @@ The scan is read-only and creates an immutable snapshot. It records each reposit
 ## 5. Start a run in the dashboard
 
 1. Confirm the **Project folder** points to the intended Git repository.
-2. Optionally choose a registered product and select one or more **Repositories in scope**. Selecting a single local repository also aligns the project folder with that checkout.
+2. Optionally choose a registered product and select one or more **Repositories this run touches**. Selecting a single local repository also aligns the project folder with that checkout.
 3. Describe a concrete, testable result in **What should the team accomplish?**
-4. Choose a **Run mode**:
-   - **Observe only** permits diagnostic, read-only, low-risk tasks and rejects plans or results that attempt implementation.
-   - **Supervised** prepares repository changes after the configured plan-approval gate.
-   - **Bounded autonomy** executes within the configured repository, tool, spending, and external-write policies.
-5. Choose **Architect decides** or enter a manual concurrency count.
+4. Choose **What can the AI actually do?** — this is the run mode:
+   - **Look only, change nothing** (internally `observe`) permits diagnostic, read-only, low-risk tasks and rejects plans or results that attempt implementation.
+   - **Prepare changes, I approve before anything runs** (internally `supervised`) prepares repository changes after the configured plan-approval gate.
+   - **Make changes within limits I've approved** (internally `bounded`) executes within the configured repository, tool, spending, and external-write policies.
+5. Choose **Let the planner decide** or enter a manual concurrency count under **How many AI workers at once?**
 6. Enable the authenticated providers you want in the worker pool.
 7. Add acceptance criteria, constraints, risk, priority, an optional deadline, and any policy notes.
 8. Click **Build plan preview**. This saves a durable objective draft but starts no run.
 9. Review every proposed task and dependency plus the affected/excluded repository impact map, repository rationale, integration conditions, permissions, checks, model assignments, and capacity estimate. For a multi-repository run, every task must name exactly one affected repository.
-10. Enter requested changes and click **Revise plan**, or click **Approve revision & start**. DevHarmonics retains every revision and its rationale, and execution uses the exact revision you approved without asking the architect to silently produce another plan.
+10. Enter requested changes and click **Revise plan**, or click **Approve this plan & start the run**. DevHarmonics retains every revision and its rationale, and execution uses the exact revision you approved without asking the architect to silently produce another plan.
 
-Multi-repository execution is available through DH-720. Every affected repository must have a compatible registered local checkout, every task must target exactly one affected repository, and the plan must retain explicit integration conditions. DevHarmonics then creates a separate integration branch/worktree per repository at an exact base commit, gives each task a repository-local branch/worktree, and runs repository-local validators. Work in different repositories can proceed concurrently; merges into the same repository are serialized. Final review receives aggregate, repository-prefixed diff evidence without write access and must satisfy the configured reviewer count, distinct-provider, and implementor-independence rules. A blocking finding must use a repository-prefixed location such as `repo:core/src/service.ts:7`; an unscoped or ambiguous finding fails closed. Scoped findings become automatic fixer tasks only in the affected repository worktrees. DevHarmonics revalidates those branches, invalidates the old review receipts while retaining them in the ledger, and requires a fresh independent quorum before reporting `READY`. The run's **Exact integration set** card and evidence export retain every repository's base and integration HEAD commit, branch, worktree, status, error, and the integration conditions. The primary checkouts remain untouched.
+Multi-repository execution is available through DH-720. Every affected repository must have a compatible registered local checkout, every task must target exactly one affected repository, and the plan must retain explicit integration conditions. DevHarmonics then creates a separate integration branch/worktree per repository at an exact base commit, gives each task a repository-local branch/worktree, and runs repository-local validators. Work in different repositories can proceed concurrently; merges into the same repository are serialized. Final review receives aggregate, repository-prefixed diff evidence without write access and must satisfy the configured reviewer count, distinct-provider, and implementor-independence rules. A blocking finding must use a repository-prefixed location such as `repo:core/src/service.ts:7`; an unscoped or ambiguous finding fails closed. Scoped findings become automatic fixer tasks only in the affected repository worktrees. DevHarmonics revalidates those branches, invalidates the old review receipts while retaining them in the ledger, and requires a fresh independent quorum before reporting `READY`. The run's **Repositories being changed together** card and evidence export retain every repository's base and integration HEAD commit, branch, worktree, status, error, and the integration conditions. The primary checkouts remain untouched.
 
 This path does not yet let one task mutate several repositories, reconstruct an interrupted integration set after restart, clean up retained worktrees automatically, push branches, or open pull requests.
 
@@ -162,7 +162,7 @@ The run permanently records which workflow revision it executed. Editing a workf
 
 ## 6. Understand the run board
 
-- **Plan**: tasks waiting for dependencies or an available worker.
+- **Queued**: tasks waiting for dependencies or an available worker.
 - **Working**: an agent is editing, or a failed task is retrying.
 - **Verifying**: configured validators are running.
 - **Resolved**: the task passed, failed, was blocked, or was cancelled.
@@ -173,7 +173,7 @@ The metrics show task count, passed checks, attempts, and currently active agent
 
 Every dashboard action acknowledges immediately: the button you pressed disables, shows a busy label with a small spinner, and announces an explicit done or failed result. A floating **activity strip** at the bottom of the screen lists everything DevHarmonics is doing right now — active run tasks with the responsible provider and model, plus local operations like fleet refreshes — and stays visible when you change screens, so navigation never hides work. Working tasks show how long they have been active; when a long provider call has produced no new events for several minutes, the card and strip say so ("quiet for 6m — the provider call may still be running") instead of pretending progress. These times are rebuilt from the durable ledger, so refreshing the page shows honest elapsed values, not reset ones. DevHarmonics does not draw percentage bars for work it cannot measure, and it never displays activity from tools running outside its own control plane. If you use reduced-motion settings, the spinner is replaced with a static indicator.
 
-For a multi-repository run, the **Exact integration set** card shows the overall set status and one card per affected repository, including its exact base-to-HEAD commit range and integration branch. Repository IDs also appear on task cards and in the task drawer so evidence cannot be mistaken for a monorepo change.
+For a multi-repository run, the **Repositories being changed together** card shows the overall set status and one card per affected repository, including its exact base-to-HEAD commit range and integration branch. Repository IDs also appear on task cards and in the task drawer so evidence cannot be mistaken for a monorepo change.
 
 For an Observe run, DevHarmonics stores the selected mode with the run, requires every planned task to be `diagnostic`, `read_only`, and `low` risk, and rejects a worker that asks for approval again or omits contracted path-and-line evidence. Accepted findings are retained in the evidence package and reviewed independently; an empty Git diff alone is not sufficient for success.
 
@@ -181,16 +181,16 @@ For an Observe run, DevHarmonics stores the selected mode with the run, requires
 
 The **Steer this run** panel lets you redirect live work without opening an agent terminal. Nothing you do here loses completed evidence.
 
-- **Hold new tasks** stops DevHarmonics starting anything new while tasks already running finish normally. **Resume admission** releases the queue. The panel distinguishes a request you just made from one the scheduler has actually applied, so you always know whether a hold is in force yet.
+- **Pause starting new tasks** stops DevHarmonics starting anything new while tasks already running finish normally. **Let new tasks start again** releases the queue. The panel distinguishes a request you just made from one the scheduler has actually applied, so you always know whether a hold is in force yet.
 - **Reassign** moves a queued task to a different signed-in provider, and **Set order** chooses which queued tasks are admitted first. Both apply only to work that has not started, and neither can start a task whose dependencies are unfinished.
 - **Send clarification** delivers extra direction to one task. It is applied at that task's next attempt boundary rather than mid-answer, and the record shows exactly which attempt received it.
-- **Interrupt & hand off** stops whatever a task is currently doing and starts a fresh attempt carrying your direction. DevHarmonics does not claim to change an answer already being written — it stops and hands off. The button is available while the task is *working*, which covers two situations, and it is honest about both. If a provider call is in flight, that partial attempt is kept as evidence and the new attempt is attributed to it. If the task is still qualifying a model for first use — which happens before any provider call — the interrupt stops that instead, and there is no attempt record to keep, because none had been created yet. It is unavailable while validators run or during a retry gap, because there is nothing to stop. An interrupted attempt uses one of the task's approved attempts, so interrupting repeatedly can exhaust the task's budget and fail it — steering redirects work, it never buys extra provider usage.
+- **Stop & restart with new instructions** stops whatever a task is currently doing and starts a fresh attempt carrying your direction. DevHarmonics does not claim to change an answer already being written — it stops and hands off. The button is available while the task is *working*, which covers two situations, and it is honest about both. If a provider call is in flight, that partial attempt is kept as evidence and the new attempt is attributed to it. If the task is still qualifying a model for first use — which happens before any provider call — the interrupt stops that instead, and there is no attempt record to keep, because none had been created yet. It is unavailable while validators run or during a retry gap, because there is nothing to stop. An interrupted attempt uses one of the task's approved attempts, so interrupting repeatedly can exhaust the task's budget and fail it — steering redirects work, it never buys extra provider usage.
 
 Steering guides work inside the plan you approved. It cannot change a task's permissions, risk, acceptance criteria, or repository scope, and it cannot enable external writes or paid API use — those remain plan and policy decisions. Every steering request is recorded with who made it, what it targeted, and whether it was applied, rejected, or superseded by a later request, so a run's history explains every redirection after the fact.
 
 ## 7. Cancel a run
 
-Select an active run and click **Cancel run**. DevHarmonics stops scheduling new tasks, aborts active provider processes, and marks live tasks and the run as cancelled. Already-created branches, worktrees, commits, and ledger receipts remain available for inspection.
+Select an active run and click **Cancel run**, then confirm the dialog. DevHarmonics stops scheduling new tasks, aborts active provider processes, and marks live tasks and the run as cancelled. Already-created branches, worktrees, commits, and ledger receipts remain available for inspection.
 
 Closing the DevHarmonics server terminal also stops the local server. Prefer **Cancel run** first when work is active so the ledger records the explicit cancellation.
 
@@ -212,13 +212,13 @@ When a non-Observe run reaches **READY**, the **Approved delivery** card shows t
 
 1. Enable **Allow GitHub delivery actions (push, PR, merge, tag)** in Setup.
 2. Confirm **Approve & push branch** for the exact repository and HEAD shown. DevHarmonics pushes that exact commit without force-updating a conflicting remote branch.
-3. Separately confirm **Approve & create draft PR**.
+3. Separately confirm **Approve & create draft pull request**.
 4. When you are satisfied the change should land, confirm **Approve & merge**. DevHarmonics checks the live pull-request state first and refuses to merge a conflict, a pull request with pending or failing status checks, or a head commit that is no longer the reviewed commit.
 5. Optionally confirm **Approve & tag release** with a version tag. The tag lands on the actual merge commit and is recorded on the delivery; a failed tag push can be retried and reuses the already-created local tag.
 
-A **Complete delivery** control runs the remaining steps in order — still one explicit approval per consequential action. There is no automatic merge and no automatic tag: nothing external happens without your approval of that specific step. Each confirmation creates its own external-write approval and tool-policy receipt. Completed steps reconcile safely if you click them again, a second operation on the same repository is refused while one is in flight, and the card locks while a step runs. If the reviewed HEAD no longer matches the card, refresh instead of approving stale evidence. This capability is part of v0.6; it is not present in the earlier v0.5.1 release.
+A **Do everything at once** control (labeled "push, open PR, merge, tag") runs the remaining steps in order — still one explicit approval per consequential action. There is no automatic merge and no automatic tag: nothing external happens without your approval of that specific step. Each confirmation creates its own external-write approval and tool-policy receipt. Completed steps reconcile safely if you click them again, a second operation on the same repository is refused while one is in flight, and the card locks while a step runs. If the reviewed HEAD no longer matches the card, refresh instead of approving stale evidence. This capability is part of v0.6; it is not present in the earlier v0.5.1 release.
 
-A multi-repository run creates a separate integration branch and worktree for every affected repository. Use the **Exact integration set** card or exported evidence to copy the precise branch name and base-to-HEAD commit range for each repository. The earlier v0.5.1 release does not push those branches or open pull requests; v0.6 performs the separately approved delivery flow above. No version merges them into a primary checkout automatically.
+A multi-repository run creates a separate integration branch and worktree for every affected repository. Use the **Repositories being changed together** card or exported evidence to copy the precise branch name and base-to-HEAD commit range for each repository. The earlier v0.5.1 release does not push those branches or open pull requests; v0.6 performs the separately approved delivery flow above. No version merges them into a primary checkout automatically.
 
 Useful commands:
 

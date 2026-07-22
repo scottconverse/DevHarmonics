@@ -15,13 +15,13 @@
         </div>
         <button id="new-run" class="primary full">＋ New run</button>
         <nav class="app-nav" aria-label="Application">
-          <button class="nav-link active" data-view="runs">Runs</button>
-          <button class="nav-link" data-view="workbench">Workbench</button>
-          <button class="nav-link" data-view="products">Products</button>
-          <button class="nav-link" data-view="setup">Setup</button>
-          <button class="nav-link" data-view="models">Models</button>
-          <button class="nav-link" data-view="workflows">Workflows</button>
-          <button class="nav-link" data-view="evidence">Evidence</button>
+          <button class="nav-link active" data-view="runs" title="Define an objective, approve the team's plan, and watch the work happen.">Runs</button>
+          <button class="nav-link" data-view="workbench" title="Ask one or more models questions about a project — read-only, nothing runs, nothing changes.">Workbench</button>
+          <button class="nav-link" data-view="products" title="Register the real products and repositories the team works on.">Products</button>
+          <button class="nav-link" data-view="setup" title="The rules every run follows: who plans, who builds, who reviews, and what the team may do.">Setup</button>
+          <button class="nav-link" data-view="models" title="Every model DevHarmonics can use and what each has proven it can do.">Models</button>
+          <button class="nav-link" data-view="workflows" title="Reusable, versioned job descriptions you can turn into a run.">Workflows</button>
+          <button class="nav-link" data-view="evidence" title="The permanent record of a run: what was done, checked, and reviewed.">Evidence</button>
         </nav>
         <div class="section-label">Recent runs</div>
         <nav id="run-list" class="run-list" aria-label="Recent runs"></nav>
@@ -34,10 +34,13 @@
       <main>
         <header class="topbar">
           <div>
-            <p class="eyebrow">LOCAL ORCHESTRATOR</p>
-            <h1 id="page-title">Assemble a verified agent team</h1>
+            <h1 id="page-title">Runs</h1>
+            <p id="page-purpose" class="view-purpose">Define an objective, approve the team's plan, and watch the work happen.</p>
           </div>
-          <div id="provider-status" class="provider-status"></div>
+          <div class="provider-status-wrap">
+            <div id="provider-status" class="provider-status"></div>
+            <small class="field-help provider-status-legend">Green = signed in and ready to work. Grey = needs setup — see the Setup page to connect.</small>
+          </div>
         </header>
 
         <section id="composer" class="composer panel">
@@ -46,16 +49,17 @@
               <span class="step">01</span>
               <h2>Define the outcome</h2>
             </div>
-            <span class="muted">Your credentials stay inside the official CLIs.</span>
+            <span class="muted">Your sign-in stays with each AI provider's own app — DevHarmonics never sees or stores your password or API key.</span>
           </div>
 
           <label for="project-path">Project folder</label>
           <input id="project-path" class="input" spellcheck="false" />
 
           <div class="objective-repository-picker">
-            <label for="objective-product">Product context <small>Optional</small></label>
+            <label for="objective-product">Group with other repositories? <small>Optional</small></label>
             <select id="objective-product" class="input"><option value="">Standalone repository</option></select>
-            <fieldset id="objective-repositories-field" class="hidden"><legend>Repositories in scope</legend><p class="field-help">Select every repository the architect must assess. Planning can span repositories; execution remains disabled until the affected set has a supported integration topology.</p><div id="objective-repositories" class="repository-picker-list"></div></fieldset>
+            <small class="field-help">Pick a registered product to plan across several repositories at once. Leave blank to work in a single folder.</small>
+            <fieldset id="objective-repositories-field" class="hidden"><legend>Repositories this run touches</legend><p class="field-help">Check every repository the AI needs to look at or change. If you pick more than one, DevHarmonics checks first that it knows how to keep changes across them in sync — if it can't, it will only let you plan, not run, until that's resolved.</p><div id="objective-repositories" class="repository-picker-list"></div></fieldset>
           </div>
 
           <label for="goal">What should the team accomplish?</label>
@@ -66,49 +70,53 @@
           ></textarea>
 
           <div class="objective-grid">
-            <label for="acceptance-criteria">Acceptance criteria <small>One observable result per line</small><textarea id="acceptance-criteria" rows="4" placeholder="CSV downloads with the selected filters&#10;Export is covered by an automated test"></textarea></label>
-            <label for="constraints">Constraints <small>One boundary per line</small><textarea id="constraints" rows="4" placeholder="Preserve the existing report API&#10;Do not add a paid dependency"></textarea></label>
+            <label for="acceptance-criteria">Done means <small>one thing you can check per line</small><textarea id="acceptance-criteria" rows="4" placeholder="CSV downloads with the selected filters&#10;Export is covered by an automated test"></textarea><small class="field-help">Each line becomes a checklist item the AI must prove true before the run is marked complete.</small></label>
+            <label for="constraints">Rules to follow <small>one boundary per line</small><textarea id="constraints" rows="4" placeholder="Preserve the existing report API&#10;Do not add a paid dependency"></textarea><small class="field-help">Anything you don't want changed — e.g. "don't touch the database schema." The plan is built to respect these.</small></label>
           </div>
 
           <div class="objective-policy-grid">
-            <label for="objective-risk">Objective risk<select id="objective-risk" class="input"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option></select></label>
+            <label for="objective-risk">How risky is this change? <small>Low / Medium / High</small><select id="objective-risk" class="input"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option></select><small class="field-help">Higher risk asks the AI planner and reviewer to be more cautious and adds extra review steps before anything ships.</small></label>
             <label for="objective-priority">Priority<select id="objective-priority" class="input"><option value="low">Low</option><option value="normal" selected>Normal</option><option value="high">High</option><option value="urgent">Urgent</option></select></label>
             <label for="objective-deadline">Deadline <small>Optional</small><input id="objective-deadline" class="input" type="datetime-local"></label>
           </div>
 
-          <label for="policy-notes">Policy notes <small>Optional; one instruction per line</small></label>
+          <label for="policy-notes">Extra instructions for the team <small>optional, one per line</small></label>
           <textarea id="policy-notes" rows="2" placeholder="Require an independent accessibility review"></textarea>
+          <small class="field-help">Standing instructions that don't fit as a constraint or acceptance criterion — e.g. "require an independent accessibility review."</small>
 
           <div class="composer-grid">
             <div>
-              <label for="run-autonomy">Run mode</label>
+              <label for="run-autonomy">What can the AI actually do?</label>
               <select id="run-autonomy" class="input" aria-describedby="run-autonomy-help">
-                <option value="observe">Observe only</option>
-                <option value="supervised">Supervised</option>
-                <option value="bounded">Bounded autonomy</option>
+                <option value="observe">Look only, change nothing</option>
+                <option value="supervised">Prepare changes, I approve before anything runs</option>
+                <option value="bounded">Make changes within limits I've approved</option>
               </select>
-              <small id="run-autonomy-help" class="field-help">Read-only diagnostics and evidence. No repository changes.</small>
+              <small id="run-autonomy-help" class="field-help">Nothing is changed. The AI only reads your code and reports back.</small>
             </div>
             <div>
-              <label for="agent-mode">Concurrency</label>
+              <label for="agent-mode">How many AI workers at once?</label>
               <div class="joined">
                 <select id="agent-mode" class="input">
-                  <option value="auto">Architect decides</option>
+                  <option value="auto">Let the planner decide</option>
                   <option value="manual">I’ll choose</option>
                 </select>
                 <input id="agent-count" class="input count" type="number" min="1" value="20" aria-label="Agent count" disabled />
               </div>
+              <small class="field-help">More workers can finish faster but cost more and are harder to review. "Let the planner decide" picks a sensible number for the size of the job.</small>
             </div>
             <fieldset>
-              <legend>Worker pool</legend>
+              <legend>Which AI providers can work on this?</legend>
               <div id="provider-toggles" class="toggles"></div>
+              <p class="field-help">Only signed-in providers can be picked. If one is greyed out, the reason is printed under its name — open "First-time provider sign-in guide" below to connect it.</p>
             </fieldset>
           </div>
 
           <div id="provider-auth-gate" class="auth-gate hidden" role="status">
             <div>
-              <strong>Provider sign-in required</strong>
+              <strong>Sign in to at least one provider before you can start a run.</strong>
               <span id="provider-auth-message"></span>
+              <small class="field-help">You can still build a plan preview without signing in, but nothing can execute until at least one worker above is available.</small>
             </div>
             <button id="refresh-provider-status" class="secondary" type="button">Refresh sign-in status</button>
           </div>
@@ -127,16 +135,18 @@
               <div><span class="step">02</span><div><p class="eyebrow">APPROVAL PREVIEW</p><h2 id="plan-preview-title">Review the proposed plan</h2></div></div>
               <span id="plan-revision" class="status-pill"></span>
             </div>
+            <p class="field-help">Nothing runs until you click Approve below. Read every task — this is your one checkpoint before the AI starts working.</p>
             <p id="plan-summary" class="plan-summary"></p>
             <div id="plan-metrics" class="metrics"></div>
             <div id="plan-repository-impact" class="plan-repository-impact"></div>
+            <p class="field-help">Each task below shows whether it can edit files or only look (permission), how closely its result gets checked (risk), and which model quality tier it's assigned (tier).</p>
             <div id="plan-task-list" class="plan-task-list"></div>
             <label for="revision-feedback">What should change?</label>
             <textarea id="revision-feedback" rows="3" placeholder="Keep the first task, split browser verification from implementation, and restrict changes to src/reports."></textarea>
             <div class="plan-actions">
               <p id="plan-execution-note" class="muted">No repository write begins until you approve this exact revision.</p>
               <button id="revise-plan" class="secondary" type="button">Revise plan</button>
-              <button id="approve-plan-start" class="primary" type="button">Approve revision &amp; start</button>
+              <button id="approve-plan-start" class="primary" type="button">Approve this plan &amp; start the run</button>
             </div>
           </section>
         </section>
@@ -152,53 +162,62 @@
               </details>
             </div>
             <div id="run-status" class="status-pill"></div>
-            <button id="approve-run" class="primary hidden">Approve plan</button>
-            <button id="pause-run" class="secondary hidden">Pause run</button>
-            <button id="resume-run" class="primary hidden">Resume as recovery run</button>
+            <button id="approve-run" class="primary hidden">Approve &amp; continue</button>
+            <button id="pause-run" class="secondary hidden" title="Stops new work from starting; anything already in progress finishes its current step first.">Pause run</button>
+            <button id="resume-run" class="primary hidden" title="Continues from where you left off. DevHarmonics calls this a &quot;recovery run&quot; internally — you won't lose any progress or evidence.">Resume this run</button>
             <button id="cancel-run" class="danger hidden">Cancel run</button>
           </div>
+          <details class="run-status-legend">
+            <summary>What do these run statuses mean?</summary>
+            <p class="field-help">Planning: the AI is still building the plan — nothing has changed yet. Awaiting approval: the run is stopped and needs your click above before it continues. Running: AI workers are actively making changes, inside the limits you approved. Paused: work is stopped but nothing is lost — resume it any time. Passed / failed / blocked / cancelled: finished — open a task card below to see which.</p>
+          </details>
 
           <div class="metrics">
             <div class="metric"><span>Tasks</span><strong id="metric-tasks">0</strong></div>
             <div class="metric"><span>Passed checks</span><strong id="metric-checks">0</strong></div>
             <div class="metric"><span>Attempts</span><strong id="metric-attempts">0</strong></div>
-            <div class="metric"><span>Active agents</span><strong id="metric-active">0</strong></div>
+            <div class="metric"><span>AI workers active now</span><strong id="metric-active">0</strong></div>
           </div>
+          <p class="field-help">Checks = automated tests the AI's work must pass. Attempts = how many tries it took across all tasks, including retries after a failed check.</p>
 
           <section id="integration-set-panel" class="panel integration-set-panel hidden" aria-labelledby="integration-set-title">
-            <div class="panel-heading"><div><span class="step">IS</span><h3 id="integration-set-title">Exact integration set</h3></div><span id="integration-set-status" class="lifecycle"></span></div>
+            <div class="panel-heading"><div><span class="step">IS</span><h3 id="integration-set-title">Repositories being changed together</h3></div><span id="integration-set-status" class="lifecycle" title="ready = all repositories are lined up and safe to deliver together · not ready = at least one repository isn't caught up yet · failed = something went wrong keeping them in sync"></span></div>
+            <p class="field-help">When a run touches more than one repository, DevHarmonics tracks them as one coordinated set so a change in one doesn't get delivered without its matching change in another.</p>
             <p id="integration-set-conditions" class="muted"></p>
             <div id="integration-set-repositories" class="integration-set-repositories"></div>
           </section>
 
           <section id="steering-panel" class="panel integration-set-panel hidden" aria-labelledby="steering-title">
             <div class="panel-heading"><div><span class="step">S</span><h3 id="steering-title">Steer this run</h3></div><span id="steering-admission" class="lifecycle"></span></div>
-            <p class="muted">Steering guides work inside the approved plan. It cannot change a task's permissions, risk, acceptance criteria, or repository scope.</p>
+            <p class="muted">Steering guides work inside the approved plan. It cannot change a task's permissions, risk, acceptance criteria, or repository scope (see "What this task is allowed to do" in a task's own details).</p>
+            <p class="field-help">"Admission" is DevHarmonics' term for a task moving from queued to working. Holding it stops new tasks from starting — anything already running keeps going.</p>
             <div class="steering-actions">
-              <button id="steering-hold" class="secondary" type="button">Hold new tasks</button>
-              <button id="steering-resume" class="secondary" type="button">Resume admission</button>
+              <button id="steering-hold" class="secondary" type="button">Pause starting new tasks</button>
+              <button id="steering-resume" class="secondary" type="button">Let new tasks start again</button>
             </div>
             <form id="steering-clarify-form" class="steering-form">
               <label for="steering-task">Task</label>
               <select id="steering-task" class="input"></select>
-              <label for="steering-clarification">Clarification <small>Applied at the next attempt boundary</small></label>
+              <label for="steering-clarification">Message to the AI <small>reaches it before its next try, not mid-response</small></label>
               <textarea id="steering-clarification" rows="2" placeholder="Prefer the existing helper instead of adding a dependency."></textarea>
+              <small class="field-help">If the AI is mid-response right now, this note is queued and delivered the next time it starts (or retries) the task — not instantly.</small>
               <div class="steering-actions">
                 <button id="steering-clarify" class="secondary" type="submit">Send clarification</button>
-                <button id="steering-interrupt" class="secondary" type="button">Interrupt &amp; hand off</button>
+                <button id="steering-interrupt" class="secondary" type="button">Stop &amp; restart with new instructions</button>
               </div>
             </form>
             <div class="steering-queue">
-              <label for="steering-provider">Reassign the selected task <small>Queued tasks only</small></label>
+              <label for="steering-provider">Send this task to a different AI <small>only works before it starts</small></label>
               <div class="joined">
                 <select id="steering-provider" class="input"></select>
                 <button id="steering-reassign" class="secondary" type="button">Reassign</button>
               </div>
-              <label for="steering-order">Admission order <small>Queued task IDs, highest priority first</small></label>
+              <label for="steering-order">Order queued tasks should start <small>list task IDs, most important first</small></label>
               <div class="joined">
                 <input id="steering-order" class="input" spellcheck="false" placeholder="beta, alpha" />
                 <button id="steering-reprioritize" class="secondary" type="button">Set order</button>
               </div>
+              <small class="field-help">Copy IDs from the task board below, separated by commas. This only reorders tasks that haven't started yet.</small>
             </div>
             <div id="steering-directives" class="steering-directives"></div>
             <p id="steering-error" class="error" role="alert"></p>
@@ -206,11 +225,13 @@
 
           <section id="delivery-panel" class="panel integration-set-panel hidden" aria-labelledby="delivery-title">
             <div class="panel-heading"><div><span class="step">D</span><h3 id="delivery-title">Approved delivery</h3></div><span id="delivery-status" class="lifecycle"></span></div>
+            <p class="field-help">This panel appears once at least one task has finished and passed review. Every button below pushes real changes to GitHub — nothing happens without your click.</p>
             <p id="delivery-guidance" class="muted"></p>
             <div id="delivery-repositories" class="integration-set-repositories"></div>
             <p id="delivery-error" class="error" role="alert"></p>
           </section>
 
+          <p class="field-help">Queued: waiting to start. Working: an AI is actively writing code. Verifying: DevHarmonics is running its own checks on the result. Resolved: finished — passed, paused, failed, blocked, or cancelled; open a card to see which.</p>
           <div id="board" class="board" aria-label="Task board"></div>
 
           <div class="lower-grid">
@@ -220,7 +241,8 @@
             </section>
             <section id="verdict-panel" class="panel verdict-panel">
               <div class="panel-heading"><h3>Final review</h3></div>
-              <div id="verdict" class="empty-state">The reviewer’s verdict will appear after integration.</div>
+              <p class="field-help">An independent AI reviewer checks the finished work and gives a verdict here — separate from the AI that did the work.</p>
+              <div id="verdict" class="empty-state">The independent reviewer's verdict will appear here once the run finishes and its changes are combined.</div>
             </section>
           </div>
         </section>
@@ -310,7 +332,7 @@
 
         <section id="setup-view" class="workspace-view hidden" aria-labelledby="setup-title">
           <div class="view-heading">
-            <div><p class="eyebrow">PROJECT SETTINGS</p><h2 id="setup-title">Connect your AI providers and set what the team is allowed to do</h2><p class="field-help">The rules every run follows: who plans, who builds, who reviews, and what the team may do without asking you.</p></div>
+            <div><p class="eyebrow">PROJECT SETTINGS</p><h2 id="setup-title">Connect your AI providers and set what the team is allowed to do</h2></div>
             <button id="refresh-setup" class="secondary" type="button" title="Re-tests whether each connected AI tool is signed in and reachable. Does not change any setting.">Recheck sign-in status</button>
           </div>
           <div id="connection-cards" class="connection-grid"></div>
@@ -321,7 +343,7 @@
               <label>Planner (writes the task plan)<select id="setting-architect" class="input"></select><small class="field-help">Planning needs a signed-in subscription CLI (Codex, Claude Code, or Antigravity) — local models can build and review, but cannot be the architect.</small></label>
               <label>Reviewer (checks finished work)<select id="setting-reviewer" class="input"></select><small class="field-help">The reviewer looks at each task's result independently of whoever built it and decides pass/fail. Restricted to Claude, Codex, and Antigravity for the same reason as the planner.</small></label>
               <label>Default number of workers running at once<input id="setting-agents" class="input" type="number" min="1"><small class="field-help">How many AI workers can work in parallel on a new run, by default. Higher runs faster but produces more simultaneous changes to review. You can override this per run.</small></label>
-              <label>Default run mode<select id="setting-autonomy" class="input" aria-describedby="setting-autonomy-help"><option value="observe">Observe only</option><option value="supervised">Supervised</option><option value="bounded">Bounded autonomy</option></select><small id="setting-autonomy-help" class="field-help"></small></label>
+              <label>Default run mode<select id="setting-autonomy" class="input" aria-describedby="setting-autonomy-help"><option value="observe">Look only, change nothing</option><option value="supervised">Prepare changes, I approve before anything runs</option><option value="bounded">Make changes within limits I've approved</option></select><small id="setting-autonomy-help" class="field-help"></small></label>
               <label>How models get picked<select id="setting-routing-mode" class="input"><option value="adaptive">Adaptive by task</option><option value="manual">Manual role defaults</option></select><small class="field-help">Adaptive by task — DevHarmonics automatically picks the best qualified model for each task's difficulty and cost. Manual role defaults — always use the exact model and effort level you set below for that role.</small></label>
               <label>Planner: exact model (optional)<select id="setting-architect-model" class="input"></select><small class="field-help">Leave as "Configured provider default" to let the planner's own CLI pick its normal model. Pin an exact model here to always use that one instead — it can be from a different provider than the Planner choice above.</small></label>
               <label>Planner: capability level<select id="setting-architect-tier" class="input"></select><small class="field-help">Premium = most capable and most expensive; Economy = fastest and cheapest; Standard = in between. Automatic lets the scheduler choose.</small></label>
@@ -358,7 +380,7 @@
         </section>
 
         <section id="models-view" class="workspace-view hidden" aria-labelledby="models-title">
-          <div class="view-heading"><div><p class="eyebrow">AI MODELS</p><h2 id="models-title">Known models</h2><p class="field-help">Every model DevHarmonics can use, what each has proven it can do, and why work gets routed where it does. Nothing here spends money or changes code by itself.</p></div><button id="refresh-models" class="secondary" type="button" title="Asks each connected provider what models it currently offers, and updates this list. Existing qualifications are not affected.">Check for new models</button></div>
+          <div class="view-heading"><div><p class="eyebrow">AI MODELS</p><h2 id="models-title">Known models</h2><p class="field-help">Nothing here spends money or changes code by itself.</p></div><button id="refresh-models" class="secondary" type="button" title="Asks each connected provider what models it currently offers, and updates this list. Existing qualifications are not affected.">Check for new models</button></div>
           <div id="model-summary" class="metrics"></div>
           <p class="field-help">Known models: every model DevHarmonics has seen from a connected provider or you added manually (excludes retired models). Passed a role check: has passed at least one check proving it can do a specific job (planning, working, or reviewing). Ready to be used: turned on, currently qualified, and eligible to be picked for a run right now. Estimated local capacity: a rough guess at how many local-model tasks can run at once on this machine — an estimate DevHarmonics uses for planning, not something it enforces.</p>
           <div id="runtime-list" class="connection-grid"></div>

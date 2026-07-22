@@ -150,6 +150,16 @@ Good goals specify the observable result and important verification. Example:
 
 The agent count is not artificially capped. High settings can consume substantial CPU, memory, disk space, provider quota, and rate-limit capacity. The actual number of simultaneous workers cannot exceed the number of dependency-ready tasks.
 
+### Run a saved workflow (development builds after v0.5.1)
+
+A **workflow** is a reusable, versioned job description — for example "audit the documentation for stale version claims" — stored as a JSON document in the repository's tracked `workflows/` directory and recorded in the ledger by content hash, so every revision is permanent and identifiable. Two ship with DevHarmonics: `documentation-consistency` and `release-truth-audit`.
+
+1. Open **Workflows** and select a recorded revision. The full document is shown — inputs, acceptance criteria, required evidence, approval points, and permissions — so you can review exactly what will run before anything moves.
+2. Fill in the typed inputs (an empty value does not count for a required input) and the repository scope, then click **Create objective**.
+3. The workflow becomes a normal objective in **Runs**: propose a plan, approve the exact revision, and start it like any other run.
+
+The run permanently records which workflow revision it executed. Editing a workflow never changes what a past run did — an edit is a new revision beside the old one — and a revision recorded as a promotion of an earlier pilot is refused if it tries to widen the pilot's permissions (turning on external writes, escalating autonomy, or dropping an approval point). To record a new workflow or revision, POST its document to `/api/workflows`.
+
 ## 6. Understand the run board
 
 - **Plan**: tasks waiting for dependencies or an available worker.
@@ -196,16 +206,17 @@ devharmonics/<run-prefix>
 
 DevHarmonics deliberately does not merge that branch into your checked-out branch. Review it with normal Git tools, run any additional checks, and merge it only when satisfied.
 
-### Development builds after v0.5.1: approved delivery
+### Development builds after v0.5.1: approved delivery, complete from the cockpit
 
-When a non-Observe run reaches **READY**, the **Approved delivery** card shows the exact base branch, base commit, reviewed HEAD commit, and delivery branch for each repository. External writes are off by default. To deliver through GitHub:
+When a non-Observe run reaches **READY**, the **Approved delivery** card shows the exact base branch, base commit, reviewed HEAD commit, and delivery branch for each repository. External writes are off by default. To deliver through GitHub, entirely from the dashboard:
 
 1. Enable **Allow external writes** in Setup.
 2. Confirm **Approve & push branch** for the exact repository and HEAD shown. DevHarmonics pushes that exact commit without force-updating a conflicting remote branch.
-3. After the push succeeds, separately confirm **Approve & create draft PR**.
-4. Open the retained draft-PR link and perform normal human review. DevHarmonics exposes no merge action.
+3. Separately confirm **Approve & create draft PR**.
+4. When you are satisfied the change should land, confirm **Approve & merge PR**. DevHarmonics checks the live pull-request state first and refuses to merge a conflict, a pull request with pending or failing status checks, or a head commit that is no longer the reviewed commit.
+5. Optionally confirm **Approve & tag release** with a version tag. The tag lands on the actual merge commit and is recorded on the delivery; a failed tag push can be retried and reuses the already-created local tag.
 
-Each confirmation creates its own external-write approval and tool-policy receipt. If the reviewed HEAD no longer matches the card, refresh instead of approving stale evidence. This development capability is planned for the v0.6 increment; it is not present in the tagged v0.5.1 release.
+A **Complete delivery** control runs the remaining steps in order — still one explicit approval per consequential action. There is no automatic merge and no automatic tag: nothing external happens without your approval of that specific step. Each confirmation creates its own external-write approval and tool-policy receipt. Completed steps reconcile safely if you click them again, a second operation on the same repository is refused while one is in flight, and the card locks while a step runs. If the reviewed HEAD no longer matches the card, refresh instead of approving stale evidence. This development capability is part of the v0.6 increment; it is not present in the tagged v0.5.1 release.
 
 A multi-repository run creates a separate integration branch and worktree for every affected repository. Use the **Exact integration set** card or exported evidence to copy the precise branch name and base-to-HEAD commit range for each repository. The tagged v0.5.1 release does not push those branches or open pull requests. Development builds after v0.5.1 can perform the separately approved delivery flow above. No version merges them into a primary checkout automatically.
 

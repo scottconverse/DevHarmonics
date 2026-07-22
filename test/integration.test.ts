@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -685,6 +685,226 @@ test("qualified Ollama implementor completes a bounded receipted local-tool chan
       await runProcess({ command: "git", args: ["worktree", "remove", "--force", path.join(runRoot, "integration")], cwd: project, timeoutMs: 30_000 });
       await rm(runRoot, { recursive: true, force: true });
     }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("workflow provenance cannot be forged at the HTTP boundary and shipped workflows seed a fresh cockpit", async () => {
+  // Audit DH810-AUD-001/005/006 at the PUBLIC boundary: a fresh server seeds
+  // the shipped workflows-of-record, no objective route accepts a client
+  // provenance pin, and the promotion API refuses with typed statuses instead
+  // of silent downgrades or generic 500s.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-provenance-http-"));
+  const project = await createRepository(root);
+  await initializeProject(project);
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  try {
+    // AUD-005: the two shipped documents are recorded in a FRESH ledger.
+    const listed = await fetch(`${dashboard.url}/api/workflows`).then((response) => response.json()) as { workflows: Array<{ name: string; revisionHash: string }> };
+    assert.deepEqual(listed.workflows.map((workflow) => workflow.name).sort(), ["documentation-consistency", "release-truth-audit"], "a fresh cockpit contains the shipped workflows-of-record");
+    const knownHash = listed.workflows.find((workflow) => workflow.name === "documentation-consistency")!.revisionHash;
+
+    const objectiveBody = {
+      outcome: "Forge a pedigree",
+      acceptanceCriteria: ["none"],
+      constraints: [],
+      projectPath: project,
+      repositoryIds: [],
+      risk: "low",
+      autonomy: "observe",
+      priority: "normal",
+      policyNotes: [],
+    };
+    // AUD-001: a KNOWN hash is refused the same as an unknown one — the field
+    // itself is privileged, not merely validated.
+    for (const forged of [knownHash, "a".repeat(64)]) {
+      const refused = await fetch(`${dashboard.url}/api/objectives`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...objectiveBody, workflowRevisionHash: forged }),
+      });
+      assert.equal(refused.status, 400, "a client-supplied provenance pin refuses");
+      assert.match(((await refused.json()) as { error: string }).error, /structural provenance/i);
+    }
+    const afterForgeries = await fetch(`${dashboard.url}/api/objectives`).then((response) => response.json()) as { objectives: unknown[] };
+    assert.equal(afterForgeries.objectives.length, 0, "the refused forgeries created no objective");
+
+    // The update route refuses the pin too (hand-editing clears provenance;
+    // it can never set it).
+    const legit = await fetch(`${dashboard.url}/api/objectives`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(objectiveBody),
+    });
+    assert.equal(legit.status, 201);
+    const legitObjective = ((await legit.json()) as { objective: { id: string; workflowRevisionHash: string | null } }).objective;
+    assert.equal(legitObjective.workflowRevisionHash, null, "a hand-authored objective has explicit null provenance");
+    for (const forged of [knownHash, "a".repeat(64)]) {
+      const forgedUpdate = await fetch(`${dashboard.url}/api/objectives/${legitObjective.id}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...objectiveBody, expectedRevision: 1, workflowRevisionHash: forged }),
+      });
+      assert.equal(forgedUpdate.status, 400, "an objective update cannot inject provenance");
+    }
+
+    // DH810-R3-002: the public run route refuses the reserved field the same
+    // way — never a silent 202 that ignores it.
+    for (const forged of [knownHash, "a".repeat(64)]) {
+      const forgedRun = await fetch(`${dashboard.url}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ goal: "Forge a run pedigree", projectPath: project, workflowRevisionHash: forged }),
+      });
+      assert.equal(forgedRun.status, 400, "a run request cannot supply the reserved provenance field");
+    }
+    const runsAfterForgeries = await fetch(`${dashboard.url}/api/runs`).then((response) => response.json()) as { runs: unknown[] };
+    assert.equal(runsAfterForgeries.runs.length, 0, "the refused run forgeries created no run");
+
+    // The Workbench conversion route refuses the pin as well.
+    const session = ((await (await fetch(`${dashboard.url}/api/workbench`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectPath: project, title: "Provenance probe" }),
+    })).json()) as { session: { id: string } }).session;
+    for (const forged of [knownHash, "a".repeat(64)]) {
+      const forgedConvert = await fetch(`${dashboard.url}/api/workbench/${session.id}/convert`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...objectiveBody, workflowRevisionHash: forged }),
+      });
+      assert.equal(forgedConvert.status, 400, "Workbench conversion cannot inject provenance");
+    }
+
+    // DH810-R3-001: both supported server layouts must resolve the shipped
+    // fixtures — src/../workflows (the tracked directory) and
+    // dist/src/../workflows (copied by the build). A missing copy would make
+    // `npm run dev` seed nothing while the compiled product seeds two.
+    for (const layoutDirectory of [path.join(process.cwd(), "workflows"), path.join(process.cwd(), "dist", "workflows")]) {
+      for (const fixture of ["documentation-consistency.json", "release-truth-audit.json"]) {
+        await stat(path.join(layoutDirectory, fixture));
+      }
+    }
+
+    // The ONLY path that sets provenance: instantiation of a stored revision.
+    const instantiated = await fetch(`${dashboard.url}/api/workflows/${knownHash}/instantiate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ inputs: { repositoryId: "repo:docs" }, repositoryIds: [] }),
+    });
+    assert.equal(instantiated.status, 201);
+    assert.equal(((await instantiated.json()) as { objective: { workflowRevisionHash: string | null } }).objective.workflowRevisionHash, knownHash, "instantiation is the privileged provenance path");
+
+    // AUD-006: promotion statuses are typed — malformed 400, unknown 404,
+    // widening 409 — and an attempted promotion is never quietly recorded as
+    // an ordinary revision.
+    const before = ((await (await fetch(`${dashboard.url}/api/workflows`)).json()) as { workflows: unknown[] }).workflows.length;
+    const baseDocument = {
+      name: "promotion-probe",
+      description: "Pilot for promotion status checks.",
+      inputs: [],
+      objective: { outcomeTemplate: "Probe promotions.", acceptanceCriteria: ["typed statuses"], risk: "low" },
+      evidenceRequirements: ["status transcript"],
+      approvalPoints: ["plan"],
+      completionContract: { deliverable: "statuses", reviewLenses: ["artifact"] },
+      permissions: { autonomy: "observe", allowExternalWrites: false },
+    };
+    const malformed = await fetch(`${dashboard.url}/api/workflows`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ document: baseDocument, promotedFrom: "not-a-hash" }),
+    });
+    assert.equal(malformed.status, 400, "a malformed promotion base refuses");
+    const unknownBase = await fetch(`${dashboard.url}/api/workflows`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ document: baseDocument, promotedFrom: "0".repeat(64) }),
+    });
+    assert.equal(unknownBase.status, 404, "an unknown promotion base is 404");
+    const after = ((await (await fetch(`${dashboard.url}/api/workflows`)).json()) as { workflows: unknown[] }).workflows.length;
+    assert.equal(after, before, "refused promotions record nothing");
+
+    const recordedBase = await fetch(`${dashboard.url}/api/workflows`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ document: baseDocument }),
+    });
+    assert.equal(recordedBase.status, 201);
+    const baseHash = ((await recordedBase.json()) as { revision: { revisionHash: string } }).revision.revisionHash;
+    const widened = await fetch(`${dashboard.url}/api/workflows`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        document: { ...baseDocument, description: "Widened.", permissions: { autonomy: "bounded", allowExternalWrites: false } },
+        promotedFrom: baseHash,
+      }),
+    });
+    assert.equal(widened.status, 409, "a widening promotion is a 409 conflict, not a 500");
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("run provenance pins before execution and survives pause and resume", async () => {
+  // Audit DH810-AUD-001/002 at the orchestrator: an unknown pin refuses
+  // BEFORE any run row exists, a valid pin is recorded at run creation, and a
+  // recovery run keeps the objective linkage and exact workflow revision.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-provenance-resume-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  const ledger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  const orchestrator = new Orchestrator(ledger);
+  try {
+    assert.throws(
+      () => orchestrator.begin({ goal: "forged", projectPath: project, workflowRevisionHash: "f".repeat(64) }),
+      /unknown workflow revision/i,
+      "an unknown pin refuses before a run exists",
+    );
+    assert.equal(ledger.listRuns().length, 0, "the refused start created no run");
+
+    const workflows = await import("../src/workflows.js") as Record<string, any>;
+    const parsed = workflows.parseWorkflowDocument(await readFile(path.join(process.cwd(), "workflows", "release-truth-audit.json"), "utf-8"));
+    assert.equal(parsed.ok, true);
+    const recorded = (ledger as Ledger & Record<string, any>).recordWorkflowRevision({ workflow: parsed.workflow });
+
+    // The pinned run also carries a real objective/plan linkage, so resume
+    // must preserve BOTH (round-3 note on AUD-002: the hash alone is not the
+    // whole provenance chain).
+    const instantiated = workflows.instantiateWorkflow({ workflow: parsed.workflow, inputs: { repositoryId: "repo:docs", tag: "v0.0.1" }, projectPath: project, repositoryIds: [] });
+    assert.equal(instantiated.ok, true, JSON.stringify(instantiated.issues ?? []));
+    const objective = ledger.createObjective(instantiated.objective);
+    ledger.appendPlanRevision(objective.id, {
+      summary: "Audit the release",
+      recommendedConcurrency: 1,
+      tasks: [{ id: "audit", title: "Audit", description: "Audit the release claims", dependencies: [], preferredProvider: "codex" as const, checks: ["diff-check"] }],
+    }, "Single audit task");
+    const approved = ledger.approvePlanRevision(objective.id, 1);
+
+    const runId = orchestrator.begin({
+      goal: "workflow run",
+      projectPath: project,
+      autonomy: "observe",
+      workflowRevisionHash: recorded.revisionHash,
+      objectiveLink: { objectiveId: objective.id, approvedPlanRevision: approved.revision },
+    });
+    assert.equal(ledger.getRun(runId)?.workflowRevisionHash, recorded.revisionHash, "the pin is recorded at run creation, before execution");
+    orchestrator.pause(runId);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    if (ledger.getRun(runId)?.status !== "paused") ledger.pauseRun(runId);
+    const resumedId = orchestrator.resume(runId);
+    assert.ok(resumedId, "the paused run resumes");
+    const resumed = ledger.getRun(resumedId!);
+    assert.equal(resumed?.workflowRevisionHash, recorded.revisionHash, "the recovery run keeps the exact workflow revision");
+    assert.equal(resumed?.objectiveId, objective.id, "the recovery run keeps the objective linkage");
+    assert.equal(resumed?.approvedPlanRevision, approved.revision, "the recovery run keeps the approved plan revision");
+  } finally {
+    await orchestrator.shutdown();
+    ledger.close();
     await rm(root, { recursive: true, force: true });
   }
 });

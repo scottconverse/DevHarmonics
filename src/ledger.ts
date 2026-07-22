@@ -1633,7 +1633,22 @@ export class Ledger {
   }
 
   createObjective(input: ObjectiveInput): ObjectiveRecord {
-    const objective = objectiveInputSchema.parse(input) as ObjectiveInput;
+    // The public schema deliberately has no workflowRevisionHash (audit
+    // DH810-AUD-001) — the privileged provenance field is re-attached from the
+    // typed input here and validated against the stored revisions, so an
+    // objective can never claim a pedigree the ledger has not recorded.
+    const objective = {
+      ...objectiveInputSchema.parse(input),
+      ...(input.workflowRevisionHash ? { workflowRevisionHash: input.workflowRevisionHash } : {}),
+    } as ObjectiveInput;
+    if (objective.workflowRevisionHash) {
+      if (!/^[a-f0-9]{64}$/.test(objective.workflowRevisionHash)) {
+        throw new Error("Objective workflow provenance must be a 64-character content hash");
+      }
+      if (!this.getWorkflowRevision(objective.workflowRevisionHash)) {
+        throw new Error(`Objective provenance names unknown workflow revision '${objective.workflowRevisionHash}'`);
+      }
+    }
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
     this.database.prepare(`
@@ -3864,7 +3879,7 @@ export class Ledger {
       priority: String(row.priority) as ObjectiveRecord["priority"],
       ...(row.deadline === null ? {} : { deadline: String(row.deadline) }),
       policyNotes: JSON.parse(String(row.policy_notes_json)) as string[],
-      ...(row.workflow_revision_hash === null || row.workflow_revision_hash === undefined ? {} : { workflowRevisionHash: String(row.workflow_revision_hash) }),
+      workflowRevisionHash: row.workflow_revision_hash === null || row.workflow_revision_hash === undefined ? null : String(row.workflow_revision_hash),
       revision: Number(row.revision),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),

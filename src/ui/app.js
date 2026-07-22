@@ -100,7 +100,7 @@ async function withOperation(button, label, action, { onError = showError, busyL
   } catch (error) {
     endOperation(id, "failed", error.message);
     try {
-      await onError(error.message);
+      await onError(error.message, error);
     } catch {
       // the error surface itself failed; the strip already carries the failure
     }
@@ -629,28 +629,59 @@ async function refreshWorkflows() {
         <strong>${escapeHtml(workflow.name)}</strong>
         <p class="field-help">revision ${escapeHtml(workflow.revisionHash.slice(0, 12))} · recorded ${escapeHtml(workflow.createdAt.slice(0, 10))}</p>
       </button>`).join("")
-    : `<p class="field-help">No workflow revisions are recorded yet. Shipped documents live in the tracked <code>workflows/</code> directory of this repository; record one with POST /api/workflows.</p>`;
+    : `<p class="field-help">No workflow revisions are recorded yet. The two shipped documents (in the install's <code>workflows/</code> directory) are recorded automatically at server start — an empty list here means seeding failed; check the server terminal. Record your own with <code>POST /api/workflows</code> and a JSON body of <code>{"document": { …workflow… }}</code>.</p>`;
   $("#workflow-detail").classList.add("hidden");
+}
+
+// DH810-AUD-009: each input renders as its actual type — a number field for
+// numbers and an explicit true/false selector for booleans — so a typo can
+// never silently become `false`.
+function workflowInputControl(input) {
+  const shared = `data-workflow-input="${escapeHtml(input.name)}" data-workflow-input-type="${escapeHtml(input.type)}"`;
+  if (input.type === "number") return `<input type="number" step="any" ${shared} placeholder="number">`;
+  if (input.type === "boolean") return `<select ${shared}><option value="">(not set)</option><option value="true">true</option><option value="false">false</option></select>`;
+  return `<input type="text" ${shared} placeholder="text">`;
+}
+
+// DH810-AUD-004: repository scope requires a product (the server refuses
+// repository IDs without one), so the form offers the same product-scoped
+// repository picker as the objective composer instead of a bare text field.
+function renderWorkflowScope() {
+  const product = state.products.find((candidate) => candidate.id === $("#workflow-product")?.value) || null;
+  const container = $("#workflow-repositories");
+  if (!container) return;
+  container.innerHTML = product
+    ? product.repositories.map((repository) => `<label class="field-help"><input type="checkbox" name="workflow-repository" value="${escapeHtml(repository.id)}"> ${escapeHtml(repository.name)}${repository.localPath ? "" : " (no local checkout)"}</label>`).join("") || '<p class="field-help">This product has no attached repositories yet.</p>'
+    : '<p class="field-help">Standalone: the objective runs against the server project folder. Select a product to scope repositories.</p>';
 }
 
 async function showWorkflowDetail(revisionHash) {
   const { revision } = await api(`/api/workflows/${revisionHash}`);
+  if (!state.products.length) {
+    try { await refreshProducts(); } catch { /* products are optional for a standalone instantiation */ }
+  }
   state.selectedWorkflow = revision;
   $("#workflow-detail-name").textContent = `${revision.name} — revision ${revision.revisionHash.slice(0, 12)}`;
   $("#workflow-detail-description").textContent = revision.workflow.description;
   $("#workflow-detail-json").textContent = JSON.stringify(revision.workflow, null, 2);
   $("#workflow-detail-inputs").innerHTML = [
     ...revision.workflow.inputs.map((input) => `<label class="field-help">${escapeHtml(input.name)}${input.required ? " (required)" : ""} — ${escapeHtml(input.description)}
-      <input type="text" data-workflow-input="${escapeHtml(input.name)}" data-workflow-input-type="${escapeHtml(input.type)}" placeholder="${escapeHtml(input.type)}">
+      ${workflowInputControl(input)}
     </label>`),
-    `<label class="field-help">Repository ids (comma-separated)
-      <input type="text" id="workflow-repository-ids" placeholder="repo:docs">
+    `<label class="field-help">Product
+      <select id="workflow-product"><option value="">Standalone (no product)</option>${state.products.map((product) => `<option value="${escapeHtml(product.id)}">${escapeHtml(product.name)}</option>`).join("")}</select>
     </label>`,
+    `<div id="workflow-repositories"></div>`,
   ].join("");
+  renderWorkflowScope();
   $("#workflow-instantiate-result").textContent = "";
-  $("#workflow-error").textContent = "";
+  $("#workflow-error").innerHTML = "";
   $("#workflow-detail").classList.remove("hidden");
 }
+
+$("#workflow-detail-inputs").addEventListener("change", (event) => {
+  if (event.target.id === "workflow-product") renderWorkflowScope();
+});
 
 $("#workflow-list").addEventListener("click", async (event) => {
   const card = event.target.closest("[data-workflow-hash]");
@@ -677,16 +708,25 @@ $("#workflow-instantiate").addEventListener("click", async (event) => {
     }
   }
   if (inputError) { $("#workflow-error").textContent = inputError; return; }
-  const repositoryIds = ($("#workflow-repository-ids")?.value || "").split(",").map((value) => value.trim()).filter(Boolean);
-  $("#workflow-error").textContent = "";
+  const productId = $("#workflow-product")?.value || "";
+  const repositoryIds = [...document.querySelectorAll('input[name="workflow-repository"]:checked')].map((input) => input.value);
+  $("#workflow-error").innerHTML = "";
   await withOperation(event.currentTarget, "Creating the objective from the workflow", async () => {
     const result = await api(`/api/workflows/${revision.revisionHash}/instantiate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ inputs, repositoryIds }),
+      body: JSON.stringify({ inputs, repositoryIds, ...(productId ? { productId } : {}) }),
     });
     $("#workflow-instantiate-result").textContent = `Objective ${result.objective.id.slice(0, 8)} created from revision ${result.revisionHash.slice(0, 12)}. Propose and approve its plan in the composer — the run will pin this exact workflow revision.`;
-  }, { onError: (message) => { $("#workflow-error").textContent = message; }, busyLabel: "Creating…" });
+  }, {
+    // DH810-AUD-009: the API names the offending inputs — surface every named
+    // issue, not just the top-level message.
+    onError: (message, error) => {
+      const issues = Array.isArray(error?.data?.issues) ? error.data.issues : [];
+      $("#workflow-error").innerHTML = [escapeHtml(message), ...issues.map((issue) => `<br>· ${escapeHtml(String(issue))}`)].join("");
+    },
+    busyLabel: "Creating…",
+  });
 });
 
 async function refreshEvidence() {

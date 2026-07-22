@@ -166,6 +166,8 @@ export interface RunRequest {
   enabledProviders?: ProviderName[] | undefined;
   approvedPlan?: RunPlan | undefined;
   objectiveLink?: RunObjectiveLink | undefined;
+  /** DH-810 structural provenance: pinned into the run BEFORE execution starts; never client-supplied. */
+  workflowRevisionHash?: string | undefined;
 }
 
 export type RunAutonomy = "observe" | "supervised" | "bounded";
@@ -194,11 +196,18 @@ export interface ObjectiveInput {
   workflowRevisionHash?: string | undefined;
 }
 
-export interface ObjectiveRecord extends ObjectiveInput {
+export interface ObjectiveRecord extends Omit<ObjectiveInput, "workflowRevisionHash"> {
   id: string;
   revision: number;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Always present on a stored record: the exact workflow revision this
+   * objective came from, or null when it was hand-authored or hand-edited.
+   * String-or-null (never omitted) — the same public shape as
+   * RunSummary.workflowRevisionHash (audit DH810-AUD-008).
+   */
+  workflowRevisionHash: string | null;
 }
 
 export interface PlanRevisionRecord {

@@ -3648,35 +3648,60 @@ export class Ledger {
    * old one. Nothing here can rewrite what a historical run executed.
    */
   recordWorkflowRevision(input: { workflow: WorkflowDocument; promotedFrom?: string }): { revisionHash: string; createdAt: string } {
+    // Gate finding (test lane, 2026-07-22): workflow documents carry
+    // user-authored free text and go through the same redaction boundary as
+    // every other persisted free-text field. Redaction happens BEFORE hashing,
+    // so a revision's content identity is the identity of what the ledger
+    // actually stores.
+    const workflow: WorkflowDocument = {
+      ...input.workflow,
+      description: redactText(input.workflow.description),
+      inputs: input.workflow.inputs.map((item) => ({ ...item, description: redactText(item.description) })),
+      objective: {
+        ...input.workflow.objective,
+        outcomeTemplate: redactText(input.workflow.objective.outcomeTemplate),
+        acceptanceCriteria: input.workflow.objective.acceptanceCriteria.map(redactText),
+      },
+      evidenceRequirements: input.workflow.evidenceRequirements.map(redactText),
+      completionContract: { ...input.workflow.completionContract, deliverable: redactText(input.workflow.completionContract.deliverable) },
+    };
     // DH-810 promotion guard: a revision promoted from a pilot may never
-    // silently WIDEN what the pilot was allowed to do — external writes cannot
-    // switch on, autonomy cannot escalate, and no approval point the pilot
-    // required may disappear. Refused loudly, never accepted quietly.
+    // silently WIDEN what the pilot was allowed to do or WEAKEN the oversight
+    // the pilot ran under — external writes cannot switch on, autonomy cannot
+    // escalate, no approval point may disappear, no review lens may be
+    // dropped, and the evidence bar cannot shrink. Refused loudly, never
+    // accepted quietly.
     if (input.promotedFrom) {
       const base = this.getWorkflowRevision(input.promotedFrom);
       if (!base) throw new Error(`Unknown promotion base revision '${input.promotedFrom}'`);
       const widenings: string[] = [];
-      if (input.workflow.permissions.allowExternalWrites && !base.workflow.permissions.allowExternalWrites) {
+      if (workflow.permissions.allowExternalWrites && !base.workflow.permissions.allowExternalWrites) {
         widenings.push("allowExternalWrites: false -> true");
       }
       const autonomyRank: Record<string, number> = { observe: 0, supervised: 1, bounded: 2 };
-      if ((autonomyRank[input.workflow.permissions.autonomy] ?? 0) > (autonomyRank[base.workflow.permissions.autonomy] ?? 0)) {
-        widenings.push(`autonomy: ${base.workflow.permissions.autonomy} -> ${input.workflow.permissions.autonomy}`);
+      if ((autonomyRank[workflow.permissions.autonomy] ?? 0) > (autonomyRank[base.workflow.permissions.autonomy] ?? 0)) {
+        widenings.push(`autonomy: ${base.workflow.permissions.autonomy} -> ${workflow.permissions.autonomy}`);
       }
       for (const point of base.workflow.approvalPoints) {
-        if (!input.workflow.approvalPoints.includes(point)) widenings.push(`approval point removed: ${point}`);
+        if (!workflow.approvalPoints.includes(point)) widenings.push(`approval point removed: ${point}`);
+      }
+      for (const lens of base.workflow.completionContract.reviewLenses) {
+        if (!workflow.completionContract.reviewLenses.includes(lens)) widenings.push(`review lens removed: ${lens}`);
+      }
+      if (workflow.evidenceRequirements.length < base.workflow.evidenceRequirements.length) {
+        widenings.push(`evidence requirements reduced: ${base.workflow.evidenceRequirements.length} -> ${workflow.evidenceRequirements.length}`);
       }
       if (widenings.length) {
         throw new Error(`Promotion from ${input.promotedFrom.slice(0, 12)} would widen permissions (${widenings.join("; ")}); widening requires a fresh un-promoted revision recorded deliberately`);
       }
     }
-    const revisionHash = workflowRevisionHash(input.workflow);
+    const revisionHash = workflowRevisionHash(workflow);
     const existing = this.database.prepare("SELECT created_at FROM workflow_revisions WHERE revision_hash = ?").get(revisionHash) as { created_at: string } | undefined;
     if (existing) return { revisionHash, createdAt: String(existing.created_at) };
     const createdAt = new Date().toISOString();
     this.database.prepare(
       "INSERT INTO workflow_revisions (revision_hash, name, document_json, created_at) VALUES (?, ?, ?, ?)",
-    ).run(revisionHash, input.workflow.name, JSON.stringify(input.workflow), createdAt);
+    ).run(revisionHash, workflow.name, JSON.stringify(workflow), createdAt);
     return { revisionHash, createdAt };
   }
 

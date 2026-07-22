@@ -28,6 +28,13 @@ const expectations = [
   ["CONTRIBUTING.md", `DevHarmonics v${version} is an early public project.`],
   ["SECURITY.md", `latest tagged release, **v${version}**`],
   ["README.md", `[Contributing](CONTRIBUTING.md)`],
+  // Release-truth guards added at the v0.6.0 gate: the rollback recipe's
+  // from-schema pair and the README suite count drifted unnoticed because
+  // this gate did not reach them. The pair below must be updated together
+  // with any release that changes the prior tag or the ledger schema.
+  ["docs/ROLLBACK.md", `backup-v26-to-v33`],
+  ["docs/ROLLBACK.md", `Ledger schema 26 → 33`],
+  ["README.md", `183 tests across`],
 ];
 
 const failures = [];

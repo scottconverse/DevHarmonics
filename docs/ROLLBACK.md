@@ -6,12 +6,12 @@ backup, and accept that ledger records created after the upgrade stay behind.
 
 ## What v0.6.0 changes that a rollback must account for
 
-1. **Ledger schema 28 → 33.** Migrations are one-way, and an older build
+1. **Ledger schema 26 → 33.** Migrations are one-way, and an older build
    refuses to open a newer-schema ledger rather than corrupting it. Before the
    first migration of an upgrade applies, DevHarmonics writes a byte-consistent
    `VACUUM INTO` snapshot beside the ledger named
    `devharmonics.db.backup-v<from>-to-v<to>-<timestamp>-<id>.sqlite`
-   (for this upgrade: `...backup-v28-to-v33-...`).
+   (for this upgrade: `...backup-v26-to-v33-...`).
 2. **Project configuration is unchanged** (config schema version 2). No config
    rollback is needed.
 3. **External surfaces.** v0.6.0 can push branches, open pull requests, merge,
@@ -36,7 +36,7 @@ backup, and accept that ledger records created after the upgrade stay behind.
    ```powershell
    Set-Location C:\path\to\your\project\.devharmonics
    Rename-Item devharmonics.db devharmonics.db.v0.6.0-kept
-   Copy-Item "devharmonics.db.backup-v28-to-v33-*.sqlite" devharmonics.db
+   Copy-Item "devharmonics.db.backup-v26-to-v33-*.sqlite" devharmonics.db
    ```
 
 4. Restart: `node dist/src/cli.js serve --project C:\path\to\your\project`.

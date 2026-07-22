@@ -20,7 +20,7 @@ import { redactText } from "./redaction.js";
 import { createRunEvidenceExport, createRunReport } from "./reporter.js";
 import { observeLocalResources } from "./resources.js";
 import { inspectLocalRepository } from "./repository-intelligence.js";
-import { DeliveryService, type DeliveryAction } from "./delivery.js";
+import { DeliveryRefusal, DeliveryService, type DeliveryAction } from "./delivery.js";
 import { scanProductIntelligence } from "./product-intelligence.js";
 import { manualModelSchema, objectiveInputSchema, productRegistrationSchema, steeringDirectiveInputSchema, workbenchSessionInputSchema } from "./schemas.js";
 import type { ObjectiveInput, ProviderName, RunRequest, WorkbenchMessageRecord } from "./types.js";
@@ -80,6 +80,8 @@ export async function startDashboard(options: {
   projectPath: string;
   port?: number;
   open?: boolean;
+  /** Test seam: substitute the process runner behind delivery git/gh calls. Never set in production paths. */
+  deliveryRunner?: ConstructorParameters<typeof DeliveryService>[1];
 }): Promise<{ url: string; close: () => Promise<void> }> {
   const defaultProject = path.resolve(options.projectPath);
   await initializeProject(defaultProject);
@@ -89,7 +91,7 @@ export async function startDashboard(options: {
   const orchestrator = new Orchestrator(ledger);
   const catalog = new ModelCatalogCoordinator(ledger, defaultProject);
   const openRouter = new OpenRouterService(ledger);
-  const delivery = new DeliveryService(ledger);
+  const delivery = new DeliveryService(ledger, options.deliveryRunner);
   const eventStreams = new Set<ServerResponse>();
 
   await catalog.refresh(true, "application_launch");
@@ -188,7 +190,7 @@ async function route(
   if (request.method === "GET" && url.pathname === "/api/openrouter/callback") {
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
-    if (!code) throw new Error("OpenRouter OAuth callback is missing its authorization code");
+    if (!code) throw new ClientRequestError("OpenRouter OAuth callback is missing its authorization code");
     await context.openRouter.completeOAuth(code, state);
     const config = await loadConfig(context.defaultProject);
     await context.openRouter.syncConnection(config.openRouter.enabled);
@@ -216,7 +218,7 @@ async function route(
   if (request.method === "POST" && url.pathname === "/api/openrouter/models/activate") {
     requireJsonRequest(request);
     const body = await readJson(request) as { modelId?: string };
-    if (!body.modelId) throw new Error("OpenRouter modelId is required");
+    if (!body.modelId) throw new ClientRequestError("OpenRouter modelId is required");
     sendJson(response, 201, { model: context.openRouter.activateCatalogModel(body.modelId) });
     return;
   }
@@ -247,7 +249,15 @@ async function route(
 
   if (request.method === "PUT" && url.pathname === "/api/config") {
     requireJsonRequest(request);
-    const config = await saveConfig(context.defaultProject, await readJson(request));
+    const body = await readJson(request);
+    let config;
+    try {
+      config = await saveConfig(context.defaultProject, body);
+    } catch (error) {
+      // A config document the schema refuses is a client fault, not a server
+      // fault (gate finding, QA lane 2026-07-22).
+      throw new ClientRequestError(error instanceof Error ? error.message : String(error));
+    }
     await context.openRouter.syncConnection(config.openRouter.enabled);
     sendJson(response, 200, { config });
     return;
@@ -609,7 +619,7 @@ async function route(
       return;
     }
     const details = await stat(parsed.data.projectPath);
-    if (!details.isDirectory()) throw new Error("Workbench project path must be a directory");
+    if (!details.isDirectory()) throw new ClientRequestError("Workbench project path must be a directory");
     await initializeProject(parsed.data.projectPath);
     sendJson(response, 201, { session: context.ledger.createWorkbenchSession(parsed.data) });
     return;
@@ -732,7 +742,7 @@ async function route(
       return;
     }
     const details = await stat(parsed.data.projectPath);
-    if (!details.isDirectory()) throw new Error("Project path must be a directory");
+    if (!details.isDirectory()) throw new ClientRequestError("Project path must be a directory");
     await initializeProject(parsed.data.projectPath);
     sendJson(response, 201, { objective: context.ledger.createObjective(parsed.data) });
     return;
@@ -815,7 +825,7 @@ async function route(
       return;
     }
     const projectDetails = await stat(instantiated.objective.projectPath);
-    if (!projectDetails.isDirectory()) throw new Error("Project path must be a directory");
+    if (!projectDetails.isDirectory()) throw new ClientRequestError("Project path must be a directory");
     await initializeProject(instantiated.objective.projectPath);
     const objective = context.ledger.createObjective(instantiated.objective);
     sendJson(response, 201, { objective, revisionHash: instantiated.revisionHash });
@@ -923,10 +933,10 @@ async function route(
       sendJson(response, 400, { error: "workflowRevisionHash is structural provenance set only by workflow instantiation; it cannot be supplied on a run request" });
       return;
     }
-    if (!body.goal?.trim()) throw new Error("Goal is required");
+    if (!body.goal?.trim()) throw new ClientRequestError("Goal is required");
     const projectPath = path.resolve(body.projectPath || context.defaultProject);
     const details = await stat(projectPath);
-    if (!details.isDirectory()) throw new Error("Project path must be a directory");
+    if (!details.isDirectory()) throw new ClientRequestError("Project path must be a directory");
     await initializeProject(projectPath);
     const config = await loadConfig(projectPath);
     await context.catalog.ensureFresh();
@@ -934,7 +944,7 @@ async function route(
     const agents = body.agents === "auto" ? "auto" : Number(body.agents);
     const enabledProviders = body.enabledProviders as ProviderName[] | undefined;
     const autonomy = body.autonomy ?? config.runPolicy.autonomy;
-    if (!(["observe", "supervised", "bounded"] as const).includes(autonomy)) throw new Error("Run autonomy must be observe, supervised, or bounded");
+    if (!(["observe", "supervised", "bounded"] as const).includes(autonomy)) throw new ClientRequestError("Run autonomy must be observe, supervised, or bounded");
     const runId = context.orchestrator.begin({
       goal: body.goal.trim(),
       projectPath,
@@ -1033,6 +1043,17 @@ async function route(
     });
     sendJson(response, 200, { delivery: result });
     return;
+    } catch (error) {
+      // Gate finding ENG-1: an ordinary delivery refusal (wrong order, a
+      // conflicting or blocked pull request, red checks, a different tag on an
+      // already-tagged delivery) is a CONFLICT with live state — 404/409 with
+      // the honest reason, never a generic 500. Execution failures (git/gh
+      // exiting non-zero) still surface as server faults.
+      if (error instanceof DeliveryRefusal) {
+        sendJson(response, /was not found/i.test(error.message) ? 404 : 409, { error: redactText(error.message) });
+        return;
+      }
+      throw error;
     } finally {
       deliveryOperationsInFlight.delete(inFlightKey);
     }
@@ -1150,6 +1171,20 @@ async function route(
     return;
   }
 
+  // Gate finding (QA lane, 2026-07-22): a real API path called with an
+  // unsupported method is a different client mistake than an unknown path,
+  // and telling them apart saves real debugging time. This list is a
+  // diagnostic nicety only — the if-chain above remains the routing source of
+  // truth, and a path missing here degrades safely to the same 404 as before.
+  // Only exact collection paths participate: a fallthrough there can ONLY
+  // mean an unsupported method. Sub-paths keep their 404 (a malformed id and
+  // a wrong method are indistinguishable at this point, and guessing 405
+  // there would mislabel malformed-id requests).
+  const knownApiPathPattern = /^\/api\/(bootstrap|catalog\/refresh(es)?|config|connections|events|init|model-performance|models|objectives|openrouter\/(callback|catalog|connect|disconnect|models\/activate|status)|products|qualifications|resources|runs|workbench|workflows)$/;
+  if (knownApiPathPattern.test(url.pathname)) {
+    sendJson(response, 405, { error: `Method ${request.method} is not supported for ${url.pathname}` });
+    return;
+  }
   sendJson(response, 404, { error: "Not found" });
 }
 
@@ -1214,26 +1249,38 @@ function slugId(value: string): string {
 }
 
 function requireJsonRequest(request: IncomingMessage): void {
+  // Gate finding (QA lane, 2026-07-22): these are CLIENT faults — a wrong
+  // content type or a rejected origin must report 400, never 500.
   if (!request.headers["content-type"]?.startsWith("application/json")) {
-    throw new Error("Only application/json requests are accepted");
+    throw new ClientRequestError("Only application/json requests are accepted");
   }
   const origin = request.headers.origin;
-  if (origin && !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
-    throw new Error("Cross-origin requests are not accepted");
+  // Loopback-only, but both spellings of loopback: the dashboard binds
+  // 127.0.0.1, and a user who typed localhost is on the same interface.
+  if (origin && !/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(origin)) {
+    throw new ClientRequestError("Cross-origin requests are not accepted");
   }
 }
 
-async function readJson(request: IncomingMessage): Promise<unknown> {
+async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
   let body = "";
   for await (const chunk of request) {
     body += chunk;
-    if (body.length > 1_000_000) throw new Error("Request body is too large");
+    if (body.length > 1_000_000) throw new ClientRequestError("Request body is too large");
   }
+  let parsed: unknown;
   try {
-    return JSON.parse(body || "{}");
+    parsed = JSON.parse(body || "{}");
   } catch {
     throw new ClientRequestError("Request body must contain valid JSON");
   }
+  // Gate finding (QA lane): a valid-JSON non-object body (`null`, `5`, `"x"`,
+  // `[]`) previously flowed into `"field" in raw` checks and crashed with a
+  // TypeError reported as 500. The routes all expect an object envelope.
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ClientRequestError("Request body must be a JSON object");
+  }
+  return parsed as Record<string, unknown>;
 }
 
 function sendJson(response: ServerResponse, status: number, value: unknown): void {
@@ -1321,7 +1368,7 @@ function compareModelIdentifiers(left: string, right: string): number {
 
 function parseIntegerQuery(value: string | null, fallback: number, name: string): number {
   if (value === null) return fallback;
-  if (!/^\d+$/.test(value)) throw new Error(`Query parameter '${name}' must be a non-negative integer`);
+  if (!/^\d+$/.test(value)) throw new ClientRequestError(`Query parameter '${name}' must be a non-negative integer`);
   return Number(value);
 }
 

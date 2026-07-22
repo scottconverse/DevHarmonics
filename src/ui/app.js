@@ -692,14 +692,14 @@ $("#workflow-instantiate").addEventListener("click", async (event) => {
   const revision = state.selectedWorkflow;
   if (!revision) return;
   const inputs = {};
-  let inputError = null;
+  const inputErrors = [];
   for (const element of document.querySelectorAll("[data-workflow-input]")) {
     const raw = element.value.trim();
     if (!raw) continue;
     const type = element.dataset.workflowInputType;
     if (type === "number") {
       const parsed = Number(raw);
-      if (!Number.isFinite(parsed)) inputError = `${element.dataset.workflowInput} must be a number`;
+      if (!Number.isFinite(parsed)) inputErrors.push(`${element.dataset.workflowInput} must be a number`);
       inputs[element.dataset.workflowInput] = parsed;
     } else if (type === "boolean") {
       inputs[element.dataset.workflowInput] = raw === "true";
@@ -707,7 +707,7 @@ $("#workflow-instantiate").addEventListener("click", async (event) => {
       inputs[element.dataset.workflowInput] = raw;
     }
   }
-  if (inputError) { $("#workflow-error").textContent = inputError; return; }
+  if (inputErrors.length) { $("#workflow-error").innerHTML = inputErrors.map((issue) => escapeHtml(issue)).join("<br>"); return; }
   const productId = $("#workflow-product")?.value || "";
   const repositoryIds = [...document.querySelectorAll('input[name="workflow-repository"]:checked')].map((input) => input.value);
   $("#workflow-error").innerHTML = "";
@@ -939,9 +939,13 @@ function renderSteering(run) {
   // Finished tasks are excluded by the same rule the ledger enforces, so the
   // panel never offers direction the server would refuse.
   const steerableTasks = run.tasks.filter((task) => !task.id.startsWith("__") && steerableTaskStatuses().includes(task.status));
-  select.innerHTML = steerableTasks
-    .map((task) => `<option value="${escapeHtml(task.id)}">${escapeHtml(task.title)} — ${escapeHtml(task.status)}</option>`)
-    .join("");
+  // Gate finding UX-F6: zero steerable tasks previously rendered an empty,
+  // unlabeled dropdown — worded like every other empty state instead.
+  select.innerHTML = steerableTasks.length
+    ? steerableTasks
+      .map((task) => `<option value="${escapeHtml(task.id)}">${escapeHtml(task.title)} — ${escapeHtml(task.status)}</option>`)
+      .join("")
+    : '<option value="">No steerable tasks right now</option>';
   if (steerableTasks.some((task) => task.id === previous)) select.value = previous;
   // Only 'working' means a provider invocation is actually in flight. 'verifying'
   // runs DevHarmonics' own validators and 'retry' is a backoff gap — offering
@@ -1211,7 +1215,7 @@ async function saveObjectiveDraft() {
 
 async function previewPlan({ revise = false } = {}) {
   const enabledProviders = [...document.querySelectorAll('input[name="provider"]:checked')].map((input) => input.value);
-  if (!enabledProviders.length) return showError("Sign in to and enable at least one provider.");
+  if (!enabledProviders.length) return showError("Enable at least one provider in the worker pool — and sign in first if none are available.");
   const feedback = $("#revision-feedback").value.trim();
   if (revise && !feedback) return showError("Describe what should change before requesting another revision.");
   const button = revise ? $("#revise-plan") : $("#preview-plan");

@@ -2714,6 +2714,77 @@ test("workflow revisions persist immutably and runs pin the exact revision execu
   }
 });
 
+test("migration 30's delivery-table rebuild preserves row data from a physical schema-29 database", async () => {
+  // Gate finding ENG-3 (2026-07-22): the CHECK-widening RENAME/rebuild in
+  // migration 30 had no test proving a delivery row's VALUES survive it.
+  // Reconstruct the physical v27-shaped table (narrow CHECK, no release_tag),
+  // seed a real row, replay migrations 30-33, and compare every column.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-migration-29-"));
+  const filename = path.join(root, "devharmonics.db");
+  const seeded = new Ledger(filename);
+  const runId = seeded.createRun("Deliver across the rebuild", root);
+  seeded.setRunStatus(runId, "running");
+  seeded.setRunStatus(runId, "ready", "READY");
+  seeded.prepareDeliveryRepository({ runId, repositoryId: "repo:rebuild", localPath: root, baseBranch: "main", baseCommit: "1".repeat(40), headCommit: "2".repeat(40), branch: "devharmonics/rebuild" });
+  seeded.close();
+
+  const surgery = new DatabaseSync(filename);
+  const before = surgery.prepare("SELECT * FROM delivery_repositories WHERE run_id = ?").get(runId) as Record<string, unknown>;
+  surgery.exec(`
+    ALTER TABLE delivery_repositories RENAME TO delivery_repositories_new;
+    CREATE TABLE delivery_repositories (
+      run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+      repository_id TEXT NOT NULL,
+      local_path TEXT NOT NULL,
+      base_branch TEXT NOT NULL,
+      base_commit TEXT NOT NULL,
+      head_commit TEXT NOT NULL,
+      branch TEXT NOT NULL,
+      remote_url TEXT,
+      status TEXT NOT NULL CHECK(status IN ('prepared', 'branch_pushed', 'draft_pr_created', 'failed')),
+      pull_request_url TEXT,
+      approval_id TEXT,
+      error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (run_id, repository_id)
+    );
+    INSERT INTO delivery_repositories (run_id, repository_id, local_path, base_branch, base_commit, head_commit, branch, remote_url, status, pull_request_url, approval_id, error, created_at, updated_at)
+      SELECT run_id, repository_id, local_path, base_branch, base_commit, head_commit, branch, remote_url, status, pull_request_url, approval_id, error, created_at, updated_at
+      FROM delivery_repositories_new;
+    DROP TABLE delivery_repositories_new;
+    DELETE FROM schema_migrations WHERE version > 29;
+    PRAGMA user_version = 29;
+  `);
+  surgery.close();
+
+  const upgraded = new Ledger(filename);
+  try {
+    assert.equal(upgraded.getSchemaVersion(), LEDGER_SCHEMA_VERSION, "the physical v29 database reaches the current schema");
+    const record = upgraded.getRun(runId)?.delivery?.repositories.find((repository) => repository.repositoryId === "repo:rebuild");
+    assert.ok(record, "the delivery row survives the rebuild");
+    assert.equal(record!.status, "prepared");
+    assert.equal(record!.baseCommit, "1".repeat(40));
+    assert.equal(record!.headCommit, "2".repeat(40));
+    assert.equal(record!.branch, "devharmonics/rebuild");
+    const database = new DatabaseSync(filename);
+    try {
+      const after = database.prepare("SELECT * FROM delivery_repositories WHERE run_id = ?").get(runId) as Record<string, unknown>;
+      for (const [column, value] of Object.entries(before)) {
+        assert.deepEqual(after[column], value, `column '${column}' survives the CHECK-widening rebuild byte-for-byte`);
+      }
+      const rebuiltSql = String((database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'delivery_repositories'").get() as { sql: string }).sql);
+      assert.match(rebuiltSql, /'merged'/, "the rebuilt table accepts the widened states");
+      assert.match(rebuiltSql, /'tagged'/, "the rebuilt table accepts the widened states");
+    } finally {
+      database.close();
+    }
+  } finally {
+    upgraded.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("delivery completes from the cockpit: receipted merge and tag, never blind", async () => {
   // Owner-corrected rule (2026-07-22): "never auto-merge" means never WITHOUT
   // the owner's approval — the cockpit must be able to run the whole delivery.
@@ -2903,6 +2974,28 @@ test("workflow instantiation validates typed inputs and builds the objective thr
   // objective carries the revision hash in its own field, which is what the
   // start route derives the run pin from (a client can never supply the pin).
   assert.equal(instantiated.objective.workflowRevisionHash, instantiated.revisionHash, "the objective carries its workflow revision structurally");
+
+  // Gate finding (test lane, 2026-07-22): an OMITTED optional input is a
+  // legal state the parser allows — its placeholder substitutes to an empty
+  // string. This is the documented contract: pinned here so a future change
+  // to optional-input handling is a deliberate decision, not drift.
+  const optionalTemplate = workflows.parseWorkflowDocument(JSON.stringify({
+    name: "documentation-consistency",
+    description: "Optional input in the template.",
+    inputs: [
+      { name: "repositoryId", type: "string", required: true, description: "Repository" },
+      { name: "maxFindings", type: "number", required: false, description: "Bound" },
+    ],
+    objective: { outcomeTemplate: "Audit ${repositoryId} with bound ${maxFindings}.", acceptanceCriteria: ["done"], risk: "low" },
+    evidenceRequirements: ["citations"],
+    approvalPoints: ["plan"],
+    completionContract: { deliverable: "report", reviewLenses: ["artifact"] },
+    permissions: { autonomy: "observe", allowExternalWrites: false },
+  }));
+  assert.equal(optionalTemplate.ok, true);
+  const withOmittedOptional = workflows.instantiateWorkflow({ workflow: optionalTemplate.workflow, inputs: { repositoryId: "repo:docs" }, projectPath: "p", repositoryIds: [] });
+  assert.equal(withOmittedOptional.ok, true);
+  assert.equal(withOmittedOptional.objective.outcome, "Audit repo:docs with bound .", "an omitted optional input substitutes to an empty string — the documented contract");
 });
 
 test("objective workflow provenance persists through the ledger and a hand-edit clears it", async () => {
@@ -2995,6 +3088,34 @@ test("a promoted workflow revision can never silently widen the pilot's permissi
       () => ledger.recordWorkflowRevision({ workflow: parsedBase.workflow, promotedFrom: "0".repeat(64) }),
       /unknown promotion base/i,
       "a promotion base the ledger never stored refuses",
+    );
+
+    // Gate finding (test lane, 2026-07-22): "cannot silently widen" also
+    // covers OVERSIGHT — dropping a review lens or shrinking the evidence bar
+    // the pilot ran under is refused the same way as a permission widening.
+    const twoLensBase = {
+      ...base,
+      name: "pilot-audit-two-lens",
+      evidenceRequirements: ["path:line citation", "checksum transcript"],
+      completionContract: { deliverable: "audit report", reviewLenses: ["artifact", "claims"] },
+    };
+    const parsedTwoLens = workflows.parseWorkflowDocument(JSON.stringify(twoLensBase));
+    assert.equal(parsedTwoLens.ok, true);
+    const recordedTwoLens = ledger.recordWorkflowRevision({ workflow: parsedTwoLens.workflow });
+    const promoteTwoLens = (document: unknown) => {
+      const parsed = workflows.parseWorkflowDocument(JSON.stringify(document));
+      assert.equal(parsed.ok, true, JSON.stringify((parsed as { issues?: string[] }).issues ?? []));
+      return ledger.recordWorkflowRevision({ workflow: parsed.workflow, promotedFrom: recordedTwoLens.revisionHash });
+    };
+    assert.throws(
+      () => promoteTwoLens({ ...twoLensBase, completionContract: { deliverable: "audit report", reviewLenses: ["artifact"] } }),
+      /review lens removed: claims/i,
+      "dropping a review lens the pilot required is a widening",
+    );
+    assert.throws(
+      () => promoteTwoLens({ ...twoLensBase, evidenceRequirements: ["path:line citation"] }),
+      /evidence requirements reduced/i,
+      "shrinking the evidence bar is a widening",
     );
 
     // Same scope and NARROWING both promote cleanly — the guard blocks
@@ -4160,6 +4281,7 @@ test("ledger redacts secrets at every persistence entry point", async () => {
     stderr: "bearer-secret-123456789",
     event: "event-secret-123456789",
     review: "review-secret-123456789",
+    workflow: "sk-proj-workflowsecret123456789",
   };
   const ledger = new Ledger(filename);
   try {
@@ -4199,6 +4321,21 @@ test("ledger redacts secrets at every persistence entry point", async () => {
       useful: "provider returned 401",
     });
     ledger.setRunStatus(runId, "failed", `password=${secrets.review}`);
+    // Gate finding (test lane, 2026-07-22): workflow documents are the tenth
+    // free-text persistence path — a credential pasted into a workflow
+    // description must be redacted at the same boundary as everything else.
+    (ledger as Ledger & Record<string, any>).recordWorkflowRevision({
+      workflow: {
+        name: "redaction-probe",
+        description: `Example: OPENAI_API_KEY=${secrets.workflow}`,
+        inputs: [{ name: "target", type: "string", required: true, description: `token ${secrets.workflow}` }],
+        objective: { outcomeTemplate: "Probe ${target}.", acceptanceCriteria: [`never persist ${secrets.workflow}`], risk: "low" },
+        evidenceRequirements: [`transcript without ${secrets.workflow}`],
+        approvalPoints: ["plan"],
+        completionContract: { deliverable: `report omitting ${secrets.workflow}`, reviewLenses: ["artifact"] },
+        permissions: { autonomy: "observe", allowExternalWrites: false },
+      },
+    });
   } finally {
     ledger.close();
   }
@@ -4212,6 +4349,7 @@ test("ledger redacts secrets at every persistence entry point", async () => {
       checks: database.prepare("SELECT * FROM checks").all(),
       events: database.prepare("SELECT * FROM events").all(),
       blackboard: database.prepare("SELECT * FROM blackboard_entries").all(),
+      workflows: database.prepare("SELECT * FROM workflow_revisions").all(),
     });
     for (const secret of Object.values(secrets)) {
       assert.equal(persisted.includes(secret), false, `Secret leaked to SQLite: ${secret}`);

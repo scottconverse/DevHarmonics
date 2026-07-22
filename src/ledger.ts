@@ -16,6 +16,7 @@ import {
   type RunStatus,
 } from "./domain.js";
 import { redactText, redactValue } from "./redaction.js";
+import { workflowRevisionHash, type WorkflowDocument } from "./workflows.js";
 import {
   objectiveInputSchema,
   planRevisionInputSchema,
@@ -79,6 +80,7 @@ interface RunRow {
   autonomy: string;
   objective_id: string | null;
   approved_plan_revision: number | null;
+  workflow_revision_hash: string | null;
   plan_json: string | null;
 }
 
@@ -170,7 +172,7 @@ interface CheckRow {
   duration_ms: number;
 }
 
-export const LEDGER_SCHEMA_VERSION = 31;
+export const LEDGER_SCHEMA_VERSION = 33;
 
 export const REPOSITORY_ROLES = [
   "umbrella",
@@ -1299,6 +1301,35 @@ const MIGRATIONS: readonly LedgerMigration[] = [
       if (!columns.has("release_tag")) database.exec("ALTER TABLE delivery_repositories ADD COLUMN release_tag TEXT;");
     },
   },
+  {
+    version: 32,
+    name: "workflow-revisions",
+    apply(database) {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS workflow_revisions (
+          revision_hash TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          document_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS workflow_revisions_name ON workflow_revisions(name, created_at);
+      `);
+      const runColumns = new Set(
+        (database.prepare("SELECT name FROM pragma_table_info('runs')").all() as unknown as Array<{ name: string }>).map((column) => column.name),
+      );
+      if (!runColumns.has("workflow_revision_hash")) database.exec("ALTER TABLE runs ADD COLUMN workflow_revision_hash TEXT;");
+    },
+  },
+  {
+    version: 33,
+    name: "objective-workflow-provenance",
+    apply(database) {
+      const columns = new Set(
+        (database.prepare("SELECT name FROM pragma_table_info('objectives')").all() as unknown as Array<{ name: string }>).map((column) => column.name),
+      );
+      if (!columns.has("workflow_revision_hash")) database.exec("ALTER TABLE objectives ADD COLUMN workflow_revision_hash TEXT;");
+    },
+  },
 ];
 
 function summarizeGoal(goal: string, maxLength = 180): string {
@@ -1308,7 +1339,8 @@ function summarizeGoal(goal: string, maxLength = 180): string {
 }
 
 const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
-  runs: ["id", "goal", "project_path", "status", "plan_json", "final_review", "resumed_from", "autonomy", "objective_id", "approved_plan_revision", "created_at", "updated_at"],
+  runs: ["id", "goal", "project_path", "status", "plan_json", "final_review", "resumed_from", "autonomy", "objective_id", "approved_plan_revision", "workflow_revision_hash", "created_at", "updated_at"],
+  workflow_revisions: ["revision_hash", "name", "document_json", "created_at"],
   tasks: [
     "run_id",
     "task_id",
@@ -1422,7 +1454,7 @@ const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
   tool_policy_receipts: ["id", "run_id", "task_id", "attempt_id", "tool_id", "actor_role", "stage", "side_effect", "outcome", "reason", "request_json", "lock_keys_json", "approval_id", "created_at"],
   review_receipts: ["id", "run_id", "round", "integration_sha256", "evidence_binding_json", "verdict", "provider", "model_id", "connection_id", "lens", "summary", "raw_text", "invalidated_at", "invalidation_reason", "created_at"],
   review_findings: ["id", "review_receipt_id", "finding_id", "severity", "location", "rationale", "suggested_correction", "disposition", "created_at"],
-  objectives: ["id", "outcome", "acceptance_criteria_json", "constraints_json", "project_path", "product_id", "repository_ids_json", "risk", "autonomy", "priority", "deadline", "policy_notes_json", "revision", "created_at", "updated_at"],
+  objectives: ["id", "outcome", "acceptance_criteria_json", "constraints_json", "project_path", "product_id", "repository_ids_json", "risk", "autonomy", "priority", "deadline", "policy_notes_json", "revision", "created_at", "updated_at", "workflow_revision_hash"],
   plan_revisions: ["objective_id", "revision", "plan_json", "rationale", "approved", "created_at", "approved_at"],
   workbench_sessions: ["id", "project_path", "title", "mode", "objective_id", "converted_at", "created_at", "updated_at"],
   workbench_messages: ["id", "session_id", "role", "content", "provider", "connection_id", "requested_model_id", "resolved_model_id", "status", "error", "input_tokens", "output_tokens", "cost_usd", "duration_ms", "paid_spend_reservation_id", "created_at"],
@@ -1601,15 +1633,30 @@ export class Ledger {
   }
 
   createObjective(input: ObjectiveInput): ObjectiveRecord {
-    const objective = objectiveInputSchema.parse(input) as ObjectiveInput;
+    // The public schema deliberately has no workflowRevisionHash (audit
+    // DH810-AUD-001) — the privileged provenance field is re-attached from the
+    // typed input here and validated against the stored revisions, so an
+    // objective can never claim a pedigree the ledger has not recorded.
+    const objective = {
+      ...objectiveInputSchema.parse(input),
+      ...(input.workflowRevisionHash ? { workflowRevisionHash: input.workflowRevisionHash } : {}),
+    } as ObjectiveInput;
+    if (objective.workflowRevisionHash) {
+      if (!/^[a-f0-9]{64}$/.test(objective.workflowRevisionHash)) {
+        throw new Error("Objective workflow provenance must be a 64-character content hash");
+      }
+      if (!this.getWorkflowRevision(objective.workflowRevisionHash)) {
+        throw new Error(`Objective provenance names unknown workflow revision '${objective.workflowRevisionHash}'`);
+      }
+    }
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
     this.database.prepare(`
       INSERT INTO objectives (
         id, outcome, acceptance_criteria_json, constraints_json, project_path, product_id,
         repository_ids_json, risk, autonomy, priority, deadline, policy_notes_json,
-        revision, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        workflow_revision_hash, revision, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
     `).run(
       id,
       redactText(objective.outcome),
@@ -1623,6 +1670,7 @@ export class Ledger {
       objective.priority,
       objective.deadline ?? null,
       JSON.stringify(objective.policyNotes.map(redactText)),
+      objective.workflowRevisionHash ?? null,
       now,
       now,
     );
@@ -1638,7 +1686,8 @@ export class Ledger {
       UPDATE objectives SET
         outcome = ?, acceptance_criteria_json = ?, constraints_json = ?, project_path = ?,
         product_id = ?, repository_ids_json = ?, risk = ?, autonomy = ?, priority = ?,
-        deadline = ?, policy_notes_json = ?, revision = revision + 1, updated_at = ?
+        deadline = ?, policy_notes_json = ?, workflow_revision_hash = NULL,
+        revision = revision + 1, updated_at = ?
       WHERE id = ? AND revision = ?
     `).run(
       redactText(objective.outcome),
@@ -2500,6 +2549,7 @@ export class Ledger {
       resumedFrom: run.resumed_from,
       objectiveId: run.objective_id,
       approvedPlanRevision: run.approved_plan_revision,
+      workflowRevisionHash: run.workflow_revision_hash ?? null,
       plan: run.plan_json ? JSON.parse(run.plan_json) as RunPlan : null,
       integrationSet: this.getIntegrationSet(runId),
       delivery: this.getDeliveryHandoff(runId),
@@ -3592,6 +3642,76 @@ export class Ledger {
     }));
   }
 
+  /**
+   * DH-810: idempotent by content hash. Re-recording identical content returns
+   * the original record untouched; changed content is a NEW revision beside the
+   * old one. Nothing here can rewrite what a historical run executed.
+   */
+  recordWorkflowRevision(input: { workflow: WorkflowDocument; promotedFrom?: string }): { revisionHash: string; createdAt: string } {
+    // DH-810 promotion guard: a revision promoted from a pilot may never
+    // silently WIDEN what the pilot was allowed to do — external writes cannot
+    // switch on, autonomy cannot escalate, and no approval point the pilot
+    // required may disappear. Refused loudly, never accepted quietly.
+    if (input.promotedFrom) {
+      const base = this.getWorkflowRevision(input.promotedFrom);
+      if (!base) throw new Error(`Unknown promotion base revision '${input.promotedFrom}'`);
+      const widenings: string[] = [];
+      if (input.workflow.permissions.allowExternalWrites && !base.workflow.permissions.allowExternalWrites) {
+        widenings.push("allowExternalWrites: false -> true");
+      }
+      const autonomyRank: Record<string, number> = { observe: 0, supervised: 1, bounded: 2 };
+      if ((autonomyRank[input.workflow.permissions.autonomy] ?? 0) > (autonomyRank[base.workflow.permissions.autonomy] ?? 0)) {
+        widenings.push(`autonomy: ${base.workflow.permissions.autonomy} -> ${input.workflow.permissions.autonomy}`);
+      }
+      for (const point of base.workflow.approvalPoints) {
+        if (!input.workflow.approvalPoints.includes(point)) widenings.push(`approval point removed: ${point}`);
+      }
+      if (widenings.length) {
+        throw new Error(`Promotion from ${input.promotedFrom.slice(0, 12)} would widen permissions (${widenings.join("; ")}); widening requires a fresh un-promoted revision recorded deliberately`);
+      }
+    }
+    const revisionHash = workflowRevisionHash(input.workflow);
+    const existing = this.database.prepare("SELECT created_at FROM workflow_revisions WHERE revision_hash = ?").get(revisionHash) as { created_at: string } | undefined;
+    if (existing) return { revisionHash, createdAt: String(existing.created_at) };
+    const createdAt = new Date().toISOString();
+    this.database.prepare(
+      "INSERT INTO workflow_revisions (revision_hash, name, document_json, created_at) VALUES (?, ?, ?, ?)",
+    ).run(revisionHash, input.workflow.name, JSON.stringify(input.workflow), createdAt);
+    return { revisionHash, createdAt };
+  }
+
+  listWorkflowRevisions(): Array<{ revisionHash: string; name: string; createdAt: string }> {
+    const rows = this.database.prepare("SELECT revision_hash, name, created_at FROM workflow_revisions ORDER BY created_at, revision_hash").all() as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => ({ revisionHash: String(row.revision_hash), name: String(row.name), createdAt: String(row.created_at) }));
+  }
+
+  getWorkflowRevision(revisionHash: string): { revisionHash: string; name: string; workflow: WorkflowDocument; createdAt: string } | null {
+    const row = this.database.prepare("SELECT * FROM workflow_revisions WHERE revision_hash = ?").get(revisionHash) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return {
+      revisionHash: String(row.revision_hash),
+      name: String(row.name),
+      workflow: JSON.parse(String(row.document_json)) as WorkflowDocument,
+      createdAt: String(row.created_at),
+    };
+  }
+
+  /**
+   * A run may only pin a revision the ledger actually stores, and the pin is
+   * an audit fact: once set it can be re-asserted idempotently but never
+   * re-pointed at a different revision (panel finding — a later-callable
+   * setter that overwrites the pin IS the history rewrite this design forbids).
+   */
+  linkRunWorkflowRevision(runId: string, revisionHash: string): void {
+    if (!this.getWorkflowRevision(revisionHash)) throw new Error(`Unknown workflow revision '${revisionHash}'`);
+    const current = this.database.prepare("SELECT workflow_revision_hash FROM runs WHERE id = ?").get(runId) as { workflow_revision_hash: string | null } | undefined;
+    if (!current) throw new Error(`Run '${runId}' was not found`);
+    if (current.workflow_revision_hash !== null && current.workflow_revision_hash !== revisionHash) {
+      throw new Error(`Run '${runId}' is already pinned to workflow revision '${current.workflow_revision_hash}'`);
+    }
+    this.database.prepare("UPDATE runs SET workflow_revision_hash = ? WHERE id = ?").run(revisionHash, runId);
+  }
+
   listReviewReceipts(runId: string): ReviewReceiptRecord[] {
     const reviews = this.database.prepare(
       "SELECT * FROM review_receipts WHERE run_id = ? ORDER BY round, id",
@@ -3759,6 +3879,7 @@ export class Ledger {
       priority: String(row.priority) as ObjectiveRecord["priority"],
       ...(row.deadline === null ? {} : { deadline: String(row.deadline) }),
       policyNotes: JSON.parse(String(row.policy_notes_json)) as string[],
+      workflowRevisionHash: row.workflow_revision_hash === null || row.workflow_revision_hash === undefined ? null : String(row.workflow_revision_hash),
       revision: Number(row.revision),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),

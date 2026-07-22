@@ -98,6 +98,11 @@ export const objectiveInputSchema = z.object({
   deadline: z.string().datetime({ offset: true }).optional(),
   policyNotes: z.array(z.string().trim().min(1).max(2_000)).max(200),
 });
+// DH-810: workflow provenance is STRUCTURAL and privileged. It is set only by
+// workflow instantiation (which builds ObjectiveInput directly, without this
+// schema) — it is deliberately NOT part of the public objective schema, and
+// public routes additionally REJECT any request that tries to supply it
+// (audit DH810-AUD-001: a client-supplied pin makes the audit trail fabricable).
 
 export const planRevisionInputSchema = z.object({
   plan: runPlanSchema,

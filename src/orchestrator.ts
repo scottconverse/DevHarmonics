@@ -80,7 +80,14 @@ export class Orchestrator {
   constructor(private readonly ledger: Ledger) {}
 
   begin(request: RunRequest, resumedFrom: string | null = null): string {
+    // DH810-AUD-001: an unknown workflow pin must refuse BEFORE any run
+    // exists, and a valid pin must be recorded BEFORE execution launches — a
+    // run may never start unpinned and acquire its pedigree afterwards.
+    if (request.workflowRevisionHash && !this.ledger.getWorkflowRevision(request.workflowRevisionHash)) {
+      throw new Error(`Cannot start a run pinned to unknown workflow revision '${request.workflowRevisionHash}'`);
+    }
     const runId = this.ledger.createRun(request.goal, request.projectPath, resumedFrom, request.autonomy ?? "supervised", request.objectiveLink ?? null);
+    if (request.workflowRevisionHash) this.ledger.linkRunWorkflowRevision(runId, request.workflowRevisionHash);
     const controller = new AbortController();
     this.cancellations.set(runId, controller);
     const execution = this.execute(runId, request, controller.signal)
@@ -118,7 +125,16 @@ export class Orchestrator {
   resume(runId: string): string | null {
     const previous = this.ledger.getRun(runId);
     if (!previous || previous.status !== "paused") return null;
-    const nextRunId = this.begin({ goal: previous.goal, projectPath: previous.projectPath, autonomy: previous.autonomy }, runId);
+    // DH810-AUD-002: a recovery run is the same piece of work — it keeps the
+    // objective/plan linkage and the exact workflow revision the original run
+    // executed. Recovery never launders provenance away.
+    const nextRunId = this.begin({
+      goal: previous.goal,
+      projectPath: previous.projectPath,
+      autonomy: previous.autonomy,
+      ...(previous.objectiveId && previous.approvedPlanRevision ? { objectiveLink: { objectiveId: previous.objectiveId, approvedPlanRevision: previous.approvedPlanRevision } } : {}),
+      ...(previous.workflowRevisionHash ? { workflowRevisionHash: previous.workflowRevisionHash } : {}),
+    }, runId);
     this.ledger.addEvent(runId, "run.resumed", `Recovery continued in run ${nextRunId}`, { nextRunId });
     this.ledger.addEvent(nextRunId, "run.resumed", `Recovering evidence from run ${runId}`, { previousRunId: runId });
     return nextRunId;
@@ -459,6 +475,7 @@ export class Orchestrator {
       enabledProviders: input.enabledProviders,
       approvedPlan: input.revision.plan,
       objectiveLink: { objectiveId: input.objective.id, approvedPlanRevision: input.revision.revision },
+      ...(input.objective.workflowRevisionHash ? { workflowRevisionHash: input.objective.workflowRevisionHash } : {}),
     });
   }
 

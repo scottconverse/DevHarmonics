@@ -1,0 +1,37 @@
+{
+  "name": "documentation-consistency",
+  "description": "Verify every versioned claim in the documentation matches the repository state, and correct the stale ones with cited sources.",
+  "inputs": [
+    {
+      "name": "repositoryId",
+      "type": "string",
+      "required": true,
+      "description": "Repository whose documentation is audited"
+    }
+  ],
+  "objective": {
+    "outcomeTemplate": "Every versioned claim in ${repositoryId} documentation matches the code, with each correction citing the source line that proves it.",
+    "acceptanceCriteria": [
+      "No stale version statements remain anywhere in the repository's documentation",
+      "Every corrected claim cites the file and line that makes it true"
+    ],
+    "risk": "medium"
+  },
+  "evidenceRequirements": [
+    "path:line citation per corrected claim"
+  ],
+  "approvalPoints": [
+    "plan",
+    "external_write"
+  ],
+  "completionContract": {
+    "deliverable": "reviewed branch",
+    "reviewLenses": [
+      "artifact"
+    ]
+  },
+  "permissions": {
+    "autonomy": "supervised",
+    "allowExternalWrites": true
+  }
+}

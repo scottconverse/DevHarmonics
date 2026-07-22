@@ -348,6 +348,7 @@ export const devHarmonicsConfigSchema = z.object({
       medium: z.array(z.enum(["artifact", "claims"])).min(1),
       high: z.array(z.enum(["artifact", "claims"])).min(1),
     }).default({ low: ["artifact"], medium: ["artifact"], high: ["artifact", "claims"] }),
+    attestNoManagedClaudePolicy: z.boolean().default(false),
     maxFixRounds: z.number().int().min(0).max(5),
   }).superRefine((policy, context) => {
     // A quorum requirement that arithmetic can never satisfy is refused at
@@ -367,6 +368,7 @@ export const devHarmonicsConfigSchema = z.object({
     minimumDistinctProvidersByRisk: { low: 1, medium: 1, high: 2 },
     requireImplementorIndependenceByRisk: { low: false, medium: true, high: true },
     requiredLensesByRisk: { low: ["artifact"], medium: ["artifact"], high: ["artifact", "claims"] },
+    attestNoManagedClaudePolicy: false,
     maxFixRounds: 2,
   }),
   routing: z.object({

@@ -78,6 +78,14 @@ export interface DevHarmonicsConfig {
     minimumDistinctProvidersByRisk: Record<"low" | "medium" | "high", number>;
     requireImplementorIndependenceByRisk: Record<"low" | "medium" | "high", boolean>;
     requiredLensesByRisk: Record<"low" | "medium" | "high", Array<"artifact" | "claims">>;
+    /**
+     * Owner attestation that no admin-managed Claude Code policy (file,
+     * registry, MDM, or server-delivered) governs this machine. Required for
+     * a Claude CLI reviewer to take a claims-lens slot: managed policy can
+     * configure hooks that survive every headless shutdown flag, and the
+     * server/MDM tiers are not client-enumerable. Defaults to false.
+     */
+    attestNoManagedClaudePolicy: boolean;
     maxFixRounds: number;
   };
   routing: {

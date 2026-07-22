@@ -831,7 +831,7 @@ export class Orchestrator {
     // Codex R2-001: a claims-lens slot may only route to an adapter that can
     // STRUCTURALLY deny its file tools — capability, not prompt, is the gate.
     const toolDenialIncapable = firstReviewLens === "claims" && autonomy !== "observe"
-      ? this.ledger.listConnections().filter((connection) => !providerSupportsToolDenial(connection.provider, connection.transport)).map((connection) => connection.id)
+      ? this.ledger.listConnections().filter((connection) => !providerSupportsToolDenial(connection.provider, connection.transport, { attestedNoManagedPolicy: config.reviewPolicy.attestNoManagedClaudePolicy })).map((connection) => connection.id)
       : [];
     for (let reviewAttempt = 1; reviewAttempt <= config.application.retry.maxAttempts; reviewAttempt++) {
       const effectiveExcludedConnections = toolDenialIncapable.length
@@ -1564,7 +1564,7 @@ export class Orchestrator {
     // Codex R2-001: claims-lens slots route only to adapters that can
     // structurally deny their file tools.
     const toolDenialIncapable = input.lens === "claims" && input.autonomy !== "observe"
-      ? this.ledger.listConnections().filter((connection) => !providerSupportsToolDenial(connection.provider, connection.transport)).map((connection) => connection.id)
+      ? this.ledger.listConnections().filter((connection) => !providerSupportsToolDenial(connection.provider, connection.transport, { attestedNoManagedPolicy: input.config.reviewPolicy.attestNoManagedClaudePolicy })).map((connection) => connection.id)
       : [];
     for (let reviewAttempt = 1; reviewAttempt <= input.config.application.retry.maxAttempts; reviewAttempt++) {
       const effectiveExcludedConnections = toolDenialIncapable.length

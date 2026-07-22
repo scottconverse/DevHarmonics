@@ -97,7 +97,7 @@ if (process.argv.includes("--version")) {
 } else if (input.includes("You are the claims-lens reviewer")) {
   const manifest = JSON.stringify({findings:[],claimedChanges:[{path:"result.txt",kind:"created",taskId:"one"}]});
   const toolsIndex = process.argv.indexOf("--tools");
-  const toolsFlag = toolsIndex >= 0 && process.argv[toolsIndex + 1] === "" && process.argv.includes("--strict-mcp-config") && process.argv.includes("--safe-mode") ? "denied" : "undenied";
+  const toolsFlag = toolsIndex >= 0 && process.argv[toolsIndex + 1] === "" && process.argv.includes("--strict-mcp-config") && process.argv.includes("--safe-mode") && process.argv.includes("--bare") ? "denied" : "undenied";
   const review = "READY\\n\\nClaims reviewed from cwd=" + process.cwd().replace(/\\\\/g, "/") + " toolsFlag=" + toolsFlag + " and they cohere with the receipts.\\n" + manifest;
   if (process.argv.includes("--json")) console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:review}}));
   else if (process.argv.includes("--output-format")) console.log(JSON.stringify({result:review}));
@@ -480,6 +480,9 @@ test("high-risk orchestration requires two independent provider reviews", async 
   config.product.reviewer = "gemini";
   config.product.workers = ["codex"];
   config.routing.reviewer.preferredTier = "standard";
+  // The owner attestation is what admits a Claude CLI reviewer to a claims
+  // slot at all; this fixture machine is its test double.
+  config.reviewPolicy.attestNoManagedClaudePolicy = true;
   for (const provider of ["codex", "claude", "gemini"] as const) {
     config.connections[provider].command = command;
     config.connections[provider].timeoutMs = 30_000;

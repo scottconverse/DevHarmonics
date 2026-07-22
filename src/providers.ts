@@ -1,4 +1,6 @@
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import type {
   ProviderConfig,
   ProviderName,
@@ -273,19 +275,38 @@ abstract class CliProvider implements ProviderAdapter {
 }
 
 /**
- * Platform locations of Claude Code's admin-managed policy settings. Managed
- * policy can configure hooks that `--safe-mode` explicitly does NOT disable
- * (Codex R4-001: "Admin-managed (policy) settings still apply"), so their
- * presence means argv alone cannot close the ambient executable surface.
+ * CLIENT-VISIBLE locations where Claude Code managed policy can be delivered
+ * on this platform (base file, managed-settings.d drop-ins, and on Windows
+ * the Policies registry keys). Managed policy can configure hooks that
+ * `--safe-mode` explicitly does NOT disable ("Admin-managed (policy) settings
+ * still apply"), so any hit here means argv cannot close the ambient
+ * executable surface. This detection is DEFENSE IN DEPTH, not an attestation:
+ * server-managed and MDM-delivered policy are not client-enumerable, which is
+ * exactly why the capability additionally requires the owner's explicit
+ * configuration attestation (Codex R5-001).
  */
-const CLAUDE_MANAGED_POLICY_PATHS = process.platform === "win32"
-  ? ["C:\\ProgramData\\ClaudeCode\\managed-settings.json"]
-  : process.platform === "darwin"
-    ? ["/Library/Application Support/ClaudeCode/managed-settings.json"]
-    : ["/etc/claude-code/managed-settings.json"];
+function clientVisibleClaudePolicyDetected(): boolean {
+  const roots = process.platform === "win32"
+    ? ["C:\\Program Files\\ClaudeCode", "C:\\ProgramData\\ClaudeCode"]
+    : process.platform === "darwin"
+      ? ["/Library/Application Support/ClaudeCode"]
+      : ["/etc/claude-code"];
+  for (const root of roots) {
+    if (existsSync(join(root, "managed-settings.json"))) return true;
+    const dropIns = join(root, "managed-settings.d");
+    if (existsSync(dropIns) && readdirSync(dropIns).some((entry) => entry.endsWith(".json"))) return true;
+  }
+  if (process.platform === "win32") {
+    for (const hive of ["HKLM", "HKCU"]) {
+      const probe = spawnSync("reg", ["query", `${hive}\\SOFTWARE\\Policies\\ClaudeCode`], { stdio: "ignore", timeout: 5_000 });
+      if (probe.status === 0) return true;
+    }
+  }
+  return false;
+}
 
 export function claudeManagedPolicyPresent(): boolean {
-  return CLAUDE_MANAGED_POLICY_PATHS.some((candidate) => existsSync(candidate));
+  return clientVisibleClaudePolicyDetected();
 }
 
 /**
@@ -294,8 +315,11 @@ export function claudeManagedPolicyPresent(): boolean {
  * that can: prompt wording and cwd placement are not enforcement.
  * - claude: conditional — headless --tools "" empties the built-in tool set,
  *   --strict-mcp-config rejects ambient MCP, --safe-mode disables ordinary
- *   customization; but admin-managed POLICY hooks survive all three, so the
- *   capability holds only on a machine attested free of managed policy.
+ *   customization; but admin-managed POLICY hooks survive all three, and
+ *   server-managed/MDM policy is not client-enumerable. The capability
+ *   therefore requires BOTH the owner's explicit configuration attestation
+ *   that no managed Claude policy governs this machine AND no client-visible
+ *   policy detection hit. Default is unattested — fail closed.
  * - local (Ollama HTTP): yes — the transport has no tools at all.
  * - api (OpenRouter): yes — chat completion, no tool execution surface.
  * - codex: no — its sandbox modes govern writes, not read scope.
@@ -304,10 +328,12 @@ export function claudeManagedPolicyPresent(): boolean {
 export function providerSupportsToolDenial(
   provider: string,
   transport: string,
-  managedPolicyPresent: boolean = claudeManagedPolicyPresent(),
+  options?: { attestedNoManagedPolicy?: boolean; managedPolicyDetected?: boolean },
 ): boolean {
   if (transport === "local" || transport === "api") return true;
-  return provider === "claude" && !managedPolicyPresent;
+  if (provider !== "claude") return false;
+  if (!(options?.attestedNoManagedPolicy ?? false)) return false;
+  return !(options?.managedPolicyDetected ?? claudeManagedPolicyPresent());
 }
 
 export class CodexProvider extends CliProvider {
@@ -353,8 +379,12 @@ export class ClaudeProvider extends CliProvider {
       // BOUNDARY (Codex R4-001): admin-managed POLICY hooks survive all three
       // flags — providerSupportsToolDenial therefore grants this capability
       // only on machines attested free of managed policy settings.
+      // --bare additionally skips hooks, plugin sync, auto-memory, and
+      // CLAUDE.md discovery per its own help; it is belt-and-suspenders here,
+      // not the proof — the managed-policy residual is handled by the owner
+      // attestation gating the capability itself.
       ...(request.withoutRepositoryTools
-        ? ["--tools", "", "--strict-mcp-config", "--safe-mode"]
+        ? ["--tools", "", "--strict-mcp-config", "--safe-mode", "--bare"]
         : []),
     ];
   }

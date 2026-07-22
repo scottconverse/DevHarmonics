@@ -2475,16 +2475,20 @@ test("claims-lens reviews route only to adapters that can structurally deny tool
   // sandbox modes govern writes, not read scope; Gemini's add-dir boundary is
   // undemonstrated. Tool-less transports and claude's --disallowedTools are in.
   const providersModule = await import("../src/providers.js") as Record<string, any>;
-  assert.equal(providersModule.providerSupportsToolDenial("codex", "subscription_cli", false), false);
-  assert.equal(providersModule.providerSupportsToolDenial("gemini", "subscription_cli", false), false);
-  assert.equal(providersModule.providerSupportsToolDenial("ollama", "local", true), true);
-  assert.equal(providersModule.providerSupportsToolDenial("openrouter", "api", true), true);
-  // Codex R4-001: --safe-mode does not disable admin-managed POLICY hooks, so
-  // claude's denial capability holds only on a machine attested free of
-  // managed policy settings.
-  assert.equal(providersModule.providerSupportsToolDenial("claude", "subscription_cli", false), true);
-  assert.equal(providersModule.providerSupportsToolDenial("claude", "subscription_cli", true), false, "managed policy present means argv cannot close the hook surface");
-  assert.equal(typeof providersModule.claudeManagedPolicyPresent, "function", "the attestation is a real filesystem check, not an assumption");
+  const attested = { attestedNoManagedPolicy: true, managedPolicyDetected: false };
+  assert.equal(providersModule.providerSupportsToolDenial("codex", "subscription_cli", attested), false);
+  assert.equal(providersModule.providerSupportsToolDenial("gemini", "subscription_cli", attested), false);
+  assert.equal(providersModule.providerSupportsToolDenial("ollama", "local"), true);
+  assert.equal(providersModule.providerSupportsToolDenial("openrouter", "api"), true);
+  // Codex R4-001/R5-001: --safe-mode does not disable admin-managed POLICY
+  // hooks, and server/MDM-delivered policy is not client-enumerable. Claude's
+  // capability therefore requires the OWNER'S explicit attestation AND no
+  // client-visible policy detection — and defaults closed without both.
+  assert.equal(providersModule.providerSupportsToolDenial("claude", "subscription_cli", attested), true);
+  assert.equal(providersModule.providerSupportsToolDenial("claude", "subscription_cli", { attestedNoManagedPolicy: false, managedPolicyDetected: false }), false, "no attestation, no capability — the default fails closed");
+  assert.equal(providersModule.providerSupportsToolDenial("claude", "subscription_cli", { attestedNoManagedPolicy: true, managedPolicyDetected: true }), false, "client-visible policy overrides the attestation");
+  assert.equal(providersModule.providerSupportsToolDenial("claude", "subscription_cli"), false, "the bare default is unattested and closed");
+  assert.equal(typeof providersModule.claudeManagedPolicyPresent, "function", "client-visible detection is a real filesystem/registry check");
 });
 
 test("the assembled claims-lens chunk prompt demands the manifest the header promised", async () => {

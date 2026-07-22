@@ -234,7 +234,7 @@ export interface IntegrationSetRecord {
   updatedAt: string;
 }
 
-export type DeliveryRepositoryStatus = "prepared" | "branch_pushed" | "draft_pr_created" | "failed";
+export type DeliveryRepositoryStatus = "prepared" | "branch_pushed" | "draft_pr_created" | "merged" | "tagged" | "failed";
 
 export interface DeliveryRepositoryRecord {
   runId: string;

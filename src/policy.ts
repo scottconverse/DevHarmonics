@@ -109,6 +109,16 @@ const builtInTools: Readonly<Record<string, ToolDefinition>> = {
     description: "Create a draft GitHub pull request for an exact reviewed branch", allowedRoles: ["coordinator"], allowedStages: ["release"],
     secretPolicy: "credential_reference", inputSchema: { type: "object", required: ["repository", "head", "base"] }, outputSchema: { type: "object", required: ["url"] }, lockScope: "external_github",
   },
+  "github.pr_merge": {
+    id: "github.pr_merge", trust: "external", sideEffect: "external_write", receiptsRequired: true,
+    description: "Merge an owner-approved reviewed pull request after verifying its live state", allowedRoles: ["coordinator"], allowedStages: ["release"],
+    secretPolicy: "credential_reference", inputSchema: { type: "object", required: ["repository", "pullRequestUrl"] }, outputSchema: { type: "object", required: ["merged"] }, lockScope: "external_github",
+  },
+  "github.tag_push": {
+    id: "github.tag_push", trust: "external", sideEffect: "external_write", receiptsRequired: true,
+    description: "Create and push an owner-approved release tag on the merged commit", allowedRoles: ["coordinator"], allowedStages: ["release"],
+    secretPolicy: "credential_reference", inputSchema: { type: "object", required: ["repository", "tag"] }, outputSchema: { type: "object", required: ["tag"] }, lockScope: "external_github",
+  },
   "shell.unrestricted": {
     id: "shell.unrestricted", trust: "external", sideEffect: "destructive", receiptsRequired: true,
     description: "Run an unrestricted shell", allowedRoles: [], allowedStages: [],

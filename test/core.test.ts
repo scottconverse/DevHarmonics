@@ -2981,6 +2981,50 @@ test("declining a tag mismatch records a CANCELLED operation — never succeeded
   assert.equal(helpers.classifyOperationOutcome(null).status, "succeeded", "a null return value is a success");
 });
 
+test("delivery tag caption never claims 'declares no version' during a mergeVersionUnavailable outage", async () => {
+  // MAJOR gate finding R4-002 (2026-07-22): PR #38 made GET
+  // /api/runs/:id/delivery return `mergeVersionUnavailable: true` for a
+  // repository whose merged version could not be re-resolved (a transient
+  // GitHub/network failure), but the cockpit's fillDeclaredTagVersions never
+  // checked the flag — it fell into the declaredVersion===null branch and
+  // told the owner "This repository declares no version in its own files",
+  // which is false during the outage and contradicts the CHANGELOG's
+  // promised "merge version temporarily unavailable - retry" copy. Drive the
+  // REAL shipped deliveryTagCaption pure seam extracted from src/ui/app.js —
+  // the exact function fillDeclaredTagVersions calls — so a future refactor
+  // that drops the mergeVersionUnavailable check fails HERE.
+  const appSource = readFileSync(path.join(process.cwd(), "src", "ui", "app.js"), "utf8");
+  const start = appSource.indexOf("function deliveryTagCaption(repository)");
+  const end = appSource.indexOf("\nasync function fillDeclaredTagVersions(");
+  assert.ok(start >= 0 && end > start, "deliveryTagCaption must exist as an extractable function in app.js");
+  const deliveryTagCaption = new Function(`${appSource.slice(start, end)}; return deliveryTagCaption;`)() as (
+    repository: Record<string, unknown>,
+  ) => { prefill: string | null; help: string };
+
+  // (a) The outage state: merge OID could not be re-resolved this GET.
+  const unavailable = deliveryTagCaption({ repositoryId: "repo:truth", declaredVersion: null, mergeVersionUnavailable: true });
+  assert.doesNotMatch(unavailable.help, /declares no version/, "an unavailable merge read is NEVER described as a versionless repository");
+  assert.match(unavailable.help, /can't be read right now|retry/i, "the outage state gives explicit retry guidance");
+  assert.equal(unavailable.prefill, null, "the outage state never prefills a tag — there is nothing confirmed to prefill");
+
+  // (b) A genuinely versionless repository (no mergeVersionUnavailable flag)
+  // keeps the pre-existing, correct copy — this finding must not overcorrect.
+  const trulyVersionless = deliveryTagCaption({ repositoryId: "repo:truth", declaredVersion: null });
+  assert.match(trulyVersionless.help, /declares no version/, "a repository that truly has no declared version still says so");
+  assert.equal(trulyVersionless.prefill, null);
+
+  // (c) The ordinary success path is unaffected by the new branch.
+  const resolved = deliveryTagCaption({ repositoryId: "repo:truth", declaredVersion: "2.0.0" });
+  assert.equal(resolved.prefill, "v2.0.0", "a resolved declared version still prefills the tag field");
+  assert.match(resolved.help, /declares version 2\.0\.0/);
+
+  // (d) mergeVersionUnavailable wins even if a stale declaredVersion string
+  // is also present on the record — the outage guidance must not be masked.
+  const staleButUnavailable = deliveryTagCaption({ repositoryId: "repo:truth", declaredVersion: "1.0.0", mergeVersionUnavailable: true });
+  assert.equal(staleButUnavailable.prefill, null, "mergeVersionUnavailable suppresses prefill even over a present declaredVersion");
+  assert.doesNotMatch(staleButUnavailable.help, /declares version/, "the outage guidance is never masked by a stale declaredVersion");
+});
+
 test("migration 30's delivery-table rebuild preserves row data from a physical schema-29 database", async () => {
   // Gate finding ENG-3 (2026-07-22): the CHECK-widening RENAME/rebuild in
   // migration 30 had no test proving a delivery row's VALUES survive it.

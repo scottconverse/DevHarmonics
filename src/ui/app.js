@@ -1182,6 +1182,45 @@ function renderDelivery(run) {
 // text that read exactly like the value about to be applied. The field now
 // carries the repository's REAL declared version as its editable value, and
 // the caption states plainly what an empty field means.
+//
+// PR #38 finding R4-002 (2026-07-22): GET /api/runs/:id/delivery started
+// returning `mergeVersionUnavailable: true` for a repository whose merged
+// version could not be re-resolved (transient GitHub/network failure), but
+// this caption logic never checked the flag — the `declaredVersion === null`
+// branch fired instead and told the owner the repository "declares no
+// version", which is false during an outage and directly contradicts the
+// CHANGELOG's promised retry copy. mergeVersionUnavailable is now checked
+// FIRST, before the generic null branch, and never prefills a tag in that
+// state. Pulled out as a pure function of the repository record so it can be
+// tested without the DOM.
+function deliveryTagCaption(repository) {
+  if (repository.mergeVersionUnavailable) {
+    return {
+      prefill: null,
+      help: "The merged version can't be read right now (GitHub or network hiccup). Refresh to retry — the tag field will fill in once it's readable.",
+    };
+  }
+  if (repository.declaredVersion) {
+    return {
+      prefill: `v${repository.declaredVersion.replace(/^v/i, "")}`,
+      help: `This repository declares version ${repository.declaredVersion} — the field is pre-filled to match. Edit it to tag differently (you will be asked to confirm a mismatch), or clear it to skip tagging.`,
+    };
+  }
+  if (repository.declaredVersion === null) {
+    return {
+      prefill: null,
+      help: "This repository declares no version in its own files. Enter a tag to create one, or leave empty to skip tagging.",
+    };
+  }
+  // The field is absent entirely — a server built before version enrichment.
+  // Say that, never "declares no version" (which would be a claim about the
+  // repository this client cannot back).
+  return {
+    prefill: null,
+    help: "Declared-version lookup needs a server restart on the current build. Empty tag field = no tag is created.",
+  };
+}
+
 async function fillDeclaredTagVersions(run) {
   if (!run?.delivery?.repositories?.length) return;
   try {
@@ -1193,18 +1232,9 @@ async function fillDeclaredTagVersions(run) {
         if (help && repository.status === "tagged") help.textContent = `Tagged ${repository.releaseTag || ""}.`;
         continue;
       }
-      if (repository.declaredVersion) {
-        const proposed = `v${repository.declaredVersion.replace(/^v/i, "")}`;
-        if (!input.value && document.activeElement !== input) input.value = proposed;
-        if (help) help.textContent = `This repository declares version ${repository.declaredVersion} — the field is pre-filled to match. Edit it to tag differently (you will be asked to confirm a mismatch), or clear it to skip tagging.`;
-      } else if (repository.declaredVersion === null && help) {
-        help.textContent = "This repository declares no version in its own files. Enter a tag to create one, or leave empty to skip tagging.";
-      } else if (help) {
-        // The field is absent entirely — a server built before version
-        // enrichment. Say that, never "declares no version" (which would be a
-        // claim about the repository this client cannot back).
-        help.textContent = "Declared-version lookup needs a server restart on the current build. Empty tag field = no tag is created.";
-      }
+      const caption = deliveryTagCaption(repository);
+      if (caption.prefill && !input.value && document.activeElement !== input) input.value = caption.prefill;
+      if (help) help.textContent = caption.help;
     }
   } catch {
     // Enrichment is a nicety; the buttons stay honest without it.

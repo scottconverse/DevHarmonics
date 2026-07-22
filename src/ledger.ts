@@ -170,7 +170,7 @@ interface CheckRow {
   duration_ms: number;
 }
 
-export const LEDGER_SCHEMA_VERSION = 29;
+export const LEDGER_SCHEMA_VERSION = 30;
 
 export const REPOSITORY_ROLES = [
   "umbrella",
@@ -1249,6 +1249,40 @@ const MIGRATIONS: readonly LedgerMigration[] = [
       if (!columns.has("lens")) database.exec("ALTER TABLE review_receipts ADD COLUMN lens TEXT CHECK(lens IN ('artifact', 'claims') OR lens IS NULL);");
     },
   },
+  {
+    version: 30,
+    name: "delivery-merge-and-tag",
+    apply(database) {
+      // SQLite cannot widen a CHECK constraint in place; rebuild the table
+      // with the merged/tagged states (owner-corrected rule 2026-07-22: the
+      // cockpit completes the delivery — merge and tag are owner-receipted
+      // actions, never automatic).
+      database.exec(`
+        ALTER TABLE delivery_repositories RENAME TO delivery_repositories_v27;
+        CREATE TABLE delivery_repositories (
+          run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+          repository_id TEXT NOT NULL,
+          local_path TEXT NOT NULL,
+          base_branch TEXT NOT NULL,
+          base_commit TEXT NOT NULL,
+          head_commit TEXT NOT NULL,
+          branch TEXT NOT NULL,
+          remote_url TEXT,
+          status TEXT NOT NULL CHECK(status IN ('prepared', 'branch_pushed', 'draft_pr_created', 'merged', 'tagged', 'failed')),
+          pull_request_url TEXT,
+          approval_id TEXT,
+          error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (run_id, repository_id)
+        );
+        INSERT INTO delivery_repositories SELECT * FROM delivery_repositories_v27;
+        DROP TABLE delivery_repositories_v27;
+        CREATE INDEX IF NOT EXISTS delivery_repositories_status
+          ON delivery_repositories(run_id, status);
+      `);
+    },
+  },
 ];
 
 function summarizeGoal(goal: string, maxLength = 180): string {
@@ -2111,11 +2145,15 @@ export class Ledger {
     }));
     const status: DeliveryRepositoryStatus = repositories.some((repository) => repository.status === "failed")
       ? "failed"
-      : repositories.every((repository) => repository.status === "draft_pr_created")
-        ? "draft_pr_created"
-        : repositories.every((repository) => ["branch_pushed", "draft_pr_created"].includes(repository.status))
-          ? "branch_pushed"
-          : "prepared";
+      : repositories.every((repository) => repository.status === "tagged")
+        ? "tagged"
+        : repositories.every((repository) => ["merged", "tagged"].includes(repository.status))
+          ? "merged"
+          : repositories.every((repository) => ["draft_pr_created", "merged", "tagged"].includes(repository.status))
+            ? "draft_pr_created"
+            : repositories.every((repository) => ["branch_pushed", "draft_pr_created", "merged", "tagged"].includes(repository.status))
+              ? "branch_pushed"
+              : "prepared";
     return { runId, status, repositories };
   }
 

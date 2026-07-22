@@ -1672,7 +1672,7 @@ test("approved delivery pushes the exact reviewed branch before creating a draft
     assert.equal(delivered.status, "draft_pr_created");
     assert.equal(delivered.pullRequestUrl, "https://github.com/civicsuite/example/pull/42");
     assert.ok(commands.some((item) => item.command === "gh" && item.args.includes("--draft") && item.args.includes("--head") && item.args.includes("devharmonics/12345678")));
-    assert.equal(commands.some((item) => item.args.includes("merge")), false, "delivery must expose no implicit merge operation");
+    assert.equal(commands.some((item) => item.args.includes("merge")), false, "push and draft-PR actions never merge implicitly — merging is its own owner-receipted action");
     assert.deepEqual(ledger.listToolPolicyReceipts(runId).filter((item) => item.outcome === "allow").map((item) => item.approvalId), ["approval-push", "approval-pr"]);
     assert.equal(ledger.getRun(runId)?.delivery?.repositories[0]?.headCommit, "b".repeat(40));
   } finally {
@@ -2569,6 +2569,83 @@ test("the assembled claims-lens chunk prompt demands the manifest the header pro
   assert.ok(!/claimedChanges/.test(seen[0]!), "non-claims reviews keep the findings-only contract");
 });
 
+test("delivery completes from the cockpit: receipted merge and tag, never blind", async () => {
+  // Owner-corrected rule (2026-07-22): "never auto-merge" means never WITHOUT
+  // the owner's approval — the cockpit must be able to run the whole delivery.
+  // merge_pr shows PR state and refuses conflicts; tag_release is an explicit
+  // versioned go/no-go; each step is its own external-write receipt.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-delivery-complete-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  const commands: Array<{ command: string; args: string[] }> = [];
+  let mergeable = "CONFLICTING";
+  let prState = "OPEN";
+  const runner = async (request: { command: string; args: string[] }) => {
+    commands.push({ command: request.command, args: [...request.args] });
+    const joined = request.args.join(" ");
+    if (request.command === "git" && joined === "remote get-url origin") {
+      return { stdout: "https://github.com/civicsuite/example.git\n", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "create") {
+      return { stdout: "https://github.com/civicsuite/example/pull/7\n", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "view" && joined.includes("state,isDraft,mergeable")) {
+      return { stdout: JSON.stringify({ state: prState, isDraft: true, mergeable }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "view" && joined.includes("mergeCommit")) {
+      return { stdout: JSON.stringify({ state: "MERGED", mergeCommit: { oid: "c".repeat(40) } }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "merge") prState = "MERGED";
+    return { stdout: "", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+  };
+  try {
+    const runId = ledger.createRun("Complete the delivery", root);
+    ledger.setRunStatus(runId, "running");
+    ledger.setRunStatus(runId, "ready", "READY");
+    ledger.prepareDeliveryRepository({ runId, repositoryId: "repo:example", localPath: root, baseBranch: "main", baseCommit: "a".repeat(40), headCommit: "b".repeat(40), branch: "devharmonics/777" });
+    const service = new DeliveryService(ledger, runner as never);
+    const config = structuredClone(defaultConfig);
+    config.runPolicy.allowExternalWrites = true;
+    const approval = (id: string) => ({ id, kind: "external_write" as const, approvedBy: "local-owner", approvedAt: new Date().toISOString() });
+
+    await assert.rejects(
+      () => service.execute({ runId, repositoryId: "repo:example", action: "merge_pr", config, approval: approval("approval-merge") }),
+      /draft pull request first/i,
+      "merge requires the PR to exist",
+    );
+    await service.execute({ runId, repositoryId: "repo:example", action: "push_branch", config, approval: approval("approval-push") });
+    await service.execute({ runId, repositoryId: "repo:example", action: "create_draft_pr", config, approval: approval("approval-pr") });
+
+    await assert.rejects(
+      () => service.execute({ runId, repositoryId: "repo:example", action: "merge_pr", config, approval: approval("approval-merge") }),
+      /not mergeable|conflict/i,
+      "a conflicting PR is never merged blind",
+    );
+    mergeable = "MERGEABLE";
+    const merged = await service.execute({ runId, repositoryId: "repo:example", action: "merge_pr", config, approval: approval("approval-merge") });
+    assert.equal(merged.status, "merged");
+    assert.ok(commands.some((item) => item.command === "gh" && item.args[1] === "ready"), "a draft PR is marked ready before merging");
+    assert.ok(commands.some((item) => item.command === "gh" && item.args[1] === "merge" && item.args.includes("--merge")));
+
+    await assert.rejects(
+      () => service.execute({ runId, repositoryId: "repo:example", action: "tag_release", tag: "bad tag!", config, approval: approval("approval-tag") }),
+      /tag/i,
+      "an invalid tag name is refused",
+    );
+    const tagged = await service.execute({ runId, repositoryId: "repo:example", action: "tag_release", tag: "v0.9.9", config, approval: approval("approval-tag") });
+    assert.equal(tagged.status, "tagged");
+    assert.ok(commands.some((item) => item.command === "git" && item.args[0] === "tag" && item.args.includes("v0.9.9") && item.args.includes("c".repeat(40))), "the tag lands on the actual merge commit");
+    assert.ok(commands.some((item) => item.command === "git" && item.args.join(" ").includes("push origin refs/tags/v0.9.9")));
+    assert.deepEqual(
+      ledger.listToolPolicyReceipts(runId).filter((item) => item.outcome === "allow").map((item) => item.approvalId),
+      ["approval-push", "approval-pr", "approval-merge", "approval-merge", "approval-tag"],
+      "every consequential step carries its own owner receipt — including the conflict-refused merge attempt, which stays in the trail as evidence",
+    );
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("verification-integrity gate fails closed on test weakening and reports bounded evidence", async () => {
   const integrityPath = "../src/verification-integrity.js";
   const integrityModule = await import(integrityPath).catch(() => ({})) as Record<string, any>;
@@ -3088,6 +3165,7 @@ test("ledger upgrades a v0.1 database transactionally and preserves a pre-migrat
           { version: 27, name: "approved-delivery-handoffs" },
           { version: 28, name: "live-run-steering" },
           { version: 29, name: "review-receipt-lens" },
+          { version: 30, name: "delivery-merge-and-tag" },
         ],
       );
     } finally {
@@ -4538,7 +4616,7 @@ test("steering directives persist with actor, target, disposition, and supersede
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-steering-ledger-"));
   const ledger = new Ledger(path.join(root, "devharmonics.db"));
   try {
-    assert.equal(LEDGER_SCHEMA_VERSION, 29, "review-receipt lens advances the ledger schema");
+    assert.equal(LEDGER_SCHEMA_VERSION, 30, "delivery merge/tag states advance the ledger schema");
     const runId = ledger.createRun("Steer me", root);
     ledger.savePlan(runId, {
       summary: "One task",

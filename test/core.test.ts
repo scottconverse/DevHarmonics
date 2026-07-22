@@ -2475,11 +2475,16 @@ test("claims-lens reviews route only to adapters that can structurally deny tool
   // sandbox modes govern writes, not read scope; Gemini's add-dir boundary is
   // undemonstrated. Tool-less transports and claude's --disallowedTools are in.
   const providersModule = await import("../src/providers.js") as Record<string, any>;
-  assert.equal(providersModule.providerSupportsToolDenial("claude", "subscription_cli"), true);
-  assert.equal(providersModule.providerSupportsToolDenial("codex", "subscription_cli"), false);
-  assert.equal(providersModule.providerSupportsToolDenial("gemini", "subscription_cli"), false);
-  assert.equal(providersModule.providerSupportsToolDenial("ollama", "local"), true);
-  assert.equal(providersModule.providerSupportsToolDenial("openrouter", "api"), true);
+  assert.equal(providersModule.providerSupportsToolDenial("codex", "subscription_cli", false), false);
+  assert.equal(providersModule.providerSupportsToolDenial("gemini", "subscription_cli", false), false);
+  assert.equal(providersModule.providerSupportsToolDenial("ollama", "local", true), true);
+  assert.equal(providersModule.providerSupportsToolDenial("openrouter", "api", true), true);
+  // Codex R4-001: --safe-mode does not disable admin-managed POLICY hooks, so
+  // claude's denial capability holds only on a machine attested free of
+  // managed policy settings.
+  assert.equal(providersModule.providerSupportsToolDenial("claude", "subscription_cli", false), true);
+  assert.equal(providersModule.providerSupportsToolDenial("claude", "subscription_cli", true), false, "managed policy present means argv cannot close the hook surface");
+  assert.equal(typeof providersModule.claudeManagedPolicyPresent, "function", "the attestation is a real filesystem check, not an assumption");
 });
 
 test("the assembled claims-lens chunk prompt demands the manifest the header promised", async () => {

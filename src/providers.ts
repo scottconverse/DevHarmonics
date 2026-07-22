@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import type {
   ProviderConfig,
   ProviderName,
@@ -272,19 +273,41 @@ abstract class CliProvider implements ProviderAdapter {
 }
 
 /**
+ * Platform locations of Claude Code's admin-managed policy settings. Managed
+ * policy can configure hooks that `--safe-mode` explicitly does NOT disable
+ * (Codex R4-001: "Admin-managed (policy) settings still apply"), so their
+ * presence means argv alone cannot close the ambient executable surface.
+ */
+const CLAUDE_MANAGED_POLICY_PATHS = process.platform === "win32"
+  ? ["C:\\ProgramData\\ClaudeCode\\managed-settings.json"]
+  : process.platform === "darwin"
+    ? ["/Library/Application Support/ClaudeCode/managed-settings.json"]
+    : ["/etc/claude-code/managed-settings.json"];
+
+export function claudeManagedPolicyPresent(): boolean {
+  return CLAUDE_MANAGED_POLICY_PATHS.some((candidate) => existsSync(candidate));
+}
+
+/**
  * Whether an adapter can STRUCTURALLY deny its file/shell tools for a single
  * invocation (Codex R2-001). Claims-lens reviews are routed only to adapters
  * that can: prompt wording and cwd placement are not enforcement.
- * - claude: yes — headless --tools "" empties the built-in tool set, with
- *   --strict-mcp-config and --safe-mode rejecting ambient MCP/plugin tools.
+ * - claude: conditional — headless --tools "" empties the built-in tool set,
+ *   --strict-mcp-config rejects ambient MCP, --safe-mode disables ordinary
+ *   customization; but admin-managed POLICY hooks survive all three, so the
+ *   capability holds only on a machine attested free of managed policy.
  * - local (Ollama HTTP): yes — the transport has no tools at all.
  * - api (OpenRouter): yes — chat completion, no tool execution surface.
  * - codex: no — its sandbox modes govern writes, not read scope.
  * - gemini: no until its --add-dir boundary is demonstrated by execution.
  */
-export function providerSupportsToolDenial(provider: string, transport: string): boolean {
+export function providerSupportsToolDenial(
+  provider: string,
+  transport: string,
+  managedPolicyPresent: boolean = claudeManagedPolicyPresent(),
+): boolean {
   if (transport === "local" || transport === "api") return true;
-  return provider === "claude";
+  return provider === "claude" && !managedPolicyPresent;
 }
 
 export class CodexProvider extends CliProvider {
@@ -323,10 +346,13 @@ export class ClaudeProvider extends CliProvider {
       request.writeAccess ? "acceptEdits" : "plan",
       // Plan mode blocks writes but not reads, and Claude Code's read scope is
       // not bound to its cwd — a claims-lens review must shut the tool surface
-      // down completely, not deny an enumerated list (Codex R3-001: a named
-      // deny list is not a closed set). --tools "" disables every built-in
-      // tool; --strict-mcp-config with no servers rejects ambient MCP tools;
-      // --safe-mode disables plugins, hooks, and other ambient customization.
+      // down, not deny an enumerated list (Codex R3-001: a named deny list is
+      // not a closed set). --tools "" disables every built-in tool;
+      // --strict-mcp-config with no servers rejects ambient MCP tools;
+      // --safe-mode disables ordinary customization (plugins, hooks, skills).
+      // BOUNDARY (Codex R4-001): admin-managed POLICY hooks survive all three
+      // flags — providerSupportsToolDenial therefore grants this capability
+      // only on machines attested free of managed policy settings.
       ...(request.withoutRepositoryTools
         ? ["--tools", "", "--strict-mcp-config", "--safe-mode"]
         : []),

@@ -310,45 +310,46 @@
 
         <section id="setup-view" class="workspace-view hidden" aria-labelledby="setup-title">
           <div class="view-heading">
-            <div><p class="eyebrow">CONTROL PLANE</p><h2 id="setup-title">Connections and run policy</h2></div>
-            <button id="refresh-setup" class="secondary" type="button">Refresh diagnostics</button>
+            <div><p class="eyebrow">PROJECT SETTINGS</p><h2 id="setup-title">Connect your AI providers and set what the team is allowed to do</h2><p class="field-help">The rules every run follows: who plans, who builds, who reviews, and what the team may do without asking you.</p></div>
+            <button id="refresh-setup" class="secondary" type="button" title="Re-tests whether each connected AI tool is signed in and reachable. Does not change any setting.">Recheck sign-in status</button>
           </div>
           <div id="connection-cards" class="connection-grid"></div>
           <form id="settings-form" class="panel settings-panel">
-            <div class="panel-heading"><div><span class="step">02</span><h2>Team defaults</h2></div><span class="muted">No passwords or API keys are stored here.</span></div>
+            <div class="panel-heading"><div><span class="step">02</span><h2>Default team setup</h2></div><span class="muted">No passwords or API keys are stored here.</span></div>
+            <p class="field-help">These are the starting choices for every new run. You can change most of them per run when you describe an objective.</p>
             <div class="settings-grid">
-              <label>Architect<select id="setting-architect" class="input"></select></label>
-              <label>Reviewer<select id="setting-reviewer" class="input"></select></label>
-              <label>Default agents<input id="setting-agents" class="input" type="number" min="1"></label>
-              <label>Autonomy<select id="setting-autonomy" class="input"><option value="observe">Observe only</option><option value="supervised">Supervised</option><option value="bounded">Bounded autonomy</option></select></label>
-              <label>Model scheduling<select id="setting-routing-mode" class="input"><option value="adaptive">Adaptive by task</option><option value="manual">Manual role defaults</option></select></label>
-              <label>Architect model<select id="setting-architect-model" class="input"></select></label>
-              <label>Architect tier<select id="setting-architect-tier" class="input"></select></label>
-              <label>Architect effort<select id="setting-architect-effort" class="input"></select></label>
-              <label>Architect upgrades<select id="setting-architect-upgrade" class="input"><option value="pinned">Pinned exact model</option><option value="track_family">Track qualified family</option></select></label>
-              <label>Worker model<select id="setting-worker-model" class="input"></select></label>
-              <label>Worker tier<select id="setting-worker-tier" class="input"></select></label>
-              <label>Worker effort<select id="setting-worker-effort" class="input"></select></label>
-              <label>Worker upgrades<select id="setting-worker-upgrade" class="input"><option value="pinned">Pinned exact model</option><option value="track_family">Track qualified family</option></select></label>
-              <label>Reviewer model<select id="setting-reviewer-model" class="input"></select></label>
-              <label>Reviewer tier<select id="setting-reviewer-tier" class="input"></select></label>
-              <label>Reviewer effort<select id="setting-reviewer-effort" class="input"></select></label>
-              <label>Reviewer upgrades<select id="setting-reviewer-upgrade" class="input"><option value="pinned">Pinned exact model</option><option value="track_family">Track qualified family</option></select></label>
+              <label>Planner (writes the task plan)<select id="setting-architect" class="input"></select><small class="field-help">Planning needs a signed-in subscription CLI (Codex, Claude Code, or Antigravity) — local models can build and review, but cannot be the architect.</small></label>
+              <label>Reviewer (checks finished work)<select id="setting-reviewer" class="input"></select><small class="field-help">The reviewer looks at each task's result independently of whoever built it and decides pass/fail. Restricted to Claude, Codex, and Antigravity for the same reason as the planner.</small></label>
+              <label>Default number of workers running at once<input id="setting-agents" class="input" type="number" min="1"><small class="field-help">How many AI workers can work in parallel on a new run, by default. Higher runs faster but produces more simultaneous changes to review. You can override this per run.</small></label>
+              <label>Default run mode<select id="setting-autonomy" class="input" aria-describedby="setting-autonomy-help"><option value="observe">Observe only</option><option value="supervised">Supervised</option><option value="bounded">Bounded autonomy</option></select><small id="setting-autonomy-help" class="field-help"></small></label>
+              <label>How models get picked<select id="setting-routing-mode" class="input"><option value="adaptive">Adaptive by task</option><option value="manual">Manual role defaults</option></select><small class="field-help">Adaptive by task — DevHarmonics automatically picks the best qualified model for each task's difficulty and cost. Manual role defaults — always use the exact model and effort level you set below for that role.</small></label>
+              <label>Planner: exact model (optional)<select id="setting-architect-model" class="input"></select><small class="field-help">Leave as "Configured provider default" to let the planner's own CLI pick its normal model. Pin an exact model here to always use that one instead — it can be from a different provider than the Planner choice above.</small></label>
+              <label>Planner: capability level<select id="setting-architect-tier" class="input"></select><small class="field-help">Premium = most capable and most expensive; Economy = fastest and cheapest; Standard = in between. Automatic lets the scheduler choose.</small></label>
+              <label>Planner: how hard it thinks<select id="setting-architect-effort" class="input"></select><small class="field-help">Higher effort can improve plan quality on hard objectives but costs more and takes longer. Only used when Model scheduling is set to Manual role defaults.</small></label>
+              <label>Planner: stay pinned or auto-upgrade<select id="setting-architect-upgrade" class="input"><option value="pinned">Pinned exact model</option><option value="track_family">Track qualified family</option></select><small class="field-help">Pinned exact model — always use exactly the model chosen above, even after a newer version is qualified. Track qualified family — automatically switch to the newest qualified version of the same model line (e.g. a new Claude Sonnet release) once it passes qualification.</small></label>
+              <label>Worker: exact model (optional)<select id="setting-worker-model" class="input"></select><small class="field-help">Leave as "Configured provider default" to let the worker's own CLI pick its normal model. Pin an exact model here to always use that one instead, regardless of which subscription tools are eligible to work below.</small></label>
+              <label>Worker: capability level<select id="setting-worker-tier" class="input"></select><small class="field-help">Premium = most capable and most expensive; Economy = fastest and cheapest; Standard = in between. Automatic lets the scheduler choose.</small></label>
+              <label>Worker: how hard it thinks<select id="setting-worker-effort" class="input"></select><small class="field-help">Higher effort can improve the worker's results on hard tasks but costs more and takes longer. Only used when Model scheduling is set to Manual role defaults.</small></label>
+              <label>Worker: stay pinned or auto-upgrade<select id="setting-worker-upgrade" class="input"><option value="pinned">Pinned exact model</option><option value="track_family">Track qualified family</option></select><small class="field-help">Pinned exact model — always use exactly the model chosen above, even after a newer version is qualified. Track qualified family — automatically switch to the newest qualified version of the same model line once it passes qualification.</small></label>
+              <label>Reviewer: exact model (optional)<select id="setting-reviewer-model" class="input"></select><small class="field-help">Leave as "Configured provider default" to let the reviewer's own CLI pick its normal model. Pin an exact model here to always use that one instead — it can be from a different provider than the Reviewer choice above.</small></label>
+              <label>Reviewer: capability level<select id="setting-reviewer-tier" class="input"></select><small class="field-help">Premium = most capable and most expensive; Economy = fastest and cheapest; Standard = in between. Automatic lets the scheduler choose.</small></label>
+              <label>Reviewer: how hard it thinks<select id="setting-reviewer-effort" class="input"></select><small class="field-help">Higher effort can improve the reviewer's judgment on hard tasks but costs more and takes longer. Only used when Model scheduling is set to Manual role defaults.</small></label>
+              <label>Reviewer: stay pinned or auto-upgrade<select id="setting-reviewer-upgrade" class="input"><option value="pinned">Pinned exact model</option><option value="track_family">Track qualified family</option></select><small class="field-help">Pinned exact model — always use exactly the model chosen above, even after a newer version is qualified. Track qualified family — automatically switch to the newest qualified version of the same model line once it passes qualification.</small></label>
             </div>
-            <fieldset><legend>Eligible subscription workers</legend><div id="setting-workers" class="toggles"></div></fieldset>
+            <fieldset><legend>Subscription workers</legend><p class="field-help">The signed-in provider CLIs that can take implementation work. Local models join the worker pool separately: activate and qualify them on the Models page.</p><div id="setting-workers" class="toggles"></div></fieldset>
             <div class="policy-list">
-              <label><input id="setting-plan-approval" type="checkbox"> Require plan approval before execution</label>
-              <label><input id="setting-external-writes" type="checkbox"> Allow external writes when a tool policy permits them</label>
-              <label><input id="setting-paid-api" type="checkbox"> Allow paid API runtimes for this project</label>
-              <label><input id="setting-fallback" type="checkbox"> Allow qualified fallback when the assigned runtime is unavailable</label>
+              <label><input id="setting-plan-approval" type="checkbox"><span>Wait for my approval before doing any work<small class="field-help">Every run stops after planning until you approve the exact plan. Off = supervised runs still stop at the approval points below; nothing ever writes outside your machine without a per-action approval.</small></span></label>
+              <label><input id="setting-external-writes" type="checkbox"><span>Allow GitHub delivery actions (push, PR, merge, tag)<small class="field-help">Master switch for the four delivery actions. Even when on, each individual push, PR, merge, or tag still needs your explicit approval click — this switch only makes those buttons available.</small></span></label>
+              <label><input id="setting-paid-api" type="checkbox"><span>Allow OpenRouter (pay-per-use) models for this project<small class="field-help">This is one of two switches that must both be on before any paid API model can be used — the other is "Enable OpenRouter connection" below. Your subscription tools (Claude, Codex, Gemini) are unaffected either way.</small></span></label>
+              <label><input id="setting-fallback" type="checkbox"><span>If your chosen model is unavailable, let DevHarmonics substitute a qualified one<small class="field-help">If the exact model or tool you assigned to a role is signed out, over its rate limit, or temporarily cooling down, this lets DevHarmonics automatically use a different model that has already passed the same qualification checks, instead of stopping the run.</small></span></label>
             </div>
             <section class="api-policy">
-              <div><strong>OpenRouter paid fallback</strong><p class="muted">OAuth connection alone never enables spending. DevHarmonics chooses the exact model and performs fallback itself.</p></div>
+              <div><strong>OpenRouter (pay-per-use models)</strong><p class="muted">OpenRouter is a separate, pay-per-use service — unlike Claude/Codex/Gemini above, it charges your card per request instead of a flat subscription. Everything in this section is off by default. Connecting your account does not spend money by itself. Spending requires the checkbox below.</p></div>
               <div class="settings-grid">
-                <label><span><input id="openrouter-enabled" type="checkbox"> Enable OpenRouter connection</span></label>
-                <label><span><input id="openrouter-paid-fallback" type="checkbox"> Allow paid API fallback</span></label>
-                <label>Per-run limit (USD)<input id="openrouter-run-limit" class="input" type="number" min="0" step="0.01"></label>
-                <label>Monthly limit (USD)<input id="openrouter-month-limit" class="input" type="number" min="0" step="0.01"></label>
+                <label><span><input id="openrouter-enabled" type="checkbox"> Allow OpenRouter to be used at all</span><small class="field-help">Turn this on before connecting your account. It doesn't connect anything by itself — click "Connect OpenRouter with OAuth" below to actually sign in.</small></label>
+                <label><span><input id="openrouter-paid-fallback" type="checkbox"> Allow spending on OpenRouter models</span><small class="field-help">Must be on, together with "Allow OpenRouter (pay-per-use) models for this project" above, before DevHarmonics will ever use a paid OpenRouter model — for example if your subscription tools are all unavailable and fallback is allowed.</small></label>
+                <label>Per-run limit (USD)<input id="openrouter-run-limit" class="input" type="number" min="0" step="0.01"><small class="field-help">The most this run is allowed to spend on OpenRouter models before it stops.</small></label>
+                <label>Monthly limit (USD)<input id="openrouter-month-limit" class="input" type="number" min="0" step="0.01"><small class="field-help">The most OpenRouter can spend across all runs in a calendar month.</small></label>
               </div>
               <div class="model-actions"><button id="openrouter-connect" class="secondary" type="button">Connect OpenRouter with OAuth</button><button id="openrouter-disconnect" class="secondary" type="button">Disconnect</button><span id="openrouter-status" class="muted"></span></div>
             </section>
@@ -357,31 +358,35 @@
         </section>
 
         <section id="models-view" class="workspace-view hidden" aria-labelledby="models-title">
-          <div class="view-heading"><div><p class="eyebrow">MODEL FLEET</p><h2 id="models-title">Known models</h2></div><button id="refresh-models" class="secondary" type="button">Refresh fleet</button></div>
+          <div class="view-heading"><div><p class="eyebrow">AI MODELS</p><h2 id="models-title">Known models</h2><p class="field-help">Every model DevHarmonics can use, what each has proven it can do, and why work gets routed where it does. Nothing here spends money or changes code by itself.</p></div><button id="refresh-models" class="secondary" type="button" title="Asks each connected provider what models it currently offers, and updates this list. Existing qualifications are not affected.">Check for new models</button></div>
           <div id="model-summary" class="metrics"></div>
+          <p class="field-help">Known models: every model DevHarmonics has seen from a connected provider or you added manually (excludes retired models). Passed a role check: has passed at least one check proving it can do a specific job (planning, working, or reviewing). Ready to be used: turned on, currently qualified, and eligible to be picked for a run right now. Estimated local capacity: a rough guess at how many local-model tasks can run at once on this machine — an estimate DevHarmonics uses for planning, not something it enforces.</p>
           <div id="runtime-list" class="connection-grid"></div>
-          <div id="model-filter-bar" class="panel joined"><input id="model-filter" class="input" placeholder="Filter known models"><select id="model-status-filter" class="input"><option value="all">All current models</option><option value="active">Active</option><option value="qualified">Qualified</option><option value="stale">Stale</option><option value="unqualified">Unqualified</option></select></div>
+          <div id="model-filter-bar" class="panel joined"><input id="model-filter" class="input" placeholder="Filter known models"><select id="model-status-filter" class="input"><option value="all">All current models</option><option value="active">Ready to be used</option><option value="qualified">Passed a role check</option><option value="stale">Needs re-checking</option><option value="unqualified">Not yet checked</option></select></div>
+          <p class="field-help">Qualifying runs a small test task through the model to confirm it can safely do a specific job before DevHarmonics will use it. Higher thinking effort can improve results on hard tasks but costs more and is slower. Model info is "verified" when it comes from the provider's own published specs, or "inferred" when DevHarmonics estimated it from limited data.</p>
+          <p class="field-help">Status meanings: <strong>Not checked yet</strong> — never tested · <strong>Needs re-checking</strong> — the provider changed the model since it last passed · <strong>Excluded</strong> — you turned this model off on purpose · <strong>Needs benchmark</strong> — needs an extra accuracy test before it can be used · <strong>Not qualified</strong> — failed, or hasn't passed a role check yet · <strong>Qualified (inactive)</strong> — passed its check but turned off · <strong>Active</strong> — DevHarmonics can use this model now.</p>
           <div id="model-list" class="model-grid"></div>
           <section id="openrouter-panel" class="panel settings-panel">
-            <div class="panel-heading"><div><span class="step">API</span><h2>OpenRouter catalog</h2></div><span class="muted">Searching is free. Importing a model does not qualify it or enable paid routing.</span></div>
-            <div class="joined"><input id="openrouter-model-query" class="input" placeholder="Search exact OpenRouter models"><button id="openrouter-search" class="secondary" type="button">Search catalog</button></div>
+            <div class="panel-heading"><div><span class="step">API</span><h2>Search OpenRouter's model catalog</h2></div><span class="muted">Searching is free. Importing a model does not qualify it or enable paid routing.</span></div>
+            <div class="joined"><input id="openrouter-model-query" class="input" placeholder="Search by model name"><button id="openrouter-search" class="secondary" type="button">Search catalog</button></div>
             <div id="openrouter-catalog" class="model-grid"></div>
           </section>
           <form id="runtime-form" class="panel settings-panel">
-            <div class="panel-heading"><div><span class="step">+</span><h2>Add a local Ollama runtime</h2></div><span class="muted">Loopback endpoints only. DevHarmonics never downloads models automatically.</span></div>
+            <div class="panel-heading"><div><span class="step">+</span><h2>Connect a local model server</h2></div><span class="muted">Only works with a server running on this machine. DevHarmonics never downloads models automatically.</span></div>
+            <p class="field-help">Ollama is free software that runs AI models directly on this machine, with no subscription and no per-request cost. Use this if you're already running one.</p>
             <div class="settings-grid">
-              <label>Runtime ID<input id="runtime-id" class="input" required pattern="[A-Za-z0-9][A-Za-z0-9_-]*" placeholder="civicsuite"></label>
+              <label>Short name (for DevHarmonics to refer to it by)<input id="runtime-id" class="input" required pattern="[A-Za-z0-9][A-Za-z0-9_-]*" placeholder="civicsuite"></label>
               <label>Display name<input id="runtime-display" class="input" required placeholder="CivicSuite Ollama"></label>
-              <label>Base URL<input id="runtime-url" class="input" required type="url" value="http://127.0.0.1:15434"></label>
+              <label>Server address<input id="runtime-url" class="input" required type="url" value="http://127.0.0.1:15434"><small class="field-help">The address Ollama is listening on. The default value works for a typical local install — change it only if you configured a different port.</small></label>
             </div>
-            <div class="composer-actions"><p class="muted">Refresh Fleet probes configured runtimes.</p><button class="primary" type="submit">Add runtime</button></div>
+            <div class="composer-actions"><p class="muted">Clicking "Check for new models" above will also re-check this connection.</p><button class="primary" type="submit">Connect server</button></div>
           </form>
           <form id="model-form" class="panel settings-panel">
-            <div class="panel-heading"><div><span class="step">+</span><h2>Add a known model</h2></div><span class="muted">Manual entries remain unschedulable until verified and qualified.</span></div>
+            <div class="panel-heading"><div><span class="step">+</span><h2>Add a model manually</h2></div><span class="muted">A manually added model can't be used until it passes qualification, same as any other model.</span></div>
             <div class="settings-grid">
               <label>Connection<select id="model-connection" class="input" required></select></label>
               <label>Model identifier<input id="model-id" class="input" required placeholder="provider:model-name"></label>
-              <label>Canonical name<input id="model-canonical" class="input" required placeholder="model-name"></label>
+              <label>Base model name (without provider prefix)<input id="model-canonical" class="input" required placeholder="model-name"></label>
               <label>Display name<input id="model-display" class="input" required placeholder="Model Name"></label>
             </div>
             <div class="composer-actions"><p id="model-message" class="muted" role="status"></p><button class="primary" type="submit">Add model</button></div>

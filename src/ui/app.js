@@ -219,18 +219,22 @@ function taskRouting(run, taskId) {
   return [...(run?.events || [])].reverse().find((event) => event.kind === "task.started" && event.data?.taskId === taskId && event.data?.routing)?.data?.routing || null;
 }
 
+// Slice A pattern #4: one canonical phrase for unverified model identity,
+// used everywhere DevHarmonics shows a model it asked for but hasn't had
+// confirmed back — "the provider did not report which exact model ran;
+// DevHarmonics shows what was requested and never claims more."
 function routingIdentity(routing, fallbackProvider) {
   if (!routing) return providerDisplayName(fallbackProvider);
   const connection = connectionDisplayName(routing.connectionId, routing.provider || fallbackProvider);
   const requestedModelId = routing.model?.requestedModelId;
-  return requestedModelId ? `${connection} / ${modelDisplayName(requestedModelId)} (requested)` : `${connection} / provider default (actual model unverified)`;
+  return requestedModelId ? `${connection} / ${modelDisplayName(requestedModelId)} — requested model (identity unverified)` : `${connection} / provider default — requested model (identity unverified)`;
 }
 
 function recordedModelIdentity(provider, modelId, resolution, connectionId) {
   const connection = connectionDisplayName(connectionId, provider);
   const model = modelDisplayName(modelId);
-  if (resolution === "requested_unverified") return `${connection} / ${model} requested (actual model unverified)`;
-  if (resolution === "provider_default_unresolved") return `${connection} / provider default (actual model unverified)`;
+  if (resolution === "requested_unverified") return `${connection} / ${model} — requested model (identity unverified)`;
+  if (resolution === "provider_default_unresolved") return `${connection} / provider default — requested model (identity unverified)`;
   return `${connection} / ${model}`;
 }
 
@@ -338,15 +342,29 @@ function syncProjectPathFromRepositorySelection() {
   if (selected.length === 1 && selected[0].localPath) $("#project-path").value = selected[0].localPath;
 }
 
+// Slice A: "unknown"/"unmeasured" are placeholder values the backend has
+// never actually verified — never print them with the same visual weight as
+// a real, checked fact (doctor.ts:16-17, openrouter.ts:318-319, ollama.ts:127-128).
+function measuredValueMarkup(value) {
+  if (value === "unknown" || value === "unmeasured") return '<span class="muted">not yet measured</span>';
+  return escapeHtml(value);
+}
+
+const CONNECTION_KIND_LABELS = {
+  subscription_cli: "Subscription tool",
+  api: "Pay-per-use API",
+  local: "Local model",
+};
+
 function renderConnections() {
   $("#connection-cards").innerHTML = state.connections.map((connection) => {
     const diagnostics = connection.metadata?.diagnostics || [];
     const firstProblem = diagnostics.find((item) => item.state === "fail" || item.state === "unknown");
     return `<article class="connection-card ${connection.available ? "ready" : "attention"}">
-      <div class="connection-head"><div><span class="connection-kind">${escapeHtml(connection.transport.replaceAll("_", " "))}</span><h3>${escapeHtml(connection.displayName)}</h3></div><span class="auth-label ${connection.available ? "ready" : "required"}">${connection.available ? "Ready" : "Setup"}</span></div>
+      <div class="connection-head"><div><span class="connection-kind">${escapeHtml(CONNECTION_KIND_LABELS[connection.transport] || connection.transport.replaceAll("_", " "))}</span><h3>${escapeHtml(connection.displayName)}</h3></div><span class="auth-label ${connection.available ? "ready" : "required"}">${connection.available ? "Ready" : "Needs sign-in"}</span></div>
       <p>${escapeHtml(firstProblem?.detail || connection.metadata?.summary || "Connection is ready")}</p>
-      <dl><div><dt>Runtime</dt><dd>${escapeHtml(connection.runtimeVersion || "Not detected")}</dd></div><div><dt>Entitlement</dt><dd>${escapeHtml(connection.entitlement)}</dd></div><div><dt>Capacity</dt><dd>${escapeHtml(connection.capacity)}</dd></div></dl>
-      ${connection.transport === "subscription_cli" ? `<label class="connection-enable"><input type="checkbox" data-connection-provider="${escapeHtml(connection.provider)}" ${connection.enabled ? "checked" : ""}> Eligible for runs</label>` : `<span class="muted">${connection.transport === "api" ? "Controlled by the paid API policy below" : "Controlled from the local runtime configuration"}</span>`}
+      <dl><div><dt>Installed version</dt><dd>${escapeHtml(connection.runtimeVersion || "Not detected")}</dd></div><div><dt>Entitlement</dt><dd>${measuredValueMarkup(connection.entitlement)}</dd></div><div><dt>Capacity</dt><dd>${measuredValueMarkup(connection.capacity)}</dd></div></dl>
+      ${connection.transport === "subscription_cli" ? `<label class="connection-enable"><input type="checkbox" data-connection-provider="${escapeHtml(connection.provider)}" ${connection.enabled ? "checked" : ""}> Allow this tool to work on runs</label><p class="field-help">Unchecked tools are skipped everywhere — as architect, reviewer, or worker — even if they're signed in.</p>` : `<span class="muted">${connection.transport === "api" ? "Turned on/off using the OpenRouter settings further down this page" : "Managed on the Models page, not here"}</span>`}
     </article>`;
   }).join("");
 }
@@ -362,6 +380,7 @@ function renderSettings() {
   $("#setting-autonomy").value = config.runPolicy.autonomy;
   $("#run-autonomy").value = config.runPolicy.autonomy;
   renderRunAutonomyHelp();
+  renderRunAutonomyHelp("setting-autonomy", "setting-autonomy-help");
   $("#setting-plan-approval").checked = config.runPolicy.requirePlanApproval;
   $("#setting-external-writes").checked = config.runPolicy.allowExternalWrites;
   $("#setting-paid-api").checked = config.runPolicy.allowPaidApi;
@@ -384,10 +403,10 @@ function renderSettings() {
     const configuredModelIsEligible = eligibleModels.some((model) => model.id === configuredModel?.id);
     const configuredConnection = state.connections.find((item) => item.id === configuredModel?.connectionId);
     const unavailableConfiguredOption = configuredModel && !configuredModelIsEligible
-      ? `<option value="${escapeHtml(configuredModel.id)}" disabled>${escapeHtml(configuredConnection?.displayName || configuredModel.connectionId)} / ${escapeHtml(configuredModel.displayName)} (not currently role-qualified)</option>`
+      ? `<option value="${escapeHtml(configuredModel.id)}" disabled>${escapeHtml(configuredConnection?.displayName || configuredModel.connectionId)} / ${escapeHtml(configuredModel.displayName)} (not currently role-qualified — hasn't passed the check for this role; see Models)</option>`
       : "";
     const modelOptions = [
-      '<option value="">Configured provider default</option>',
+      '<option value="">Let the tool choose its own default model</option>',
       ...eligibleModels.map((model) => {
         const connection = state.connections.find((item) => item.id === model.connectionId);
         return `<option value="${escapeHtml(model.id)}">${escapeHtml(connection?.displayName || model.connectionId)} / ${escapeHtml(model.displayName)}</option>`;
@@ -411,19 +430,25 @@ function renderOpenRouterStatus() {
   const status = $("#openrouter-status");
   if (!status) return;
   status.textContent = state.openRouter.connected
-    ? `Connected. Provider credit/limit status is checked before paid routing.`
+    ? `Connected. DevHarmonics checks your OpenRouter balance and limits before spending.`
     : "Disconnected. No paid API request can run.";
   $("#openrouter-connect").classList.toggle("hidden", state.openRouter.connected);
   $("#openrouter-disconnect").classList.toggle("hidden", !state.openRouter.connected);
 }
 
-function renderRunAutonomyHelp() {
+// Slice A: the composer's "Run mode" and Setup's "Default run mode" are the
+// identical control — the same live consequence line is reused for both
+// instead of leaving Setup's copy unexplained (DESIGN-DECISIONS.md).
+function renderRunAutonomyHelp(selectId = "run-autonomy", helpId = "run-autonomy-help") {
   const help = {
-    observe: "Read-only diagnostics and evidence. No repository changes.",
-    supervised: "Agents may prepare repository changes after you approve the plan.",
-    bounded: "Agents may execute within the configured tool and repository boundaries.",
+    observe: "Observe only — read-only diagnostics and evidence, no repository changes.",
+    supervised: "Supervised — agents may prepare repository changes after you approve the plan.",
+    bounded: "Bounded autonomy — agents may execute within the configured tool and repository boundaries.",
   };
-  $("#run-autonomy-help").textContent = help[$("#run-autonomy").value] || help.supervised;
+  const select = $(`#${selectId}`);
+  const helpElement = $(`#${helpId}`);
+  if (!select || !helpElement) return;
+  helpElement.textContent = help[select.value] || help.supervised;
 }
 
 function requiresSpecialistBenchmark(model) {
@@ -468,6 +493,57 @@ function isModelSchedulable(model) {
     && hasCurrentSpecialistBenchmark(model));
 }
 
+// Slice A: translate the raw model-availability/quota enums the backend
+// reports (runtime.ts / registry.ts) into plain English wherever they reach
+// the page — never print a raw snake_case token to the PM.
+const HEALTH_STATE_LABELS = {
+  ready: "ready",
+  degraded: "temporarily slow",
+  cooling: "cooling down after an error",
+  quota_exhausted: "over its usage limit",
+  rate_limited: "rate-limited",
+  authentication: "signed out",
+  unavailable: "unavailable",
+};
+function healthStateLabel(state) {
+  return HEALTH_STATE_LABELS[state] || String(state).replaceAll("_", " ");
+}
+
+const ROLE_LABELS = {
+  general: "general capability",
+  architect: "planner",
+  worker: "worker",
+  reviewer: "reviewer",
+  analysis: "analysis",
+  benchmark: "accuracy benchmark",
+  local_tools: "file-editing permissions",
+};
+function roleLabel(role) {
+  return ROLE_LABELS[role] || String(role).replaceAll("_", " ");
+}
+
+const CONFIDENCE_LABELS = { insufficient: "low", emerging: "medium", established: "high" };
+
+function workloadLabel(workload) {
+  const [complexity, tier] = String(workload).split(":");
+  const complexityLabel = complexity ? complexity[0].toUpperCase() + complexity.slice(1) : "Unclassified";
+  return tier ? `${complexityLabel}, ${tier}-tier tasks` : `${complexityLabel} tasks`;
+}
+
+// Shared list-item formatter for both the model-wide "Observed performance"
+// summary and the per-workload "Performance by task type" slices — same
+// plain-English labels either way (DH inventory-02, app.js:514-518).
+function performanceSummaryItems(stats, { includeLatency }) {
+  const items = [
+    `Completed: ${Math.round(stats.successRate * 100)}%`,
+    `Succeeded on the first try: ${Math.round(stats.firstAttemptSuccessRate * 100)}%`,
+  ];
+  if (includeLatency) items.push(stats.averageLatencyMs == null ? "Typical time: unavailable" : `Typical time: ${formatDuration(stats.averageLatencyMs)}`);
+  items.push(stats.averageCostUsd == null ? "Typical cost: unavailable" : `Typical cost: $${Number(stats.averageCostUsd).toFixed(4)}${includeLatency ? ` (${stats.billedSampleCount} billed runs)` : ""}`);
+  items.push(`Editing conflicts: ${stats.integrationConflictCount}`, `Test/check failures: ${stats.validatorFailureCount}`, `Runs that didn't finish (not the model's fault): ${stats.notReadyRunCount}`, `Based on ${stats.sampleSize} real runs`);
+  return items;
+}
+
 function renderModels() {
   const allCurrentModels = state.models.filter((model) => !model.retired);
   const query = $("#model-filter")?.value.trim().toLowerCase() || "";
@@ -481,12 +557,12 @@ function renderModels() {
   });
   const qualified = allCurrentModels.filter((model) => hasCurrentOperationalQualification(model) && !model.qualificationStale).length;
   const active = allCurrentModels.filter(isModelSchedulable).length;
-  $("#model-summary").innerHTML = `<div class="metric"><span>Current</span><strong>${allCurrentModels.length}</strong></div><div class="metric"><span>Role-qualified models</span><strong>${qualified}</strong></div><div class="metric"><span>Schedulable active</span><strong>${active}</strong></div><div class="metric"><span>Advisory local slots</span><strong>${state.resources?.advisoryLocalSlots ?? "?"}</strong></div>`;
+  $("#model-summary").innerHTML = `<div class="metric"><span>Known models</span><strong>${allCurrentModels.length}</strong></div><div class="metric"><span>Passed a role check</span><strong>${qualified}</strong></div><div class="metric"><span>Ready to be used</span><strong>${active}</strong></div><div class="metric"><span>Estimated local capacity</span><strong>${state.resources?.advisoryLocalSlots ?? "?"}</strong></div>`;
   const runtimes = state.bootstrap.config.localRuntimes?.ollama || [];
   $("#runtime-list").innerHTML = runtimes.map((runtime) => {
     const connection = state.connections.find((item) => item.metadata?.runtimeId === runtime.id);
-    const status = connection?.available ? "Ready" : connection?.installed ? "No installed models" : "Not reachable";
-    return `<article class="connection-card"><span class="connection-kind">LOCAL RUNTIME</span><h3>${escapeHtml(runtime.displayName)}</h3><p>${escapeHtml(runtime.baseUrl)}</p><span class="status ${connection?.available ? "ready" : "warning"}">${status}</span></article>`;
+    const status = connection?.available ? "Ready" : connection?.installed ? "No installed models" : "Can't connect";
+    return `<article class="connection-card"><span class="connection-kind">LOCAL MODEL SERVER</span><h3>${escapeHtml(runtime.displayName)}</h3><p>${escapeHtml(runtime.baseUrl)}</p><span class="status ${connection?.available ? "ready" : "warning"}">${status}</span>${status === "Can't connect" ? `<p class="field-help">DevHarmonics couldn't reach this address. Check that the local model server is running and the Base URL is correct.</p>` : ""}</article>`;
   }).join("");
   $("#model-list").innerHTML = currentModels.length ? currentModels.map((model) => {
     const connection = state.connections.find((item) => item.id === model.connectionId);
@@ -494,44 +570,66 @@ function renderModels() {
     const tier = profile.tier || "unclassified";
     const family = profile.family || "unclassified";
     const capabilities = Array.isArray(profile.capabilities) ? profile.capabilities : [];
-    const effort = profile.reasoningEffort ? ` · reasoning: ${profile.reasoningEffort}` : "";
-    const confidence = profile.confidence ? ` · evidence: ${profile.confidence}` : "";
+    const effort = profile.reasoningEffort ? ` · thinking effort: ${profile.reasoningEffort}` : "";
+    const confidence = profile.confidence ? ` · model info: ${profile.confidence}` : "";
     const allHistory = state.qualifications.filter((item) => item.modelId === model.id);
     const history = allHistory.slice(0, 5);
+    const hasAnyOperationalAttempt = allHistory.some((item) => item.role !== "benchmark");
     const currentRoleQualifications = allHistory.filter((item) => item.fingerprint === model.qualificationFingerprint);
     const hasCurrentRoleFailure = currentRoleQualifications.some((item) => !item.passed);
     const operationallyQualified = hasCurrentOperationalQualification(model);
     const specialistBenchmarkRequired = requiresSpecialistBenchmark(model);
     const specialistBenchmarkPassed = hasCurrentSpecialistBenchmark(model);
-    const qualify = `<button class="secondary small" data-qualify-model="${escapeHtml(model.id)}">${operationallyQualified ? "Requalify" : connection?.transport === "local" ? "Qualify locally" : connection?.provider === "openrouter" ? "Qualify paid model" : "Verify subscription model"}</button>`;
-    const qualifyTools = connection?.transport === "local" ? `<button class="secondary small" data-qualify-local-tools="${escapeHtml(model.id)}">Qualify bounded write tools</button>` : "";
-    const qualifyBenchmark = connection?.transport === "local" ? `<button class="secondary small" data-qualify-benchmark="${escapeHtml(model.id)}">Benchmark specialist</button>` : "";
+    const qualify = `<button class="secondary small" data-qualify-model="${escapeHtml(model.id)}">${operationallyQualified ? "Requalify" : connection?.transport === "local" ? "Qualify locally" : connection?.provider === "openrouter" ? "Qualify (may cost money)" : "Qualify"}</button>`;
+    const qualifyTools = connection?.transport === "local" ? `<button class="secondary small" data-qualify-local-tools="${escapeHtml(model.id)}">Test file-editing permissions</button>` : "";
+    const qualifyBenchmark = connection?.transport === "local" ? `<button class="secondary small" data-qualify-benchmark="${escapeHtml(model.id)}">Run accuracy test</button>` : "";
     const activate = `<button class="secondary small" data-activate-model="${escapeHtml(model.id)}">${model.active ? "Deactivate" : "Activate"}</button>`;
-    const health = model.health?.state && model.health.state !== "ready" ? ` · ${model.health.state}` : "";
+    const health = model.health?.state && model.health.state !== "ready" ? ` · ${healthStateLabel(model.health.state)}` : "";
     const performance = state.performanceProfiles.find((item) => item.modelId === model.id);
     const performancePolicy = state.performancePolicies.find((item) => item.modelId === model.id);
+    const confidenceLabel = performance ? (CONFIDENCE_LABELS[performance.uncertainty] || performance.uncertainty) : "";
     const empiricalHtml = performance
-      ? `<p class="empirical-profile"><strong>Observed performance:</strong> ${Math.round(performance.successRate * 100)}% completed · ${Math.round(performance.firstAttemptSuccessRate * 100)}% first-pass · ${performance.averageLatencyMs == null ? "latency unavailable" : `${formatDuration(performance.averageLatencyMs)} average`} · ${performance.averageCostUsd == null ? "cost unavailable" : `$${Number(performance.averageCostUsd).toFixed(4)} average billed cost (${performance.billedSampleCount} billed)`} · ${performance.validatorFailureCount} validator failures · ${performance.integrationConflictCount} integration conflicts · ${performance.notReadyRunCount} NOT READY runs (non-causal) · ${performance.sampleSize} samples · <span class="uncertainty ${escapeHtml(performance.uncertainty)}">${escapeHtml(performance.uncertainty)} evidence</span>${performance.observationsExcluded ? " · excluded by user" : performance.eligibleForAdaptiveWeighting ? " · eligible for adaptive weighting" : " · not used for adaptive weighting yet"}</p>`
-      : `<p class="empirical-profile"><strong>Observed performance:</strong> No observations in the current baseline; published capabilities only.${performancePolicy?.ignoredBefore ? ` Baseline reset ${escapeHtml(new Date(performancePolicy.ignoredBefore).toLocaleString())}.` : ""}</p>`;
+      ? `<p class="empirical-profile"><strong>Observed performance:</strong> ${performanceSummaryItems(performance, { includeLatency: true }).join(" · ")} · <span class="uncertainty ${escapeHtml(performance.uncertainty)}">Confidence: ${escapeHtml(confidenceLabel)}</span>${performance.observationsExcluded ? " · excluded by user" : performance.eligibleForAdaptiveWeighting ? " · eligible for adaptive weighting" : " · not used for adaptive weighting yet"}</p>`
+      : `<p class="empirical-profile"><strong>Observed performance:</strong> No real-run data yet — this shows only the provider's published specs.${performancePolicy?.ignoredBefore ? ` Performance history was reset on ${escapeHtml(new Date(performancePolicy.ignoredBefore).toLocaleString())}.` : ""}</p>`;
     const workloadHtml = performance && Object.keys(performance.workloads || {}).length
-      ? `<details class="qualification-history workload-history"><summary>Workload evidence (${Object.keys(performance.workloads).length})</summary>${Object.entries(performance.workloads).map(([workload, slice]) => `<p><strong>${escapeHtml(workload.replace(":", " / "))}</strong> · ${Math.round(slice.successRate * 100)}% completed · ${Math.round(slice.firstAttemptSuccessRate * 100)}% first-pass · ${slice.averageCostUsd == null ? "cost unavailable" : `$${Number(slice.averageCostUsd).toFixed(4)} average billed cost`} · ${slice.validatorFailureCount} validator failures · ${slice.integrationConflictCount} integration conflicts · ${slice.notReadyRunCount} NOT READY runs (non-causal) · ${slice.sampleSize} samples · ${escapeHtml(slice.uncertainty)}</p>`).join("")}</details>`
+      ? `<details class="qualification-history workload-history"><summary>Performance by task type (${Object.keys(performance.workloads).length})</summary>${Object.entries(performance.workloads).map(([workload, slice]) => `<p><strong>${escapeHtml(workloadLabel(workload))}</strong> · ${performanceSummaryItems(slice, { includeLatency: false }).join(" · ")}</p>`).join("")}</details>`
       : "";
-    const performanceActions = `<button class="secondary small" data-reset-performance="${escapeHtml(model.id)}">Reset observation baseline</button><button class="secondary small" data-exclude-performance="${escapeHtml(model.id)}">${performancePolicy?.excluded ? "Include empirical history" : "Exclude empirical history"}</button>`;
-    const historyHtml = `<details class="qualification-history"><summary>Qualification history (${history.length})</summary>${history.length ? history.map((item) => `<p><strong>${escapeHtml(item.passed ? "PASS" : "FAIL")}</strong> ${escapeHtml(item.role)} · ${escapeHtml(item.fixtureVersion)} · ${escapeHtml(new Date(item.createdAt).toLocaleString())}</p>`).join("") : "<p>No probes recorded.</p>"}</details>`;
+    const performanceActions = `<button class="secondary small" data-reset-performance="${escapeHtml(model.id)}">Reset performance history</button><button class="secondary small" data-exclude-performance="${escapeHtml(model.id)}">${performancePolicy?.excluded ? "Resume using past results for scheduling" : "Stop using past results for scheduling"}</button>`;
+    const historyHtml = `<details class="qualification-history"><summary>Qualification history (${history.length})</summary>${history.length ? history.map((item) => `<p><strong>${escapeHtml(item.passed ? "PASS" : "FAIL")}</strong> for ${escapeHtml(roleLabel(item.role))}, tested ${escapeHtml(new Date(item.createdAt).toLocaleString())}</p>`).join("") : "<p>No checks run yet.</p>"}</details>`;
     const isStale = model.qualified && model.qualificationStale;
-    const stateText = isStale ? "Qualification stale; it will not be scheduled until requalified" : model.excluded ? "Excluded from scheduling" : specialistBenchmarkRequired && !specialistBenchmarkPassed ? "Specialist scheduling requires the benchmark pass" : !operationallyQualified ? "No current role qualification; not schedulable" : hasCurrentRoleFailure ? "Qualified only for passing roles; failed roles remain unschedulable" : model.active ? "Active for adaptive scheduling" : "Qualified; activate to make it available to the adaptive scheduler";
-    const lifecycleText = isStale ? "stale" : !operationallyQualified && specialistBenchmarkPassed ? "benchmark only" : hasCurrentRoleFailure ? "partial" : model.lifecycle;
-    const lifecycleClass = isStale || !operationallyQualified || hasCurrentRoleFailure ? "degraded" : model.lifecycle;
+    const stateText = isStale ? "This model's check is out of date — the provider changed it since it last passed. It won't be used again until you re-run the check."
+      : model.excluded ? "You've excluded this model from being used"
+      : specialistBenchmarkRequired && !specialistBenchmarkPassed ? "This model needs an extra accuracy test before it can be used"
+      : !operationallyQualified ? "Hasn't passed a role check yet — can't be used"
+      : hasCurrentRoleFailure ? "Passed some roles, failed others — see qualification history below"
+      : model.active ? "Active — DevHarmonics can use this model"
+      : "Passed its check but turned off — click Activate to make it usable";
+    // Slice A: "you turned this off on purpose" (deliberate) reads and colors
+    // differently from "something needs attention" (degraded) — see the
+    // .lifecycle.deliberate / .lifecycle.degraded split in app.css.
+    // model.excluded is checked first in both the chip text and its color
+    // class so a deliberately-excluded model never shows an amber "needs
+    // attention" chip with a grey/deliberate meaning underneath, or vice versa.
+    const lifecycleText = model.excluded ? "Excluded"
+      : isStale ? "Needs re-checking"
+      : specialistBenchmarkRequired && !specialistBenchmarkPassed ? "Needs benchmark"
+      : !operationallyQualified ? (hasAnyOperationalAttempt ? "Not qualified" : "Not checked yet")
+      : hasCurrentRoleFailure ? "Not qualified"
+      : model.active ? "Active"
+      : "Qualified (inactive)";
+    const lifecycleClass = model.excluded ? "deliberate"
+      : (isStale || !operationallyQualified || hasCurrentRoleFailure || (specialistBenchmarkRequired && !specialistBenchmarkPassed)) ? "degraded"
+      : model.active ? "active" : "qualified";
     const detailParts = [
-      `Model vendor: ${model.metadata?.modelVendor || "not declared"}`,
-      `Quota group: ${model.metadata?.quotaGroupDisplayName || model.metadata?.quotaGroup || "not declared"}`,
-      model.quotaGroupHealth ? `Quota health: ${model.quotaGroupHealth.state}${model.quotaGroupHealth.cooldownUntil ? `; cooldown until ${new Date(model.quotaGroupHealth.cooldownUntil).toLocaleString()}` : ""}` : model.metadata?.quotaGroup ? "Quota health: no quota event observed" : "",
-      `Family: ${family}`,
+      `Made by: ${model.metadata?.modelVendor || "unknown"}`,
+      `Shares usage limit with: ${model.metadata?.quotaGroupDisplayName || model.metadata?.quotaGroup || "nothing tracked"}`,
+      model.quotaGroupHealth ? `Usage limit status: ${healthStateLabel(model.quotaGroupHealth.state)}${model.quotaGroupHealth.cooldownUntil ? `, back at ${new Date(model.quotaGroupHealth.cooldownUntil).toLocaleString()}` : ""}` : "",
+      `Model line: ${family === "unclassified" ? "unknown" : family}`,
       `Capabilities: ${capabilities.length ? capabilities.join(", ") : "not declared"}`,
-      model.metadata?.details?.parameter_size ? `Parameters: ${model.metadata.details.parameter_size}` : "",
-      model.metadata?.details?.quantization_level ? `Quantization: ${model.metadata.details.quantization_level}` : "",
+      model.metadata?.details?.parameter_size ? `Model size: ${model.metadata.details.parameter_size}` : "",
+      model.metadata?.details?.quantization_level ? `Compression level: ${model.metadata.details.quantization_level}` : "",
     ].filter(Boolean).join(" · ");
-    return `<article class="model-card"><div><span class="connection-kind">${escapeHtml(connection?.displayName || model.connectionId)}</span><h3>${escapeHtml(model.displayName)}</h3><code>${escapeHtml(model.canonicalName)}</code></div><span class="lifecycle ${escapeHtml(lifecycleClass)}">${escapeHtml(lifecycleText)}</span><p>Tier: ${escapeHtml(tier + effort + confidence)}${escapeHtml(health)}. ${stateText}. Upgrade policy: ${model.upgradePolicy === "track_family" ? "track family" : "pinned exact"}.</p><p class="model-profile">${escapeHtml(detailParts)}.</p>${empiricalHtml}${workloadHtml}<div class="model-actions">${qualify}${qualifyTools}${qualifyBenchmark}${activate}<button class="secondary small" data-pin-model="${escapeHtml(model.id)}">${model.pinned ? "Unpin" : "Pin"}</button><button class="secondary small" data-track-model="${escapeHtml(model.id)}">${model.upgradePolicy === "track_family" ? "Pin exact" : "Track family"}</button><button class="secondary small" data-exclude-model="${escapeHtml(model.id)}">${model.excluded ? "Include" : "Exclude"}</button>${performanceActions}</div>${historyHtml}</article>`;
+    return `<article class="model-card"><div><span class="connection-kind">${escapeHtml(connection?.displayName || model.connectionId)}</span><h3>${escapeHtml(model.displayName)}</h3><code>${escapeHtml(model.canonicalName)}</code></div><span class="lifecycle ${escapeHtml(lifecycleClass)}">${escapeHtml(lifecycleText)}</span><p>Tier: ${escapeHtml(tier + effort + confidence)}${escapeHtml(health)}. ${stateText}. Update policy: ${model.upgradePolicy === "track_family" ? "auto-upgrading within its model line" : "staying on this exact version"}.</p><p class="model-profile">${escapeHtml(detailParts)}.</p>${empiricalHtml}${workloadHtml}<div class="model-actions">${qualify}${qualifyTools}${qualifyBenchmark}${activate}<button class="secondary small" data-pin-model="${escapeHtml(model.id)}">${model.pinned ? "Stop preferring this model" : "Always prefer this model"}</button><button class="secondary small" data-track-model="${escapeHtml(model.id)}">${model.upgradePolicy === "track_family" ? "Stay on this exact version" : "Auto-upgrade within this model line"}</button><button class="secondary small" data-exclude-model="${escapeHtml(model.id)}">${model.excluded ? "Include in automatic scheduling" : "Exclude from automatic scheduling"}</button>${performanceActions}</div>${historyHtml}</article>`;
   }).join("") : '<div class="panel empty-state">No current models match this filter.</div>';
   $("#model-connection").innerHTML = state.connections.map((connection) => `<option value="${escapeHtml(connection.id)}">${escapeHtml(connection.displayName)}</option>`).join("");
 }
@@ -617,7 +715,10 @@ function showView(view) {
   } else {
     $("#composer").classList.add("hidden");
     $("#run-view").classList.add("hidden");
-    $("#page-title").textContent = view === "setup" ? "Configure the control plane" : view === "models" ? "Manage the model fleet" : view === "products" ? "Operate across real products" : view === "workbench" ? "Explore before you execute" : view === "workflows" ? "Run a versioned workflow" : "Inspect retained evidence";
+    // Slice A: Setup and Models now carry their own single title + purpose
+    // sentence in the view body (see index.html); the topbar just names the
+    // section instead of repeating a second, differently-worded headline.
+    $("#page-title").textContent = view === "setup" ? "Setup" : view === "models" ? "Models" : view === "products" ? "Operate across real products" : view === "workbench" ? "Explore before you execute" : view === "workflows" ? "Run a versioned workflow" : "Inspect retained evidence";
   }
 }
 
@@ -1404,7 +1505,8 @@ function showComposer() {
 }
 
 $("#agent-mode").addEventListener("change", (event) => { $("#agent-count").disabled = event.target.value === "auto"; });
-$("#run-autonomy").addEventListener("change", renderRunAutonomyHelp);
+$("#run-autonomy").addEventListener("change", () => renderRunAutonomyHelp());
+$("#setting-autonomy").addEventListener("change", () => renderRunAutonomyHelp("setting-autonomy", "setting-autonomy-help"));
 $("#objective-product").addEventListener("change", () => {
   renderObjectiveRepositoryPicker();
 });
@@ -1675,28 +1777,31 @@ $("#openrouter-model-query").addEventListener("keydown", (event) => { if (event.
 async function searchOpenRouterCatalog() {
   const query = $("#openrouter-model-query").value.trim();
   const result = await api(`/api/openrouter/catalog?q=${encodeURIComponent(query)}`);
-  $("#openrouter-catalog").innerHTML = result.models.map((model) => `<article class="model-card"><div><span class="connection-kind">OPENROUTER CATALOG</span><h3>${escapeHtml(model.displayName)}</h3><code>${escapeHtml(model.canonicalName)}</code></div><p>Context: ${Number(model.metadata.contextLength || 0).toLocaleString()} · estimated qualification: ${model.estimatedQualificationCostUsd == null ? "unknown" : `$${Number(model.estimatedQualificationCostUsd).toFixed(5)}`}</p>${model.exact ? `<button class="secondary small" data-import-openrouter="${escapeHtml(model.canonicalName)}">Import exact candidate</button>` : '<span class="muted">Moving alias · discovery only</span>'}</article>`).join("") || '<div class="empty-state">No matching catalog models.</div>';
+  $("#openrouter-catalog").innerHTML = result.models.map((model) => `<article class="model-card"><div><span class="connection-kind">OPENROUTER CATALOG</span><h3>${escapeHtml(model.displayName)}</h3><code>${escapeHtml(model.canonicalName)}</code></div><p>Reads up to ${Number(model.metadata.contextLength || 0).toLocaleString()} tokens at once · Estimated cost to test: ${model.estimatedQualificationCostUsd == null ? "unknown" : `$${Number(model.estimatedQualificationCostUsd).toFixed(5)}`}</p>${model.exact ? `<button class="secondary small" data-import-openrouter="${escapeHtml(model.canonicalName)}">Add to known models</button>` : '<span class="muted" title="OpenRouter sometimes points a name at whichever model is newest, so DevHarmonics can\'t lock a version to it. Search for the specific version name instead.">Not an exact match — can\'t be added yet</span>'}</article>`).join("") || '<div class="empty-state">No matching catalog models.</div>';
 }
 
+// Slice A: this is the same "why a model was picked" concept as the Models
+// view's Observed performance / Workload evidence blocks — one vocabulary
+// for both, and no raw scoring-system point values shown to a PM.
 function routingEvidenceMarkup(routing) {
-  if (!routing) return '<h3>Why this model</h3><div class="empty-state">Routing evidence is not available for this earlier attempt.</div>';
-  const labels = {
-    manualAssignment: "Manual assignment",
-    baseEligibility: "Eligible candidate",
-    tierFit: "Workload tier fit",
-    reasoningFit: "Reasoning fit",
-    userPin: "User pin",
-    preferredProvider: "Preferred provider",
-    fallbackProvider: "Fallback affinity",
-    empiricalReliability: "Empirical reliability",
-    empiricalLatency: "Workload latency",
-    providerDiversity: "Independent provider",
-    costAwareness: "Relative paid-model cost",
+  if (!routing) return '<h3>Why this model</h3><div class="empty-state">We don\'t have a record of why this model was picked for this earlier run.</div>';
+  const reasons = {
+    manualAssignment: "Manually assigned",
+    baseEligibility: "Qualified for this task",
+    tierFit: "Right capability level for the task's difficulty",
+    reasoningFit: "Matched the effort setting needed",
+    userPin: "You pinned this model",
+    preferredProvider: "Preferred provider for this task",
+    fallbackProvider: "Used as a fallback preference",
+    empiricalReliability: "Historically reliable on similar tasks",
+    empiricalLatency: "Historically fast on similar tasks",
+    providerDiversity: "Chosen from a different provider than the one that wrote the code, for independent review",
+    costAwareness: "Reasonable cost compared to similar models",
   };
-  const scoreRows = Object.entries(routing.scoreBreakdown || {}).filter(([, value]) => Number(value) !== 0)
-    .map(([key, value]) => `<div><dt>${escapeHtml(labels[key] || key)}</dt><dd>${Number(value) > 0 ? "+" : ""}${escapeHtml(value)}</dd></div>`).join("");
+  const reasonRows = Object.entries(routing.scoreBreakdown || {}).filter(([, value]) => Number(value) !== 0)
+    .map(([key]) => `<li>${escapeHtml(reasons[key] || key)}</li>`).join("");
   const modelName = routing.model?.alias || routing.model?.requestedModelId || "provider default";
-  return `<h3>Why this model</h3><p>${escapeHtml(connectionDisplayName(routing.connectionId, routing.provider))} / ${escapeHtml(modelName)} was requested for a ${escapeHtml(routing.workload?.complexity || "classified")} task requiring the ${escapeHtml(routing.workload?.requiredTier || "configured")} tier. The actual model is only treated as verified when the runtime reports it.</p><dl class="contract-details routing-score">${scoreRows}<div><dt>Total routing score</dt><dd>${escapeHtml(routing.score)}</dd></div></dl>${routing.factors?.length ? `<ul>${routing.factors.map((factor) => `<li>${escapeHtml(factor)}</li>`).join("")}</ul>` : ""}`;
+  return `<h3>Why this model</h3><p>${escapeHtml(connectionDisplayName(routing.connectionId, routing.provider))} / ${escapeHtml(modelName)} was requested for a ${escapeHtml(routing.workload?.complexity || "classified")} task that needed ${escapeHtml(routing.workload?.requiredTier || "configured")}-level capability. DevHarmonics only counts a model as confirmed once the tool itself reports back which model it actually used.</p>${reasonRows ? `<ul>${reasonRows}</ul>` : ""}${routing.factors?.length ? `<ul>${routing.factors.map((factor) => `<li>${escapeHtml(factor)}</li>`).join("")}</ul>` : ""}`;
 }
 
 function formatDuration(milliseconds) {
@@ -1716,7 +1821,7 @@ $("#settings-form").addEventListener("submit", async (event) => {
   const config = structuredClone(state.bootstrap.config);
   const workers = [...document.querySelectorAll('input[name="setting-worker"]:checked')].map((input) => input.value);
   if (!workers.length) {
-    $("#settings-message").textContent = "Choose at least one worker runtime.";
+    $("#settings-message").textContent = "Turn on at least one subscription tool under \"Subscription workers.\"";
     return;
   }
   config.product = { architect: $("#setting-architect").value, reviewer: $("#setting-reviewer").value, workers };
@@ -1804,10 +1909,10 @@ $("#model-list").addEventListener("click", async (event) => {
   const excludePerformance = event.target.closest("[data-exclude-performance]");
   const button = qualify || qualifyLocalTools || qualifyBenchmark || activate || pin || track || exclude || resetPerformance || excludePerformance;
   if (!button) return;
-  const operationLabel = qualify || qualifyLocalTools || qualifyBenchmark ? "Qualifying the model" : resetPerformance ? "Resetting the empirical baseline" : excludePerformance ? "Updating empirical-history policy" : "Updating the scheduling preference";
+  const operationLabel = qualify || qualifyLocalTools || qualifyBenchmark ? "Qualifying the model" : resetPerformance ? "Resetting performance history" : excludePerformance ? "Updating whether past results count" : "Updating this model's settings";
   // Confirm before the operation begins, so cancelling never registers a
   // started (let alone succeeded) operation.
-  if (resetPerformance && !window.confirm("Reset this model's empirical baseline? Existing attempt evidence stays in the ledger but will no longer affect its profile.")) return;
+  if (resetPerformance && !window.confirm("Reset this model's performance history? Past runs are still kept on record — they just won't count toward future scheduling decisions anymore.")) return;
   let qualifiedModelId = null;
   let preferenceModelId = null;
   await withOperation(button, operationLabel, async () => {
@@ -1824,11 +1929,11 @@ $("#model-list").addEventListener("click", async (event) => {
       const model = state.models.find((item) => item.id === (qualify?.dataset.qualifyModel || qualifyLocalTools?.dataset.qualifyLocalTools || qualifyBenchmark.dataset.qualifyBenchmark));
       const connection = state.connections.find((item) => item.id === model.connectionId);
       const role = qualifyLocalTools ? "local_tools" : qualifyBenchmark ? "benchmark" : connection?.transport === "local" ? "analysis" : "general";
-      $("#model-message").textContent = role === "local_tools" ? `Running a bounded read-and-patch qualification for ${model.displayName} in a disposable fixture...` : role === "benchmark" ? `Benchmarking structured output, contradiction detection, and requirement counting for ${model.displayName}...` : `Running a small, read-only ${role} qualification for ${model.displayName}...`;
+      $("#model-message").textContent = role === "local_tools" ? `Testing ${model.displayName}'s ability to safely edit files, in a throwaway test copy of your project...` : role === "benchmark" ? `Testing ${model.displayName}'s accuracy on structured answers, spotting contradictions, and counting requirements...` : `Running a quick, read-only check to see if ${model.displayName} qualifies as a ${roleLabel(role)}...`;
       try {
         await api(`/api/models/${encodeURIComponent(model.id)}/qualify`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role }) });
       } catch (error) {
-        if (!error.data?.requiresCostConfirmation || !window.confirm(`This paid qualification is estimated to cost ${error.data.estimatedCostUsd == null ? "an unknown amount" : `$${Number(error.data.estimatedCostUsd).toFixed(5)}`}. Continue?`)) throw error;
+        if (!error.data?.requiresCostConfirmation || !window.confirm(`This test uses a paid model. Estimated cost: ${error.data.estimatedCostUsd == null ? "couldn't be estimated — check OpenRouter's pricing page before continuing" : `$${Number(error.data.estimatedCostUsd).toFixed(5)}`}. Continue?`)) throw error;
         await api(`/api/models/${encodeURIComponent(model.id)}/qualify`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role, confirmPaidCost: true }) });
       }
       qualifiedModelId = model.id;
@@ -1840,7 +1945,7 @@ $("#model-list").addEventListener("click", async (event) => {
       try {
         await api(`/api/models/${encodeURIComponent(modelId)}/preference`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       } catch (error) {
-        if (!error.data?.requiresCostConfirmation || !window.confirm(`Activation requires a paid qualification estimated at ${error.data.estimatedCostUsd == null ? "an unknown amount" : `$${Number(error.data.estimatedCostUsd).toFixed(5)}`}. Continue?`)) throw error;
+        if (!error.data?.requiresCostConfirmation || !window.confirm(`Activation requires a paid qualification. Estimated cost: ${error.data.estimatedCostUsd == null ? "couldn't be estimated — check OpenRouter's pricing page before continuing" : `$${Number(error.data.estimatedCostUsd).toFixed(5)}`}. Continue?`)) throw error;
         await api(`/api/models/${encodeURIComponent(modelId)}/preference`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, confirmPaidCost: true }) });
       }
       preferenceModelId = modelId;
@@ -1848,15 +1953,15 @@ $("#model-list").addEventListener("click", async (event) => {
     await refreshFleet();
     if (qualifiedModelId) {
       const qualifiedModel = state.models.find((model) => model.id === qualifiedModelId);
-      const nextStep = isModelSchedulable(qualifiedModel) ? "It is active and schedulable."
-        : requiresSpecialistBenchmark(qualifiedModel) && !hasCurrentSpecialistBenchmark(qualifiedModel) ? "It still needs the specialist benchmark before it can be scheduled."
-          : !hasCurrentOperationalQualification(qualifiedModel) ? "It still needs a current role qualification before it can be scheduled."
-          : qualifiedModel?.active ? "It is active but not currently schedulable."
-            : "Activate it to schedule it.";
-      $("#model-message").textContent = `${qualifiedModel?.displayName || "Model"} passed qualification. ${nextStep}`;
+      const nextStep = isModelSchedulable(qualifiedModel) ? "It's active and ready to be used."
+        : requiresSpecialistBenchmark(qualifiedModel) && !hasCurrentSpecialistBenchmark(qualifiedModel) ? "It still needs the extra accuracy test before it can be used — see \"Run accuracy test\" below."
+          : !hasCurrentOperationalQualification(qualifiedModel) ? "It still needs to pass a role check before it can be used."
+          : qualifiedModel?.active ? "It's turned on but not currently usable — check its status above."
+            : "Click Activate to start using it.";
+      $("#model-message").textContent = `${qualifiedModel?.displayName || "Model"} passed its check. ${nextStep}`;
     } else if (preferenceModelId) {
       const preferenceModel = state.models.find((model) => model.id === preferenceModelId);
-      $("#model-message").textContent = `${preferenceModel?.displayName || "Model"} scheduling preference updated.`;
+      $("#model-message").textContent = `${preferenceModel?.displayName || "Model"}'s settings were updated.`;
     }
   }, { onError: async (message) => { $("#model-message").textContent = message; await refreshFleet(); } });
 });

@@ -56,7 +56,7 @@ Being signed out of one provider is not by itself a reason to stop. Planning nee
 3. Complete the official OpenAI/ChatGPT browser sign-in.
 4. Return to the terminal and wait for completion.
 5. Verify with `codex login status`.
-6. In DevHarmonics, click **Refresh sign-in status**.
+6. In DevHarmonics, click **Recheck sign-in status**.
 
 Your ChatGPT/Codex subscription session is used by the Codex CLI. DevHarmonics never receives your password or copies its OAuth tokens.
 
@@ -66,7 +66,7 @@ Your ChatGPT/Codex subscription session is used by the Codex CLI. DevHarmonics n
 2. Run `claude auth login`.
 3. Complete Anthropic's official sign-in flow.
 4. Verify with `claude auth status --text`.
-5. Click **Refresh sign-in status** in DevHarmonics.
+5. Click **Recheck sign-in status** in DevHarmonics.
 
 ### Google Antigravity
 
@@ -81,7 +81,7 @@ The first Antigravity login requires both a browser-to-terminal code handoff and
 7. Setup is complete only when the normal Antigravity prompt appears. It shows the signed-in account and tier, selected Gemini model, current path, and a `>` input line.
 8. Press `Ctrl+C` to exit that standalone session.
 9. Run `agy models` to confirm the cached session.
-10. Click **Refresh sign-in status** in DevHarmonics.
+10. Click **Recheck sign-in status** in DevHarmonics.
 
 The one-time authorization code is a short-lived credential. Paste it only into the Antigravity terminal that requested it. Do not paste it into DevHarmonics, chat, documentation, screenshots, or issue reports.
 
@@ -210,7 +210,7 @@ DevHarmonics deliberately does not merge that branch into your checked-out branc
 
 When a non-Observe run reaches **READY**, the **Approved delivery** card shows the exact base branch, base commit, reviewed HEAD commit, and delivery branch for each repository. External writes are off by default. To deliver through GitHub, entirely from the dashboard:
 
-1. Enable **Allow external writes** in Setup.
+1. Enable **Allow GitHub delivery actions (push, PR, merge, tag)** in Setup.
 2. Confirm **Approve & push branch** for the exact repository and HEAD shown. DevHarmonics pushes that exact commit without force-updating a conflicting remote branch.
 3. Separately confirm **Approve & create draft PR**.
 4. When you are satisfied the change should land, confirm **Approve & merge**. DevHarmonics checks the live pull-request state first and refuses to merge a conflict, a pull request with pending or failing status checks, or a head commit that is no longer the reviewed commit.
@@ -258,13 +258,13 @@ Validator commands are trusted local configuration. Models can request a configu
 
 ### Local Ollama specialists and reviewers
 
-Use the Models view to qualify a discovered Ollama model before activating or pinning it. Local review is read-only: the model receives the combined integration diff as bounded per-file chunks or each accepted Observe report as an independent evidence chunk, plus bounded goal, task-contract, and validator context. A local implementor must separately pass **Qualify bounded write tools**. Its tool loop exposes only scoped file reads, searches, and hash-checked patches inside the assigned worktree—never unrestricted shell, commits, merges, or arbitrary paths. DevHarmonics records tool and chunk receipts and fails closed on missing or contradictory results. CPU-only work can take substantially longer than subscription-backed work.
+Use the Models view to qualify a discovered Ollama model before activating or pinning it. Local review is read-only: the model receives the combined integration diff as bounded per-file chunks or each accepted Observe report as an independent evidence chunk, plus bounded goal, task-contract, and validator context. A local implementor must separately pass **Test file-editing permissions**. Its tool loop exposes only scoped file reads, searches, and hash-checked patches inside the assigned worktree—never unrestricted shell, commits, merges, or arbitrary paths. DevHarmonics records tool and chunk receipts and fails closed on missing or contradictory results. CPU-only work can take substantially longer than subscription-backed work.
 
-Mellum2 appears automatically when its exact tag is installed in an enabled Ollama runtime; DevHarmonics does not download it. Mellum2 Instruct and Thinking are separate model and upgrade tracks. Use **Benchmark specialist** to run the additional strict-JSON, contradiction-detection, and requirement-count fixture. Mellum2 is not schedulable until that benchmark and the role-appropriate analysis or bounded-tool qualification are both current. Instruct begins in the economy lane for narrow, low-risk work; Thinking is evaluated separately for standard reasoning work. Neither becomes the coordinator, final reviewer, or universal default from its name or published benchmarks alone.
+Mellum2 appears automatically when its exact tag is installed in an enabled Ollama runtime; DevHarmonics does not download it. Mellum2 Instruct and Thinking are separate model and upgrade tracks. Use **Run accuracy test** to run the additional strict-JSON, contradiction-detection, and requirement-count fixture. Mellum2 is not schedulable until that benchmark and the role-appropriate analysis or bounded-tool qualification are both current. Instruct begins in the economy lane for narrow, low-risk work; Thinking is evaluated separately for standard reasoning work. Neither becomes the coordinator, final reviewer, or universal default from its name or published benchmarks alone.
 
 ### Refreshing and qualifying the fleet
 
-The application performs a complete catalog check at launch and repeats it every 24 hours. **Refresh fleet** forces a complete rediscovery. Starting a run also refreshes when the last catalog check is stale or a Codex, Claude, or Antigravity CLI version changed.
+The application performs a complete catalog check at launch and repeats it every 24 hours. **Check for new models** forces a complete rediscovery. Starting a run also refreshes when the last catalog check is stale or a Codex, Claude, or Antigravity CLI version changed.
 
 Each model card shows family, capabilities, available parameter/quantization metadata, current qualification state, **Requalify**, local bounded-tool and specialist-benchmark actions where applicable, plus recent **Qualification history**. Model selectors are role-aware and show only models with current qualification evidence compatible with that role. A previously configured incompatible model remains visible as a disabled warning until you select a qualified replacement or the provider default. Activating an unqualified or stale subscription/local model runs the required first-use qualification when selected. DevHarmonics probes only active, pinned, family-tracked, or scheduler-selected candidates; it does not invoke every model in a provider catalog.
 
@@ -281,9 +281,9 @@ Open a task and review **Why this model** to see the exact selected model, class
 ### Optional OpenRouter setup
 
 1. In **Setup**, select **Connect OpenRouter with OAuth** and approve the provider-owned browser flow. DevHarmonics stores the returned credential with Windows current-user encryption; there is no key to paste into the app.
-2. OAuth connection alone permits no paid routing. Save **Enable OpenRouter connection**, **Allow paid API runtimes for this project**, and **Allow paid API fallback**, plus positive per-run and monthly USD limits.
+2. OAuth connection alone permits no paid routing. Save **Allow OpenRouter to be used at all**, **Allow OpenRouter (pay-per-use) models for this project**, and **Allow spending on OpenRouter models**, plus positive per-run and monthly USD limits.
 3. In **Models**, search the public OpenRouter catalog and import only the exact candidates you want. Importing is inventory only.
-4. Select **Qualify paid model**. The app displays an estimated probe cost and requires confirmation. The provider's current credit/limit status is checked before the probe.
+4. Select **Qualify (may cost money)**. The app displays an estimated probe cost and requires confirmation. The provider's current credit/limit status is checked before the probe.
 5. Activate the qualified model. DevHarmonics may now choose that exact model for compatible read-only work or context-injected review, including fallback after a subscription capacity failure.
 
 DevHarmonics sends one exact `model` identifier and disables OpenRouter provider fallback. If spending or key limits cannot be verified, paid routing stops. Actual provider, resolved model, tokens, cost, and fallback reason are retained in the run ledger.
@@ -324,9 +324,9 @@ While the dashboard is running, `GET /api/connections` and `GET /api/models` exp
 
 ### A provider says Sign-in required
 
-Run the login and status commands in a separate terminal, finish every browser/terminal step, then click **Refresh sign-in status**. Installing a CLI does not sign it in.
+Run the login and status commands in a separate terminal, finish every browser/terminal step, then click **Recheck sign-in status**. Installing a CLI does not sign it in.
 
-The setup status separates configuration, installation, authentication, account visibility, model entitlement, control-plane health, capacity, and final availability. `Unknown` for entitlement or capacity is expected when a subscription CLI does not expose that fact; it does not mean DevHarmonics has detected a failure.
+The setup status separates configuration, installation, authentication, account visibility, model entitlement, control-plane health, capacity, and final availability. The dashboard shows entitlement or capacity as "not yet measured" when a subscription CLI does not expose that fact; it does not mean DevHarmonics has detected a failure.
 
 ### Antigravity browser says sign-in failed but also shows a code
 

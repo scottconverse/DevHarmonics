@@ -1,14 +1,16 @@
 # DevHarmonics Detailed Implementation Plan
 
 Document status: **Build-ready execution plan**
-Plan version: **1.31**
+Plan version: **1.32**
 Written: **2026-07-14**
-Revised: **2026-07-18**
+Revised: **2026-07-22**
 Product specification baseline: **DevHarmonics Product Specification v1.12**
 Current implementation baseline: **DevHarmonics v0.5.1**
 Google Doc: [DevHarmonics Detailed Implementation Plan](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk)
 
-Revision history: **v1.31 (2026-07-19)** — v0.6 follow-ups closing item 4's deferred scope: every read-only diagnostic requires at least one verifiable citation (a vacuous report no longer passes), reviewer prompts carry the explicit duty to judge whether cited lines support the conclusions drawn from them, a local model timeout cools that model rather than the whole local connection, validator commands support a `${repoRoot}` token so per-repository toolchains are registered portably, and the user manual records the Windows environment facts (temp relocation, Docker host) that otherwise produce false failures and false greens.
+Revision history: **v1.32 (2026-07-22)** — Added the review **evidence-lens** axis to DH-460, after external evidence (Cursor's agent-swarm study: independent review lenses reading different information sources catch what any one lens misses) and our own defect #22 converged on the same failure shape: reviewers who all see the same evidence share the same blind spot. Reviewer decorrelation now has two axes — capability (what a reviewer can do, v1.25) and lens (what a reviewer is shown). Quorum policy gains required lens coverage by risk: an **artifact lens** that never sees implementor narration, and a **claims lens** that never sees the artifact and must return a structured claimed-changes manifest, which is then compared mechanically against the integrated diff so a claims/artifact divergence is a fail-closed finding rather than a reviewer's optional catch (generalizing the write-task-must-change-something rule from defect #22). DH-320 gains cheapest-at-established-parity preference among qualified candidates. DH-650 gains a per-run cost counterfactual (the actual mix versus the priciest qualified mix). This scope is inserted ahead of the item-5 delivery rerun by owner decision (2026-07-22); the rerun then serves as the lens machinery's proving ground.
+
+**v1.31 (2026-07-19)** — v0.6 follow-ups closing item 4's deferred scope: every read-only diagnostic requires at least one verifiable citation (a vacuous report no longer passes), reviewer prompts carry the explicit duty to judge whether cited lines support the conclusions drawn from them, a local model timeout cools that model rather than the whole local connection, validator commands support a `${repoRoot}` token so per-repository toolchains are registered portably, and the user manual records the Windows environment facts (temp relocation, Docker host) that otherwise produce false failures and false greens.
 
 **v1.30 (2026-07-18)** — Item 4 closed GREEN after eight independent audit rounds. Recorded the lesson that outlasted the fixes: the recurring defect was in verification, not in the product. Four fixes shipped with tests structurally unable to fail, and mutation testing rather than a green suite caught every one. DH-330 now states that a test never watched to fail is not evidence, and that "this cannot be tested deterministically" is a conclusion to distrust.
 
@@ -497,10 +499,14 @@ Deliverables:
 - allow multiple workers of the same or different provider/model;
 - include capability, qualification, health, quota, latency, privacy, cost, diversity, and user pins.
 
+Refinement (2026-07-22): within a workload class, when two or more qualified candidates have **established** empirical slices (per DH-250's ≥20-observation threshold) whose success rates are at parity within the uncertainty the sample supports, prefer the cheaper candidate rather than the higher tier. External evidence (Cursor's agent-swarm study) and DH's own receipts agree that quality parity across mixes is common while cost spread is large; paying the tier premium is justified only where the empirical record does not yet show parity. Manual pins and qualification requirements still override; a parity preference never routes to an unqualified or cooling model, and the routing explanation must name parity as the reason when it decides the selection.
+
 Acceptance:
 
 - the coordinator is not forced onto subagents;
 - Claude, Codex, Gemini, local models, and API models can each be selected at their own available model and effort settings;
+- given two qualified candidates with established slices at parity, the cheaper one is selected and the decision explanation says so;
+- parity preference never overrides qualification, pins, health, or cooldown;
 - the UI explains every material routing decision.
 
 #### DH-330: Classified failure and fallback engine — L
@@ -708,12 +714,22 @@ Reviewer capability therefore has three distinct tiers, and the ledger should re
 
 A tier-1 reviewer cannot substitute for tier 3 no matter how many of them are convened, because the failure they miss is a property of the evidence rather than of the code. Quorum policy should express a required tier by risk — high-risk and release-boundary work requiring a falsifying reviewer — and a quorum satisfied only by tier-1 reviewers must be reported as such rather than as a passed independent review. This also constrains scheduling: a falsifying reviewer needs an isolated worktree, a build, and the ability to run and revert, which is a materially different resource profile from a read-only context reviewer.
 
+Second refinement (2026-07-22): reviewer decorrelation has a second axis — the **evidence lens**, what a reviewer is shown, orthogonal to capability. Every current reviewer receives the same bundle, and that bundle includes the implementors' task reports, so worker narration can anchor every reviewer's reading of the artifact at once; reviewers that share one bundle share one blind spot. Two lenses are distinguished:
+
+1. **Artifact lens** — task contracts, integrated diff, check receipts, repository state; **no implementor narration**. Judges what exists. (This finally implements DH-410's "reviewers receive evidence rather than implementor narration" at the review boundary.)
+2. **Claims lens** — task contracts, implementor envelopes and reports, check receipts; **no diff or worktree access**. Its duty is to extract the concrete claims made — files changed, behaviors added, checks run — into a structured **claimed-changes manifest**, and to judge whether the claims cohere and are backed by named receipts.
+
+The manifest is then compared mechanically against the integrated diff: a claimed file change absent from the diff, or a diff change no task claimed, is a fail-closed **divergence finding** requiring disposition before quorum can pass. This generalizes the defect-#22 rule (a write task that changed nothing does not pass): narration without artifacts is caught even when other tasks' diffs make the integration nonempty, and it is caught deterministically rather than depending on a reviewer noticing. Lens coverage becomes a quorum dimension by risk alongside count, provider diversity, implementor independence, and capability tier; a quorum whose reviews all shared one lens is reported as single-lens, not as a decorrelated review.
+
 Deliverables:
 
 - configure reviewer count, independence, provider/model diversity, **required reviewer capability tier**, and required expertise by risk;
 - record the capability tier and the evidence each reviewer actually produced (commands run, probes written, mutations attempted) on the review receipt;
 - report a quorum met only by context reviewers as an unfalsified result rather than a passed independent review;
 - provide reviewers the task contract, diff, relevant source, and evidence without inheriting implementor reasoning as fact;
+- configure required lens coverage by risk, assign each review slot a lens, and record the lens on the review receipt;
+- build lens-specific evidence bundles — the artifact lens excludes implementor narration, the claims lens excludes the artifact — and require the claims lens to return a structured claimed-changes manifest;
+- cross-check the claimed-changes manifest against the integrated diff deterministically and fail closed on divergence;
 - normalize findings with severity, location, rationale, suggested correction, and disposition;
 - adjudicate disagreements, assign an independent fixer, and require bounded re-review after changes.
 
@@ -721,6 +737,9 @@ Acceptance:
 
 - high-risk tasks can require two or more independent passing reviews;
 - a reviewer cannot silently review its own unqualified work;
+- an artifact-lens bundle contains no implementor narration and a claims-lens bundle contains no diff, proven by tests on the assembled bundles rather than on prompt wording;
+- a run whose implementors claim changes the integrated diff does not contain fails with a divergence finding even when the diff is nonempty;
+- a quorum satisfied by a single lens is reported as single-lens;
 - conflicting findings remain visible until resolved or explicitly accepted;
 - fixer changes invalidate prior review receipts and trigger the configured re-review gate.
 
@@ -1009,11 +1028,13 @@ Deliverables:
 - model and role performance;
 - latency, retries, validator outcomes, fallback history, quota and cooldown behavior;
 - local-versus-subscription-versus-API workload;
-- human intervention, review rejection, duplicated work, and critical-path idle time.
+- human intervention, review rejection, duplicated work, and critical-path idle time;
+- a per-run **cost counterfactual**: the run's actual billed cost beside what the same invocation volume would have cost on the priciest qualified candidate per role, computed from ledger receipts and catalog unit prices — the stratification saving made visible per run.
 
 Acceptance:
 
 - analytics use ledger evidence rather than provider self-report;
+- the counterfactual is labeled an estimate, names the comparison model per role, and shows nothing when catalog prices are unknown rather than inventing a number;
 - low-sample uncertainty is visible;
 - reports can be filtered by product, repository, role, model, and time.
 

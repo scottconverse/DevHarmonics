@@ -391,6 +391,8 @@ pre { margin: 0; padding: 12px; overflow: auto; max-height: 280px; background: #
 .strip-item.succeeded strong { color: var(--lime); }
 .strip-item.failed { color: var(--red); }
 .strip-item.failed strong { color: var(--red); }
+.strip-item.cancelled { color: var(--amber); }
+.strip-item.cancelled strong { color: var(--amber); }
 @media (prefers-reduced-motion: reduce) {
   .op-spinner { animation: none; border-top-color: var(--border); background: var(--lime); }
   .live i { animation: none; }

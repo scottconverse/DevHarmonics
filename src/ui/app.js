@@ -59,6 +59,15 @@ const OPERATION_QUIET_WARNING_MS = 5 * 60 * 1000;
 let operationSequence = 0;
 const operations = new Map();
 
+// A declined confirmation is neither a success nor a failure: the owner said
+// "No" and nothing broke (MINOR gate finding, 2026-07-22). An action returns
+// this sentinel so withOperation ends the shared operation as CANCELLED with
+// honest copy, instead of the "done" that a plain return would have implied.
+const OPERATION_CANCELLED = Symbol("dh-operation-cancelled");
+function cancelledOperation(detail = "") {
+  return { [OPERATION_CANCELLED]: true, detail };
+}
+
 function beginOperation(label) {
   const id = `op-${++operationSequence}`;
   operations.set(id, { id, label, status: "running", startedAt: Date.now(), detail: "" });
@@ -95,6 +104,10 @@ async function withOperation(button, label, action, { onError = showError, busyL
   }
   try {
     const result = await action();
+    if (result && result[OPERATION_CANCELLED]) {
+      endOperation(id, "cancelled", result.detail || "");
+      return undefined;
+    }
     endOperation(id, "succeeded");
     return result;
   } catch (error) {
@@ -166,7 +179,9 @@ function renderActivityStrip() {
   const local = [...operations.values()].map((operation) => {
     const stateLabel = operation.status === "running"
       ? `<span class="op-spinner" aria-hidden="true"></span>working · <span data-elapsed-since="${operation.startedAt}" aria-hidden="true">${operationElapsed(operation.startedAt)}</span>`
-      : operation.status === "succeeded" ? "done" : `failed — ${escapeHtml(operation.detail || "see the error message")}`;
+      : operation.status === "succeeded" ? "done"
+        : operation.status === "cancelled" ? `declined — ${escapeHtml(operation.detail || "you declined this step; nothing was changed")}`
+          : `failed — ${escapeHtml(operation.detail || "see the error message")}`;
     return `<div class="strip-item ${operation.status}"><strong>${escapeHtml(operation.label)}</strong><span>${stateLabel}</span></div>`;
   });
   const runItems = activeRunOperations().map(({ run, task, startedAt, lastActivityAt }) => {
@@ -768,12 +783,27 @@ function evidenceInline(text) {
     .replace(/`([^`\n]+)`/g, "<code>$1</code>");
 }
 
-function verdictGuidance(report, issueCount) {
+// Owner/gate finding (2026-07-22): the historical-READY wording must be earned
+// by a RETAINED READY verdict, not merely by "there is at least one issue". An
+// ordinary in-progress or never-reviewed run is INCONCLUSIVE with issues too,
+// and telling the owner "the review passed at the time it ran" for a run that
+// was never reviewed is a false trust claim. Base the wording on report
+// CONTENT: the reporter records the absence of a review as the missingEvidence
+// strings "final review" / "machine-readable final verdict" (see reporter.ts).
+// A retained READY verdict is present only when NEITHER of those is missing —
+// and within an INCONCLUSIVE report a retained machine-readable verdict can
+// only be READY (a NOT_READY one would make the verdict NOT_READY). So reserve
+// the historical wording for a retained READY invalidated by later inconsistency.
+function verdictGuidance(report) {
   if (report.verdict === "READY") return "The run is reviewed and its retained evidence is internally consistent. Deliver when you are ready.";
   if (report.verdict === "NOT_READY") return "The review or the run itself did not pass. Open the review findings below — they name what must change.";
-  return issueCount
-    ? "The review passed at the time it ran, but the retained evidence no longer lines up — the reasons are listed below. This commonly happens when the repository moved after review (for example, the delivery was merged). Treat the READY as historical; re-run the review if you need a current verdict."
-    : "The run has not reached a reviewed state yet, so no verdict can be derived. Let the run finish, or open the run board to see what it is waiting on.";
+  const missing = report.missingEvidence || [];
+  const retainedReadyVerdict = !missing.includes("final review") && !missing.includes("machine-readable final verdict");
+  const wentInconsistent = (report.inconsistencies || []).length > 0;
+  if (retainedReadyVerdict && wentInconsistent) {
+    return "The review passed at the time it ran, but the retained evidence no longer lines up — the reasons are listed below. This commonly happens when the repository moved after review (for example, the delivery was merged). Treat the READY as historical; re-run the review if you need a current verdict.";
+  }
+  return "The run has not reached a reviewed state yet, so no verdict can be derived. Let the run finish, or open the run board to see what it is waiting on.";
 }
 
 function parseReviewTargets(summary) {
@@ -807,7 +837,7 @@ function parseReviewTargets(summary) {
 function derivedVerdictMarkup(report) {
   const reportIssues = [...report.missingEvidence.map((item) => `Missing: ${item}`), ...report.inconsistencies];
   const verdictLabel = escapeHtml(report.verdict.replaceAll("_", " "));
-  const headline = `<div><span class="connection-kind">DERIVED VERDICT</span><h3>${verdictLabel}</h3><p>${escapeHtml(verdictGuidance(report, reportIssues.length))}</p></div>
+  const headline = `<div><span class="connection-kind">DERIVED VERDICT</span><h3>${verdictLabel}</h3><p>${escapeHtml(verdictGuidance(report))}</p></div>
     <span class="status-pill report-${escapeHtml(report.verdict.toLowerCase())}">${verdictLabel}</span>
     ${reportIssues.length ? `<ul class="verdict-reasons">${reportIssues.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : '<p class="report-consistent">No missing or contradictory retained evidence detected.</p>'}`;
   const parsed = parseReviewTargets(report.summary || "");
@@ -1913,8 +1943,11 @@ $("#delivery-repositories").addEventListener("click", async (event) => {
         const mismatch = error?.data?.versionMismatch;
         if (!mismatch) throw error;
         if (!window.confirm(`Hold on — this repository's own files declare version ${mismatch.declaredVersion}, but you typed ${mismatch.requestedTag}. A tag the repo contradicts is public and hard to undo.\n\nTag it as ${mismatch.requestedTag} anyway?`)) {
+          // The owner declined the override: nothing was tagged and nothing
+          // broke. Report it as a declined operation, not a success (and not a
+          // failure) so the shared activity strip stays honest.
           $("#delivery-error").textContent = `Tag not applied: the repository declares ${mismatch.declaredVersion}. Re-tag with the matching version, or confirm the mismatch deliberately.`;
-          return;
+          return cancelledOperation(`Tag not applied — you declined tagging ${mismatch.requestedTag} over the declared ${mismatch.declaredVersion}.`);
         }
         await submit(true);
       }

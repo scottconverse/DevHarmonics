@@ -343,11 +343,26 @@ export const devHarmonicsConfigSchema = z.object({
     reviewerCountByRisk: z.object({ low: z.number().int().min(1).max(8), medium: z.number().int().min(1).max(8), high: z.number().int().min(1).max(8) }),
     minimumDistinctProvidersByRisk: z.object({ low: z.number().int().min(1).max(4), medium: z.number().int().min(1).max(4), high: z.number().int().min(1).max(4) }),
     requireImplementorIndependenceByRisk: z.object({ low: z.boolean(), medium: z.boolean(), high: z.boolean() }),
+    requiredLensesByRisk: z.object({
+      low: z.array(z.enum(["artifact", "claims"])).min(1),
+      medium: z.array(z.enum(["artifact", "claims"])).min(1),
+      high: z.array(z.enum(["artifact", "claims"])).min(1),
+    }).default({ low: ["artifact"], medium: ["artifact"], high: ["artifact", "claims"] }),
     maxFixRounds: z.number().int().min(0).max(5),
+  }).superRefine((policy, context) => {
+    // More required lenses than reviewers is a quorum that can never pass;
+    // refuse it at parse time instead of failing every run at review time.
+    for (const risk of ["low", "medium", "high"] as const) {
+      const lenses = new Set(policy.requiredLensesByRisk[risk]).size;
+      if (lenses > policy.reviewerCountByRisk[risk]) {
+        context.addIssue({ code: z.ZodIssueCode.custom, path: ["requiredLensesByRisk", risk], message: `${risk} risk requires ${lenses} distinct lenses but only ${policy.reviewerCountByRisk[risk]} reviewer(s); lens coverage can never be satisfied` });
+      }
+    }
   }).default({
     reviewerCountByRisk: { low: 1, medium: 1, high: 2 },
     minimumDistinctProvidersByRisk: { low: 1, medium: 1, high: 2 },
     requireImplementorIndependenceByRisk: { low: false, medium: true, high: true },
+    requiredLensesByRisk: { low: ["artifact"], medium: ["artifact"], high: ["artifact", "claims"] },
     maxFixRounds: 2,
   }),
   routing: z.object({

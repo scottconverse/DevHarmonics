@@ -58,6 +58,7 @@ export const defaultConfig: DevHarmonicsConfig = {
     reviewerCountByRisk: { low: 1, medium: 1, high: 2 },
     minimumDistinctProvidersByRisk: { low: 1, medium: 1, high: 2 },
     requireImplementorIndependenceByRisk: { low: false, medium: true, high: true },
+    requiredLensesByRisk: { low: ["artifact"], medium: ["artifact"], high: ["artifact", "claims"] },
     maxFixRounds: 2,
   },
   routing: {

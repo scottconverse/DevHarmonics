@@ -29,7 +29,7 @@ import {
   type InvocationEvent,
 } from "../src/runtime.js";
 import type { DevHarmonicsConfig, PlannedTask, RunPlan, SteeringDirectiveRecord } from "../src/types.js";
-import { manualModelSchema, objectiveInputSchema, runPlanSchema, steeringPayloadSchema } from "../src/schemas.js";
+import { devHarmonicsConfigSchema, manualModelSchema, objectiveInputSchema, runPlanSchema, steeringPayloadSchema } from "../src/schemas.js";
 import { runProcess, subscriptionEnvironment } from "../src/process.js";
 import { REDACTED, redactText } from "../src/redaction.js";
 import { parseNvidiaSmi } from "../src/resources.js";
@@ -1923,9 +1923,9 @@ test("risk-based review quorum fails closed on weak independence and open findin
     [{ id: "low", risk: "low" }, { id: "critical", risk: "high" }],
     defaultConfig.reviewPolicy,
   );
-  assert.deepEqual(requirement, { risk: "high", requiredReviewers: 2, minimumDistinctProviders: 2, requireImplementorIndependence: true });
+  assert.deepEqual(requirement, { risk: "high", requiredReviewers: 2, minimumDistinctProviders: 2, requireImplementorIndependence: true, requiredLenses: ["artifact", "claims"] });
 
-  const ready = reviewModule.parseReviewerResponse("READY\nNo material findings.", { provider: "claude", modelId: "sonnet", connectionId: "claude" });
+  const ready = reviewModule.parseReviewerResponse("READY\nNo material findings.", { provider: "claude", modelId: "sonnet", connectionId: "claude", lens: "artifact" });
   assert.equal(ready.verdict, "READY");
   assert.deepEqual(ready.findings, []);
   const notReady = reviewModule.parseReviewerResponse(`NOT READY\n\n\`\`\`json\n{"findings":[{"severity":"high","location":"src/a.ts:7","rationale":"Unsafe bypass remains.","suggestedCorrection":"Remove the bypass.","disposition":"open"}]}\n\`\`\``, { provider: "codex", modelId: "terra", connectionId: "codex" });
@@ -1935,7 +1935,7 @@ test("risk-based review quorum fails closed on weak independence and open findin
   const passing = reviewModule.adjudicateReviewQuorum({
     requirement,
     implementationProviders: ["codex"],
-    reviews: [ready, { ...ready, provider: "gemini", modelId: "gemini-pro", connectionId: "gemini" }],
+    reviews: [ready, reviewModule.parseReviewerResponse(`READY\nClaims cohere.\n\`\`\`json\n{"findings":[],"claimedChanges":[]}\n\`\`\``, { provider: "gemini", modelId: "gemini-pro", connectionId: "gemini", lens: "claims" })],
   });
   assert.equal(passing.passed, true);
   assert.equal(passing.distinctProviders, 2);
@@ -1974,6 +1974,8 @@ test("ledger retains structured reviews and invalidates them when fixer evidence
         provider: "claude",
         modelId: "sonnet",
         connectionId: "subscription-cli:claude",
+        lens: null,
+        claimedChanges: null,
         summary: "A blocking defect remains.",
         rawText: "NOT READY",
         findings: [{ id: "unsafe", severity: "high", location: "src/a.ts:7", rationale: "Unsafe bypass remains.", suggestedCorrection: "Remove it.", disposition: "open" }],
@@ -1996,6 +1998,238 @@ test("ledger retains structured reviews and invalidates them when fixer evidence
     ledger.close();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("review lens coverage is a quorum dimension and receipts record the lens", async () => {
+  const reviewModule = await import("../src/review.js") as Record<string, any>;
+
+  assert.deepEqual(defaultConfig.reviewPolicy.requiredLensesByRisk, {
+    low: ["artifact"],
+    medium: ["artifact"],
+    high: ["artifact", "claims"],
+  }, "DH-460 requires lens coverage defaults by risk; lens count never exceeds reviewer count");
+
+  const unsatisfiable = devHarmonicsConfigSchema.shape.reviewPolicy.safeParse({
+    reviewerCountByRisk: { low: 1, medium: 1, high: 2 },
+    minimumDistinctProvidersByRisk: { low: 1, medium: 1, high: 2 },
+    requireImplementorIndependenceByRisk: { low: false, medium: true, high: true },
+    requiredLensesByRisk: { low: ["artifact"], medium: ["artifact", "claims"], high: ["artifact", "claims"] },
+    maxFixRounds: 2,
+  });
+  assert.equal(unsatisfiable.success, false, "a policy demanding more lenses than reviewers is refused at parse time");
+
+  const legacyPolicy = devHarmonicsConfigSchema.shape.reviewPolicy.parse({
+    reviewerCountByRisk: { low: 1, medium: 1, high: 2 },
+    minimumDistinctProvidersByRisk: { low: 1, medium: 1, high: 2 },
+    requireImplementorIndependenceByRisk: { low: false, medium: true, high: true },
+    maxFixRounds: 2,
+  });
+  assert.deepEqual(legacyPolicy.requiredLensesByRisk.high, ["artifact", "claims"], "a config written before lenses existed still parses with lens defaults");
+
+  const requirement = reviewModule.reviewRequirement([{ id: "critical", risk: "high" }], defaultConfig.reviewPolicy);
+  assert.deepEqual(requirement.requiredLenses, ["artifact", "claims"]);
+
+  const artifactReady = reviewModule.parseReviewerResponse("READY\nNo material findings.", { provider: "claude", modelId: "sonnet", connectionId: "claude", lens: "artifact" });
+  assert.equal(artifactReady.lens, "artifact");
+  const claimsReady = reviewModule.parseReviewerResponse(`READY\nClaims cohere with receipts.\n\`\`\`json\n{"findings":[],"claimedChanges":[]}\n\`\`\``, { provider: "gemini", modelId: "gemini-pro", connectionId: "gemini", lens: "claims" });
+
+  const singleLens = reviewModule.adjudicateReviewQuorum({
+    requirement,
+    implementationProviders: ["codex"],
+    reviews: [artifactReady, { ...artifactReady, provider: "gemini", connectionId: "gemini" }],
+  });
+  assert.equal(singleLens.passed, false, "two reviews through one lens must not satisfy a two-lens requirement");
+  assert.equal(singleLens.singleLens, true);
+  assert.match(singleLens.reasons.join(" "), /lens/i);
+
+  const covered = reviewModule.adjudicateReviewQuorum({
+    requirement,
+    implementationProviders: ["codex"],
+    reviews: [artifactReady, claimsReady],
+  });
+  assert.equal(covered.passed, true);
+  assert.equal(covered.singleLens, false);
+  assert.deepEqual([...covered.lensesCovered].sort(), ["artifact", "claims"]);
+
+  const undeclared = reviewModule.parseReviewerResponse("READY\nOk.", { provider: "ollama", connectionId: "ollama" });
+  assert.equal(undeclared.lens, null, "a review that never declared a lens records none");
+  const withUndeclared = reviewModule.adjudicateReviewQuorum({ requirement, implementationProviders: ["codex"], reviews: [artifactReady, undeclared] });
+  assert.equal(withUndeclared.passed, false, "an undeclared lens covers nothing");
+  assert.match(withUndeclared.reasons.join(" "), /claims/i);
+
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-review-lens-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db")) as Ledger & Record<string, any>;
+  try {
+    const runId = ledger.createRun("Lens receipts", root);
+    const evidenceBinding = createReviewEvidenceBinding({ autonomy: "bounded", plan: { summary: "lens", recommendedConcurrency: 1, tasks: [] }, taskReports: "", diff: [], checks: [], repositories: [{ repositoryId: root, baseCommit: "base", headCommit: "head" }] });
+    ledger.recordReviewReceipt({ runId, round: 1, integrationSha256: reviewEvidenceBindingSha256(evidenceBinding), evidenceBinding, review: { ...artifactReady, findings: [] } });
+    ledger.recordReviewReceipt({
+      runId,
+      round: 1,
+      integrationSha256: reviewEvidenceBindingSha256(evidenceBinding),
+      evidenceBinding,
+      review: { verdict: "READY", provider: "ollama", modelId: null, connectionId: "ollama", summary: "No lens declared.", rawText: "READY", findings: [], lens: null, claimedChanges: null },
+    });
+    const receipts = ledger.listReviewReceipts(runId);
+    assert.equal(receipts.length, 2);
+    assert.equal(receipts[0]!.lens, "artifact", "the receipt must retain which lens produced the review");
+    assert.equal(receipts[1]!.lens, null);
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("review lens bundles decorrelate what each reviewer is shown", async () => {
+  const promptsModule = await import("../src/prompts.js") as Record<string, any>;
+  const reviewModule = await import("../src/review.js") as Record<string, any>;
+
+  assert.equal(typeof reviewModule.lensForSlot, "function", "DH-460 requires deterministic lens assignment");
+  assert.equal(reviewModule.lensForSlot(["artifact", "claims"], 1), "artifact");
+  assert.equal(reviewModule.lensForSlot(["artifact", "claims"], 2), "claims");
+  assert.equal(reviewModule.lensForSlot(["artifact", "claims"], 3), "artifact");
+  assert.equal(reviewModule.lensForSlot([], 1), null);
+
+  assert.equal(typeof reviewModule.applicableReviewLenses, "function", "observe runs have no artifact to review");
+  assert.deepEqual(reviewModule.applicableReviewLenses({ requiredLenses: ["artifact", "claims"] }, "observe"), ["claims"]);
+  assert.deepEqual(reviewModule.applicableReviewLenses({ requiredLenses: ["artifact", "claims"] }, "bounded"), ["artifact", "claims"]);
+
+  const plan = { summary: "lens bundles", recommendedConcurrency: 1, tasks: [] };
+  const narrationSentinel = "NARRATION-SENTINEL-73f1";
+  const workspaceSentinel = "C:/sentinel/integration-worktree";
+  const common = { goal: "Ship the lens", constitution: "Be honest.", plan, checkSummary: "checks: 1 passed", autonomy: "bounded" };
+
+  const artifactPrompt = promptsModule.reviewerPrompt({ ...common, taskReports: narrationSentinel, workspacePath: workspaceSentinel, lens: "artifact" });
+  assert.ok(!artifactPrompt.includes(narrationSentinel), "the artifact lens must not see implementor narration");
+  assert.ok(artifactPrompt.includes(workspaceSentinel), "the artifact lens keeps the worktree");
+  assert.match(artifactPrompt, /withheld/i);
+
+  const legacyPrompt = promptsModule.reviewerPrompt({ ...common, taskReports: narrationSentinel, workspacePath: workspaceSentinel });
+  assert.ok(legacyPrompt.includes(narrationSentinel), "an unassigned lens keeps today's combined bundle");
+
+  const claimsHeader = promptsModule.claimsReviewerContextHeader(common);
+  assert.ok(!claimsHeader.includes(workspaceSentinel), "the claims lens must not learn the worktree location");
+  assert.match(claimsHeader, /no repository access|do not have repository/i);
+  assert.match(claimsHeader, /claimedChanges/, "the claims lens must be contracted to return a claimed-changes manifest");
+
+  const claimsChunks = promptsModule.claimsReviewChunks(narrationSentinel);
+  assert.ok(claimsChunks.length >= 1);
+  assert.ok(claimsChunks[0].content.includes(narrationSentinel), "the claims lens reviews the narration itself");
+
+  const artifactHeader = promptsModule.localReviewerContextHeader({ ...common, taskReports: narrationSentinel, lens: "artifact" });
+  assert.ok(!artifactHeader.includes(narrationSentinel), "a tool-less artifact-lens reviewer is narration-free too");
+});
+
+test("claims/artifact divergence is a deterministic fail-closed finding", async () => {
+  const reviewModule = await import("../src/review.js") as Record<string, any>;
+
+  // The claims lens returns a structured manifest inside the same fenced JSON.
+  const claims = reviewModule.parseReviewerResponse(
+    `READY\nClaims cohere.\n\`\`\`json\n{"findings":[],"claimedChanges":[{"path":"src\\\\alpha.ts","kind":"modified","taskId":"t1"},{"path":"src/beta.ts","kind":"created","taskId":"t2"}]}\n\`\`\``,
+    { provider: "gemini", modelId: "gemini-pro", connectionId: "gemini", lens: "claims" },
+  );
+  assert.deepEqual(claims.claimedChanges, [
+    { path: "src/alpha.ts", kind: "modified", taskId: "t1" },
+    { path: "src/beta.ts", kind: "created", taskId: "t2" },
+  ], "manifest paths are normalized and retained");
+  const noManifest = reviewModule.parseReviewerResponse("READY\nOk.", { provider: "gemini", connectionId: "gemini", lens: "claims" });
+  assert.equal(noManifest.claimedChanges, null, "an absent manifest is not an empty manifest");
+
+  assert.equal(typeof reviewModule.claimsArtifactDivergence, "function", "DH-460 requires the deterministic divergence gate");
+
+  // Exact agreement: no findings.
+  const agree = reviewModule.claimsArtifactDivergence({
+    reviews: [claims],
+    diffPaths: ["src/alpha.ts", "src\\beta.ts"],
+    passedTaskIds: new Set(["t1", "t2"]),
+  });
+  assert.deepEqual(agree, []);
+
+  // A claimed change absent from the diff fails closed (defect-22 class),
+  // even when the diff is nonempty.
+  const phantom = reviewModule.claimsArtifactDivergence({
+    reviews: [claims],
+    diffPaths: ["src/alpha.ts"],
+    passedTaskIds: new Set(["t1", "t2"]),
+  });
+  assert.equal(phantom.length, 1);
+  assert.equal(phantom[0].severity, "high");
+  assert.match(phantom[0].rationale, /src\/beta\.ts/);
+  assert.match(phantom[0].rationale, /t2/);
+  assert.equal(phantom[0].disposition, "open");
+
+  // A claim from a task that never passed is a fallback echo, not a divergence.
+  const failedTask = reviewModule.claimsArtifactDivergence({
+    reviews: [claims],
+    diffPaths: ["src/alpha.ts"],
+    passedTaskIds: new Set(["t1"]),
+  });
+  assert.deepEqual(failedTask, []);
+
+  // An integrated change nobody claimed is an unexplained change.
+  const unexplained = reviewModule.claimsArtifactDivergence({
+    reviews: [claims],
+    diffPaths: ["src/alpha.ts", "src/beta.ts", "src/gamma.ts"],
+    passedTaskIds: new Set(["t1", "t2"]),
+  });
+  assert.equal(unexplained.length, 1);
+  assert.equal(unexplained[0].severity, "medium");
+  assert.match(unexplained[0].rationale, /src\/gamma\.ts/);
+
+  // Divergence findings and a manifest-less claims review both block the quorum.
+  const requirement = { risk: "high", requiredReviewers: 2, minimumDistinctProviders: 2, requireImplementorIndependence: false, requiredLenses: ["artifact", "claims"] };
+  const artifactReady = reviewModule.parseReviewerResponse("READY\nArtifact holds.", { provider: "claude", modelId: "sonnet", connectionId: "claude", lens: "artifact" });
+  const blocked = reviewModule.adjudicateReviewQuorum({
+    requirement,
+    implementationProviders: [],
+    reviews: [artifactReady, claims],
+    divergence: phantom,
+  });
+  assert.equal(blocked.passed, false);
+  assert.match(blocked.reasons.join(" "), /divergence/i);
+  assert.equal(blocked.openFindings.some((finding: any) => finding.id === phantom[0].id), true);
+
+  const manifestLess = reviewModule.adjudicateReviewQuorum({
+    requirement,
+    implementationProviders: [],
+    reviews: [artifactReady, noManifest],
+  });
+  assert.equal(manifestLess.passed, false, "a claims-lens review without a manifest cannot support a pass");
+  assert.match(manifestLess.reasons.join(" "), /manifest/i);
+});
+
+test("adaptive routing prefers the cheapest candidate at established empirical parity", async () => {
+  const routingModule = await import("../src/routing.js") as Record<string, any>;
+  assert.equal(typeof routingModule.preferCheapestAtParity, "function", "DH-320 requires the parity preference");
+
+  const established = (rate: number) => ({ eligibleForAdaptiveWeighting: true, firstAttemptSuccessRate: rate, sampleSize: 40 });
+  const guards = { tierFit: 6, userPin: 0, preferredProvider: 0, fallbackProvider: 0, providerDiversity: 0 };
+  const premium = { id: "premium-model", pinned: false, unitCostUsd: 12, empiricalWorkload: established(0.96), breakdown: { ...guards } };
+  const budget = { id: "budget-model", pinned: false, unitCostUsd: 1.5, empiricalWorkload: established(0.94), breakdown: { ...guards } };
+
+  // Parity within tolerance: the cheaper candidate displaces the top.
+  const displaced = routingModule.preferCheapestAtParity([premium, budget]);
+  assert.equal(displaced?.id, "budget-model");
+
+  // A real quality gap is not parity.
+  const weaker = { ...budget, empiricalWorkload: established(0.7) };
+  assert.equal(routingModule.preferCheapestAtParity([premium, weaker]), null);
+
+  // An emerging record cannot claim parity.
+  const emerging = { ...budget, empiricalWorkload: { ...established(0.94), eligibleForAdaptiveWeighting: false } };
+  assert.equal(routingModule.preferCheapestAtParity([premium, emerging]), null);
+
+  // A pinned top is the user's decision, not the router's.
+  const pinnedTop = { ...premium, pinned: true };
+  assert.equal(routingModule.preferCheapestAtParity([pinnedTop, budget]), null);
+
+  // Unknown prices produce no preference rather than an invented one.
+  const unpriced = { ...budget, unitCostUsd: null };
+  assert.equal(routingModule.preferCheapestAtParity([premium, unpriced]), null);
+
+  // A diversity-boosted top is not displaced by a same-provider bargain.
+  const diverseTop = { ...premium, breakdown: { ...guards, providerDiversity: 8 } };
+  assert.equal(routingModule.preferCheapestAtParity([diverseTop, budget]), null);
 });
 
 test("verification-integrity gate fails closed on test weakening and reports bounded evidence", async () => {
@@ -2516,6 +2750,7 @@ test("ledger upgrades a v0.1 database transactionally and preserves a pre-migrat
           { version: 26, name: "paid-spend-reservation-lifecycle" },
           { version: 27, name: "approved-delivery-handoffs" },
           { version: 28, name: "live-run-steering" },
+          { version: 29, name: "review-receipt-lens" },
         ],
       );
     } finally {
@@ -3966,7 +4201,7 @@ test("steering directives persist with actor, target, disposition, and supersede
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-steering-ledger-"));
   const ledger = new Ledger(path.join(root, "devharmonics.db"));
   try {
-    assert.equal(LEDGER_SCHEMA_VERSION, 28, "live run steering advances the ledger schema");
+    assert.equal(LEDGER_SCHEMA_VERSION, 29, "review-receipt lens advances the ledger schema");
     const runId = ledger.createRun("Steer me", root);
     ledger.savePlan(runId, {
       summary: "One task",

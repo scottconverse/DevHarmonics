@@ -77,6 +77,7 @@ export interface DevHarmonicsConfig {
     reviewerCountByRisk: Record<"low" | "medium" | "high", number>;
     minimumDistinctProvidersByRisk: Record<"low" | "medium" | "high", number>;
     requireImplementorIndependenceByRisk: Record<"low" | "medium" | "high", boolean>;
+    requiredLensesByRisk: Record<"low" | "medium" | "high", Array<"artifact" | "claims">>;
     maxFixRounds: number;
   };
   routing: {

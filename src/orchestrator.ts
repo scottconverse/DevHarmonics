@@ -1,3 +1,4 @@
+import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { projectLegacyProvider } from "./compatibility.js";
@@ -13,6 +14,8 @@ import { OllamaAdapter, syncOllamaRuntimes } from "./ollama.js";
 import { createRuntimeAdapter } from "./providers.js";
 import {
   architectPrompt,
+  claimsReviewChunks,
+  claimsReviewerContextHeader,
   formatFailures,
   localReviewerContextHeader,
   objectivePromptText,
@@ -42,7 +45,7 @@ import { syncSubscriptionConnections } from "./registry.js";
 import { ModelRouter, type RouteInput } from "./routing.js";
 import { observeLocalResources } from "./resources.js";
 import { evaluateToolRequest, type ToolStage } from "./policy.js";
-import { adjudicateReviewQuorum, parseReviewerResponse, reviewRequirement, type ReviewFinding, type ReviewQuorumDecision, type ReviewRequirement, type StructuredReview } from "./review.js";
+import { adjudicateReviewQuorum, applicableReviewLenses, claimsArtifactDivergence, lensForSlot, parseReviewerResponse, reviewRequirement, type ReviewFinding, type ReviewLens, type ReviewQuorumDecision, type ReviewRequirement, type StructuredReview } from "./review.js";
 import { OPENROUTER_MAX_OUTPUT_TOKENS, OpenRouterService, requireInvocationCostCeiling, type PaidSpendReservation } from "./openrouter.js";
 import { ensureSchedulerCandidateQualified, ensureSchedulerProviderCandidateQualified, hasQualifiableCandidate, type SchedulerQualificationResult } from "./qualification.js";
 import { mergeRepositoryValidators, resolveValidatorCwd, runValidator, unknownValidator } from "./validators.js";
@@ -809,7 +812,9 @@ export class Orchestrator {
         .filter((task) => task.id !== "__integration__" && task.provider)
         .map((task) => String(task.provider)),
     )];
-    const reviewPolicy = reviewRequirement(plan.tasks, config.reviewPolicy);
+    const baseReviewRequirement = reviewRequirement(plan.tasks, config.reviewPolicy);
+    const reviewPolicy: ReviewRequirement = { ...baseReviewRequirement, requiredLenses: applicableReviewLenses(baseReviewRequirement, autonomy) };
+    const firstReviewLens = lensForSlot(reviewPolicy.requiredLenses, 1);
     const excludedReviewerModels = new Set<string>();
     const excludedReviewerConnections = new Set<string>();
     if (reviewPolicy.requireImplementorIndependence) {
@@ -818,7 +823,7 @@ export class Orchestrator {
       }
     }
     let reviewText: string | null = null;
-    let completedReviewerIdentity: { provider: string; modelId: string | null; connectionId: string } | null = null;
+    let completedReviewerIdentity: { provider: string; modelId: string | null; connectionId: string; lens?: ReviewLens | null } | null = null;
     let reviewerFallbackReason: string | null = null;
     let lastReviewerError: Error | null = null;
     for (let reviewAttempt = 1; reviewAttempt <= config.application.retry.maxAttempts; reviewAttempt++) {
@@ -862,10 +867,14 @@ export class Orchestrator {
       const reviewer = await this.provider(reviewerDecision.provider, config, reviewerDecision.connectionId);
       this.ledger.addEvent(runId, "review.started", `${reviewerDecision.provider} is reviewing the ${autonomy === "observe" ? "diagnostic reports" : "integration branch"}${reviewAttempt > 1 ? ` (fallback ${reviewAttempt})` : ""}`, { routing: reviewerDecision, reviewAttempt, fallbackReason: reviewerFallbackReason });
       try {
-        if (reviewer.connection.capabilities.providerManagedTools) {
+        // The claims lens never gets repository tools: even a tool-capable
+        // reviewer is routed through bounded chunks of the reports themselves,
+        // so what it cannot see is a property of the bundle, not of the prompt.
+        const claimsLensReview = firstReviewLens === "claims" && autonomy !== "observe";
+        if (reviewer.connection.capabilities.providerManagedTools && !claimsLensReview) {
           const review = await reviewer.invoke({
             role: "reviewer",
-            prompt: reviewerPrompt({ goal: request.goal, constitution, plan, checkSummary, taskReports, workspacePath: worktrees.integrationPath, autonomy }),
+            prompt: reviewerPrompt({ goal: request.goal, constitution, plan, checkSummary, taskReports, workspacePath: worktrees.integrationPath, autonomy, lens: firstReviewLens }),
             cwd: worktrees.integrationPath,
             permission: "read_only",
             timeoutMs: null,
@@ -875,16 +884,22 @@ export class Orchestrator {
           this.recordInvocation(runId, null, "reviewer", reviewerDecision, review, reviewerFallbackReason);
           reviewText = review.text;
         } else {
-          const diffFiles = await worktrees.integrationDiffFiles();
-          const chunks = autonomy === "observe" ? this.diagnosticReportChunks(runId) : chunkDiffFiles(diffFiles);
+          const diffFiles = claimsLensReview ? [] : await worktrees.integrationDiffFiles();
+          const chunks = claimsLensReview
+            ? claimsReviewChunks(taskReports)
+            : autonomy === "observe" ? this.diagnosticReportChunks(runId) : chunkDiffFiles(diffFiles);
           const localTaskReports = autonomy === "observe" ? "Each accepted diagnostic report is supplied as an independent evidence chunk." : taskReports;
           const performReview = (paidSpendReservationId?: string) => runContextOnlyReview({
             adapter: reviewer,
             model: reviewerDecision.model,
-            cwd: worktrees.integrationPath,
-            contextHeader: localReviewerContextHeader({ goal: request.goal, constitution, plan, checkSummary, taskReports: localTaskReports, autonomy }),
+            // A CLI reviewer runs in its cwd and can read whatever is there; the
+            // claims lens therefore never runs inside the integration worktree.
+            cwd: claimsLensReview ? os.tmpdir() : worktrees.integrationPath,
+            contextHeader: claimsLensReview
+              ? claimsReviewerContextHeader({ goal: request.goal, constitution, plan, checkSummary, autonomy })
+              : localReviewerContextHeader({ goal: request.goal, constitution, plan, checkSummary, taskReports: localTaskReports, autonomy, lens: firstReviewLens }),
             chunks,
-            evidenceLabel: autonomy === "observe" ? "diagnostic report" : "diff chunk",
+            evidenceLabel: claimsLensReview ? "task report chunk" : autonomy === "observe" ? "diagnostic report" : "diff chunk",
             maxOutputTokens: 512,
             signal,
             onChunk: (receipt, index, total) => {
@@ -904,6 +919,7 @@ export class Orchestrator {
           provider: reviewerDecision.provider,
           modelId: reviewerDecision.model.requestedModelId ? String(reviewerDecision.model.requestedModelId) : null,
           connectionId: String(reviewer.connection.id),
+          lens: firstReviewLens,
         };
         this.recordConnectionOutcome(reviewer.connection.id, { success: true });
         if (reviewerDecision.model.requestedModelId) {
@@ -965,6 +981,7 @@ export class Orchestrator {
         runId,
         reviewSlot,
         requiredReviewers: reviewPolicy.requiredReviewers,
+        lens: lensForSlot(reviewPolicy.requiredLenses, reviewSlot),
         reviewerName,
         reviewerProviders,
         implementationProviders,
@@ -991,7 +1008,14 @@ export class Orchestrator {
         }
       }
     }
-    let finalQuorum = adjudicateReviewQuorum({ requirement: reviewPolicy, implementationProviders, reviews: structuredReviews });
+    const passedTaskIds = new Set((this.ledger.getRun(runId)?.tasks ?? []).filter((task) => task.status === "passed").map((task) => task.id));
+    const firstRoundDivergence = autonomy === "observe"
+      ? []
+      : claimsArtifactDivergence({ reviews: structuredReviews, diffPaths: (await worktrees.integrationDiffFiles()).map((file) => file.path), passedTaskIds });
+    if (firstRoundDivergence.length) {
+      this.ledger.addEvent(runId, "review.divergence", `${firstRoundDivergence.length} claims/artifact divergence finding${firstRoundDivergence.length === 1 ? "" : "s"} — the reports and the integrated diff disagree`, { findings: firstRoundDivergence });
+    }
+    let finalQuorum = adjudicateReviewQuorum({ requirement: reviewPolicy, implementationProviders, reviews: structuredReviews, divergence: firstRoundDivergence });
     let finalReviews = structuredReviews;
     let finalReviewSha256 = integrationReviewSha256;
     for (let fixRound = 1; !finalQuorum.passed && finalQuorum.openFindings.length && autonomy !== "observe" && fixRound <= config.reviewPolicy.maxFixRounds; fixRound++) {
@@ -1487,6 +1511,8 @@ export class Orchestrator {
     runId: string;
     reviewSlot: number;
     requiredReviewers: number;
+    /** The evidence bundle this review slot is shown; null keeps the combined legacy bundle. */
+    lens?: ReviewLens | null;
     /** Null when only qualified local reviewers remain; the router then chooses among them. */
     reviewerName: ProviderName | null;
     reviewerProviders: readonly string[];
@@ -1563,10 +1589,13 @@ export class Orchestrator {
       this.ledger.addEvent(input.runId, "review.started", `${decision.provider} is completing quorum review ${input.reviewSlot}/${input.requiredReviewers}${reviewAttempt > 1 ? ` (fallback ${reviewAttempt})` : ""}`, { routing: decision, reviewSlot: input.reviewSlot, requiredReviewers: input.requiredReviewers, reviewAttempt, fallbackReason });
       try {
         let text: string;
-        if (!input.reviewChunks && reviewer.connection.capabilities.providerManagedTools) {
+        // The claims lens never gets repository tools or diff chunks — its
+        // bundle is the reports themselves, regardless of adapter capability.
+        const claimsLensReview = input.lens === "claims" && input.autonomy !== "observe";
+        if (!input.reviewChunks && reviewer.connection.capabilities.providerManagedTools && !claimsLensReview) {
           const review = await reviewer.invoke({
             role: "reviewer",
-            prompt: reviewerPrompt({ goal: input.goal, constitution: input.constitution, plan: input.plan, checkSummary: input.checkSummary, taskReports: input.taskReports, workspacePath: reviewCwd, autonomy: input.autonomy }),
+            prompt: reviewerPrompt({ goal: input.goal, constitution: input.constitution, plan: input.plan, checkSummary: input.checkSummary, taskReports: input.taskReports, workspacePath: reviewCwd, autonomy: input.autonomy, lens: input.lens ?? null }),
             cwd: reviewCwd,
             permission: "read_only",
             timeoutMs: null,
@@ -1576,17 +1605,21 @@ export class Orchestrator {
           this.recordInvocation(input.runId, null, "reviewer", decision, review, fallbackReason);
           text = review.text;
         } else {
-          const chunks = input.reviewChunks ?? (input.autonomy === "observe"
-            ? this.diagnosticReportChunks(input.runId)
-            : chunkDiffFiles(await input.worktrees!.integrationDiffFiles()));
+          const chunks = claimsLensReview
+            ? claimsReviewChunks(input.taskReports)
+            : input.reviewChunks ?? (input.autonomy === "observe"
+              ? this.diagnosticReportChunks(input.runId)
+              : chunkDiffFiles(await input.worktrees!.integrationDiffFiles()));
           const localTaskReports = input.autonomy === "observe" ? "Each accepted diagnostic report is supplied as an independent evidence chunk." : input.taskReports;
           const performReview = (paidSpendReservationId?: string) => runContextOnlyReview({
             adapter: reviewer,
             model: decision.model,
-            cwd: reviewCwd,
-            contextHeader: localReviewerContextHeader({ goal: input.goal, constitution: input.constitution, plan: input.plan, checkSummary: input.checkSummary, taskReports: localTaskReports, autonomy: input.autonomy }),
+            cwd: claimsLensReview ? os.tmpdir() : reviewCwd,
+            contextHeader: claimsLensReview
+              ? claimsReviewerContextHeader({ goal: input.goal, constitution: input.constitution, plan: input.plan, checkSummary: input.checkSummary, autonomy: input.autonomy })
+              : localReviewerContextHeader({ goal: input.goal, constitution: input.constitution, plan: input.plan, checkSummary: input.checkSummary, taskReports: localTaskReports, autonomy: input.autonomy, lens: input.lens ?? null }),
             chunks,
-            evidenceLabel: input.reviewEvidenceLabel ?? (input.autonomy === "observe" ? "diagnostic report" : "diff chunk"),
+            evidenceLabel: claimsLensReview ? "task report chunk" : input.reviewEvidenceLabel ?? (input.autonomy === "observe" ? "diagnostic report" : "diff chunk"),
             maxOutputTokens: 512,
             signal: input.signal,
             onChunk: (receipt, index, total) => {
@@ -1613,6 +1646,7 @@ export class Orchestrator {
           provider: decision.provider,
           modelId: decision.model.requestedModelId ? String(decision.model.requestedModelId) : null,
           connectionId: String(reviewer.connection.id),
+          lens: input.lens ?? null,
         });
       } catch (error) {
         if (input.signal.aborted) throw error;
@@ -1662,6 +1696,8 @@ export class Orchestrator {
     reviewCwd?: string;
     reviewChunks?: readonly ReviewChunk[];
     reviewEvidenceLabel?: string;
+    /** Integrated diff paths for the deterministic claims/artifact divergence check; derived from worktrees when omitted. */
+    diffPaths?: readonly string[];
     eventContext?: Record<string, unknown>;
     signal: AbortSignal;
     goal: string;
@@ -1679,11 +1715,13 @@ export class Orchestrator {
       }
     }
     const reviews: StructuredReview[] = [];
-    for (let reviewSlot = 1; reviewSlot <= input.requirement.requiredReviewers; reviewSlot++) {
+    const requirement: ReviewRequirement = { ...input.requirement, requiredLenses: applicableReviewLenses(input.requirement, input.autonomy) };
+    for (let reviewSlot = 1; reviewSlot <= requirement.requiredReviewers; reviewSlot++) {
       const review = await this.completeQuorumReview({
         ...input,
         reviewSlot,
-        requiredReviewers: input.requirement.requiredReviewers,
+        requiredReviewers: requirement.requiredReviewers,
+        lens: lensForSlot(requirement.requiredLenses, reviewSlot),
         excludedReviewerModels: excludedModels,
         excludedReviewerConnections: excludedConnections,
       });
@@ -1698,9 +1736,16 @@ export class Orchestrator {
         }
       }
     }
+    const diffPaths = input.diffPaths
+      ?? (input.worktrees && input.autonomy !== "observe" ? (await input.worktrees.integrationDiffFiles()).map((file) => file.path) : null);
+    const passedTaskIds = new Set((this.ledger.getRun(input.runId)?.tasks ?? []).filter((task) => task.status === "passed").map((task) => task.id));
+    const divergence = diffPaths ? claimsArtifactDivergence({ reviews, diffPaths, passedTaskIds }) : [];
+    if (divergence.length) {
+      this.ledger.addEvent(input.runId, "review.divergence", `${divergence.length} claims/artifact divergence finding${divergence.length === 1 ? "" : "s"} — the reports and the integrated diff disagree`, { ...input.eventContext, findings: divergence });
+    }
     return {
       reviews,
-      decision: adjudicateReviewQuorum({ requirement: input.requirement, implementationProviders: input.implementationProviders, reviews }),
+      decision: adjudicateReviewQuorum({ requirement, implementationProviders: input.implementationProviders, reviews, divergence }),
     };
   }
 

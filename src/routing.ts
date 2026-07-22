@@ -138,15 +138,26 @@ export class ModelRouter {
             providerDiversity: input.avoidProviders?.length && !input.avoidProviders.includes(connection.provider) ? 8 : 0,
             costAwareness: costScores.get(model.id) ?? 0,
           });
-          return [{ model, connection, profile, score: scoreTotal(breakdown), breakdown }];
+          return [{ model, connection, profile, empiricalWorkload, score: scoreTotal(breakdown), breakdown }];
         })
         .flat()
         .sort((left, right) => right.score - left.score || left.model.id.localeCompare(right.model.id));
-      const selected = candidates[0];
-      if (selected) {
+      const top = candidates[0];
+      if (top) {
+        // DH-320: quality parity at a lower price beats the tier premium, but
+        // only when the established empirical record proves the parity.
+        const parityChoice = preferCheapestAtParity(candidates.map((candidate) => ({
+          id: candidate.model.id,
+          pinned: candidate.model.pinned,
+          unitCostUsd: catalogUnitCost(candidate.model),
+          empiricalWorkload: candidate.empiricalWorkload,
+          breakdown: candidate.breakdown,
+        })));
+        const selected = parityChoice ? candidates.find((candidate) => candidate.model.id === parityChoice.id)! : top;
         return this.decisionForModel(input, workload, selected.model, selected.connection, selected.breakdown, [
           `adaptive ${workload.complexity} workload`,
           `${selected.profile.tier} model tier satisfies ${workload.requiredTier}`,
+          ...(parityChoice ? [`cheapest qualified candidate at established empirical parity (kept over ${top.model.canonicalName})`] : []),
           ...(selected.profile.reasoningEffort ? [`${selected.profile.reasoningEffort} reasoning setting fits workload`] : []),
           ...workload.factors,
           ...(selected.model.pinned ? ["user pin"] : []),
@@ -338,7 +349,42 @@ export function relativeCatalogCostScores(candidates: ReadonlyArray<{ id: string
   }));
 }
 
-function catalogUnitCost(model: ModelRecord): number | null {
+export interface ParityCandidate {
+  id: string;
+  pinned: boolean;
+  unitCostUsd: number | null;
+  empiricalWorkload?: Pick<ModelPerformanceSlice, "eligibleForAdaptiveWeighting" | "firstAttemptSuccessRate"> | undefined;
+  breakdown: Pick<RoutingScoreBreakdown, "tierFit" | "userPin" | "preferredProvider" | "fallbackProvider" | "providerDiversity">;
+}
+
+/** Success-rate difference at or under this is parity once both records are established (DH-250's ≥20-observation bar). */
+export const PARITY_SUCCESS_RATE_TOLERANCE = 0.05;
+
+/**
+ * DH-320: among score-ranked candidates (best first), pick the cheaper model
+ * over the top one only when the empirical record actually supports it — both
+ * slices established, success rates at parity, both prices known, and every
+ * non-cost routing consideration (tier fit, pins, provider preferences,
+ * diversity) identical. Returns the displacing candidate, or null when the top
+ * selection stands. A pinned top is the user's decision and is never displaced.
+ */
+export function preferCheapestAtParity(candidates: ReadonlyArray<ParityCandidate>): ParityCandidate | null {
+  const top = candidates[0];
+  if (!top || top.pinned) return null;
+  if (!top.empiricalWorkload?.eligibleForAdaptiveWeighting) return null;
+  if (top.unitCostUsd === null || !Number.isFinite(top.unitCostUsd)) return null;
+  const guardKeys = ["tierFit", "userPin", "preferredProvider", "fallbackProvider", "providerDiversity"] as const;
+  const atParity = candidates.slice(1).filter((candidate) => {
+    if (candidate.unitCostUsd === null || !Number.isFinite(candidate.unitCostUsd) || candidate.unitCostUsd >= top.unitCostUsd!) return false;
+    if (!candidate.empiricalWorkload?.eligibleForAdaptiveWeighting) return false;
+    if (Math.abs(candidate.empiricalWorkload.firstAttemptSuccessRate - top.empiricalWorkload!.firstAttemptSuccessRate) > PARITY_SUCCESS_RATE_TOLERANCE) return false;
+    return guardKeys.every((key) => candidate.breakdown[key] === top.breakdown[key]);
+  });
+  if (!atParity.length) return null;
+  return atParity.reduce((cheapest, candidate) => (candidate.unitCostUsd! < cheapest.unitCostUsd! ? candidate : cheapest));
+}
+
+export function catalogUnitCost(model: ModelRecord): number | null {
   const prompt = numericMetadata(model.metadata.promptPrice);
   const completion = numericMetadata(model.metadata.completionPrice);
   return prompt === null || completion === null ? null : prompt + completion;

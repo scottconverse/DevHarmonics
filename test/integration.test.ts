@@ -441,7 +441,7 @@ test("orchestrator completes a verified run through fake subscription CLIs", asy
         connection_id: "subscription-cli:codex",
         model_id: "subscription-cli:codex:model:gpt-5-6-terra",
         model_resolution: "concrete",
-        adapter_version: "0.5.1",
+        adapter_version: "0.6.0",
         runtime_version: "fake 1.0",
         model_settings_json: '{"effort":"medium"}',
         failure_kind: null,
@@ -770,7 +770,7 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
       defaultProject: string;
       providers: Array<{ name: string; setupSteps: string[] }>;
     };
-    assert.deepEqual(value.product, { name: "DevHarmonics", version: "0.5.1" });
+    assert.deepEqual(value.product, { name: "DevHarmonics", version: "0.6.0" });
     assert.equal(value.defaultProject, project);
     assert.equal(value.providers.length, 3);
     assert.ok(value.providers.find((provider) => provider.name === "gemini")?.setupSteps.some((step) => step.includes("one-time code")));
@@ -933,7 +933,7 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
     assert.equal(indexResponse.headers.get("cache-control"), "no-store");
     assert.equal(indexResponse.headers.get("expires"), "0");
 
-    const appScript = await fetch(`${dashboard.url}/app.js?v=0.5.1`).then((response) => response.text());
+    const appScript = await fetch(`${dashboard.url}/app.js?v=0.6.0`).then((response) => response.text());
     assert.match(appScript, /new EventSource/);
     assert.doesNotMatch(appScript, /setInterval\(refreshRuns/);
     assert.match(appScript, /autonomy:\s*\$\("#run-autonomy"\)\.value/);
@@ -969,7 +969,7 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
     assert.match(pageText, /id="activity-strip"/, "DH-632 requires the activity strip in the shell");
     assert.match(pageText, /aria-live="polite"[^>]*id="activity-strip"|id="activity-strip"[^>]*aria-live="polite"/, "the activity strip must be a polite live region");
 
-    const appStyles = await fetch(`${dashboard.url}/app.css?v=0.5.1`).then((response) => response.text());
+    const appStyles = await fetch(`${dashboard.url}/app.css?v=0.6.0`).then((response) => response.text());
     assert.match(appStyles, /@media \(max-width:\s*1200px\)[\s\S]*?\.board\s*\{\s*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
     assert.match(appStyles, /@media \(max-width:\s*950px\)[\s\S]*?\.run-list\s*\{[\s\S]*?display:\s*flex/);
     assert.match(appStyles, /\.app-shell\s*\{[^}]*overflow-x:\s*clip/);

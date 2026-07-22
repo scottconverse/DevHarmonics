@@ -141,6 +141,76 @@ export class DeliveryService {
     return parseDeclaredVersion(packageJson, pyproject);
   }
 
+  /** Is the object for `oid` present in the local object store? Bounded, read-only. */
+  private async commitObjectPresent(localPath: string, oid: string): Promise<boolean> {
+    const result = await this.runner({ command: "git", args: ["cat-file", "-e", `${oid}^{commit}`], cwd: localPath, timeoutMs: 30_000 });
+    return result.exitCode === 0;
+  }
+
+  /** Resolve a merged PR's immutable merge-commit OID from the LIVE pull request, or null. */
+  private async resolveMergeCommitOid(delivery: DeliveryRepositoryRecord): Promise<string | null> {
+    if (!delivery.pullRequestUrl) return null;
+    const view = await this.runner({ command: "gh", args: ["pr", "view", delivery.pullRequestUrl, "--json", "state,mergeCommit"], cwd: delivery.localPath, timeoutMs: 60_000 });
+    if (view.exitCode !== 0 || !view.stdout.trim()) return null;
+    try {
+      const state = JSON.parse(view.stdout) as { state?: string; mergeCommit?: { oid?: string } | null };
+      if (state.state === "MERGED" && state.mergeCommit?.oid) return state.mergeCommit.oid;
+    } catch {
+      // A malformed live read cannot resolve the OID right now; the caller
+      // reports "temporarily unavailable" rather than substituting a wrong one.
+    }
+    return null;
+  }
+
+  /**
+   * The declared version to prefill for a delivery's tag field, resolved LAZILY
+   * and AUTHORITATIVELY at read time (ROUND3-001, 2026-07-22). Before a merge
+   * commit exists, the reviewed head is the only truth. Once the repository is
+   * merged or tagged, the version MUST come from the immutable merge commit the
+   * tag gate judges — NEVER the reviewed head, which can declare a stale version
+   * and provoke a tag the gate would reject, or no version at all. Post-merge
+   * enrichment in `merge_pr` is a mere cache: this method is the authority and
+   * self-heals the two transient failure paths that cache can leave behind —
+   *   1. the merge-commit OID was never persisted (a `gh pr view` failure at
+   *      merge time): it is re-resolved from the live PR and persisted
+   *      opportunistically, so the repair is durable;
+   *   2. the OID is known but its object is not yet local (a failed or skipped
+   *      fetch at merge time): the merge commit is fetched once, bounded, then
+   *      the manifest is read from it.
+   * If the merge OID genuinely cannot be resolved right now (no PR reachable) or
+   * the object cannot be fetched, it returns `declaredVersion: null` with
+   * `mergeVersionUnavailable: true` — an explicit, honest signal the caller can
+   * render as "merge version temporarily unavailable — retry". It never
+   * substitutes the reviewed head for a merged repository.
+   */
+  async resolveDeliveryVersion(delivery: DeliveryRepositoryRecord): Promise<{ declaredVersion: string | null; mergeVersionUnavailable: boolean; mergeCommitOid: string | null }> {
+    const merged = delivery.status === "merged" || delivery.status === "tagged";
+    if (!merged) {
+      // Before a merge commit exists, the reviewed head is the only truth.
+      return { declaredVersion: await this.declaredVersionAtCommit(delivery.localPath, delivery.headCommit), mergeVersionUnavailable: false, mergeCommitOid: delivery.mergeCommitOid };
+    }
+    let mergeOid = delivery.mergeCommitOid;
+    if (!mergeOid) {
+      // Failure path 1: the OID was never persisted. Re-resolve it from the live
+      // PR and persist so the repair survives the next read.
+      mergeOid = await this.resolveMergeCommitOid(delivery);
+      if (mergeOid) {
+        this.ledger.updateDeliveryRepository(delivery.runId, delivery.repositoryId, { status: delivery.status, mergeCommitOid: mergeOid });
+      }
+    }
+    if (!mergeOid) {
+      return { declaredVersion: null, mergeVersionUnavailable: true, mergeCommitOid: null };
+    }
+    // Failure path 2: ensure the merge commit's object is local, fetching once.
+    if (!(await this.commitObjectPresent(delivery.localPath, mergeOid))) {
+      await this.runner({ command: "git", args: ["fetch", "origin", delivery.baseBranch], cwd: delivery.localPath, timeoutMs: 120_000 });
+      if (!(await this.commitObjectPresent(delivery.localPath, mergeOid))) {
+        return { declaredVersion: null, mergeVersionUnavailable: true, mergeCommitOid: mergeOid };
+      }
+    }
+    return { declaredVersion: await this.declaredVersionAtCommit(delivery.localPath, mergeOid), mergeVersionUnavailable: false, mergeCommitOid: mergeOid };
+  }
+
   async execute(input: DeliveryExecutionInput): Promise<DeliveryRepositoryRecord> {
     const run = this.ledger.getRun(input.runId);
     if (!run) throw new DeliveryRefusal(`Run '${input.runId}' was not found`);
@@ -298,15 +368,16 @@ export class DeliveryService {
           const merge = await this.runner({ command: "gh", args: ["pr", "merge", delivery.pullRequestUrl, "--merge"], cwd: delivery.localPath, timeoutMs: 120_000 });
           if (merge.exitCode !== 0) throw new Error(failureMessage(merge, "Pull request merge failed"));
         }
-        // ROUND2-002: capture the immutable merge commit OID now. The tag GATE
-        // judges this commit's declared version, so the cockpit's post-merge tag
-        // prefill must resolve from the SAME OID — not the reviewed head, which
-        // can declare a different version (the base advanced, or merge
-        // resolution changed the manifest) and provoke an avoidable
-        // second-confirmation conflict. Fetch it so the GET enrichment can read
-        // the merged artifact's manifest locally. Enrichment is best-effort: the
-        // merge is already durable, so a missing OID or a failed fetch must
-        // never fail an accomplished merge — it degrades to the head prefill.
+        // ROUND2-002: capture the immutable merge commit OID now, and fetch its
+        // object, as a CACHE that saves the GET path a round-trip on the happy
+        // path. This persistence is deliberately best-effort — the merge is
+        // already durable, so a missing OID or a failed fetch must never fail an
+        // accomplished merge. It is NOT the source of truth: after ROUND3-001 the
+        // GET path (resolveDeliveryVersion) is authoritative and self-heals both
+        // transient failures here — a never-persisted OID is re-resolved from the
+        // live PR at read time, and an unfetched object is fetched then — so a
+        // merged repository's prefill always follows the merge commit and NEVER
+        // degrades to the reviewed head.
         let mergeCommitOid: string | null = null;
         const mergeCommitView = await this.runner({ command: "gh", args: ["pr", "view", delivery.pullRequestUrl, "--json", "state,mergeCommit"], cwd: delivery.localPath, timeoutMs: 60_000 });
         if (mergeCommitView.exitCode === 0 && mergeCommitView.stdout.trim()) {

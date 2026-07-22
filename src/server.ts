@@ -995,17 +995,21 @@ async function route(
     // placeholder text (owner finding, 2026-07-22): enrich each repository with
     // the version its own files declare, via the same immutable-commit lookup
     // the tag gate uses, never from the mutable checkout (CRITICAL gate finding,
-    // 2026-07-22). Once merged, resolve from the persisted MERGE commit OID —
-    // the exact artifact the tag gate judges — so the prefill can never propose
-    // a version the gate will reject (ROUND2-002). Before a merge commit exists,
-    // the reviewed head is the only truth available.
+    // 2026-07-22). resolveDeliveryVersion is the AUTHORITY (ROUND3-001): before a
+    // merge commit exists it reads the reviewed head; once merged/tagged it
+    // follows the MERGE commit the tag gate judges — the exact artifact — even
+    // when merge-time enrichment failed, re-resolving the OID from the live PR
+    // and fetching its object at read time. It NEVER falls back to the reviewed
+    // head for a merged repository; if the merge version genuinely cannot be
+    // resolved right now it returns null with mergeVersionUnavailable so the
+    // cockpit shows an honest "retry" rather than a silently-wrong version.
     const repositories = await Promise.all((run.delivery?.repositories ?? []).map(async (repository) => {
-      const versionCommit = ["merged", "tagged"].includes(repository.status) && repository.mergeCommitOid
-        ? repository.mergeCommitOid
-        : repository.headCommit;
+      const resolved = await context.delivery.resolveDeliveryVersion(repository);
       return {
         ...repository,
-        declaredVersion: await context.delivery.declaredVersionAtCommit(repository.localPath, versionCommit),
+        mergeCommitOid: resolved.mergeCommitOid,
+        declaredVersion: resolved.declaredVersion,
+        ...(resolved.mergeVersionUnavailable ? { mergeVersionUnavailable: true } : {}),
       };
     }));
     sendJson(response, 200, { delivery: run.delivery ? { ...run.delivery, repositories } : null });

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import type { ObjectiveInput } from "./types.js";
 
 /**
  * DH-810: a workflow is a versioned, parameterized document stored in Git.
@@ -92,4 +93,67 @@ function canonicalize(value: unknown): unknown {
 
 export function workflowRevisionHash(workflow: WorkflowDocument): string {
   return createHash("sha256").update(JSON.stringify(canonicalize(workflow))).digest("hex");
+}
+
+export interface WorkflowInstantiation {
+  ok: true;
+  objective: ObjectiveInput;
+  revisionHash: string;
+}
+
+export type WorkflowInstantiationResult = WorkflowInstantiation | { ok: false; issues: string[] };
+
+/**
+ * DH-810 S3: a workflow plus typed inputs becomes an ObjectiveInput for the
+ * EXISTING composer path — no second execution engine. Input validation fails
+ * closed: missing required inputs, wrong types, and undeclared names are all
+ * refused with named issues before anything is built. The produced objective
+ * carries the workflow revision hash in its policy notes so the run that
+ * eventually starts from it can pin the exact revision executed.
+ */
+export function instantiateWorkflow(input: {
+  workflow: WorkflowDocument;
+  inputs: Record<string, unknown>;
+  projectPath: string;
+  repositoryIds: string[];
+  productId?: string;
+  priority?: "low" | "normal" | "high" | "urgent";
+}): WorkflowInstantiationResult {
+  const issues: string[] = [];
+  const declared = new Map(input.workflow.inputs.map((item) => [item.name, item]));
+  for (const item of input.workflow.inputs) {
+    const value = input.inputs[item.name];
+    if (value === undefined || value === null) {
+      if (item.required) issues.push(`inputs.${item.name}: required and missing`);
+      continue;
+    }
+    if (typeof value !== item.type) issues.push(`inputs.${item.name}: expected ${item.type}, received ${typeof value}`);
+  }
+  for (const name of Object.keys(input.inputs)) {
+    if (!declared.has(name)) issues.push(`inputs.${name}: not declared by workflow '${input.workflow.name}'`);
+  }
+  if (issues.length) return { ok: false, issues };
+
+  const revisionHash = workflowRevisionHash(input.workflow);
+  const outcome = input.workflow.objective.outcomeTemplate.replace(/\$\{([^}]*)\}/g, (_, name: string) => String(input.inputs[name] ?? ""));
+  return {
+    ok: true,
+    revisionHash,
+    objective: {
+      outcome,
+      acceptanceCriteria: [...input.workflow.objective.acceptanceCriteria],
+      constraints: [],
+      projectPath: input.projectPath,
+      ...(input.productId ? { productId: input.productId } : {}),
+      repositoryIds: [...input.repositoryIds],
+      risk: input.workflow.objective.risk,
+      autonomy: input.workflow.permissions.autonomy,
+      priority: input.priority ?? "normal",
+      policyNotes: [
+        `Workflow: ${input.workflow.name} @ revision ${revisionHash.slice(0, 12)}`,
+        ...input.workflow.evidenceRequirements.map((requirement) => `Required evidence: ${requirement}`),
+        `Completion contract: ${input.workflow.completionContract.deliverable} (review lenses: ${input.workflow.completionContract.reviewLenses.join(", ")})`,
+      ],
+    },
+  };
 }

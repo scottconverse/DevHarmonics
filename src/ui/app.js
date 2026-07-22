@@ -609,6 +609,7 @@ function showView(view) {
   $("#evidence-view").classList.toggle("hidden", view !== "evidence");
   $("#products-view").classList.toggle("hidden", view !== "products");
   $("#workbench-view").classList.toggle("hidden", view !== "workbench");
+  $("#workflows-view").classList.toggle("hidden", view !== "workflows");
   if (view === "runs") {
     $("#composer").classList.toggle("hidden", Boolean(state.selectedRunId) && !state.composing);
     $("#run-view").classList.toggle("hidden", !state.selectedRunId || state.composing);
@@ -616,9 +617,77 @@ function showView(view) {
   } else {
     $("#composer").classList.add("hidden");
     $("#run-view").classList.add("hidden");
-    $("#page-title").textContent = view === "setup" ? "Configure the control plane" : view === "models" ? "Manage the model fleet" : view === "products" ? "Operate across real products" : view === "workbench" ? "Explore before you execute" : "Inspect retained evidence";
+    $("#page-title").textContent = view === "setup" ? "Configure the control plane" : view === "models" ? "Manage the model fleet" : view === "products" ? "Operate across real products" : view === "workbench" ? "Explore before you execute" : view === "workflows" ? "Run a versioned workflow" : "Inspect retained evidence";
   }
 }
+
+async function refreshWorkflows() {
+  const { workflows } = await api("/api/workflows");
+  state.workflows = workflows;
+  $("#workflow-list").innerHTML = workflows.length
+    ? workflows.map((workflow) => `<button class="connection-card" style="text-align:left;cursor:pointer" data-workflow-hash="${escapeHtml(workflow.revisionHash)}">
+        <strong>${escapeHtml(workflow.name)}</strong>
+        <p class="field-help">revision ${escapeHtml(workflow.revisionHash.slice(0, 12))} · recorded ${escapeHtml(workflow.createdAt.slice(0, 10))}</p>
+      </button>`).join("")
+    : `<p class="field-help">No workflow revisions are recorded yet. Shipped documents live in <code>.devharmonics/workflows/</code>; record one with POST /api/workflows.</p>`;
+  $("#workflow-detail").classList.add("hidden");
+}
+
+async function showWorkflowDetail(revisionHash) {
+  const { revision } = await api(`/api/workflows/${revisionHash}`);
+  state.selectedWorkflow = revision;
+  $("#workflow-detail-name").textContent = `${revision.name} — revision ${revision.revisionHash.slice(0, 12)}`;
+  $("#workflow-detail-description").textContent = revision.workflow.description;
+  $("#workflow-detail-json").textContent = JSON.stringify(revision.workflow, null, 2);
+  $("#workflow-detail-inputs").innerHTML = [
+    ...revision.workflow.inputs.map((input) => `<label class="field-help">${escapeHtml(input.name)}${input.required ? " (required)" : ""} — ${escapeHtml(input.description)}
+      <input type="text" data-workflow-input="${escapeHtml(input.name)}" data-workflow-input-type="${escapeHtml(input.type)}" placeholder="${escapeHtml(input.type)}">
+    </label>`),
+    `<label class="field-help">Repository ids (comma-separated)
+      <input type="text" id="workflow-repository-ids" placeholder="repo:docs">
+    </label>`,
+  ].join("");
+  $("#workflow-instantiate-result").textContent = "";
+  $("#workflow-error").textContent = "";
+  $("#workflow-detail").classList.remove("hidden");
+}
+
+$("#workflow-list").addEventListener("click", async (event) => {
+  const card = event.target.closest("[data-workflow-hash]");
+  if (card) await showWorkflowDetail(card.dataset.workflowHash);
+});
+
+$("#workflow-instantiate").addEventListener("click", async (event) => {
+  const revision = state.selectedWorkflow;
+  if (!revision) return;
+  const inputs = {};
+  let inputError = null;
+  for (const element of document.querySelectorAll("[data-workflow-input]")) {
+    const raw = element.value.trim();
+    if (!raw) continue;
+    const type = element.dataset.workflowInputType;
+    if (type === "number") {
+      const parsed = Number(raw);
+      if (!Number.isFinite(parsed)) inputError = `${element.dataset.workflowInput} must be a number`;
+      inputs[element.dataset.workflowInput] = parsed;
+    } else if (type === "boolean") {
+      inputs[element.dataset.workflowInput] = raw === "true";
+    } else {
+      inputs[element.dataset.workflowInput] = raw;
+    }
+  }
+  if (inputError) { $("#workflow-error").textContent = inputError; return; }
+  const repositoryIds = ($("#workflow-repository-ids")?.value || "").split(",").map((value) => value.trim()).filter(Boolean);
+  $("#workflow-error").textContent = "";
+  await withOperation(event.currentTarget, "Creating the objective from the workflow", async () => {
+    const result = await api(`/api/workflows/${revision.revisionHash}/instantiate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ inputs, repositoryIds }),
+    });
+    $("#workflow-instantiate-result").textContent = `Objective ${result.objective.id.slice(0, 8)} created from revision ${result.revisionHash.slice(0, 12)}. Propose and approve its plan in the composer — the run will pin this exact workflow revision.`;
+  }, { onError: (message) => { $("#workflow-error").textContent = message; }, busyLabel: "Creating…" });
+});
 
 async function refreshEvidence() {
   const runId = state.selectedRunId || state.runs[0]?.id;
@@ -1214,6 +1283,7 @@ document.querySelector(".app-nav").addEventListener("click", async (event) => {
   if (button.dataset.view === "evidence") await refreshEvidence();
   if (button.dataset.view === "products") await refreshProducts();
   if (button.dataset.view === "workbench") await refreshWorkbench();
+  if (button.dataset.view === "workflows") await refreshWorkflows();
 });
 $("#refresh-products").addEventListener("click", refreshProducts);
 $("#register-product").addEventListener("click", () => {

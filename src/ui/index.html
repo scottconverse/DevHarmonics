@@ -20,6 +20,7 @@
           <button class="nav-link" data-view="products">Products</button>
           <button class="nav-link" data-view="setup">Setup</button>
           <button class="nav-link" data-view="models">Models</button>
+          <button class="nav-link" data-view="workflows">Workflows</button>
           <button class="nav-link" data-view="evidence">Evidence</button>
         </nav>
         <div class="section-label">Recent runs</div>
@@ -385,6 +386,28 @@
             </div>
             <div class="composer-actions"><p id="model-message" class="muted" role="status"></p><button class="primary" type="submit">Add model</button></div>
           </form>
+        </section>
+
+        <section id="workflows-view" class="workspace-view hidden" aria-labelledby="workflows-title">
+          <div class="view-heading">
+            <div>
+              <p class="eyebrow">Reusable workflows</p>
+              <h2 id="workflows-title">Versioned, reviewable, receipted</h2>
+            </div>
+          </div>
+          <p class="field-help">A workflow is a Git-versioned document. Starting one creates an objective through the normal composer — you still review and approve the plan before anything runs, and the run pins the exact workflow revision it executed.</p>
+          <div id="workflow-list" class="connection-grid"></div>
+          <article id="workflow-detail" class="connection-card hidden">
+            <h3 id="workflow-detail-name"></h3>
+            <p id="workflow-detail-description" class="field-help"></p>
+            <div id="workflow-detail-inputs"></div>
+            <div class="plan-actions">
+              <button id="workflow-instantiate" class="primary small" type="button">Create objective from this workflow</button>
+            </div>
+            <p id="workflow-instantiate-result" class="field-help"></p>
+            <p id="workflow-error" class="error"></p>
+            <details><summary>Full document (this exact revision)</summary><pre id="workflow-detail-json" class="integration-commit-range" style="white-space:pre-wrap"></pre></details>
+          </article>
         </section>
 
         <section id="evidence-view" class="workspace-view hidden" aria-labelledby="evidence-title">

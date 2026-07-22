@@ -8,6 +8,7 @@ import { initializeProject, loadConfig, saveConfig, devHarmonicsDirectory } from
 import { inspectProviders } from "./doctor.js";
 import { catalogPricesPerMTokens } from "./routing.js";
 import { runCostCounterfactual } from "./model-performance.js";
+import { instantiateWorkflow, parseWorkflowDocument } from "./workflows.js";
 import { Ledger, STEERABLE_RUN_STATUSES, STEERABLE_TASK_STATUSES } from "./ledger.js";
 import { Orchestrator } from "./orchestrator.js";
 import { ModelCatalogCoordinator } from "./catalog.js";
@@ -685,6 +686,55 @@ async function route(
     return;
   }
 
+  // DH-810: stored workflows — list revisions, record a parsed document, and
+  // instantiate one into an objective through the EXISTING composer path.
+  if (request.method === "GET" && url.pathname === "/api/workflows") {
+    sendJson(response, 200, { workflows: context.ledger.listWorkflowRevisions() });
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/workflows") {
+    requireJsonRequest(request);
+    const body = await readJson(request) as { document?: unknown };
+    const parsedDocument = parseWorkflowDocument(typeof body.document === "string" ? body.document : JSON.stringify(body.document ?? null));
+    if (!parsedDocument.ok) {
+      sendJson(response, 400, { error: "Workflow document is invalid", issues: parsedDocument.issues });
+      return;
+    }
+    sendJson(response, 201, { revision: context.ledger.recordWorkflowRevision({ workflow: parsedDocument.workflow }) });
+    return;
+  }
+  const workflowDetailMatch = url.pathname.match(/^\/api\/workflows\/([a-f0-9]{64})$/i);
+  if (request.method === "GET" && workflowDetailMatch?.[1]) {
+    const stored = context.ledger.getWorkflowRevision(workflowDetailMatch[1]);
+    sendJson(response, stored ? 200 : 404, stored ? { revision: stored } : { error: "Workflow revision not found" });
+    return;
+  }
+  const workflowInstantiateMatch = url.pathname.match(/^\/api\/workflows\/([a-f0-9]{64})\/instantiate$/i);
+  if (request.method === "POST" && workflowInstantiateMatch?.[1]) {
+    requireJsonRequest(request);
+    const stored = context.ledger.getWorkflowRevision(workflowInstantiateMatch[1]);
+    if (!stored) {
+      sendJson(response, 404, { error: "Workflow revision not found" });
+      return;
+    }
+    const body = await readJson(request) as { inputs?: Record<string, unknown>; projectPath?: string; repositoryIds?: string[]; productId?: string; priority?: "low" | "normal" | "high" | "urgent" };
+    const instantiated = instantiateWorkflow({
+      workflow: stored.workflow,
+      inputs: body.inputs ?? {},
+      projectPath: path.resolve(String(body.projectPath || context.defaultProject)),
+      repositoryIds: Array.isArray(body.repositoryIds) ? body.repositoryIds.map(String) : [],
+      ...(body.productId ? { productId: String(body.productId) } : {}),
+      ...(body.priority ? { priority: body.priority } : {}),
+    });
+    if (!instantiated.ok) {
+      sendJson(response, 400, { error: "Workflow inputs are invalid", issues: instantiated.issues });
+      return;
+    }
+    const objective = context.ledger.createObjective(instantiated.objective);
+    sendJson(response, 201, { objective, revisionHash: instantiated.revisionHash });
+    return;
+  }
+
   const objectiveMatch = url.pathname.match(/^\/api\/objectives\/([a-f0-9-]+)$/i);
   if (request.method === "GET" && objectiveMatch?.[1]) {
     const objective = context.ledger.getObjective(objectiveMatch[1]);
@@ -755,7 +805,7 @@ async function route(
       sendJson(response, 409, { error: execution.reason, execution });
       return;
     }
-    const body = await readJson(request) as { agents?: number | "auto"; enabledProviders?: ProviderName[] };
+    const body = await readJson(request) as { agents?: number | "auto"; enabledProviders?: ProviderName[]; workflowRevisionHash?: string };
     const revision = context.ledger.approvePlanRevision(objective.id, revisionNumber);
     const agents = body.agents === "auto" ? "auto" : Number(body.agents);
     const runId = context.orchestrator.beginApprovedObjective({
@@ -764,7 +814,12 @@ async function route(
       agents: agents === "auto" || Number.isInteger(agents) && agents > 0 ? agents : "auto",
       ...(body.enabledProviders ? { enabledProviders: body.enabledProviders } : {}),
     });
-    sendJson(response, 202, { runId, objectiveId: objective.id, approvedPlanRevision: revision.revision });
+    // DH-810: a run started from a workflow pins the exact revision executed —
+    // fail-closed linkage, refused for hashes the ledger never stored.
+    if (typeof body.workflowRevisionHash === "string" && body.workflowRevisionHash) {
+      context.ledger.linkRunWorkflowRevision(runId, body.workflowRevisionHash);
+    }
+    sendJson(response, 202, { runId, objectiveId: objective.id, approvedPlanRevision: revision.revision, ...(body.workflowRevisionHash ? { workflowRevisionHash: body.workflowRevisionHash } : {}) });
     return;
   }
 

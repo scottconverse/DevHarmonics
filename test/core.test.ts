@@ -2837,6 +2837,81 @@ test("delivery completes from the cockpit: receipted merge and tag, never blind"
   }
 });
 
+// workflow's own risk/autonomy/acceptance, and refusal cases.
+
+test("workflow instantiation validates typed inputs and builds the objective through the composer contract", async () => {
+  const workflows = await import("../src/workflows.js") as Record<string, any>;
+  assert.equal(typeof workflows.instantiateWorkflow, "function", "DH-810 requires workflow instantiation");
+  const parsed = workflows.parseWorkflowDocument(JSON.stringify({
+    name: "documentation-consistency",
+    description: "Verify every versioned claim in the docs matches the repository state.",
+    inputs: [
+      { name: "repositoryId", type: "string", required: true, description: "Repository to audit" },
+      { name: "maxFindings", type: "number", required: false, description: "Stop after this many findings" },
+    ],
+    objective: {
+      outcomeTemplate: "Every versioned claim in ${repositoryId} documentation matches the code.",
+      acceptanceCriteria: ["No stale version statements remain", "Every corrected claim cites its source line"],
+      risk: "medium",
+    },
+    evidenceRequirements: ["path:line citation per corrected claim"],
+    approvalPoints: ["plan"],
+    completionContract: { deliverable: "reviewed branch", reviewLenses: ["artifact"] },
+    permissions: { autonomy: "supervised", allowExternalWrites: false },
+  }));
+  assert.equal(parsed.ok, true);
+
+  const instantiated = workflows.instantiateWorkflow({
+    workflow: parsed.workflow,
+    inputs: { repositoryId: "repo:docs", maxFindings: 10 },
+    projectPath: "C:/fixture/project",
+    repositoryIds: ["repo:docs"],
+  });
+  assert.equal(instantiated.ok, true, JSON.stringify(instantiated.issues ?? []));
+  assert.equal(instantiated.objective.outcome, "Every versioned claim in repo:docs documentation matches the code.");
+  assert.deepEqual(instantiated.objective.acceptanceCriteria, parsed.workflow.objective.acceptanceCriteria);
+  assert.equal(instantiated.objective.risk, "medium");
+  assert.equal(instantiated.objective.autonomy, "supervised");
+  assert.equal(instantiated.objective.projectPath, "C:/fixture/project");
+  assert.deepEqual(instantiated.objective.repositoryIds, ["repo:docs"]);
+  assert.ok(instantiated.objective.policyNotes.some((note: string) => note.includes("path:line citation")), "evidence requirements travel as policy notes");
+  assert.ok(instantiated.objective.policyNotes.some((note: string) => note.includes(instantiated.revisionHash.slice(0, 12))), "the objective names its workflow revision");
+
+  // Required input missing, wrong type, and undeclared input all refuse.
+  assert.equal(workflows.instantiateWorkflow({ workflow: parsed.workflow, inputs: {}, projectPath: "p", repositoryIds: [] }).ok, false, "a missing required input refuses");
+  assert.equal(workflows.instantiateWorkflow({ workflow: parsed.workflow, inputs: { repositoryId: 7 }, projectPath: "p", repositoryIds: [] }).ok, false, "a wrong-typed input refuses");
+  assert.equal(workflows.instantiateWorkflow({ workflow: parsed.workflow, inputs: { repositoryId: "r", mystery: true }, projectPath: "p", repositoryIds: [] }).ok, false, "an undeclared input refuses");
+});
+
+test("the shipped workflows-of-record parse from disk and pin stable revisions", async () => {
+  // DH-810 S4: the two documents shipped with the product are fixtures-of-
+  // record — the test parses the REAL files, so any edit that breaks the
+  // grammar (or silently changes what a product depends on) fails here.
+  const workflows = await import("../src/workflows.js") as Record<string, any>;
+  const shippedDirectory = path.join(process.cwd(), "workflows");
+  const shipped = ["documentation-consistency.json", "release-truth-audit.json"];
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-workflows-record-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db")) as Ledger & Record<string, any>;
+  try {
+    for (const filename of shipped) {
+      const text = await readFile(path.join(shippedDirectory, filename), "utf-8");
+      const parsed = workflows.parseWorkflowDocument(text);
+      assert.equal(parsed.ok, true, `${filename}: ${JSON.stringify(parsed.issues ?? [])}`);
+      const recorded = ledger.recordWorkflowRevision({ workflow: parsed.workflow });
+      assert.equal(recorded.revisionHash, workflows.workflowRevisionHash(parsed.workflow));
+    }
+    assert.equal(ledger.listWorkflowRevisions().length, 2);
+    // The high-risk release-truth audit demands both lenses — the product's
+    // own audits run under the same decorrelation discipline it enforces.
+    const releaseTruth = ledger.listWorkflowRevisions().map((revision: { revisionHash: string }) => ledger.getWorkflowRevision(revision.revisionHash)!).find((revision: { name: string }) => revision.name === "release-truth-audit")!;
+    assert.deepEqual(releaseTruth.workflow.completionContract.reviewLenses, ["artifact", "claims"]);
+    assert.equal(releaseTruth.workflow.objective.risk, "high");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("verification-integrity gate fails closed on test weakening and reports bounded evidence", async () => {
   const integrityPath = "../src/verification-integrity.js";
   const integrityModule = await import(integrityPath).catch(() => ({})) as Record<string, any>;

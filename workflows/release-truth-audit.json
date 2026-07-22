@@ -1,0 +1,44 @@
+{
+  "name": "release-truth-audit",
+  "description": "Verify every claim a release page makes - versions, checksums, artifact names, install commands - against the tagged artifacts themselves.",
+  "inputs": [
+    {
+      "name": "repositoryId",
+      "type": "string",
+      "required": true,
+      "description": "Repository whose release is audited"
+    },
+    {
+      "name": "tag",
+      "type": "string",
+      "required": true,
+      "description": "Release tag to audit"
+    }
+  ],
+  "objective": {
+    "outcomeTemplate": "Every claim on the ${repositoryId} release page for ${tag} matches its tagged artifacts, with mismatches corrected or reported.",
+    "acceptanceCriteria": [
+      "Every checksum, version string, and artifact name on the release page is verified against the artifact",
+      "Each verification cites the artifact and the claim it checked"
+    ],
+    "risk": "high"
+  },
+  "evidenceRequirements": [
+    "checksum verification transcript",
+    "path:line citation per corrected claim"
+  ],
+  "approvalPoints": [
+    "plan"
+  ],
+  "completionContract": {
+    "deliverable": "audit report",
+    "reviewLenses": [
+      "artifact",
+      "claims"
+    ]
+  },
+  "permissions": {
+    "autonomy": "observe",
+    "allowExternalWrites": false
+  }
+}

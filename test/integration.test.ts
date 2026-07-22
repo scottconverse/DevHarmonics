@@ -876,6 +876,12 @@ test("the delivery HTTP route serializes per repository, types its refusals, and
     if (request.command === "git" && joined === "remote get-url origin") {
       return { stdout: "https://github.com/civicsuite/http.git\n", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
     }
+    // The tag-truth gate and the GET enrichment now read the version from the
+    // IMMUTABLE commit via `git show <oid>:package.json`, not the checkout. This
+    // fixture's commits (reviewed head and merge commit) declare 9.9.9.
+    if (request.command === "git" && request.args[0] === "show" && joined.endsWith(":package.json")) {
+      return { stdout: JSON.stringify({ name: "fixture", version: "9.9.9" }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
     if (request.command === "git" && request.args[0] === "push" && !joined.includes("refs/tags/")) {
       pushCalls += 1;
       if (pushCalls === 1) await firstPushHeld; // hold the lock long enough for the racing request to arrive
@@ -944,10 +950,10 @@ test("the delivery HTTP route serializes per repository, types its refusals, and
     assert.deepEqual(completed.completedSteps, ["push_branch", "create_draft_pr", "merge_pr"]);
     assert.ok(completed.approvalId, "the composite carries its single approval id");
 
-    // Tag-truth gate (owner-requested, 2026-07-22): the repository declares
-    // 9.9.9 about itself; a contradicting tag refuses with BOTH values, and
+    // Tag-truth gate (owner-requested, 2026-07-22): the reviewed/merge COMMIT
+    // declares 9.9.9 about itself (supplied by the fake runner's `git show`, not
+    // the mutable checkout); a contradicting tag refuses with BOTH values, and
     // only an explicit owner confirmation mints it anyway.
-    await writeFile(path.join(project, "package.json"), JSON.stringify({ name: "fixture", version: "9.9.9" }), "utf8");
     // The delivery payload carries the declared version, so the cockpit's tag
     // field can show the REAL proposed tag instead of decorative ghost text
     // (owner finding, 2026-07-22).

@@ -1,5 +1,3 @@
-import { readFile } from "node:fs/promises";
-import path from "node:path";
 import type { Ledger } from "./ledger.js";
 import { evaluateToolRequest, type ToolApprovalReceipt } from "./policy.js";
 import { runProcess, type ProcessRequest, type ProcessResult } from "./process.js";
@@ -71,20 +69,48 @@ export class VersionMismatchRefusal extends DeliveryRefusal {
   }
 }
 
-/** Best-effort read of the version the repository declares about itself: package.json first, then pyproject.toml. Null when no claim is discoverable. */
-export async function readDeclaredVersion(localPath: string): Promise<string | null> {
-  try {
-    const parsed = JSON.parse(await readFile(path.join(localPath, "package.json"), "utf-8")) as { version?: unknown };
-    if (typeof parsed.version === "string" && parsed.version.trim()) return parsed.version.trim();
-  } catch {
-    // no package.json or unparsable — fall through to pyproject
-  }
-  try {
-    const pyproject = await readFile(path.join(localPath, "pyproject.toml"), "utf-8");
-    const match = pyproject.match(/^\s*version\s*=\s*["']([^"']+)["']/m);
+/**
+ * Read ONLY the PEP 621 `[project].version` from pyproject text. A section-
+ * scoped scan (gate finding, 2026-07-22): the previous whole-file regex took
+ * the FIRST `version = "..."` anywhere, so a `[tool.something] version` before
+ * `[project]` masqueraded as the project's own version. We walk table headers
+ * and read `version` only while inside the exact `[project]` table, stopping at
+ * the next table header. Hand-rolled — no TOML dependency.
+ */
+function pyprojectProjectVersion(text: string): string | null {
+  let inProject = false;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.replace(/^\s+/, "");
+    if (line.startsWith("[")) {
+      // A table header. Only the exact `[project]` table carries the canonical
+      // version; `[project.scripts]`, `[tool.x]`, etc. do not.
+      inProject = /^\[project\]\s*(#.*)?$/.test(line);
+      continue;
+    }
+    if (!inProject) continue;
+    const match = line.match(/^version\s*=\s*["']([^"']+)["']/);
     if (match?.[1]) return match[1].trim();
-  } catch {
-    // no pyproject either — the repository makes no discoverable version claim
+  }
+  return null;
+}
+
+/**
+ * Resolve the version a manifest declares, from its raw text: package.json
+ * wins; pyproject only when package.json makes no usable claim. Pure so both
+ * the immutable-commit lookup and its tests share one parser.
+ */
+export function parseDeclaredVersion(packageJson: string | null, pyproject: string | null): string | null {
+  if (packageJson) {
+    try {
+      const parsed = JSON.parse(packageJson) as { version?: unknown };
+      if (typeof parsed.version === "string" && parsed.version.trim()) return parsed.version.trim();
+    } catch {
+      // package.json present but unparsable — fall through to pyproject
+    }
+  }
+  if (pyproject) {
+    const version = pyprojectProjectVersion(pyproject);
+    if (version) return version;
   }
   return null;
 }
@@ -97,6 +123,23 @@ function versionsAgree(tag: string, declared: string): boolean {
 
 export class DeliveryService {
   constructor(private readonly ledger: Ledger, private readonly runner: ProcessRunner = runProcess) {}
+
+  /**
+   * The version an IMMUTABLE commit declares about itself, read from that
+   * commit's own blobs via `git show <commitish>:<manifest>` — never from the
+   * mutable working tree (CRITICAL gate finding, 2026-07-22). A stale or
+   * locally edited checkout must not be able to falsely refuse a correct tag or
+   * authorize a tag the merged artifact contradicts. Bounded and read-only.
+   */
+  async declaredVersionAtCommit(localPath: string, commitish: string): Promise<string | null> {
+    const show = async (file: string): Promise<string | null> => {
+      const result = await this.runner({ command: "git", args: ["show", `${commitish}:${file}`], cwd: localPath, timeoutMs: 30_000 });
+      return result.exitCode === 0 ? result.stdout : null;
+    };
+    const packageJson = await show("package.json");
+    const pyproject = await show("pyproject.toml");
+    return parseDeclaredVersion(packageJson, pyproject);
+  }
 
   async execute(input: DeliveryExecutionInput): Promise<DeliveryRepositoryRecord> {
     const run = this.ledger.getRun(input.runId);
@@ -130,13 +173,9 @@ export class DeliveryService {
     if (input.action === "tag_release") {
       if (delivery.status !== "merged") throw new DeliveryRefusal("Merge the pull request before tagging the release");
       if (!input.tag || !RELEASE_TAG_PATTERN.test(input.tag)) throw new DeliveryRefusal("Release tag names must be short version-like identifiers (letters, digits, dot, dash, underscore)");
-      // Tag-truth gate: when the repository declares a version about itself
-      // and the requested tag contradicts it, refuse with both values unless
-      // the owner has explicitly confirmed the mismatch.
-      const declaredVersion = await readDeclaredVersion(delivery.localPath);
-      if (declaredVersion && !versionsAgree(input.tag, declaredVersion) && !input.confirmVersionMismatch) {
-        throw new VersionMismatchRefusal(declaredVersion, input.tag);
-      }
+      // The tag-truth gate runs INSIDE tag execution, after the immutable merge
+      // commit OID is known, so it judges the artifact that will actually be
+      // tagged rather than the mutable checkout (see declaredVersionAtCommit).
     }
 
     const remoteResult = await this.runner({ command: "git", args: ["remote", "get-url", "origin"], cwd: delivery.localPath, timeoutMs: 30_000 });
@@ -272,6 +311,14 @@ export class DeliveryService {
       if (mergedView.exitCode !== 0) throw new Error(failureMessage(mergedView, "Could not read the merged pull request"));
       const mergedState = JSON.parse(mergedView.stdout) as { state: string; mergeCommit: { oid: string } | null };
       if (mergedState.state !== "MERGED" || !mergedState.mergeCommit?.oid) throw new DeliveryRefusal("The pull request has no merge commit to tag");
+      // Tag-truth gate: resolve the declared version from the exact merge commit
+      // that will be tagged, not the checkout. When the merged artifact's own
+      // files contradict the requested tag, refuse with both values unless the
+      // owner explicitly confirmed the mismatch.
+      const declaredVersion = await this.declaredVersionAtCommit(delivery.localPath, mergedState.mergeCommit.oid);
+      if (declaredVersion && !versionsAgree(input.tag!, declaredVersion) && !input.confirmVersionMismatch) {
+        throw new VersionMismatchRefusal(declaredVersion, input.tag!);
+      }
       const fetch = await this.runner({ command: "git", args: ["fetch", "origin", delivery.baseBranch], cwd: delivery.localPath, timeoutMs: 120_000 });
       if (fetch.exitCode !== 0) throw new Error(failureMessage(fetch, "Could not fetch the merged base branch"));
       // A prior attempt may have created the local tag and failed only the

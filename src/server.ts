@@ -20,7 +20,7 @@ import { redactText } from "./redaction.js";
 import { createRunEvidenceExport, createRunReport } from "./reporter.js";
 import { observeLocalResources } from "./resources.js";
 import { inspectLocalRepository } from "./repository-intelligence.js";
-import { DeliveryRefusal, DeliveryService, VersionMismatchRefusal, type DeliveryAction } from "./delivery.js";
+import { DeliveryRefusal, DeliveryService, VersionMismatchRefusal, readDeclaredVersion, type DeliveryAction } from "./delivery.js";
 import { scanProductIntelligence } from "./product-intelligence.js";
 import { manualModelSchema, objectiveInputSchema, productRegistrationSchema, steeringDirectiveInputSchema, workbenchSessionInputSchema } from "./schemas.js";
 import type { ObjectiveInput, ProviderName, RunRequest, WorkbenchMessageRecord } from "./types.js";
@@ -987,7 +987,18 @@ async function route(
   const deliveryMatch = url.pathname.match(/^\/api\/runs\/([a-f0-9-]+)\/delivery$/i);
   if (request.method === "GET" && deliveryMatch?.[1]) {
     const run = context.ledger.getRun(deliveryMatch[1]);
-    sendJson(response, run ? 200 : 404, run ? { delivery: run.delivery } : { error: "Run not found" });
+    if (!run) {
+      sendJson(response, 404, { error: "Run not found" });
+      return;
+    }
+    // The cockpit's tag field must show the REAL proposed tag, not decorative
+    // placeholder text (owner finding, 2026-07-22): enrich each repository
+    // with the version its own files declare.
+    const repositories = await Promise.all((run.delivery?.repositories ?? []).map(async (repository) => ({
+      ...repository,
+      declaredVersion: await readDeclaredVersion(repository.localPath),
+    })));
+    sendJson(response, 200, { delivery: run.delivery ? { ...run.delivery, repositories } : null });
     return;
   }
   if (request.method === "POST" && deliveryMatch?.[1]) {

@@ -963,6 +963,7 @@ function renderSelectedRun() {
   renderIntegrationSet(run);
   renderSteering(run);
   renderDelivery(run);
+  void fillDeclaredTagVersions(run);
   renderBoard(run);
   renderActivity(run);
   renderVerdict(run);
@@ -1123,12 +1124,46 @@ function renderDelivery(run) {
         <button class="${merged ? "secondary" : "primary"} small" type="button" data-delivery-action="merge_pr" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || !created || merged ? "disabled" : ""}>${merged ? "Merged ✓" : "Approve &amp; merge"}</button>
       </div>
       <div class="plan-actions delivery-tag-row">
-        <input class="delivery-tag-input" type="text" placeholder="v1.0.0" aria-label="Release tag for ${escapeHtml(repository.repositoryId)}" data-tag-for="${escapeHtml(repository.repositoryId)}" ${!externalWritesAllowed || !merged || tagged ? "disabled" : ""}>
+        <input class="delivery-tag-input" type="text" placeholder="no tag" aria-label="Release tag for ${escapeHtml(repository.repositoryId)}" data-tag-for="${escapeHtml(repository.repositoryId)}" ${!externalWritesAllowed || !merged || tagged ? "disabled" : ""}>
         <button class="${merged && !tagged ? "primary" : "secondary"} small" type="button" data-delivery-action="tag_release" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || !merged || tagged ? "disabled" : ""}>${tagged ? "Tagged ✓" : "Approve &amp; tag release"}</button>
         ${merged ? "" : `<button class="primary small" type="button" data-delivery-action="complete_delivery" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed ? "disabled" : ""}>Complete delivery (push · PR · merge · tag if named)</button>`}
       </div>
+      <p class="field-help delivery-tag-help" data-tag-help-for="${escapeHtml(repository.repositoryId)}">${tagged ? `Tagged ${escapeHtml(repository.releaseTag || "")}.` : "Empty tag field = no tag is created. Reading this repository's declared version…"}</p>
     </article>`;
   }).join("");
+}
+
+// Owner finding (2026-07-22): the tag field showed decorative "v1.0.0" ghost
+// text that read exactly like the value about to be applied. The field now
+// carries the repository's REAL declared version as its editable value, and
+// the caption states plainly what an empty field means.
+async function fillDeclaredTagVersions(run) {
+  if (!run?.delivery?.repositories?.length) return;
+  try {
+    const { delivery } = await api(`/api/runs/${run.id}/delivery`);
+    for (const repository of delivery?.repositories ?? []) {
+      const input = document.querySelector(`[data-tag-for="${CSS.escape(repository.repositoryId)}"]`);
+      const help = document.querySelector(`[data-tag-help-for="${CSS.escape(repository.repositoryId)}"]`);
+      if (!input || input.disabled) {
+        if (help && repository.status === "tagged") help.textContent = `Tagged ${repository.releaseTag || ""}.`;
+        continue;
+      }
+      if (repository.declaredVersion) {
+        const proposed = `v${repository.declaredVersion.replace(/^v/i, "")}`;
+        if (!input.value && document.activeElement !== input) input.value = proposed;
+        if (help) help.textContent = `This repository declares version ${repository.declaredVersion} — the field is pre-filled to match. Edit it to tag differently (you will be asked to confirm a mismatch), or clear it to skip tagging.`;
+      } else if (repository.declaredVersion === null && help) {
+        help.textContent = "This repository declares no version in its own files. Enter a tag to create one, or leave empty to skip tagging.";
+      } else if (help) {
+        // The field is absent entirely — a server built before version
+        // enrichment. Say that, never "declares no version" (which would be a
+        // claim about the repository this client cannot back).
+        help.textContent = "Declared-version lookup needs a server restart on the current build. Empty tag field = no tag is created.";
+      }
+    }
+  } catch {
+    // Enrichment is a nicety; the buttons stay honest without it.
+  }
 }
 
 function renderIntegrationSet(run) {

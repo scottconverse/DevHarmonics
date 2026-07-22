@@ -1,62 +1,199 @@
+<div align="center">
+
 # DevHarmonics
 
-**One objective. A verified AI development crew.**
+### One objective. A verified AI development crew.
 
-Current release: **v0.5.1**
+**Run several AI coding agents on your own repository at once — each in its own Git worktree, checked by commands you configured, reviewed by a model that didn't write the code, and recorded in a local SQLite ledger you can read after the fact.**
 
-**DevHarmonics is a local-first, provider-neutral software factory for product owners managing AI agents as development teams.**
+DevHarmonics never merges anything without you. It hands you a reviewed branch and the receipts — and when you say so, it pushes, opens the pull request, merges, and tags, each step on its own explicit approval, all from the dashboard.
 
-It coordinates the official Codex, Claude Code, and Google Antigravity CLIs; turns a goal into a dependency-aware task graph; gives parallel workers isolated Git worktrees; validates their changes; and records durable execution receipts in SQLite.
+[Quick start](#quick-start) · [How a run works](#how-a-run-works) · [User manual](docs/USER_MANUAL.md) · [Architecture](docs/ARCHITECTURE.md) · [Product spec](docs/PRODUCT_SPEC.md) · [Landing page](https://scottconverse.github.io/DevHarmonics/)
 
-Normal subscription and local-model use requires no model API keys. Each subscription provider uses the account session already established by its official CLI, and API-key environment variables are removed from child processes. Optional OpenRouter access is separately connected through OAuth, disabled for paid routing by default, and never requires pasting a key into DevHarmonics.
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Latest release](https://img.shields.io/badge/release-v0.6.0-informational)](https://github.com/scottconverse/DevHarmonics/releases/tag/v0.6.0)
+[![Node](https://img.shields.io/badge/node-%E2%89%A524-green)](package.json)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](#requirements)
+[![Status](https://img.shields.io/badge/status-early%20public%20preview-orange)](#project-status)
 
-[Product specification](docs/PRODUCT_SPEC.md) · [Spec Google Doc](https://docs.google.com/document/d/1rd-_gqHHPZHhTkrULJR9tHcbAVUOGONsbuEFCV-8pRQ/edit?usp=drivesdk) · [Implementation plan](docs/IMPLEMENTATION_PLAN.md) · [Plan Google Doc](https://docs.google.com/document/d/1cVTT2v6H0z6j5NMSPcdwpoWNuuawxB-FdRUj1SYLwns/edit?usp=drivesdk) · [User manual](docs/USER_MANUAL.md) · [Architecture](docs/ARCHITECTURE.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md) · [Landing page](https://scottconverse.github.io/DevHarmonics/)
+</div>
 
-## What works today
+---
 
-- Local browser dashboard at `http://127.0.0.1:4317`
-- Separate installation and sign-in checks for Codex, Claude Code, and Google Antigravity
-- Layered connection diagnostics that keep model entitlement and remaining subscription capacity explicitly unknown until verified
-- Manual or architect-selected concurrency, with no built-in agent-count ceiling
-- Typed, dependency-aware task planning
-- One temporary Git worktree and branch per task
-- Allowlisted validators with stdout, stderr, exit code, and duration receipts
-- Provider rotation and exact validator feedback on retries
-- Serial integration into a dedicated run branch
-- Read-only final review with `READY` or `NOT READY` verdicts
-- Durable run, task, attempt, check, and event records in SQLite
-- Multi-product repository registry with read-only local Git inspection, repository roles, ownership, dependencies, validators, governance sources, and dirty/incompatible-state reporting
-- Product-aware objective planning with selected repository scope, affected/excluded impact rationale, repository-scoped tasks, and explicit cross-repository integration conditions
-- Exact multi-repository integration sets with separate per-repository branches/worktrees, retained base and integration HEAD commits, repository-local validation, configured independent review quorums, automatic repository-scoped fix/re-review, and visible/exportable evidence
-- Durable read-only Workbench with exact selected-model comparison and explicit conversion into an objective draft
-- Transactional ledger migrations with automatic pre-upgrade backups and integrity checks
-- Provider-neutral assignment identities layered over the current subscription CLI providers
-- One runtime contract for subscription CLI, future local, optional API, and ACP transports, with classified invocation failures
-- Attempt receipts that retain connection/model resolution plus adapter and detected CLI versions
-- Persistent provider-neutral connection/model registry with guarded manual model entries
-- Validated run/task lifecycle transitions and replayable typed event cursors
-- Persisted server-sent events with cursor reconnection and event-driven dashboard refresh
-- Ledger-boundary redaction of common credentials in prompts, outputs, errors, checks, reviews, and events
-- Active-run cancellation from the dashboard
+Runs entirely on your machine · No model API keys for normal use · One isolated worktree per task · Every attempt, check, and verdict persisted in SQLite · No automatic merge
 
-The development branch after v0.5.1 also includes owner-approved delivery for READY runs, completing entirely from the cockpit: the run board shows exact reviewed commits, then push, draft pull request, merge, and release tag each run under your explicit approval — with live PR state checked before any merge, the tag landing on the actual merge commit, a one-click complete-delivery flow whose single receipt names every step, and every receipt retained. DevHarmonics never merges or tags on its own; it also never makes you leave the cockpit to finish. It also adds the first wave of visible operation feedback: immediate acknowledgement on every dashboard action, a global activity strip that keeps running work visible across screens, and evidence-based elapsed/heartbeat times on working tasks. These capabilities will ship with the v0.6 increment after its CivicSuite acceptance gates pass.
+<!-- Add a current dashboard screenshot here: docs/assets/dashboard.png -->
 
-## Requirements
+## The problem this solves
+
+Pointing one AI coding agent at a repository is easy. Pointing five at it is not.
+
+They collide in the working tree. The "tests passed" claim comes from the same process that wrote the code. When something looks finished, you cannot reconstruct which model touched which file, which check actually ran, or whether the check could have failed at all. And the moment you scale past one agent, the honest question stops being *did it write code?* and becomes **did anything real get verified?**
+
+DevHarmonics answers that question structurally rather than by trusting the agent:
+
+- Each task gets its own Git branch and temporary worktree, so parallel work cannot collide.
+- Models choose a validator **by name** from your config. They cannot hand DevHarmonics a shell command to run.
+- The final review is read-only, done by a different model, and — at medium and high risk — by a model that was not the implementor.
+- Reviewers are decorrelated by **evidence lens**, not just by provider: an artifact-lens reviewer judges the diff and repository without ever seeing the workers' reports, while a claims-lens reviewer judges the reports without ever seeing the code — and a deterministic gate cross-checks the claimed file changes against the integrated diff. A worker that narrates changes it never made fails on the mismatch, mechanically.
+- The integration diff is inspected for signs that the *verification itself* was weakened — deleted or skipped tests, weakened assertions, unconditional success, swallowed errors.
+- A write task that changed no files does not pass.
+- Every invocation's tokens and cost land in the ledger, and each run can show its actual cost beside what the same work would have cost on the priciest qualified model — the saving from routing cheap-where-proven is a number, not a feeling.
+
+---
+
+## How a run works
+
+```mermaid
+flowchart TD
+    G["Objective draft<br/>outcome · criteria · risk · scope"] --> A["Read-only architect"]
+    A --> P["Immutable plan revision<br/>typed task DAG"]
+    P --> OK{"Owner decision"}
+    OK -->|revise| A
+    OK -->|approve this exact revision| S["Dependency scheduler"]
+    S --> W1["Worker · isolated worktree"]
+    S --> W2["Worker · isolated worktree"]
+    S --> W3["Worker · isolated worktree"]
+    W1 --> V["Allowlisted validators<br/>+ verification-integrity check"]
+    W2 --> V
+    W3 --> V
+    V --> I["Serial merge into the<br/>run integration branch"]
+    I --> R["Read-only reviewer quorum<br/>implementor-independent"]
+    R -->|NOT READY| F["Scoped fixer tasks<br/>revalidate · re-review"]
+    F --> R
+    R -->|READY| D["Reviewed branch + SQLite receipts"]
+    D --> DL["Cockpit delivery — each step its own approval<br/>push · draft PR · merge · tag"]
+```
+
+Planning, approval, execution, and review are separate durable stages. Saving an objective starts nothing. Each architect proposal is appended as a numbered, immutable plan revision; approving one marks that exact revision, and the run executes the stored plan rather than silently regenerating it. Restart the machine and the record of what you authorized is still there.
+
+---
+
+## What it actually does
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### Plan before anything moves
+
+A read-only architect turns your objective into a typed, dependency-aware task graph. You preview the DAG, the repository impact map, permissions, checks, proposed model assignments, and capacity — then approve one exact revision or send it back.
+
+</td>
+<td width="50%" valign="top">
+
+### Isolate every agent
+
+One temporary Git branch and worktree per task. Tasks merge serially into a run integration branch, dependents start only after their dependencies land, and your checked-out branch is never touched.
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### Check with commands you chose
+
+Validators come from `.devharmonics/config.json` only. For Node projects DevHarmonics discovers existing `test`, `lint`, `build`, and `typecheck` scripts; every project also gets a built-in `diff-check`. Failed checks return exact stdout, stderr, exit code, and duration to the worker for a bounded retry.
+
+</td>
+<td width="50%" valign="top">
+
+### Review independently
+
+Reviewer count, minimum distinct providers, and implementor independence are configured per risk tier. Blocking findings become scoped fixer tasks; the changed branch is revalidated, the superseded review evidence is invalidated, and a fresh quorum is required before `READY`.
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### Keep receipts that survive a restart
+
+Runs, tasks, attempts, checks, reviews, and typed events live in SQLite. Review receipts are bound to hashes of the exact plan, check evidence, task reports, diff, and repository base/HEAD set — the evidence exporter fails closed when they no longer match.
+
+</td>
+<td width="50%" valign="top">
+
+### Steer without opening a terminal
+
+While a run is working you can hold and resume task admission, reprioritise or reassign a queued task, deliver a clarification at the next attempt boundary, or interrupt an active attempt — which stops it, keeps it as evidence, and continues in a new attributed attempt.
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### Run it again as a workflow
+
+A workflow is a versioned, parameterized document in the tracked `workflows/` directory, identified by content hash. Instantiate it with typed inputs and it becomes a normal objective through the same composer — and the run pins the exact revision it executed, immutably. Editing a workflow can never rewrite what a historical run did, and promoting a pilot can never silently widen its permissions.
+
+</td>
+<td width="50%" valign="top">
+
+### Deliver without leaving the cockpit
+
+For a `READY` run: push the exact reviewed SHA, open a draft pull request, merge it, and tag the release — from the dashboard, each step its own explicit approval and receipt. The merge refuses conflicts, red or pending checks, and a head that drifted from the reviewed commit.
+
+</td>
+</tr>
+</table>
+
+---
+
+## The part most orchestrators skip: verifying the verification
+
+An agent under pressure to make a gate go green has cheaper options than fixing the code. It can delete the failing test, skip it, weaken the assertion, append `|| true`, or wrap the failure in an empty `catch`. Every one of those produces a green run.
+
+DevHarmonics reads the integration diff for exactly this, before the reviewer ever sees it ([`src/verification-integrity.ts`](src/verification-integrity.ts)):
+
+| Finding | Severity | What it catches |
+|---|---|---|
+| `test-deleted` | Critical | A test file removed from the diff |
+| `test-focused` | Critical | A new `.only` / `fit` selector that silently excludes the rest of the suite |
+| `unconditional-success` | Critical | New `\|\| true`, `exit 0`, `process.exit(0)`, `assert.ok(true)` |
+| `test-skipped` | High | Newly added `.skip` / `.todo` / `xit` |
+| `test-filtered` | High | A new `--test-name-pattern`, `--grep`, `pytest -k`, `jest -t` narrowing the executed census |
+| `assertion-weakened` | High | A diff that removes more executable assertions than it adds |
+| `swallowed-error` | High | A newly introduced empty `catch` block |
+| `placeholder` | Medium | New `TODO`/`FIXME`/`not implemented` standing in for the requested behavior |
+
+Alongside it sits a smaller gate that came out of running this system against real repositories: **a write task whose branch changed nothing against its base commit does not pass.** The worker is told plainly that its attempt produced no repository change, and gets one bounded retry to either make the edit or explain why no change is needed. A validator that finds no fault with an empty diff is not evidence of success.
+
+> [!NOTE]
+> This is a heuristic diff analysis, not a proof. It catches the common shapes of a weakened gate; it is one layer under the independent reviewer, not a replacement for it.
+
+---
+
+## No API keys for normal use
+
+DevHarmonics is an orchestration layer over the **official** provider CLIs. It does not proxy provider HTTP APIs, and it never asks for an OpenAI, Anthropic, or Google password — authentication happens only in provider-owned terminals and browser pages.
+
+Common model API-key and cloud-credential environment variables are stripped from every provider child process. Credential-shaped strings are redacted at the ledger boundary before prompts, output, errors, checks, reviews, and events are persisted or returned through the dashboard.
+
+| Transport | Status | Auth | Notes |
+|---|---|---|---|
+| Codex CLI | Supported | `codex login` | Subscription session owned by the CLI |
+| Claude Code | Supported | `claude auth login` | Subscription session owned by the CLI |
+| Google Antigravity | Supported | first-run `agy` sign-in | One connection whose catalog may expose Google, Anthropic, **and** OpenAI models; its Gemini and Claude/GPT quota groups cool independently |
+| Ollama (local) | Partial | none | Discovered locally; schedulable only after exact-fingerprint qualification. Reviewers get bounded diff chunks; implementors get scoped `file.read` / `file.search` / hash-checked `file.patch` inside their worktree — no shell, commit, merge, or external write |
+| OpenRouter | Optional, off by default | OAuth | Disconnected and paid routing disabled by default. Spending needs three policy gates plus per-run and monthly caps. You never paste a key |
+| Agent Client Protocol | Planned | — | Contract-defined; no transport yet |
+
+> [!IMPORTANT]
+> Planning requires at least one signed-in subscription CLI — no local model is qualified for the architect role. An **already-approved** plan does not: qualified local models can carry and review the work with every subscription signed out.
+
+---
+
+## Quick start
+
+### Requirements
 
 - Windows, macOS, or Linux
-- Node.js 24 or newer
-- Git
-- At least one installed and subscription-authenticated provider CLI. This is
-  required to PLAN: no local model is qualified for the architect role, so
-  planning needs a signed-in subscription. An already-approved plan does not —
-  it can execute and be reviewed entirely by qualified local models. Providers:
-  - Codex: `codex login`
-  - Claude Code: `claude auth login`
-  - Google Antigravity (Gemini, Claude, and GPT models exposed by the signed-in account): launch `agy` and complete first-run sign-in
+- **Node.js 24 or newer**, and Git
+- A Git repository you want to change, with a clean working tree
+- At least one installed and signed-in provider CLI (see the table above)
 
-DevHarmonics never asks for an OpenAI, Anthropic, or Google email password. Authentication happens only in provider-owned terminals and browser pages.
-
-## Install from source
+### Install from source
 
 ```powershell
 git clone https://github.com/scottconverse/DevHarmonics.git
@@ -67,45 +204,35 @@ node dist/src/cli.js doctor
 node dist/src/cli.js serve --project C:\path\to\your\repository
 ```
 
-The last command opens the dashboard. To make the command available globally from this checkout:
+`doctor` reports each provider across separate configuration, installation, authentication, account-visibility, model-entitlement, control-plane-health, capacity, and assignment-availability layers. Model entitlement and remaining subscription capacity stay explicitly **unknown** until verified — a successful login is not presented as proof of either.
+
+The last command opens the dashboard at `http://127.0.0.1:4317`. Leave the terminal open.
+
+To make the command global from this checkout:
 
 ```powershell
 npm.cmd link
 devharmonics --version
-devharmonics serve --project C:\path\to\your\repository
 ```
 
-The current release is source-distributed; it does not yet include a packaged Windows installer.
+> [!NOTE]
+> There is no packaged installer or npm registry release yet. Source checkout is currently the only distribution.
 
-## First-run sign-in
+### The dashboard
 
-Run the provider's own login command, complete its browser flow, then return to DevHarmonics and click **Refresh sign-in status**.
+Seven screens, served from `127.0.0.1` with no build step and no frontend framework: **Runs**, **Workbench**, **Products**, **Workflows**, **Setup**, **Models**, **Evidence**.
 
-A signed-out provider is removed from the pool rather than treated as a reason to stop. Planning still needs one healthy subscription architect, but one signed-out provider does not block planning that another healthy provider can do — and an approved run proceeds whenever a qualified worker and reviewer can be routed, including local ones.
-
-Antigravity has a less obvious first-run flow:
-
-1. Run `agy` and choose Google sign-in with the account tied to your Gemini subscription.
-2. Complete browser sign-in. The browser displays a one-time authorization code.
-3. Copy that code, return to the Antigravity terminal, paste it at the authorization prompt, and press **Enter**. Treat it as a short-lived credential; never paste it into DevHarmonics, a chat, or a document.
-4. Complete every terminal onboarding screen, including color scheme and preferences. Use the navigation instructions shown at the bottom.
-5. Wait for the normal Antigravity prompt showing the account, subscription tier, model, project path, and a `>` input line.
-6. Exit the standalone session with `Ctrl+C`, run `agy models` to verify the cached login, and refresh DevHarmonics.
-
-The dashboard includes this provider-specific guide. See the [user manual](docs/USER_MANUAL.md) for troubleshooting.
-
-## CLI
+### Or drive it from the CLI
 
 ```text
-devharmonics serve [--project PATH] [--port 4317] [--open false]
-devharmonics init [--project PATH]
-devharmonics doctor [--project PATH]
+devharmonics serve   [--project PATH] [--port 4317] [--open false]
+devharmonics init    [--project PATH]
+devharmonics doctor  [--project PATH]
 devharmonics run --goal "..." [--project PATH] [--agents auto|N]
-                   [--providers codex,claude,gemini]
+                 [--autonomy observe|supervised|bounded]
+                 [--providers codex,claude,gemini]
 devharmonics --version
 ```
-
-Example:
 
 ```powershell
 devharmonics run --project C:\repos\shop --agents auto `
@@ -113,11 +240,15 @@ devharmonics run --project C:\repos\shop --agents auto `
   --goal "Add CSV export, cover it with tests, and verify the download"
 ```
 
-DevHarmonics does not clamp the requested agent count. Effective parallelism is still bounded by ready tasks, machine resources, provider throttling, and subscription limits.
+`--agents` is not clamped: there is no product-level agent ceiling. Effective parallelism is still bounded by ready tasks, machine resources, provider throttling, and subscription limits.
+
+`--autonomy observe` is fail-closed — every task must be diagnostic, read-only, and low risk, and read-only worker output must carry path/line evidence where the task contract requires it.
+
+---
 
 ## Project configuration
 
-The first `init`, `serve`, or `run` creates a local runtime directory in the target project:
+The first `init`, `serve`, or `run` creates a runtime directory inside the target project and adds it to that repository's private `.git/info/exclude` — the shared `.gitignore` is left alone.
 
 ```text
 .devharmonics/
@@ -126,105 +257,202 @@ The first `init`, `serve`, or `run` creates a local runtime directory in the tar
   devharmonics.db
 ```
 
-DevHarmonics adds `.devharmonics/` to that repository's private `.git/info/exclude`; it does not edit the shared `.gitignore`. For Node projects it discovers existing `test`, `lint`, `build`, and `typecheck` scripts. Every project also receives a built-in `diff-check` validator.
+<details>
+<summary><strong>Abridged <code>config.json</code> (schema version 2)</strong></summary>
 
-Example `.devharmonics/config.json`:
+The generated file contains more than this; version 1 files from earlier releases are migrated forward automatically.
 
 ```json
 {
-  "version": 1,
-  "architect": "claude",
-  "reviewer": "codex",
-  "workers": ["codex", "claude", "gemini"],
-  "concurrency": { "mode": "auto", "agents": 20, "ceiling": null },
-  "retry": { "maxAttempts": 3, "backoffMs": 1500 },
-  "providers": {
-    "codex": { "enabled": true, "command": "codex", "timeoutMs": 1800000 },
-    "claude": { "enabled": true, "command": "claude", "timeoutMs": 1800000 },
-    "gemini": { "enabled": true, "command": "agy", "timeoutMs": 1800000 }
+  "version": 2,
+  "application": {
+    "concurrency": { "mode": "auto", "agents": 8, "ceiling": null },
+    "retry": { "maxAttempts": 3, "backoffMs": 1500 }
   },
-  "validators": {
-    "diff-check": { "command": "git", "args": ["diff", "--check"], "timeoutMs": 60000 }
-  }
+  "connections": {
+    "codex":  { "enabled": true, "command": "codex",  "timeoutMs": 1800000 },
+    "claude": { "enabled": true, "command": "claude", "timeoutMs": 1800000 },
+    "gemini": { "enabled": true, "command": "agy",    "timeoutMs": 1800000 }
+  },
+  "product": {
+    "architect": "claude",
+    "reviewer": "codex",
+    "workers": ["codex", "claude", "gemini"]
+  },
+  "repository": {
+    "validators": {
+      "diff-check": { "command": "git", "args": ["diff", "--check"], "timeoutMs": 60000 }
+    }
+  },
+  "runPolicy": {
+    "autonomy": "supervised",
+    "requirePlanApproval": false,
+    "allowPaidApi": false,
+    "allowExternalWrites": false
+  },
+  "reviewPolicy": {
+    "reviewerCountByRisk": { "low": 1, "medium": 1, "high": 2 },
+    "minimumDistinctProvidersByRisk": { "low": 1, "medium": 1, "high": 2 },
+    "requireImplementorIndependenceByRisk": { "low": false, "medium": true, "high": true },
+    "maxFixRounds": 2
+  },
+  "openRouter": { "enabled": false, "allowPaidFallback": false, "perRunLimitUsd": 0, "monthlyLimitUsd": 0 }
 }
 ```
 
-Models select validators by name; they cannot supply a shell command for DevHarmonics to execute.
+`gemini` is the internal compatibility key for the Google Antigravity connection. Validator commands and arguments may use a `${repoRoot}` token, expanded to the owning repository's root — which keeps a registered validator portable across checkouts.
 
-### Model catalog and qualification policy
+</details>
 
-DevHarmonics refreshes provider and Ollama catalogs at application launch, every 24 hours while running, on **Refresh fleet**, and before a run when the catalog is stale or a provider CLI version changed. A qualification fingerprint covers the provider, exact model ID, capability metadata, runtime version, adapter version, and qualification-suite version. Fingerprint changes make prior evidence stale and prevent scheduling until requalification.
+---
 
-Models can be pinned to an exact identifier or configured to track a Sol/Terra/Luna, Fable/Opus/Sonnet/Haiku, or Gemini family. A newly discovered family member is never promoted until its exact identifier passes invocation qualification and the deterministic baseline benchmark. A model is retired only after three consecutive authoritative missing observations.
+## Beyond a single repository
 
-Google Antigravity is one subscription connection, not a synonym for Gemini. Its catalog may contain Google, Anthropic, and OpenAI models. DevHarmonics schedules Antigravity's **Gemini Models** and **Claude and GPT Models** quota groups independently: an observed exhaustion cools only that group until the reported reset, so qualified capacity in the other group can continue. The `gemini` configuration key remains an internal compatibility alias for existing projects.
+Most real products are several repositories that ship together. DevHarmonics models that without pretending they are a monorepo.
 
-OpenRouter is disconnected and paid routing is disabled by default. OAuth stores its generated credential under Windows current-user protection; DevHarmonics never asks the user to paste an API key. Connecting does not authorize spending. Paid fallback additionally requires the project paid-API gate, the OpenRouter fallback gate, positive per-run and monthly limits, an activated and qualified exact model, and a live key-limit check. DevHarmonics disables OpenRouter's own model fallback and records the exact provider, model, tokens, cost, and fallback reason itself.
+Register a **product**, then attach each local Git checkout with its role, expected branch, owners, dependencies, validator commands, and governance sources. Inspection is read-only Git: DevHarmonics records the observed branch, HEAD, origin, dirty state, and compatibility issues, and never checks out, fetches, resets, stashes, or modifies a registered checkout.
 
-## Workbench
+**Canonical intelligence sources** go a step further. Point DevHarmonics at the governance, architecture, version, status, compatibility, and release files that actually matter in each repository, and a scan produces an immutable snapshot with exact revisions, SHA-256 content hashes, working-tree state, explicit subject-aware claims, unavailable-source findings, and cited contradictions with path and line numbers. Git tags are deliberately not read as product claims. The latest bounded findings are injected into planning.
 
-Workbench is a durable, read-only project scratchpad for questions, tradeoff analysis, draft planning, and side-by-side consultation of selected qualified models. Every answer retains its connection, requested model, runtime-verified actual model when available, usage, cost, duration, and failure state. A provider that does not report actual execution identity remains explicitly unresolved; DevHarmonics does not relabel the request as proof. Workbench cannot start a run or change a repository. A useful discussion can be explicitly converted into a linked objective draft; planning and execution still require their normal approval steps.
+Execution then creates an **exact integration set**: an independent integration branch and worktree per affected repository, each pinned to a retained base commit. Tasks in different repositories run concurrently; merges into the same repository stay serialized. Blocking review findings must name exactly one repository — an unscoped finding fails closed rather than being guessed at.
 
-## Product and repository registry
+> [!WARNING]
+> Multi-repository execution supports **one repository per task**. It does not yet reconstruct an interrupted integration set after a restart, clean retained worktrees automatically, or let a single task mutate several repositories.
 
-The **Products** surface groups independent repositories into a product without turning them into a monorepo. Register a product, then add each local Git checkout with its role, expected branch, owners, dependencies, validator commands, and governance sources. DevHarmonics inspects repository identity and status using read-only Git commands and retains the current branch, HEAD, origin, dirty state, and compatibility issues. Registry inspection does not create a run or change the checkout.
+---
 
-Use **Canonical intelligence sources** to identify the governance, architecture, version, status, compatibility, and release files that matter in each local repository, then choose **Scan intelligence**. DevHarmonics creates an immutable source-backed snapshot with exact repository revisions, content hashes, working-tree state, explicit claims, unavailable-source findings, and subject-aware conflicts with path/line citations. It never infers maturity from Git tags. The latest bounded findings are included in product-aware planning.
+## Delivery, and the line DevHarmonics will not cross
 
-In the objective composer, optionally select a registered product and one or more repositories. The read-only planner uses their registry roles and dependencies to produce an affected/excluded repository impact map, repository-scoped tasks, and any required cross-repository integration conditions. A multi-repository plan can execute when every affected repository has a compatible registered local checkout, every task targets exactly one affected repository, and the plan includes explicit integration conditions. Single-repository plans continue through the normal approval flow when the selected checkout matches the objective project folder and has no compatibility issues.
+The line is this: **nothing leaves your machine without an explicit owner approval for that specific action.** There is no automatic merge, no automatic tag, and no standing permission — approving a push does not approve the pull request, and approving the pull request does not approve the merge.
 
-The DH-720 execution path creates an exact integration set rather than treating the product as a monorepo. Every affected repository gets an independent run integration branch and worktree pinned to its retained base commit, and every task gets a repository-local branch/worktree. Tasks in different repositories can run concurrently; merges into the same repository's integration branch remain serialized. DevHarmonics runs each repository's configured validators and verification-integrity check, then applies the configured independent review quorum to aggregate, repository-prefixed diff evidence. Blocking findings must identify exactly one repository. DevHarmonics assigns them to repository-scoped fixer tasks, revalidates the changed integration branches, invalidates the superseded review evidence, and requires a fresh independent quorum before reporting `READY`. The run card and evidence export retain each base/HEAD commit, branch, worktree, status, error, and the cross-repository integration conditions. The primary checkouts are untouched.
+Within that line, delivery is complete from the dashboard. For a `READY` run, the board shows the exact base branch, base commit, reviewed HEAD, and delivery branch, and you can take the whole delivery to done without opening GitHub: push that exact SHA, open a **draft** pull request, merge it, and tag the release — each step minting its own external-write approval and tool-policy receipt. A one-click complete flow runs the remaining steps, still one approval per consequential action. This exists because the product is meant to be the whole dev team for a product manager, and product managers do not log into GitHub to finish a delivery.
 
-## Run lifecycle
+The merge step is never blind: it checks the live pull-request state and refuses merge conflicts, pending or failing status checks, and a pull-request head that is no longer the reviewed commit. Tagging validates the tag name, tags the actual merge commit, records the applied tag, recovers a failed tag push by reusing the local tag, and refuses a different tag on an already-tagged delivery. Completed steps reconcile idempotently, concurrent operations on the same repository are refused, and the UI locks the delivery card while a step is in flight.
 
-1. Save a structured objective draft containing the outcome, acceptance criteria, constraints, risk, priority, deadline, policy, run mode, and optional product/repository scope. Saving or refining a draft starts no run.
-2. Ask a read-only architect for an immutable plan revision and preview its dependency graph, affected/excluded repository map, repository-scoped tasks, integration conditions, permissions, checks, proposed model assignments, and capacity.
-3. Revise the plan or approve an exact revision. Execution uses that stored revision without silently replanning it.
-4. Require clean affected Git working trees, and a routable worker and reviewer. Once a plan is approved, a subscription for each is not required — qualified local models can carry and review the work. A standalone or single-repository run creates `devharmonics/<run-prefix>`; a multi-repository run creates a distinct integration branch/worktree for every affected repository and records its base commit.
-5. Assign each ready task a repository-local task branch and temporary worktree. One task targets one repository; tasks in different repositories may execute concurrently.
-6. Run a worker in that isolated worktree and execute only allowlisted validators.
-7. Return failed check receipts to a worker for a bounded retry.
-8. For writable tasks, commit passing work and merge it serially into the target repository's integration branch; Observe tasks retain reports without commits.
-9. Start dependent tasks only after their dependencies merge.
-10. Ask a read-only reviewer to evaluate the combined diff or each accepted diagnostic report. Multi-repository evidence is aggregated with repository-prefixed paths while preserving exact per-repository commits.
+External writes are off by default (`runPolicy.allowExternalWrites`).
 
-DevHarmonics does not merge the integration branch into your checked-out branch. You review and merge it yourself.
+> [!NOTE]
+> Pull-request creation and merge shell out to the GitHub CLI (`gh`), which must be installed and authenticated. The branch push and tag use `git` directly.
 
-## Safety boundaries
+---
 
-- The dashboard binds only to `127.0.0.1`.
-- Mutation endpoints require same-origin JSON requests.
-- Architect and reviewer calls use provider read-only or plan modes.
-- Workers use restricted editing modes rather than unrestricted bypass modes.
-- Prompts are launched without shell interpolation.
-- Validator commands come only from local user-controlled configuration.
-- Common API-key and cloud-credential variables are stripped from provider environments.
-- Common credential formats are redacted before run content and execution receipts are persisted or returned through the dashboard API.
-- Parallel work requires a clean Git working tree.
+## Architecture
 
-## MVP limitations
+A single Node process: a loopback HTTP server, a dependency-free browser UI, an orchestrator, and a SQLite ledger. No daemon, no queue broker, no container, no hosted control plane.
 
-- Merge conflicts still fail the affected task; the automatic fixer handles structured reviewer findings, not Git merge conflicts.
-- Temporary worktrees are retained for inspection until explicit archival/cleanup is added.
-- Multi-repository execution still supports one repository per task. It does not yet reconstruct an interrupted integration set after restart, clean retained worktrees automatically, push branches, open pull requests, or let one task mutate several repositories.
-- Provider quotas and throttling originate with each subscription; DevHarmonics classifies observed failures and can cool and reroute qualified workers/reviewers, but provider-supplied remaining-quota telemetry is not consistently available. Antigravity's observed Gemini and Claude/GPT quota groups are tracked separately rather than cooling the entire connection.
-- Ollama models are discovered locally and remain unschedulable until their exact runtime fingerprint passes the qualifications required for the assigned work. Read-only local reviewers receive bounded per-file diff or per-report chunks with progress receipts and fail-closed aggregation. Qualified local implementors can use only DevHarmonics' scoped `file.read`, `file.search`, and hash-checked `file.patch` loop inside their assigned worktree; they receive no unrestricted shell, commit, merge, or external-write authority. ACP remains future work.
-- Mellum2 is the first named local specialist family. Instruct and Thinking are separate upgrade tracks; neither is downloaded, activated, promoted, or made the universal default automatically. In addition to analysis or bounded-tool qualification, Mellum2 must pass the current structured-output, contradiction-detection, and requirement-count benchmark before scheduling. Instruct is initially eligible only for narrow, low-risk specialist work; Thinking is evaluated independently for standard reasoning work.
-- Exact-model/settings routing is active for qualified models. Scheduler-selected Codex, Claude, Gemini/Antigravity, and explicitly assigned Ollama candidates are qualified on first use, requalified when their fingerprint changes, and selected independently by role/task tier. Durable **Why this model** evidence explains workload fit, qualification, pins, reliability, latency, relative paid-model cost, and independent-review preference. Empirical profiles are sliced by workload and expose validator failures, integration conflicts, billed cost, uncertainty, reset, and exclusion controls; only established evidence with at least 20 observations can affect reliability or latency. Account-wide failures fall back at connection scope while exact-model quota, context, resource, compatibility, and timeout failures can fall back at model scope.
-- Manual registry entries are inventory records only; they do not imply account visibility, verification, qualification, or schedulability.
+Everything provider-specific sits behind one `RuntimeAdapter` contract covering connection, model selection, invocation, events, results, usage, and **classified** failures — which is why a subscription CLI, a local Ollama runtime, and an OAuth API transport can be scheduled, cooled, and failed over by the same code path, and why adding a transport does not mean touching the orchestrator.
 
-## Development
+<details>
+<summary><strong>Module map</strong></summary>
+
+| Path | Responsibility |
+|---|---|
+| [`src/cli.ts`](src/cli.ts) | `serve`, `init`, `doctor`, `run` |
+| [`src/server.ts`](src/server.ts) | Loopback HTTP API, persisted SSE stream, static dashboard |
+| [`src/orchestrator.ts`](src/orchestrator.ts) | Planning, scheduling, retries, integration, review, steering, cancellation |
+| [`src/ledger.ts`](src/ledger.ts) | SQLite persistence and its ordered transactional migrations |
+| [`src/runtime.ts`](src/runtime.ts) · [`src/providers.ts`](src/providers.ts) | Transport-neutral contracts and provider process adapters |
+| [`src/worktrees.ts`](src/worktrees.ts) · [`src/integration-sets.ts`](src/integration-sets.ts) | Task/integration worktrees and multi-repository coordination |
+| [`src/validators.ts`](src/validators.ts) · [`src/verification-integrity.ts`](src/verification-integrity.ts) | Allowlisted check execution and gate-weakening analysis |
+| [`src/policy.ts`](src/policy.ts) · [`src/local-tools.ts`](src/local-tools.ts) | Tool trust/side-effect policy and the scoped local-model tool loop |
+| [`src/routing.ts`](src/routing.ts) · [`src/qualification.ts`](src/qualification.ts) · [`src/model-performance.ts`](src/model-performance.ts) | Adaptive selection, first-use qualification, empirical profiles |
+| [`src/redaction.ts`](src/redaction.ts) | Centralized secret scrubbing before the ledger and UI boundaries |
+| [`src/workflows.ts`](src/workflows.ts) | Versioned parameterized workflow documents, fail-closed parsing, typed instantiation |
+| [`src/reporter.ts`](src/reporter.ts) · [`src/delivery.ts`](src/delivery.ts) | Immutable evidence export and approved branch/draft-PR handoff |
+
+Full detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+</details>
+
+<details>
+<summary><strong>Model routing and why a model was chosen</strong></summary>
+
+Routing is adaptive but auditable. Every concrete decision retains its individual score sources rather than a single total, and the dashboard replays them as **Why this model** evidence: workload tier, qualification state, pins, established reliability and latency, relative catalog price among comparable paid candidates, and provider independence for review.
+
+Empirical profiles are sliced by workload. Under 5 observations is *insufficient*, 5–19 is *emerging*, 20 or more is *established* — and **only established slices may alter reliability or latency routing.** Run-level `NOT READY` participation is displayed as non-causal evidence and cannot penalize a model without task-linked findings.
+
+A qualification fingerprint covers the provider, exact model ID, capability metadata, runtime version, adapter version, and qualification-suite version. When a fingerprint changes, prior evidence goes stale and the model cannot be scheduled until it requalifies. Retirement requires three consecutive authoritative missing observations.
+
+Passing an exact model argument is not treated as proof of which model executed: when the runtime does not report that identity, the receipt keeps the request and marks resolution unverified.
+
+</details>
+
+### Safety boundaries
+
+The dashboard binds only to `127.0.0.1`, and mutation endpoints require same-origin JSON. Architect and reviewer invocations use provider read-only or plan modes; workers use restricted editing modes rather than unrestricted bypass. Prompts are launched without shell interpolation. Validator commands come only from local user-controlled configuration. Parallel work requires a clean Git working tree.
+
+> [!WARNING]
+> A run ledger can contain prompts, repository paths, provider output, and validator logs. Migration backups are byte-consistent snapshots of pre-existing data. Protect `.devharmonics/` like any other sensitive local directory.
+
+---
+
+## Project status
+
+**Early public preview, under active development.** Current release: **v0.6.0**.
+
+What that judgement rests on, in both directions:
+
+| Signal | Reading |
+|---|---|
+| Automated suite | 178 tests across configuration, credential stripping, provider parsing, plan validation, cancellation, SQLite receipts, local-model qualification and chunked review, review-lens quorums and the claims/diff divergence gate, workflow parsing/provenance/promotion guards, cockpit delivery gates, workspace-isolation guards, the dashboard server, and full fake-provider orchestration through real Git worktrees |
+| Schema handling | Ordered transactional migrations to ledger schema 33, automatic pre-upgrade backups, integrity + foreign-key validation, rollback on failure, and refusal to open a newer schema |
+| Continuous integration | **None in this repository.** The merge gate is the local suite plus independent review — nothing automated catches a regression on push |
+| Distribution | Source checkout only. No installer, no published package |
+| Operational tooling | Temporary worktrees are retained for inspection until explicit cleanup is added; an interrupted integration set is not reconstructed after restart |
+
+### Known limitations
+
+- A Git **merge conflict** fails the affected task. The automatic fixer handles structured reviewer findings, not conflicts.
+- Provider quotas originate with each subscription. DevHarmonics classifies observed failures and can cool and reroute, but reliable remaining-quota telemetry is not consistently available from providers.
+- Large CPU-only local reviews can be materially slower than subscription reviewers.
+- Manual model registry entries are inventory records only — they imply no account visibility, verification, qualification, or schedulability.
+- Local Mellum2 specialists are tracked as two separate upgrade lanes (Instruct and Thinking) and are never downloaded, activated, or promoted automatically; scheduling additionally requires a structured-output, contradiction-detection, and requirement-count benchmark.
+
+### Roadmap
+
+**Available now** — everything above without a *planned* qualifier, including cockpit-complete delivery, live run steering, visible operation feedback, review evidence lenses, per-run cost counterfactuals, and reusable workflows — all proven against a real multi-repository product (the first cross-repository CivicSuite delivery was pushed, PR'd, and merged from the cockpit).
+**Planned** — Agent Client Protocol transport; integration-set restart reconstruction; automatic worktree cleanup; one task spanning several repositories.
+
+Planned items are proposals recorded in [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md), not dated commitments.
+
+---
+
+## Who this is for
+
+DevHarmonics assumes a **solo product owner or a very small team** who already pays for one or more AI coding subscriptions, works in Git, and wants parallel agent work without giving up the ability to say what actually happened. It is deliberately local-first: there is no hosted service, no multi-tenant control plane, and no ambition to become an enterprise agent workforce platform.
+
+If you want a managed cloud product, an agent that merges to `main` on your behalf, or a key-based API gateway, this is the wrong tool.
+
+---
+
+## A codebase you can navigate
+
+About 17,500 lines of TypeScript with Zod schemas at every input boundary, exactly one production dependency (`zod`), and a 2,700-line dashboard written in plain HTML, CSS, and JavaScript with no build step.
+
+The integration suite runs **fake provider commands against temporary Git repositories**, so the full orchestration path — planning, worktrees, validators, merges, review — is exercised without a single real credential. Contributions must keep it that way.
 
 ```powershell
 npm.cmd ci
-npm.cmd run check
+npm.cmd run check     # version consistency + full suite
 npm.cmd run dev -- serve --project C:\path\to\repository
 ```
 
-The automated suite covers configuration, credential stripping, provider parsing, plan validation, cancellation, SQLite receipts, local-model qualification and chunked review, workspace-isolation guards, the dashboard server, and full fake-provider orchestration through Git worktrees and final review.
+Clear places to add capability: a new `RuntimeAdapter` for another transport, a new finding kind in the verification-integrity analyzer, a new validator, or a new routing signal.
 
-## Project status and licensing
+Read [Contributing](CONTRIBUTING.md) first. Design proposals start as a GitHub Discussion; bounded reproducible defects as an issue.
 
-DevHarmonics v0.5.1 is an early public preview. The repository is public for evaluation and collaboration.
+---
 
-DevHarmonics is released under the [Apache License 2.0](LICENSE). You may use, modify, and redistribute it under that license's terms, which include a patent grant and require preserving attribution and change notices.
+## Documentation
+
+| | |
+|---|---|
+| [User manual](docs/USER_MANUAL.md) | Install, provider sign-in, the dashboard, troubleshooting, uninstall |
+| [Architecture](docs/ARCHITECTURE.md) | Components, trust boundaries, persistence, deliberate non-features |
+| [Product specification](docs/PRODUCT_SPEC.md) | Canonical product definition |
+| [Implementation plan](docs/IMPLEMENTATION_PLAN.md) | Increment-by-increment delivery plan |
+| [Changelog](CHANGELOG.md) · [Security policy](SECURITY.md) | Release history and private vulnerability reporting |
+
+## License
+
+[Apache License 2.0](LICENSE) — use, modify, and redistribute under its terms, including the patent grant and the requirement to preserve attribution and change notices.

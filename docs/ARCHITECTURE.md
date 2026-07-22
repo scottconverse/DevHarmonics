@@ -1,6 +1,6 @@
 # DevHarmonics Architecture
 
-Architecture version: **0.5.1**
+Architecture version: **0.6.0**
 
 DevHarmonics is a local-first, provider-neutral software factory for product owners managing AI agents as development teams. Its current architecture is a local orchestration layer over official subscription-authenticated coding-agent CLIs. It does not proxy provider HTTP APIs.
 
@@ -35,7 +35,8 @@ Read-only architect -> typed task DAG -> dependency scheduler
 
 - `src/cli.ts`: command entry point for `serve`, `init`, `doctor`, and `run`.
 - `src/server.ts`: loopback-only HTTP server and static dashboard delivery.
-- `src/delivery.ts`: READY-run delivery service for separately approved exact-SHA branch pushes and draft GitHub pull requests; it has no merge operation.
+- `src/delivery.ts`: READY-run delivery service — separately approved exact-SHA branch pushes, draft GitHub pull requests, gated pull-request merges, and release tags; every external action requires its own owner approval.
+- `src/workflows.ts`: versioned parameterized workflow documents — fail-closed parsing, canonical-JSON content-hash identity, and typed instantiation into ordinary objectives.
 - `src/doctor.ts`: provider installation and authentication inspection.
 - `src/providers.ts`: provider-specific process adapters and credential stripping.
 - `src/runtime.ts`: transport-neutral connection, model-selection, invocation, event, result, usage, and classified-failure contracts.
@@ -110,7 +111,7 @@ OpenRouter is an API transport with OAuth-backed, OS-protected credential storag
 
 Events are typed, append-only ledger records. Their monotonic SQLite IDs are durable cursors; `GET /api/runs/<run-id>/events?after=<cursor>&limit=<n>` replays one run oldest-first and returns `nextCursor`. The dashboard uses `GET /api/events` as a persisted server-sent event stream, stores its last cursor for refresh/reconnection, ignores duplicate delivery, and fetches a fresh run projection only after a new durable event. The local server polls SQLite behind the stream; closing or reconnecting a browser never controls run execution.
 
-Development builds after v0.5.1 persist immutable reviewed delivery coordinates in the ledger (schema 33 as of the v0.6 line) and include them in evidence package version 5. A READY transition captures the final base branch, base commit, reviewed HEAD, and delivery branch. The loopback dashboard issues a fresh external-write approval for exactly one action at a time: push that exact SHA to its GitHub delivery branch, create a draft pull request, merge the pull request, or tag the release; a composite complete-delivery flow runs the remaining steps but still mints one approval per action. Merging verifies the live pull-request state and refuses conflicts, pending or failing status checks, and a head commit that is no longer the reviewed commit; tagging targets the actual merge commit, persists the applied tag, and recovers an interrupted tag push by reusing the local tag. Completed steps reconcile idempotently, and concurrent operations on one repository are serialized server-side. All actions use typed policy receipts, revalidate the live origin, and retain the result. There is no automatic merge or tag — every external action requires its own owner approval.
+Since v0.6, DevHarmonics persists immutable reviewed delivery coordinates in the ledger (schema 33 as of the v0.6 line) and include them in evidence package version 5. A READY transition captures the final base branch, base commit, reviewed HEAD, and delivery branch. The loopback dashboard issues a fresh external-write approval for exactly one action at a time: push that exact SHA to its GitHub delivery branch, create a draft pull request, merge the pull request, or tag the release; a composite complete-delivery flow runs the remaining steps but still mints one approval per action. Merging verifies the live pull-request state and refuses conflicts, pending or failing status checks, and a head commit that is no longer the reviewed commit; tagging targets the actual merge commit, persists the applied tag, and recovers an interrupted tag push by reusing the local tag. Completed steps reconcile idempotently, and concurrent operations on one repository are serialized server-side. All actions use typed policy receipts, revalidate the live origin, and retain the result. There is no automatic merge or tag — every external action requires its own owner approval.
 
 Reusable workflows (`src/workflows.ts`) are versioned parameterized documents stored in the repository's tracked `workflows/` directory and recorded in the ledger by canonical-JSON content hash. Parsing fails closed: ungated external-write permissions, duplicate input names, outcome-template placeholders that name no declared input, and empty evidence requirements are refused with named issues. Instantiation validates typed inputs (an empty or whitespace-only string does not satisfy a required input) and produces an ordinary objective through the existing composer path — there is no second execution engine. The objective carries the workflow revision hash as structural provenance; starting it pins that hash into the run record once, immutably, derived server-side from the stored objective rather than from any client-supplied value, and hand-editing an objective clears its provenance. Recording a revision as a promotion of an earlier pilot refuses permission widening: external writes switching on, autonomy escalation, or removal of an approval point the pilot required. The public objective routes reject any client-supplied provenance value outright, and the orchestrator verifies and records the pin before execution launches — a run never starts and acquires its pedigree afterwards, and a recovery run keeps the pin of the run it resumes. The shipped workflows-of-record are seeded idempotently at server start from the install's own `workflows/` directory. A workflow's approval points, evidence requirements, and completion contract are advisory metadata in v0.6 — parse-checked, promotion-compared, and carried as policy notes — while runtime gating remains the global run and review policies; structural per-workflow enforcement is deferred.
 
@@ -118,13 +119,13 @@ On a controlled server shutdown, the orchestrator pauses and aborts active runs,
 
 Prompts, provider output, validator stdout/stderr, errors, reviews, event messages, and event payloads are redacted before persistence. Migration backups are byte-consistent snapshots of pre-existing data, so a backup may contain sensitive values written by an older version and must be protected like the original ledger.
 
-## Deliberate non-features in v0.5.1
+## Deliberate non-features in v0.6.0
 
 - No general API-key configuration; OpenRouter OAuth is the only API transport and paid use remains separately opt-in
 - No remote DevHarmonics service
 - No automatic merge into the user's checked-out branch
 - No automatic Git merge-conflict repair; structured reviewer findings can be fixed and independently re-reviewed
-- The tagged v0.5.1 release does not provide pushes/pull requests; development builds add the separately approved cockpit delivery flow (exact-SHA branch push, draft pull request, gated merge, release tag). Restart reconstruction, automatic cleanup, and one task spanning several repositories remain unavailable.
+- No external write of any kind without a per-action owner approval; delivery (exact-SHA branch push, draft pull request, gated merge, release tag) is entirely approval-gated. Restart reconstruction, automatic cleanup, and one task spanning several repositories remain unavailable.
 - Local Ollama models cannot inspect or write arbitrary repository paths; reviewers receive orchestrator-supplied context, while qualified implementors receive only scoped read/search/hash-checked-patch tools inside the assigned worktree
 - Large CPU-only local reviews can be materially slower than subscription reviewers, so capacity-aware background scheduling and stronger local-model profiles remain follow-up work
 - No Agent Client Protocol transport yet

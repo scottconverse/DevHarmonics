@@ -4,7 +4,7 @@ Document status: **Canonical product direction**
 Specification version: **1.12**
 Written: **2026-07-13**
 Revised: **2026-07-16**
-Current implementation baseline: **DevHarmonics v0.5.1**
+Current implementation baseline: **DevHarmonics v0.6.0**
 Google Doc: [DevHarmonics Canonical Product Specification](https://docs.google.com/document/d/1rd-_gqHHPZHhTkrULJR9tHcbAVUOGONsbuEFCV-8pRQ/edit?usp=drivesdk)
 
 Revision history: **v1.12 (2026-07-16)** — Recorded the owner's licensing decision: DevHarmonics is released under the Apache License 2.0. The licensing open question is resolved and removed; the repository carries the canonical LICENSE file, and the version-consistency check enforces the license file plus matching package and lockfile metadata.

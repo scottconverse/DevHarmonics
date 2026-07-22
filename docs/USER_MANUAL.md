@@ -1,7 +1,7 @@
 # DevHarmonics User Manual
 
-Manual version: **0.5.1**<br>
-Product release: **v0.5.1**
+Manual version: **0.6.0**<br>
+Product release: **v0.6.0**
 
 DevHarmonics is a local-first, provider-neutral software factory for product owners managing AI agents as development teams. It turns one software-development objective into a planned, parallel, validated run across Codex, Claude Code, and the Google Antigravity model catalog. It runs locally and uses the subscription sessions cached by the providers' official command-line tools.
 
@@ -41,7 +41,7 @@ npm.cmd link
 devharmonics --version
 ```
 
-Expected version output is `DevHarmonics 0.5.1`.
+Expected version output is `DevHarmonics 0.6.0`.
 
 ## 3. Sign in to providers
 
@@ -150,7 +150,7 @@ Good goals specify the observable result and important verification. Example:
 
 The agent count is not artificially capped. High settings can consume substantial CPU, memory, disk space, provider quota, and rate-limit capacity. The actual number of simultaneous workers cannot exceed the number of dependency-ready tasks.
 
-### Run a saved workflow (development builds after v0.5.1)
+### Run a saved workflow (v0.6)
 
 A **workflow** is a reusable, versioned job description — for example "audit the documentation for stale version claims" — stored as a JSON document in the install's tracked `workflows/` directory and recorded in the ledger by content hash, so every revision is permanent and identifiable. Two ship with DevHarmonics — `documentation-consistency` and `release-truth-audit` — and they are recorded automatically the first time the server starts, so a fresh cockpit already lists them.
 
@@ -169,7 +169,7 @@ The run permanently records which workflow revision it executed. Editing a workf
 
 The metrics show task count, passed checks, attempts, and currently active agents. Select a task to inspect its validator receipts. The activity panel records durable run events; refreshing the browser does not erase them.
 
-### Live feedback while work runs (development builds after v0.5.1)
+### Live feedback while work runs (v0.6)
 
 Every dashboard action acknowledges immediately: the button you pressed disables, shows a busy label with a small spinner, and announces an explicit done or failed result. A floating **activity strip** at the bottom of the screen lists everything DevHarmonics is doing right now — active run tasks with the responsible provider and model, plus local operations like fleet refreshes — and stays visible when you change screens, so navigation never hides work. Working tasks show how long they have been active; when a long provider call has produced no new events for several minutes, the card and strip say so ("quiet for 6m — the provider call may still be running") instead of pretending progress. These times are rebuilt from the durable ledger, so refreshing the page shows honest elapsed values, not reset ones. DevHarmonics does not draw percentage bars for work it cannot measure, and it never displays activity from tools running outside its own control plane. If you use reduced-motion settings, the spinner is replaced with a static indicator.
 
@@ -177,7 +177,7 @@ For a multi-repository run, the **Exact integration set** card shows the overall
 
 For an Observe run, DevHarmonics stores the selected mode with the run, requires every planned task to be `diagnostic`, `read_only`, and `low` risk, and rejects a worker that asks for approval again or omits contracted path-and-line evidence. Accepted findings are retained in the evidence package and reviewed independently; an empty Git diff alone is not sufficient for success.
 
-### Steer a run while it is working (development builds after v0.5.1)
+### Steer a run while it is working (v0.6)
 
 The **Steer this run** panel lets you redirect live work without opening an agent terminal. Nothing you do here loses completed evidence.
 
@@ -206,7 +206,7 @@ devharmonics/<run-prefix>
 
 DevHarmonics deliberately does not merge that branch into your checked-out branch. Review it with normal Git tools, run any additional checks, and merge it only when satisfied.
 
-### Development builds after v0.5.1: approved delivery, complete from the cockpit
+### Approved delivery, complete from the cockpit (v0.6)
 
 When a non-Observe run reaches **READY**, the **Approved delivery** card shows the exact base branch, base commit, reviewed HEAD commit, and delivery branch for each repository. External writes are off by default. To deliver through GitHub, entirely from the dashboard:
 
@@ -216,9 +216,9 @@ When a non-Observe run reaches **READY**, the **Approved delivery** card shows t
 4. When you are satisfied the change should land, confirm **Approve & merge PR**. DevHarmonics checks the live pull-request state first and refuses to merge a conflict, a pull request with pending or failing status checks, or a head commit that is no longer the reviewed commit.
 5. Optionally confirm **Approve & tag release** with a version tag. The tag lands on the actual merge commit and is recorded on the delivery; a failed tag push can be retried and reuses the already-created local tag.
 
-A **Complete delivery** control runs the remaining steps in order — still one explicit approval per consequential action. There is no automatic merge and no automatic tag: nothing external happens without your approval of that specific step. Each confirmation creates its own external-write approval and tool-policy receipt. Completed steps reconcile safely if you click them again, a second operation on the same repository is refused while one is in flight, and the card locks while a step runs. If the reviewed HEAD no longer matches the card, refresh instead of approving stale evidence. This development capability is part of the v0.6 increment; it is not present in the tagged v0.5.1 release.
+A **Complete delivery** control runs the remaining steps in order — still one explicit approval per consequential action. There is no automatic merge and no automatic tag: nothing external happens without your approval of that specific step. Each confirmation creates its own external-write approval and tool-policy receipt. Completed steps reconcile safely if you click them again, a second operation on the same repository is refused while one is in flight, and the card locks while a step runs. If the reviewed HEAD no longer matches the card, refresh instead of approving stale evidence. This capability is part of v0.6; it is not present in the earlier v0.5.1 release.
 
-A multi-repository run creates a separate integration branch and worktree for every affected repository. Use the **Exact integration set** card or exported evidence to copy the precise branch name and base-to-HEAD commit range for each repository. The tagged v0.5.1 release does not push those branches or open pull requests. Development builds after v0.5.1 can perform the separately approved delivery flow above. No version merges them into a primary checkout automatically.
+A multi-repository run creates a separate integration branch and worktree for every affected repository. Use the **Exact integration set** card or exported evidence to copy the precise branch name and base-to-HEAD commit range for each repository. The earlier v0.5.1 release does not push those branches or open pull requests; v0.6 performs the separately approved delivery flow above. No version merges them into a primary checkout automatically.
 
 Useful commands:
 
@@ -354,7 +354,7 @@ Open the task drawer and inspect the exact command receipt. After bounded retrie
 
 ### A merge conflict stopped a task
 
-Git merge conflicts are not repaired automatically in v0.5.1. The automatic fixer addresses structured reviewer findings after integration; it does not guess through conflicting branch edits. Inspect the task and integration branches, resolve manually if appropriate, and start a new run for remaining work.
+Git merge conflicts are not repaired automatically in v0.6.0. The automatic fixer addresses structured reviewer findings after integration; it does not guess through conflicting branch edits. Inspect the task and integration branches, resolve manually if appropriate, and start a new run for remaining work.
 
 ### A provider is throttled
 

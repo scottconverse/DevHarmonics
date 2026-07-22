@@ -4,16 +4,38 @@ All notable DevHarmonics changes are documented here.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-22
+
 ### Added
 
-- Owner-approved delivery handoffs for READY runs. DevHarmonics retains each repository's exact reviewed base, HEAD, branch, and local path; requires one explicit external-write approval for an exact-SHA GitHub branch push and a separate approval for draft pull-request creation; records tool-policy receipts and resulting URLs in run evidence; and exposes no merge action.
+- Owner-approved delivery for READY runs, complete from the dashboard. DevHarmonics retains each repository's exact reviewed base, HEAD, branch, and local path, and the owner can run the entire delivery without leaving the cockpit: an exact-SHA branch push, draft pull-request creation, pull-request merge, release tagging, and a one-step complete flow. Every step requires its own explicit external-write approval and records a tool-policy receipt — there is no automatic merge and no automatic tag. The merge verifies live pull-request state and refuses conflicts, pending or failing status checks, and a head commit that is no longer the reviewed commit. Tagging validates the tag name, tags the actual merge commit, persists the applied tag, recovers an interrupted tag push by reusing the local tag, and refuses a second, different tag on an already-tagged delivery. Completed steps reconcile idempotently, concurrent operations on one repository are refused server-side, and the delivery card locks while a step is in flight.
+- Review evidence lenses (DH-460). Reviewer decorrelation gains a second axis: what a reviewer is shown. An artifact-lens reviewer judges the diff and repository without seeing the workers' reports; a claims-lens reviewer judges the reports without seeing the code and must return a structured claimed-changes manifest, which a deterministic gate compares against the integrated diff — a worker that narrates changes it never made fails mechanically. Claims-lens isolation is structural: a fresh working directory outside any repository, full tool shutdown for providers that support it, capability-gated routing away from providers that cannot prove denial, and fail-closed managed-policy detection behind an explicit owner attestation.
+- Per-run cost counterfactual (DH-650). A run shows its actual spend beside what the same work would have cost on the priciest qualified candidate mix, from like-for-like pairable receipts, with unpairable and unknown-cost receipts reported rather than silently dropped.
+- Cheapest-at-established-parity routing preference (DH-320). Among candidates whose quality guards all pass (tier fit, reasoning fit, established empirical latency, user pins, provider diversity for review), routing prefers the cheaper candidate at score parity; preference nudges cannot override a quality guard, and a directed provider remains a hard constraint.
+- DH-810 reusable workflows. A workflow is a versioned, parameterized JSON document in the repository's tracked `workflows/` directory, identified by canonical-JSON content hash and parsed fail-closed: ungated external writes, duplicate input names, outcome-template placeholders naming no declared input, and empty evidence requirements are refused at parse time with named issues. Instantiating a workflow with typed inputs (an empty or whitespace-only string does not satisfy a required input) creates an ordinary objective through the existing composer — no second execution engine — and the objective carries the workflow revision hash as structural provenance. Starting it pins the revision into the run record once, immutably, derived server-side; no client-supplied pin exists, and hand-editing an objective clears its provenance. Recording a revision promoted from a pilot refuses permission widening: external writes switching on, autonomy escalation, or removal of an approval point the pilot required. Two workflows-of-record ship (`documentation-consistency`, `release-truth-audit`) and a Workflows dashboard view lists, inspects, and instantiates revisions.
+- A write task whose branch changed nothing against its base commit does not pass. The worker is told its attempt produced no repository change and gets one bounded retry to make the edit or explain why no change is needed.
+- Read-only diagnostics must carry verifiable path/line citations where the task contract requires them, and reviewer prompts carry the explicit duty to judge whether cited lines support the conclusions drawn from them.
+- Validator commands support a `${repoRoot}` token so per-repository toolchains stay portable across checkouts.
+- Local Thinking-track model qualification; a local model timeout now cools that model rather than the whole local connection.
 - DH-635 live run steering. An owner can redirect a running run from the dashboard instead of editing an agent terminal, without losing completed evidence. Task admission can be held and resumed while active work finishes; queued tasks can be reprioritised or reassigned to another available provider; a clarification is delivered to a task at its next attempt boundary; and an active attempt can be interrupted, which stops that attempt, retains it as evidence, and continues in a new attributed attempt. Steering is deliberately unable to widen scope, permissions, spending, deployment authority, or acceptance criteria: the directive payload has no such fields, interrupt grants are capped so repeated interrupts cannot extend a task's invocation budget, and directives that could never be applied are rejected with a reason rather than left pending. Every directive records its actor, target, timestamp, disposition, and the exact attempt it steered, and the run board shows pending, applied, rejected, and superseded states. Ledger schema 28.
 - DH-632 visible operation feedback, first wave. Every dashboard-initiated action now acknowledges immediately through one shared operation helper: the control disables, exposes an accessible busy state, shows a busy label and an honest indeterminate spinner, and reports explicit done/failed end states with the failure reason. A global activity strip (a polite live region) keeps active run tasks and local operations visible across screen changes, with the responsible provider/model, evidence-based elapsed time, and a "quiet for…" heartbeat warning when a long provider call has produced no events. Task cards show live elapsed/last-activity times reconstructed from durable ledger events, so refresh or reconnection rebuilds feedback truthfully. Progress bars remain deliberately absent until a real completed/total measure exists, and reduced-motion preferences replace animation with a static indicator.
 
+### Fixed
+
+- A stale qualification no longer blocks a provider's default model from being scheduled.
+- Cross-repository architect proposals use each repository's own validator names.
+- Plan-validation vocabulary errors surface the exact accepted values instead of a generic refusal.
+- Managed-fleet configuration reflects each connection's actual schedulable roles.
+- Reviewer-independence diagnosis reports the requirement an operation actually has rather than a proxy for it.
+- Run-list rows no longer clip their bottom edge in the dashboard.
+
 ### Changed
 
-- Run evidence packages advance to version 5 and ledger schema 27 so approved delivery coordinates and results survive restarts and exports.
+- Ledger schema advances to 33 (review-receipt lens metadata, delivery merge/tag state, release-tag persistence, workflow revisions, objective workflow provenance) through ordered transactional migrations with byte-consistent pre-upgrade backups; a documented rollback path to v0.5.1 uses those backups (docs/ROLLBACK.md).
+- Run evidence packages advance to version 5 so approved delivery coordinates and results survive restarts and exports.
 - DevHarmonics is now released under the Apache License 2.0. Added the canonical `LICENSE` file and updated the README, contributor terms, package metadata, the lockfile's root license metadata, and the canonical product specification (v1.12, licensing open question resolved); the version-consistency check now requires the Apache-2.0 license file and matching package/lockfile metadata.
+- The README is rewritten as the repository's landing page: what the product structurally guarantees, how a run works, the delivery line ("nothing external without a per-action owner approval"), and an honest status/limitations section.
+- The user manual records the Windows environment facts (temp relocation, Docker host) that otherwise produce false failures and false greens, documents the full cockpit delivery flow, and adds the saved-workflow walkthrough.
 
 ## [0.5.1] - 2026-07-15
 
@@ -164,6 +186,7 @@ All notable DevHarmonics changes are documented here.
 - Source installation, complete user manual, architecture, security policy, and published landing page.
 - Detailed Antigravity browser-code handoff and multi-screen onboarding instructions.
 
+[0.6.0]: https://github.com/scottconverse/DevHarmonics/releases/tag/v0.6.0
 [0.1.0]: https://github.com/scottconverse/DevHarmonics/releases/tag/v0.1.0
 [0.5.1]: https://github.com/scottconverse/DevHarmonics/releases/tag/v0.5.1
 [0.5.0]: https://github.com/scottconverse/DevHarmonics/releases/tag/v0.5.0

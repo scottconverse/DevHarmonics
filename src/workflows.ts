@@ -1,0 +1,77 @@
+import { createHash } from "node:crypto";
+import { z } from "zod";
+
+/**
+ * DH-810: a workflow is a versioned, parameterized document stored in Git.
+ * Its identity is its content hash — the same discipline as plan revisions —
+ * so a later edit can never masquerade as the revision a historical run
+ * executed. Parsing fails closed with named issues; there is no partial parse.
+ */
+
+const workflowInputSchema = z.object({
+  name: z.string().min(1),
+  type: z.enum(["string", "number", "boolean"]),
+  required: z.boolean(),
+  description: z.string().min(1),
+});
+
+export const workflowDocumentSchema = z.object({
+  name: z.string().min(1).regex(/^[a-z0-9][a-z0-9-]*$/, "kebab-case name"),
+  description: z.string().min(1),
+  inputs: z.array(workflowInputSchema),
+  objective: z.object({
+    outcomeTemplate: z.string().min(1),
+    acceptanceCriteria: z.array(z.string().min(1)).min(1),
+    risk: z.enum(["low", "medium", "high"]),
+  }),
+  evidenceRequirements: z.array(z.string().min(1)),
+  approvalPoints: z.array(z.enum(["plan", "external_write", "spending", "destructive"])),
+  completionContract: z.object({
+    deliverable: z.string().min(1),
+    reviewLenses: z.array(z.enum(["artifact", "claims"])).min(1),
+  }),
+  permissions: z.object({
+    autonomy: z.enum(["observe", "supervised", "bounded"]),
+    allowExternalWrites: z.boolean(),
+  }),
+});
+
+export type WorkflowDocument = z.infer<typeof workflowDocumentSchema>;
+
+export type WorkflowParseResult =
+  | { ok: true; workflow: WorkflowDocument }
+  | { ok: false; issues: string[] };
+
+export function parseWorkflowDocument(text: string): WorkflowParseResult {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (error) {
+    return { ok: false, issues: [`not valid JSON: ${error instanceof Error ? error.message : String(error)}`] };
+  }
+  const parsed = workflowDocumentSchema.safeParse(raw);
+  if (!parsed.success) {
+    return { ok: false, issues: parsed.error.issues.map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`) };
+  }
+  const workflow = parsed.data;
+  // A workflow may not demand a permission its declared approval points do not
+  // gate — a document that grants itself ungated external writes is refused at
+  // parse time, not discovered at run time.
+  if (workflow.permissions.allowExternalWrites && !workflow.approvalPoints.includes("external_write")) {
+    return { ok: false, issues: ["permissions.allowExternalWrites requires an external_write approval point"] };
+  }
+  return { ok: true, workflow };
+}
+
+/** Canonical JSON: object keys sorted recursively, so formatting and key order never mint a new revision. */
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right)).map(([key, entry]) => [key, canonicalize(entry)]));
+  }
+  return value;
+}
+
+export function workflowRevisionHash(workflow: WorkflowDocument): string {
+  return createHash("sha256").update(JSON.stringify(canonicalize(workflow))).digest("hex");
+}

@@ -2569,6 +2569,62 @@ test("the assembled claims-lens chunk prompt demands the manifest the header pro
   assert.ok(!/claimedChanges/.test(seen[0]!), "non-claims reviews keep the findings-only contract");
 });
 
+test("workflow documents parse with typed inputs and content-hash revision identity", async () => {
+  // DH-810 S1: a workflow is a versioned parameterized document. Its identity
+  // is its content hash — the same canonicalization discipline as plan
+  // revisions — so a later edit can never masquerade as the revision a
+  // historical run executed.
+  const workflows = await import("../src/workflows.js").catch(() => ({})) as Record<string, any>;
+  assert.equal(typeof workflows.parseWorkflowDocument, "function", "DH-810 requires a workflow parser");
+  assert.equal(typeof workflows.workflowRevisionHash, "function", "DH-810 requires content-hash identity");
+
+  const document = {
+    name: "documentation-consistency",
+    description: "Verify every versioned claim in the docs matches the repository state.",
+    inputs: [
+      { name: "repositoryId", type: "string", required: true, description: "Repository to audit" },
+      { name: "maxFindings", type: "number", required: false, description: "Stop after this many findings" },
+    ],
+    objective: {
+      outcomeTemplate: "Every versioned claim in ${repositoryId} documentation matches the code.",
+      acceptanceCriteria: ["No stale version statements remain", "Every corrected claim cites its source line"],
+      risk: "medium",
+    },
+    evidenceRequirements: ["path:line citation per corrected claim"],
+    approvalPoints: ["plan", "external_write"],
+    completionContract: { deliverable: "reviewed branch", reviewLenses: ["artifact"] },
+    permissions: { autonomy: "supervised", allowExternalWrites: false },
+  };
+
+  const parsed = workflows.parseWorkflowDocument(JSON.stringify(document));
+  assert.equal(parsed.ok, true, JSON.stringify(parsed.issues ?? []));
+  assert.equal(parsed.workflow.name, "documentation-consistency");
+  assert.equal(parsed.workflow.inputs[0].required, true);
+
+  // Identity: stable under key order, changed by content.
+  const hashA = workflows.workflowRevisionHash(parsed.workflow);
+  const reordered = workflows.parseWorkflowDocument(JSON.stringify({ ...document, description: document.description }));
+  assert.equal(workflows.workflowRevisionHash(reordered.workflow), hashA, "identical content hashes identically");
+  const edited = workflows.parseWorkflowDocument(JSON.stringify({ ...document, description: "changed" }));
+  assert.notEqual(workflows.workflowRevisionHash(edited.workflow), hashA, "any content change is a new revision");
+
+  // Malformed documents fail closed with named issues, never a partial parse.
+  const missingInputs = workflows.parseWorkflowDocument(JSON.stringify({ ...document, inputs: [{ name: "", type: "mystery" }] }));
+  assert.equal(missingInputs.ok, false);
+  assert.ok(missingInputs.issues.length >= 1, "issues are named");
+  const notJson = workflows.parseWorkflowDocument("not json {");
+  assert.equal(notJson.ok, false);
+
+  // A workflow may not demand permissions its declared approval points don't
+  // gate: external writes without an external_write approval point is refused.
+  const widened = workflows.parseWorkflowDocument(JSON.stringify({
+    ...document,
+    approvalPoints: ["plan"],
+    permissions: { autonomy: "supervised", allowExternalWrites: true },
+  }));
+  assert.equal(widened.ok, false, "ungated external writes are refused at parse time");
+});
+
 test("verification-integrity gate fails closed on test weakening and reports bounded evidence", async () => {
   const integrityPath = "../src/verification-integrity.js";
   const integrityModule = await import(integrityPath).catch(() => ({})) as Record<string, any>;

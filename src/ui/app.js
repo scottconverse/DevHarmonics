@@ -322,27 +322,29 @@ async function refreshProducts() {
   })));
   const repositories = state.products.flatMap((product) => product.repositories);
   $("#repository-product").innerHTML = state.products.map((product) => `<option value="${escapeHtml(product.id)}">${escapeHtml(product.name)}</option>`).join("");
-  $("#add-local-repository").disabled = state.products.length === 0;
+  const noProducts = state.products.length === 0;
+  $("#add-local-repository").disabled = noProducts;
+  $("#add-local-repository-help").classList.toggle("hidden", !noProducts);
   $("#product-summary").innerHTML = `<div class="metric"><span>Products</span><strong>${state.products.length}</strong></div><div class="metric"><span>Repositories</span><strong>${repositories.length}</strong></div><div class="metric"><span>Active repositories</span><strong>${repositories.filter((repository) => !repository.archived).length}</strong></div><div class="metric"><span>Private repositories</span><strong>${repositories.filter((repository) => repository.visibility === "private").length}</strong></div>`;
   $("#products-empty").classList.toggle("hidden", state.products.length > 0);
   $("#product-list").innerHTML = state.products.map((product) => {
     const intelligence = state.productIntelligence[product.id];
     const localSources = product.repositories.reduce((sum, repository) => sum + (repository.localPath ? repository.governanceSources.length : 0), 0);
     const conflicts = intelligence?.findings.filter((finding) => finding.kind === "conflicting_claim").length || 0;
-    const missing = intelligence?.findings.filter((finding) => finding.kind === "missing_source" || finding.kind === "unreadable_source" || finding.kind === "unsafe_source").length || 0;
     const intelligenceMarkup = intelligence ? `<details class="product-intelligence" ${conflicts ? "open" : ""}>
-      <summary><strong>Intelligence ${escapeHtml(intelligence.status)}</strong><span>${intelligence.sources.filter((source) => source.status === "read").length} sources · ${intelligence.claims.length} claims · ${conflicts} conflicts · ${missing} unavailable</span></summary>
-      <p>Immutable snapshot <code>${escapeHtml(intelligence.id)}</code> · ${escapeHtml(new Date(intelligence.createdAt).toLocaleString())}</p>
+      <summary><strong>Intelligence scan: ${escapeHtml(intelligence.status)}</strong><span>Read ${intelligence.sources.filter((source) => source.status === "read").length} of the product's key documents, found ${intelligence.claims.length} factual statements, and ${conflicts} of them contradict each other across repositories.</span></summary>
+      <p class="muted">Scanned ${escapeHtml(new Date(intelligence.createdAt).toLocaleString())} (result #${escapeHtml(intelligence.id.slice(0, 8))}) — each scan is saved permanently and never edited; if the repositories change, scan again rather than overwrite this result.</p>
       ${intelligence.findings.length ? `<ul>${intelligence.findings.map((finding) => `<li class="${escapeHtml(finding.severity)}"><strong>${escapeHtml(finding.kind.replaceAll("_", " "))}</strong> ${escapeHtml(finding.message)}${finding.citations.length ? `<small>${finding.citations.map(escapeHtml).join(" · ")}</small>` : ""}</li>`).join("")}</ul>` : '<p class="muted">No conflicts or unavailable sources were found.</p>'}
-    </details>` : `<div class="product-intelligence empty"><strong>No intelligence snapshot yet</strong><span>${localSources ? `${localSources} configured canonical sources are ready to scan.` : "Attach local repositories and configure canonical sources first."}</span></div>`;
+    </details>` : `<div class="product-intelligence empty"><strong>No scan has run yet</strong><span>${localSources ? `${localSources} tracked files are ready to scan.` : "Attach a local repository and list its key documents first."}</span></div>`;
     return `<article class="panel product-card">
-    <div class="product-head"><div><span class="connection-kind">Registered product</span><h3>${escapeHtml(product.name)}</h3><p>${escapeHtml(product.description || "Registered product context")}</p></div><div class="product-actions"><a href="${escapeHtml(product.organizationUrl)}" target="_blank" rel="noreferrer">Open organization</a><button class="secondary small" type="button" data-scan-product="${escapeHtml(product.id)}">Scan intelligence</button></div></div>
+    <div class="product-head"><div><span class="connection-kind">Registered product</span><h3>${escapeHtml(product.name)}</h3><p>${escapeHtml(product.description || "Registered product context")}</p></div><div class="product-actions"><a href="${escapeHtml(product.organizationUrl)}" target="_blank" rel="noreferrer">Open organization</a><button class="secondary small" type="button" data-scan-product="${escapeHtml(product.id)}" title="Reads this product's tracked documents across all its repositories and flags outdated or conflicting information.">Scan intelligence</button></div></div>
     ${intelligenceMarkup}
     <div class="repository-list">${product.repositories.map((repository) => {
       const local = repository.inspection || null;
       const issues = local?.compatibilityIssues || [];
       const facts = [repository.role ? repository.role.replaceAll("_", " ") : null, local?.currentBranch || repository.defaultBranch, local ? local.dirty ? "dirty" : "clean" : null, ...issues.slice(0, 2)].filter(Boolean);
-      return `<div class="repository-row ${repository.localPath ? "local" : ""}"><span><strong>${escapeHtml(repository.name)}</strong><small>${escapeHtml(repository.localPath || repository.fullName)} · ${escapeHtml(repository.visibility)}${local?.headSha ? ` · ${escapeHtml(local.headSha.slice(0, 10))}` : ""}</small><span class="repository-facts">${facts.map((fact) => `<em class="${issues.includes(fact) ? "issue" : ""}">${escapeHtml(fact)}</em>`).join("")}</span></span><div class="repository-actions"><span class="lifecycle ${issues.length || local?.dirty ? "degraded" : repository.archived ? "retired" : "qualified"}">${issues.length ? `${issues.length} issues` : local?.dirty ? "dirty" : local ? "ready" : "observed"}</span>${repository.localPath ? `<button class="secondary small" type="button" data-refresh-repository="${escapeHtml(repository.id)}" data-product-id="${escapeHtml(product.id)}">Rescan</button>` : ""}</div></div>`;
+      const scanTitle = local ? "Checks again, in case the repository changed since the last check." : "Checks this repository's real files on disk and updates its status.";
+      return `<div class="repository-row ${repository.localPath ? "local" : ""}"><span><strong>${escapeHtml(repository.name)}</strong><small>ID: <code>${escapeHtml(repository.id)}</code> · ${escapeHtml(repository.localPath || repository.fullName)} · ${escapeHtml(repository.visibility)}${local?.headSha ? ` · ${escapeHtml(local.headSha.slice(0, 10))}` : ""}</small><span class="repository-facts">${facts.map((fact) => `<em class="${issues.includes(fact) ? "issue" : ""}">${escapeHtml(fact)}</em>`).join("")}</span></span><div class="repository-actions"><span class="lifecycle ${issues.length || local?.dirty ? "degraded" : repository.archived ? "retired" : "qualified"}">${issues.length ? `${issues.length} issues` : local?.dirty ? "dirty" : local ? "ready" : "observed"}</span>${repository.localPath ? `<button class="secondary small" type="button" data-refresh-repository="${escapeHtml(repository.id)}" data-product-id="${escapeHtml(product.id)}" title="${scanTitle}">${local ? "Rescan" : "Scan"}</button>` : ""}</div></div>`;
     }).join("")}</div>
   </article>`;
   }).join("");
@@ -685,10 +687,10 @@ async function refreshWorkbench(preferredSessionId = state.workbenchSession?.id)
 }
 
 function renderWorkbench() {
-  $("#workbench-count").textContent = `${state.workbenchSessions.length} saved`;
+  $("#workbench-count").textContent = `${state.workbenchSessions.length} saved discussions`;
   $("#workbench-session-list").innerHTML = state.workbenchSessions.length
     ? state.workbenchSessions.map((session) => `<button class="workbench-session ${session.id === state.workbenchSession?.id ? "active" : ""}" type="button" data-workbench-session="${escapeHtml(session.id)}"><strong>${escapeHtml(session.title)}</strong><span>${escapeHtml(session.projectPath)}</span></button>`).join("")
-    : '<div class="empty-state">No scratchpads yet.</div>';
+    : '<div class="empty-state">No discussions yet.</div>';
   $("#workbench-empty").classList.toggle("hidden", Boolean(state.workbenchSession));
   $("#workbench-active").classList.toggle("hidden", !state.workbenchSession);
   if (!state.workbenchSession) return;
@@ -710,12 +712,13 @@ function renderWorkbench() {
       const connection = state.connections.find((item) => item.id === model.connectionId);
       return `<label class="workbench-model"><input type="checkbox" name="workbench-model" value="${escapeHtml(model.id)}" ${index < Math.min(2, eligible.length) ? "checked" : ""}><span><strong>${escapeHtml(model.displayName)}</strong><small>${escapeHtml(connection?.displayName || model.connectionId)} · ${escapeHtml(model.canonicalName)}</small></span></label>`;
     }).join("")
-    : '<div class="empty-state">Activate and qualify at least one analysis-capable model in Models before consulting.</div>';
+    : '<div class="empty-state">No models are ready to answer questions yet. Go to Models, turn one on, and run its quick qualification test — that\'s a one-time check that the model can handle this kind of task. (Qualifying a model runs a short test before DevHarmonics trusts it for a given job.)</div>';
   $("#workbench-consult").disabled = eligible.length === 0;
   if (!$("#workbench-outcome").value && state.workbenchMessages.length) {
     const lastQuestion = [...state.workbenchMessages].reverse().find((message) => message.role === "user");
     $("#workbench-outcome").value = lastQuestion?.content || state.workbenchSession.title;
   }
+  renderRunAutonomyHelp("workbench-autonomy", "workbench-autonomy-help");
 }
 
 async function selectWorkbench(sessionId) {
@@ -754,9 +757,9 @@ async function refreshWorkflows() {
   $("#workflow-list").innerHTML = workflows.length
     ? workflows.map((workflow) => `<button class="connection-card" style="text-align:left;cursor:pointer" data-workflow-hash="${escapeHtml(workflow.revisionHash)}">
         <strong>${escapeHtml(workflow.name)}</strong>
-        <p class="field-help">revision ${escapeHtml(workflow.revisionHash.slice(0, 12))} · recorded ${escapeHtml(workflow.createdAt.slice(0, 10))}</p>
+        <p class="field-help" title="Workflows can be edited over time; this is the exact version you're looking at.">version ${escapeHtml(workflow.revisionHash.slice(0, 12))} · saved ${escapeHtml(workflow.createdAt.slice(0, 10))}</p>
       </button>`).join("")
-    : `<p class="field-help">No workflow revisions are recorded yet. The two shipped documents (in the install's <code>workflows/</code> directory) are recorded automatically at server start — an empty list here means seeding failed; check the server terminal. Record your own with <code>POST /api/workflows</code> and a JSON body of <code>{"document": { …workflow… }}</code>.</p>`;
+    : `<p class="field-help">The two built-in workflows appear here when the server starts. If this list stays empty, restart the DevHarmonics server.</p>`;
   $("#workflow-detail").classList.add("hidden");
 }
 
@@ -778,8 +781,8 @@ function renderWorkflowScope() {
   const container = $("#workflow-repositories");
   if (!container) return;
   container.innerHTML = product
-    ? product.repositories.map((repository) => `<label class="field-help"><input type="checkbox" name="workflow-repository" value="${escapeHtml(repository.id)}"> ${escapeHtml(repository.name)}${repository.localPath ? "" : " (no local checkout)"}</label>`).join("") || '<p class="field-help">This product has no attached repositories yet.</p>'
-    : '<p class="field-help">Standalone: the objective runs against the server project folder. Select a product to scope repositories.</p>';
+    ? product.repositories.map((repository) => `<label class="field-help"><input type="checkbox" name="workflow-repository" value="${escapeHtml(repository.id)}"> ${escapeHtml(repository.name)}${repository.localPath ? "" : " (not downloaded locally)"}</label>`).join("") || '<p class="field-help">This product has no attached repositories yet.</p>'
+    : '<p class="field-help">No product selected — this will run against the default project folder on this machine. Pick a product above to limit it to specific repositories instead.</p>';
 }
 
 async function showWorkflowDetail(revisionHash) {
@@ -788,7 +791,7 @@ async function showWorkflowDetail(revisionHash) {
     try { await refreshProducts(); } catch { /* products are optional for a standalone instantiation */ }
   }
   state.selectedWorkflow = revision;
-  $("#workflow-detail-name").textContent = `${revision.name} — revision ${revision.revisionHash.slice(0, 12)}`;
+  $("#workflow-detail-name").textContent = `Workflow: ${revision.name} (version ${revision.revisionHash.slice(0, 12)})`;
   $("#workflow-detail-description").textContent = revision.workflow.description;
   $("#workflow-detail-json").textContent = JSON.stringify(revision.workflow, null, 2);
   $("#workflow-detail-inputs").innerHTML = [
@@ -796,7 +799,7 @@ async function showWorkflowDetail(revisionHash) {
       ${workflowInputControl(input)}
     </label>`),
     `<label class="field-help">Product
-      <select id="workflow-product"><option value="">Standalone (no product)</option>${state.products.map((product) => `<option value="${escapeHtml(product.id)}">${escapeHtml(product.name)}</option>`).join("")}</select>
+      <select id="workflow-product"><option value="">No product — use default folder</option>${state.products.map((product) => `<option value="${escapeHtml(product.id)}">${escapeHtml(product.name)}</option>`).join("")}</select>
     </label>`,
     `<div id="workflow-repositories"></div>`,
   ].join("");
@@ -838,13 +841,13 @@ $("#workflow-instantiate").addEventListener("click", async (event) => {
   const productId = $("#workflow-product")?.value || "";
   const repositoryIds = [...document.querySelectorAll('input[name="workflow-repository"]:checked')].map((input) => input.value);
   $("#workflow-error").innerHTML = "";
-  await withOperation(event.currentTarget, "Creating the objective from the workflow", async () => {
+  await withOperation(event.currentTarget, "Creating the task from the workflow", async () => {
     const result = await api(`/api/workflows/${revision.revisionHash}/instantiate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ inputs, repositoryIds, ...(productId ? { productId } : {}) }),
     });
-    $("#workflow-instantiate-result").textContent = `Objective ${result.objective.id.slice(0, 8)} created from revision ${result.revisionHash.slice(0, 12)}. Propose and approve its plan in the composer — the run will pin this exact workflow revision.`;
+    $("#workflow-instantiate-result").textContent = `Task ${result.objective.id.slice(0, 8)} created from this workflow. Go to Runs → New run to review and approve its plan — it will run using exactly this version of the workflow.`;
   }, {
     // DH810-AUD-009: the API names the offending inputs — surface every named
     // issue, not just the top-level message.
@@ -876,10 +879,11 @@ async function refreshEvidence() {
   $("#evidence-verdict").innerHTML = derivedVerdictMarkup(report);
   $("#evidence-hash").textContent = evidence.integritySha256;
   $("#evidence-review-count").textContent = `${evidence.reviews.length} retained`;
-  $("#evidence-reviews").innerHTML = evidence.reviews.length ? evidence.reviews.map((review) => `<article><div><strong>Round ${review.round}</strong><span>${escapeHtml(recordedModelIdentity(review.provider, review.modelId, review.provider === "gemini" ? "requested_unverified" : null, review.connectionId))} · integration ${escapeHtml(review.integrationSha256.slice(0, 12))}</span></div><span class="lifecycle ${review.invalidatedAt ? "retired" : review.verdict === "READY" ? "qualified" : "degraded"}">${review.invalidatedAt ? "invalidated" : escapeHtml(review.verdict.replaceAll("_", " "))}</span><p class="evidence-report">${escapeHtml(review.summary)}${review.findings.length ? `\n${review.findings.map((finding) => `${finding.severity.toUpperCase()} ${finding.location || "no location"}: ${finding.rationale} [${finding.disposition}]`).join("\n")}` : ""}${review.invalidationReason ? `\nInvalidated: ${escapeHtml(review.invalidationReason)}` : ""}</p></article>`).join("") : '<div class="empty-state">No structured review receipts were retained for this run.</div>';
-  $("#evidence-attempts").innerHTML = evidence.attempts.length ? evidence.attempts.map((attempt) => `<article><div><strong>${escapeHtml(attempt.task_id)}</strong><span>${escapeHtml(recordedModelIdentity(attempt.provider, attempt.model_id, attempt.model_resolution, attempt.connection_id))}</span></div><span class="lifecycle ${attempt.status === "completed" ? "qualified" : ""}">${escapeHtml(attempt.status)}</span><details class="evidence-report"><summary>View normalized report</summary><p>${escapeHtml(attempt.result_envelope?.summary || attempt.error || "No normalized summary")}</p></details></article>`).join("") : '<div class="empty-state">No attempts were started.</div>';
+  $("#evidence-reviews").innerHTML = evidence.reviews.length ? evidence.reviews.map((review) => `<article><div><strong>Round ${review.round}</strong><span>${escapeHtml(recordedModelIdentity(review.provider, review.modelId, review.provider === "gemini" ? "requested_unverified" : null, review.connectionId))} · reviewed at commit ${escapeHtml(review.integrationSha256.slice(0, 12))}</span></div><span class="lifecycle ${review.invalidatedAt ? "retired" : review.verdict === "READY" ? "qualified" : "degraded"}">${review.invalidatedAt ? "invalidated" : escapeHtml(review.verdict.replaceAll("_", " "))}</span><p class="evidence-report">${escapeHtml(review.summary)}${review.findings.length ? `\n${review.findings.map((finding) => `${finding.severity.toUpperCase()} ${finding.location || "no location"}: ${finding.rationale} — Status: ${finding.disposition}`).join("\n")}` : ""}${review.invalidationReason ? `\nInvalidated: ${escapeHtml(review.invalidationReason)}` : ""}</p></article>`).join("") : '<div class="empty-state">No independent reviews have been recorded for this run yet.</div>';
+  const evidenceRun = state.runs.find((item) => item.id === runId);
+  $("#evidence-attempts").innerHTML = evidence.attempts.length ? evidence.attempts.map((attempt) => `<article><div><strong>${escapeHtml(evidenceRun?.tasks.find((task) => task.id === attempt.task_id)?.title || attempt.task_id)}</strong><span>${escapeHtml(recordedModelIdentity(attempt.provider, attempt.model_id, attempt.model_resolution, attempt.connection_id))}</span></div><span class="lifecycle ${attempt.status === "completed" ? "qualified" : ""}">${escapeHtml(attempt.status)}</span><details class="evidence-report"><summary>View summary</summary><p>${escapeHtml(attempt.result_envelope?.summary || attempt.error || "No summary recorded")}</p></details></article>`).join("") : '<div class="empty-state">No attempts were started.</div>';
   $("#evidence-tool-count").textContent = `${evidence.toolReceipts.length} retained`;
-  $("#evidence-tools").innerHTML = evidence.toolReceipts.length ? evidence.toolReceipts.map((receipt) => `<article><div><strong>${escapeHtml(receipt.toolId)}</strong><span>${escapeHtml(receipt.actorRole)} · ${escapeHtml(receipt.stage)} · ${escapeHtml(receipt.sideEffect)}</span></div><span class="lifecycle ${receipt.outcome === "allow" ? "qualified" : receipt.outcome === "deny" ? "retired" : "degraded"}">${escapeHtml(receipt.outcome.replaceAll("_", " "))}</span><p class="evidence-report">${escapeHtml(receipt.reason)}${receipt.lockKeys.length ? `\nLocks: ${escapeHtml(receipt.lockKeys.join(", "))}` : ""}</p></article>`).join("") : '<div class="empty-state">No tool policy decisions were retained for this run.</div>';
+  $("#evidence-tools").innerHTML = evidence.toolReceipts.length ? evidence.toolReceipts.map((receipt) => `<article><div><strong>${escapeHtml(receipt.actorRole)} tried to ${escapeHtml(receipt.sideEffect.replaceAll("_", " "))} during ${escapeHtml(receipt.stage)}</strong><span class="muted">${escapeHtml(receipt.toolId)}</span></div><span class="lifecycle ${receipt.outcome === "allow" ? "qualified" : receipt.outcome === "deny" ? "retired" : "degraded"}">${escapeHtml(receipt.outcome.replaceAll("_", " "))}</span><p class="evidence-report">${escapeHtml(receipt.reason)}${receipt.lockKeys.length ? `\nLocks: ${escapeHtml(receipt.lockKeys.join(", "))} — prevents another agent from touching the same file or resource at the same time.` : ""}</p></article>`).join("") : '<div class="empty-state">No tool permission decisions have been recorded for this run yet.</div>';
 }
 
 // Owner-reported (2026-07-22): the derived verdict rendered the entire review
@@ -934,7 +938,7 @@ function parseReviewTargets(summary) {
 function derivedVerdictMarkup(report) {
   const reportIssues = [...report.missingEvidence.map((item) => `Missing: ${item}`), ...report.inconsistencies];
   const verdictLabel = escapeHtml(report.verdict.replaceAll("_", " "));
-  const headline = `<div><span class="connection-kind">DERIVED VERDICT</span><h3>${verdictLabel}</h3><p>${escapeHtml(verdictGuidance(report, reportIssues.length))}</p></div>
+  const headline = `<div><span class="connection-kind">OVERALL VERDICT</span><h3>${verdictLabel}</h3><p>${escapeHtml(verdictGuidance(report, reportIssues.length))}</p><p class="field-help">DevHarmonics' own check of whether the evidence kept for this run is complete and consistent — separate from what each individual reviewer concluded below.</p></div>
     <span class="status-pill report-${escapeHtml(report.verdict.toLowerCase())}">${verdictLabel}</span>
     ${reportIssues.length ? `<ul class="verdict-reasons">${reportIssues.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : '<p class="report-consistent">No missing or contradictory retained evidence detected.</p>'}`;
   const parsed = parseReviewTargets(report.summary || "");
@@ -1575,6 +1579,7 @@ function showComposer() {
 $("#agent-mode").addEventListener("change", (event) => { $("#agent-count").disabled = event.target.value === "auto"; });
 $("#run-autonomy").addEventListener("change", () => renderRunAutonomyHelp());
 $("#setting-autonomy").addEventListener("change", () => renderRunAutonomyHelp("setting-autonomy", "setting-autonomy-help"));
+$("#workbench-autonomy").addEventListener("change", () => renderRunAutonomyHelp("workbench-autonomy", "workbench-autonomy-help"));
 $("#objective-product").addEventListener("change", () => {
   renderObjectiveRepositoryPicker();
 });
@@ -1705,11 +1710,11 @@ $("#new-workbench").addEventListener("click", () => {
 $("#workbench-new-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   $("#workbench-new-error").textContent = "";
-  await withOperation(event.currentTarget.querySelector('button[type="submit"]'), "Creating the Workbench scratchpad", async () => {
+  await withOperation(event.currentTarget.querySelector('button[type="submit"]'), "Creating the Workbench discussion", async () => {
     const result = await api("/api/workbench", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ projectPath: $("#workbench-project").value, title: $("#workbench-title-input").value.trim() || "Untitled scratchpad" }),
+      body: JSON.stringify({ projectPath: $("#workbench-project").value, title: $("#workbench-title-input").value.trim() || "Untitled discussion" }),
     });
     $("#workbench-new-form").classList.add("hidden");
     await refreshWorkbench(result.session.id);

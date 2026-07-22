@@ -2180,7 +2180,7 @@ test("Workbench creates a durable read-only discussion and converts it to an obj
   const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
   try {
     const pageText = await fetch(dashboard.url).then((response) => response.text());
-    assert.match(pageText, /Multi-model Workbench/);
+    assert.match(pageText, /Ask AI models about this project/);
     assert.match(pageText, /Read-only by design/);
 
     const createdResponse = await fetch(`${dashboard.url}/api/workbench`, {

@@ -249,24 +249,25 @@
 
         <section id="workbench-view" class="workspace-view hidden" aria-labelledby="workbench-title">
           <div class="view-heading">
-            <div><p class="eyebrow">DISCUSSION-ONLY STUDIO</p><h2 id="workbench-title">Multi-model Workbench</h2></div>
-            <button id="new-workbench" class="secondary" type="button">New scratchpad</button>
+            <div><p class="eyebrow">READ-ONLY — NOTHING RUNS</p><h2 id="workbench-title">Ask AI models about this project</h2><p class="field-help">Ask one or more AI models questions about your codebase and compare their answers side by side. Nothing here starts a run or changes a file.</p></div>
+            <button id="new-workbench" class="secondary" type="button">New discussion</button>
           </div>
           <div class="workbench-boundary" role="note"><strong>Read-only by design.</strong><span>Workbench consultations cannot start a run or change a repository. Convert useful discussion into an objective draft when you are ready.</span></div>
           <form id="workbench-new-form" class="panel workbench-new hidden">
             <label for="workbench-project">Project folder</label>
             <input id="workbench-project" class="input" spellcheck="false">
-            <label for="workbench-title-input">Scratchpad title</label>
+            <label for="workbench-title-input">Discussion title</label>
             <input id="workbench-title-input" class="input" placeholder="Release strategy comparison">
-            <div class="composer-actions"><p id="workbench-new-error" class="error" role="alert"></p><button class="primary" type="submit">Create scratchpad</button></div>
+            <div class="composer-actions"><p id="workbench-new-error" class="error" role="alert"></p><button class="primary" type="submit">Start discussion</button></div>
           </form>
           <div class="workbench-layout">
-            <aside class="panel workbench-sessions" aria-label="Workbench scratchpads"><div class="panel-heading"><h3>Scratchpads</h3><span id="workbench-count" class="muted"></span></div><div id="workbench-session-list" class="workbench-session-list"></div></aside>
+            <aside class="panel workbench-sessions" aria-label="Workbench discussions"><div class="panel-heading"><h3>Discussions</h3><span id="workbench-count" class="muted"></span></div><div id="workbench-session-list" class="workbench-session-list"></div></aside>
             <section class="panel workbench-main">
-              <div id="workbench-empty" class="empty-state">Create a scratchpad to ask project questions and compare qualified models.</div>
+              <div id="workbench-empty" class="empty-state">Start a discussion to ask questions about this project and compare answers from more than one AI model.</div>
               <div id="workbench-active" class="hidden">
-                <div class="panel-heading workbench-heading"><div><span class="step">W</span><div><h2 id="workbench-active-title"></h2><p id="workbench-active-project" class="muted"></p></div></div><span class="lifecycle qualified">discussion only</span></div>
+                <div class="panel-heading workbench-heading"><div><span class="step">W</span><div><h2 id="workbench-active-title"></h2><p id="workbench-active-project" class="muted"></p></div></div><span class="lifecycle qualified">read-only</span></div>
                 <div id="workbench-messages" class="workbench-messages" aria-live="polite"></div>
+                <p class="field-help">When a message says "requested model (identity unverified)," the provider didn't confirm which exact model answered — DevHarmonics shows what it asked for, not a verified fact.</p>
                 <form id="workbench-consult-form" class="workbench-consult">
                   <label for="workbench-question">Ask the selected models</label>
                   <textarea id="workbench-question" rows="4" placeholder="Compare two safe approaches to this product decision. Inspect the repository when useful, and distinguish facts from inference."></textarea>
@@ -274,9 +275,10 @@
                   <div class="composer-actions"><p id="workbench-error" class="error" role="alert"></p><button id="workbench-consult" class="primary" type="submit">Consult selected models</button></div>
                 </form>
                 <details id="workbench-convert" class="workbench-convert">
-                  <summary>Convert this discussion into an objective draft</summary>
+                  <summary>Turn this into a new task for the agent team</summary>
+                  <p class="field-help">An objective is the goal statement that starts a new agent run. Turning this discussion into one only creates a draft — you still review and approve everything before anything runs.</p>
                   <form id="workbench-convert-form">
-                    <label for="workbench-outcome">Outcome</label><textarea id="workbench-outcome" rows="3" required></textarea>
+                    <label for="workbench-outcome">What should the team accomplish?</label><textarea id="workbench-outcome" rows="3" required></textarea>
                     <div class="objective-grid">
                       <label for="workbench-criteria">Acceptance criteria <small>One per line</small><textarea id="workbench-criteria" rows="3"></textarea></label>
                       <label for="workbench-constraints">Constraints <small>One per line</small><textarea id="workbench-constraints" rows="3"></textarea></label>
@@ -284,7 +286,7 @@
                     <div class="objective-policy-grid">
                       <label for="workbench-risk">Risk<select id="workbench-risk" class="input"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option></select></label>
                       <label for="workbench-priority">Priority<select id="workbench-priority" class="input"><option value="low">Low</option><option value="normal" selected>Normal</option><option value="high">High</option><option value="urgent">Urgent</option></select></label>
-                      <label for="workbench-autonomy">Run mode<select id="workbench-autonomy" class="input"><option value="observe">Observe only</option><option value="supervised" selected>Supervised</option><option value="bounded">Bounded autonomy</option></select></label>
+                      <label for="workbench-autonomy">Run mode<select id="workbench-autonomy" class="input" aria-describedby="workbench-autonomy-help"><option value="observe">Observe only</option><option value="supervised" selected>Supervised</option><option value="bounded">Bounded autonomy</option></select><small id="workbench-autonomy-help" class="field-help"></small></label>
                     </div>
                     <div class="composer-actions"><p class="muted">Creates a draft only. Planning and execution still require their own approval.</p><button class="primary" type="submit">Create objective draft</button></div>
                   </form>
@@ -296,16 +298,17 @@
 
         <section id="products-view" class="workspace-view hidden" aria-labelledby="products-title">
           <div class="view-heading">
-            <div><p class="eyebrow">PRODUCT OPERATIONS</p><h2 id="products-title">Product portfolio</h2></div>
+            <div><p class="eyebrow">PRODUCT OPERATIONS</p><h2 id="products-title">Product portfolio</h2><p class="field-help">A product is a named group of related repositories (for example, all the repos that make up one app). Register a product, then attach the repositories that belong to it — nothing here clones or changes any code.</p></div>
             <div class="evidence-actions"><button id="register-product" class="secondary" type="button">Register product</button><button id="add-local-repository" class="secondary" type="button">Add local repository</button><button id="refresh-products" class="secondary" type="button">Refresh portfolio</button></div>
           </div>
+          <small id="add-local-repository-help" class="field-help hidden">Register a product first — every repository must belong to one.</small>
           <form id="product-form" class="panel registry-form hidden">
-            <div class="panel-heading"><div><span class="step">P</span><h2>Register a product</h2></div><span class="muted">A product groups repositories without collapsing them into a monorepo.</span></div>
+            <div class="panel-heading"><div><span class="step">P</span><h2>Register a product</h2></div><span class="muted">A product groups related repositories together — they stay as separate repositories, they're just tracked as one product here.</span></div>
             <div class="settings-grid">
               <label>Product ID<input id="product-id" class="input" required placeholder="civicsuite"></label>
               <label>Name<input id="product-name" class="input" required placeholder="CivicSuite"></label>
               <label>Organization URL<input id="product-organization" class="input" required type="url" placeholder="https://github.com/civicsuite"></label>
-              <label>Description<input id="product-description" class="input" placeholder="Civic technology product suite"></label>
+              <label>Description <small>Optional</small><input id="product-description" class="input" placeholder="Civic technology product suite"></label>
             </div>
             <div class="composer-actions"><p id="product-form-error" class="error" role="alert"></p><button class="primary" type="submit">Save product</button></div>
           </form>
@@ -314,20 +317,23 @@
             <div class="settings-grid">
               <label>Product<select id="repository-product" class="input" required></select></label>
               <label>Local folder<input id="repository-path" class="input" required spellcheck="false" placeholder="C:\\Users\\Scott\\Documents\\GitHub\\CivicSuite"></label>
-              <label>Repository role<select id="repository-role" class="input"><option value="umbrella">Umbrella</option><option value="shared_platform">Shared platform</option><option value="module" selected>Module</option><option value="desktop">Desktop</option><option value="installer">Installer</option><option value="documentation">Documentation</option><option value="release_truth">Release truth</option><option value="other">Other</option></select></label>
+              <label>Repository role<select id="repository-role" class="input"><option value="umbrella">Umbrella</option><option value="shared_platform">Shared platform</option><option value="module" selected>Module</option><option value="desktop">Desktop</option><option value="installer">Installer</option><option value="documentation">Documentation</option><option value="release_truth">Release truth</option><option value="other">Other</option></select><small class="field-help">Umbrella = the top-level repo that ties the others together · Shared platform = shared code other repos depend on · Release truth = the repo whose files declare the official current version.</small></label>
               <label>Expected branch <small>Optional</small><input id="repository-branch" class="input" placeholder="main"></label>
             </div>
             <div class="objective-grid">
               <label>Owners <small>One team or person per line</small><textarea id="repository-owners" rows="3"></textarea></label>
-              <label>Dependencies <small>One registered repository ID per line</small><textarea id="repository-dependencies" rows="3"></textarea></label>
-              <label>Canonical intelligence sources <small>Governance, architecture, status, version, compatibility, or release files; one path per line</small><textarea id="repository-governance" rows="3" placeholder="AGENTS.md&#10;README.md&#10;STATUS.md&#10;pyproject.toml"></textarea></label>
-              <label>Validator commands <small><code>name = command</code>, one per line</small><textarea id="repository-validators" rows="3" placeholder="test = npm test&#10;build = npm run build"></textarea></label>
+              <label>Dependencies <small>One registered repository ID per line</small><textarea id="repository-dependencies" rows="3"></textarea><small class="field-help">Find each repository's ID under its name in the product list below.</small></label>
+              <label>Key documents to track <small>Governance, architecture, status, version, compatibility, or release files — one file path per line</small><textarea id="repository-governance" rows="3" placeholder="AGENTS.md&#10;README.md&#10;STATUS.md&#10;pyproject.toml"></textarea><small class="field-help">These are the files the intelligence scan reads to find facts about this repository (e.g. README.md, STATUS.md).</small></label>
+              <label>Test/build commands <small><code>name = command</code>, one per line, e.g. <code>test = npm test</code></small><textarea id="repository-validators" rows="3" placeholder="test = npm test&#10;build = npm run build"></textarea><small class="field-help">Commands DevHarmonics can run to check that a change actually works, like your test suite or build.</small></label>
             </div>
             <div class="composer-actions"><p id="repository-form-error" class="error" role="alert"></p><button class="primary" type="submit">Inspect &amp; register repository</button></div>
           </form>
           <div id="product-summary" class="metrics"></div>
+          <p class="field-help">Active = not archived. Private = marked private on GitHub.</p>
+          <p class="field-help"><strong>observed</strong> = registered and inspected read-only · <strong>ready</strong> = clean checkout · <strong>dirty</strong> = uncommitted local changes · <strong>N issues</strong> = compatibility problems found during inspection</p>
+          <p class="field-help">An intelligence scan reads each repository's key documents (README, STATUS, version files, etc.) and pulls out factual claims — like which version is current — so it can catch places where two repositories disagree. Findings: <strong>conflicting claim</strong> = two repositories state different facts about the same thing (e.g. different version numbers) · <strong>missing source</strong> = a tracked file doesn't exist · <strong>unreadable source</strong> = a tracked file exists but couldn't be read · <strong>unsafe source</strong> = a tracked file was skipped for safety reasons.</p>
           <div id="product-list" class="product-list"></div>
-          <div id="products-empty" class="panel empty-state product-empty">No products registered yet. An Observe pass can add a product and its repositories without cloning or changing them.</div>
+          <div id="products-empty" class="panel empty-state product-empty">No products registered yet. Register one below, or start a run in <strong>Observe only</strong> mode (read-only, makes no changes) and let the agent team discover and add products and repositories automatically.</div>
         </section>
 
         <section id="setup-view" class="workspace-view hidden" aria-labelledby="setup-title">
@@ -418,34 +424,35 @@
         <section id="workflows-view" class="workspace-view hidden" aria-labelledby="workflows-title">
           <div class="view-heading">
             <div>
-              <p class="eyebrow">Reusable workflows</p>
-              <h2 id="workflows-title">Versioned, reviewable, receipted</h2>
+              <p class="eyebrow">REUSABLE WORKFLOWS</p>
+              <h2 id="workflows-title">Workflows</h2>
+              <p class="field-help">A workflow is a saved, ready-to-run task template. Picking one and filling in a few details creates a new task for the agent team — you still review and approve the plan before anything runs, and the run always uses the exact version of the workflow you started from, even if it's edited later.</p>
             </div>
           </div>
-          <p class="field-help">A workflow is a Git-versioned document. Starting one creates an objective through the normal composer — you still review and approve the plan before anything runs, and the run pins the exact workflow revision it executed.</p>
           <div id="workflow-list" class="connection-grid"></div>
           <article id="workflow-detail" class="connection-card hidden">
             <h3 id="workflow-detail-name"></h3>
             <p id="workflow-detail-description" class="field-help"></p>
             <div id="workflow-detail-inputs"></div>
             <div class="plan-actions">
-              <button id="workflow-instantiate" class="primary small" type="button">Create objective from this workflow</button>
+              <button id="workflow-instantiate" class="primary small" type="button">Create a task from this workflow</button>
             </div>
             <p id="workflow-instantiate-result" class="field-help"></p>
             <p id="workflow-error" role="alert" class="error"></p>
-            <details><summary>Full document (this exact revision)</summary><pre id="workflow-detail-json" class="integration-commit-range" style="white-space:pre-wrap"></pre></details>
+            <details><summary>Full workflow definition (technical, JSON)</summary><p class="field-help">The raw file that defines this workflow's steps and inputs — useful for engineers, not required reading.</p><pre id="workflow-detail-json" class="integration-commit-range" style="white-space:pre-wrap"></pre></details>
           </article>
         </section>
 
         <section id="evidence-view" class="workspace-view hidden" aria-labelledby="evidence-title">
-          <div class="view-heading"><div><p class="eyebrow">READ-ONLY REPORTER</p><h2 id="evidence-title">Run evidence</h2></div><div class="evidence-actions"><button id="refresh-evidence" class="secondary" type="button">Refresh evidence</button><button id="export-evidence" class="primary" type="button">Export JSON</button></div></div>
-          <div id="evidence-empty" class="panel empty-state">Select a run to inspect its immutable execution receipts.</div>
+          <div class="view-heading"><div><p class="eyebrow">READ-ONLY REPORTER</p><h2 id="evidence-title">Run evidence</h2><p class="field-help">Every attempt, review, and tool decision from a run is recorded here permanently and can't be edited afterward — this is the record you'd show someone to prove what actually happened.</p></div><div class="evidence-actions"><button id="refresh-evidence" class="secondary" type="button">Refresh evidence</button><button id="export-evidence" class="primary" type="button" title="Downloads this run's complete evidence file to your computer, exactly as recorded.">Export JSON</button></div></div>
+          <div id="evidence-empty" class="panel empty-state">Select a run on the left to see its permanent record — every attempt, review, and tool decision, exactly as it happened.</div>
           <div id="evidence-content" class="hidden">
             <div id="evidence-metrics" class="metrics"></div>
+            <p class="field-help">Checks = automated tests that ran and whether they passed. Reviews = times an independent AI reviewer assessed the work. Tool decisions = times an agent tried to use a tool (write a file, run a command) and whether it was allowed.</p>
             <section id="evidence-verdict" class="panel evidence-verdict" aria-live="polite"></section>
-            <section class="panel evidence-panel"><div class="panel-heading"><h3>Independent review receipts</h3><span id="evidence-review-count" class="muted"></span></div><div id="evidence-reviews" class="evidence-list"></div></section>
-            <section class="panel evidence-panel"><div class="panel-heading"><h3>Integrity and attempts</h3><code id="evidence-hash"></code></div><div id="evidence-attempts" class="evidence-list"></div></section>
-            <section class="panel evidence-panel"><div class="panel-heading"><h3>Tool policy receipts</h3><span id="evidence-tool-count" class="muted"></span></div><div id="evidence-tools" class="evidence-list"></div></section>
+            <section class="panel evidence-panel"><div class="panel-heading"><h3>Independent review receipts</h3><span id="evidence-review-count" class="muted"></span></div><p class="field-help"><strong>READY</strong> = no blocking problems found, safe to deliver · <strong>NOT READY</strong> = problems found that must be fixed first · <strong>INCONCLUSIVE</strong> = the reviewer couldn't reach a definite verdict, often from missing evidence · <strong>invalidated</strong> = this review's verdict no longer applies because something changed after it ran; kept for the record, but don't rely on it. Each target is a repository (or path within one) the reviewer assessed separately.</p><div id="evidence-reviews" class="evidence-list"></div></section>
+            <section class="panel evidence-panel"><div class="panel-heading"><h3>Integrity and attempts</h3><span class="muted">Evidence fingerprint (sha256):</span> <code id="evidence-hash"></code></div><p class="field-help">A cryptographic fingerprint of everything retained for this run. If even one byte of the record changed after the fact, this value would no longer match — it's how you'd prove the record hasn't been tampered with.</p><div id="evidence-attempts" class="evidence-list"></div></section>
+            <section class="panel evidence-panel"><div class="panel-heading"><h3>Tool policy receipts</h3><span id="evidence-tool-count" class="muted"></span></div><p class="field-help"><strong>allow</strong> = the tool call was permitted and ran · <strong>deny</strong> = the tool call was blocked. "Locks" prevent another agent from touching the same file or resource at the same time.</p><div id="evidence-tools" class="evidence-list"></div></section>
           </div>
         </section>
       </main>

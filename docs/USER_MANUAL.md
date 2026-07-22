@@ -104,11 +104,13 @@ Each provider is shown as `READY` or `SETUP`, with its detected version, authent
 3. Select **Add local repository**, choose the product, and enter the local Git checkout.
 4. Assign its role, expected branch, owners, dependency repository IDs, governance sources, and optional validator commands in `name = command` form.
 5. Click **Inspect & register repository**. DevHarmonics records the current branch, HEAD, origin, dirty state, and compatibility issues without modifying the checkout.
-6. Use **Rescan** after local Git state changes.
+6. Use **Scan** (shown as **Rescan** once the repository has already been inspected) after local Git state changes.
 
 Register CivicSuite repositories independently. Use roles such as **Umbrella**, **Shared platform**, **Module**, **Desktop**, **Installer**, **Documentation**, and **Release truth** so cross-repository planning can preserve their distinct governance and delivery boundaries.
 
-For every attached local repository, configure **Canonical intelligence sources**. These are relative paths to the files DevHarmonics should treat as evidence—such as `AGENTS.md`, `CLAUDE.md`, `ARCHITECTURE.md`, `STATUS.md`, `pyproject.toml`, `package.json`, a compatibility matrix, or release documentation. Then select **Scan intelligence** on the product card.
+Each repository's ID is now displayed in the product list (small text under its name) so it can be copied into another repository's **Dependencies** field — dependencies are entered as one registered repository ID per line.
+
+For every attached local repository, configure **Key documents to track** (the field's internal name is "canonical intelligence sources"). These are relative paths to the files DevHarmonics should treat as evidence—such as `AGENTS.md`, `CLAUDE.md`, `ARCHITECTURE.md`, `STATUS.md`, `pyproject.toml`, `package.json`, a compatibility matrix, or release documentation. Then select **Scan intelligence** on the product card.
 
 The scan is read-only and creates an immutable snapshot. It records each repository's exact HEAD, every source content hash, whether the source is uncommitted, explicit version/release/status/maturity claims, missing or unsafe sources, and subject-aware contradictions with `repository:path:line` citations. Different repositories may legitimately have different package versions; DevHarmonics flags a conflict only when sources disagree about the same named subject. Git tags are never used as maturity evidence. The newest snapshot is supplied to future product-aware planning, while older snapshots remain in the local ledger.
 
@@ -136,10 +138,10 @@ This path does not yet let one task mutate several repositories, reconstruct an 
 
 Use **Workbench** when you want to investigate a project, compare approaches, or ask several qualified models before defining executable work.
 
-1. Open **Workbench** and create a scratchpad with a project folder and title.
+1. Open **Workbench** and start a discussion with a project folder and title.
 2. Enter a question, select one or more active qualified models, and click **Consult selected models**.
 3. Compare the retained answers. Each response shows the provider/model identity and available duration or cost information.
-4. Open **Convert this discussion into an objective draft**, refine the outcome, acceptance criteria, constraints, risk, priority, and run mode, then create the draft.
+4. Open **Turn this into a new task for the agent team**, refine what the team should accomplish, acceptance criteria, constraints, risk, priority, and run mode, then click **Create objective draft**.
 5. Review the objective in **Runs** before building a plan preview.
 
 Workbench is discussion-only. It cannot change the repository, start a run, or treat a model suggestion as approved work. The converted objective retains a durable link back to its source discussion.
@@ -154,8 +156,10 @@ The agent count is not artificially capped. High settings can consume substantia
 
 A **workflow** is a reusable, versioned job description — for example "audit the documentation for stale version claims" — stored as a JSON document in the install's tracked `workflows/` directory and recorded in the ledger by content hash, so every revision is permanent and identifiable. Two ship with DevHarmonics — `documentation-consistency` and `release-truth-audit` — and they are recorded automatically the first time the server starts, so a fresh cockpit already lists them.
 
-1. Open **Workflows** and select a recorded revision. The full document is shown — inputs, acceptance criteria, required evidence, approval points, and permissions — so you can review exactly what will run before anything moves. The evidence, approval-point, and completion-contract fields are advisory in this release: they travel into the objective as policy notes that inform planning, while actual gating still comes from your run policy and review policy in Setup.
-2. Fill in the typed inputs (an empty value does not count for a required input). To scope repositories, select the owning product and tick its repositories — repository scope always belongs to a product, exactly as in the objective composer; leave it on Standalone to run against the server project folder. Then click **Create objective**.
+If the **Workflows** list is ever empty, the two built-in workflows failed to load at server start — check the server's startup logs. Engineers can add custom workflows by recording them with `POST /api/workflows` and a JSON body of `{"document": { …workflow… }}`, or by dropping a document into the install's `workflows/` folder.
+
+1. Open **Workflows** and select one from the list. The full document is shown — inputs, acceptance criteria, required evidence, approval points, and permissions — so you can review exactly what will run before anything moves. The evidence, approval-point, and completion-contract fields are advisory in this release: they travel into the objective as policy notes that inform planning, while actual gating still comes from your run policy and review policy in Setup.
+2. Fill in the typed inputs (an empty value does not count for a required input). To scope repositories, select the owning product and tick its repositories — repository scope always belongs to a product, exactly as in the New run screen; leave it on **No product — use default folder** to run against the server project folder. Then click **Create a task from this workflow**.
 3. The workflow becomes a normal objective in **Runs**: propose a plan, approve the exact revision, and start it like any other run.
 
 The run permanently records which workflow revision it executed. Editing a workflow never changes what a past run did — an edit is a new revision beside the old one — and a revision recorded as a promotion of an earlier pilot is refused if it tries to widen the pilot's permissions (turning on external writes, escalating autonomy, or dropping an approval point). To record a new workflow or revision, POST its document to `/api/workflows`.

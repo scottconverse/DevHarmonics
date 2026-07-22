@@ -68,6 +68,20 @@ function cancelledOperation(detail = "") {
   return { [OPERATION_CANCELLED]: true, detail };
 }
 
+// The end-state decision for an operation action that RESOLVED. A thrown error
+// is a "failed" end state, handled separately in withOperation's catch, so this
+// classifier only ever returns "cancelled" or "succeeded" — never "failed". A
+// returned cancellation sentinel ends the operation as "cancelled" (the owner
+// declined and nothing broke), carrying its own detail; every other resolved
+// value is a plain "succeeded". Pulled out as a PURE seam so the shipped wrapper
+// and its regression test classify identically (MINOR gate finding, 2026-07-22).
+function classifyOperationOutcome(result) {
+  if (result && result[OPERATION_CANCELLED]) {
+    return { status: "cancelled", detail: result.detail || "" };
+  }
+  return { status: "succeeded", detail: "" };
+}
+
 function beginOperation(label) {
   const id = `op-${++operationSequence}`;
   operations.set(id, { id, label, status: "running", startedAt: Date.now(), detail: "" });
@@ -104,11 +118,12 @@ async function withOperation(button, label, action, { onError = showError, busyL
   }
   try {
     const result = await action();
-    if (result && result[OPERATION_CANCELLED]) {
-      endOperation(id, "cancelled", result.detail || "");
+    const outcome = classifyOperationOutcome(result);
+    if (outcome.status === "cancelled") {
+      endOperation(id, outcome.status, outcome.detail);
       return undefined;
     }
-    endOperation(id, "succeeded");
+    endOperation(id, outcome.status);
     return result;
   } catch (error) {
     endOperation(id, "failed", error.message);

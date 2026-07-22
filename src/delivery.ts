@@ -298,8 +298,31 @@ export class DeliveryService {
           const merge = await this.runner({ command: "gh", args: ["pr", "merge", delivery.pullRequestUrl, "--merge"], cwd: delivery.localPath, timeoutMs: 120_000 });
           if (merge.exitCode !== 0) throw new Error(failureMessage(merge, "Pull request merge failed"));
         }
+        // ROUND2-002: capture the immutable merge commit OID now. The tag GATE
+        // judges this commit's declared version, so the cockpit's post-merge tag
+        // prefill must resolve from the SAME OID — not the reviewed head, which
+        // can declare a different version (the base advanced, or merge
+        // resolution changed the manifest) and provoke an avoidable
+        // second-confirmation conflict. Fetch it so the GET enrichment can read
+        // the merged artifact's manifest locally. Enrichment is best-effort: the
+        // merge is already durable, so a missing OID or a failed fetch must
+        // never fail an accomplished merge — it degrades to the head prefill.
+        let mergeCommitOid: string | null = null;
+        const mergeCommitView = await this.runner({ command: "gh", args: ["pr", "view", delivery.pullRequestUrl, "--json", "state,mergeCommit"], cwd: delivery.localPath, timeoutMs: 60_000 });
+        if (mergeCommitView.exitCode === 0 && mergeCommitView.stdout.trim()) {
+          try {
+            const mergeCommitState = JSON.parse(mergeCommitView.stdout) as { state?: string; mergeCommit?: { oid?: string } | null };
+            if (mergeCommitState.state === "MERGED" && mergeCommitState.mergeCommit?.oid) {
+              mergeCommitOid = mergeCommitState.mergeCommit.oid;
+              await this.runner({ command: "git", args: ["fetch", "origin", delivery.baseBranch], cwd: delivery.localPath, timeoutMs: 120_000 });
+            }
+          } catch {
+            // A malformed merge-commit read is best-effort enrichment only; the
+            // merge stands and the tag step re-resolves the OID authoritatively.
+          }
+        }
         const updated = this.ledger.updateDeliveryRepository(input.runId, input.repositoryId, {
-          status: "merged", remoteUrl: remote.webUrl, approvalId: input.approval.id, error: null,
+          status: "merged", remoteUrl: remote.webUrl, approvalId: input.approval.id, error: null, mergeCommitOid,
         });
         this.ledger.addEvent(input.runId, "delivery.merged", `${input.repositoryId}: merged the reviewed pull request under owner approval`, requestRecord);
         return updated;

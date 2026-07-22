@@ -35,8 +35,10 @@ DevHarmonics answers that question structurally rather than by trusting the agen
 - Each task gets its own Git branch and temporary worktree, so parallel work cannot collide.
 - Models choose a validator **by name** from your config. They cannot hand DevHarmonics a shell command to run.
 - The final review is read-only, done by a different model, and — at medium and high risk — by a model that was not the implementor.
-- The integration diff is inspected for signs that the *verification itself* was weakened.
+- Reviewers are decorrelated by **evidence lens**, not just by provider: an artifact-lens reviewer judges the diff and repository without ever seeing the workers' reports, while a claims-lens reviewer judges the reports without ever seeing the code — and a deterministic gate cross-checks the claimed file changes against the integrated diff. A worker that narrates changes it never made fails on the mismatch, mechanically.
+- The integration diff is inspected for signs that the *verification itself* was weakened — deleted or skipped tests, weakened assertions, unconditional success, swallowed errors.
 - A write task that changed no files does not pass.
+- Every invocation's tokens and cost land in the ledger, and each run can show its actual cost beside what the same work would have cost on the priciest qualified model — the saving from routing cheap-where-proven is a number, not a feeling.
 
 ---
 
@@ -372,7 +374,7 @@ What that judgement rests on, in both directions:
 
 | Signal | Reading |
 |---|---|
-| Automated suite | 162 tests across configuration, credential stripping, provider parsing, plan validation, cancellation, SQLite receipts, local-model qualification and chunked review, workspace-isolation guards, the dashboard server, and full fake-provider orchestration through real Git worktrees |
+| Automated suite | 167 tests across configuration, credential stripping, provider parsing, plan validation, cancellation, SQLite receipts, local-model qualification and chunked review, review-lens quorums and the claims/diff divergence gate, workspace-isolation guards, the dashboard server, and full fake-provider orchestration through real Git worktrees |
 | Schema handling | Ordered transactional migrations to ledger schema 28, automatic pre-upgrade backups, integrity + foreign-key validation, rollback on failure, and refusal to open a newer schema |
 | Continuous integration | **None in this repository.** The merge gate is the local suite plus independent review — nothing automated catches a regression on push |
 | Distribution | Source checkout only. No installer, no published package |

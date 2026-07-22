@@ -16,6 +16,7 @@ import {
   type RunStatus,
 } from "./domain.js";
 import { redactText, redactValue } from "./redaction.js";
+import { workflowRevisionHash, type WorkflowDocument } from "./workflows.js";
 import {
   objectiveInputSchema,
   planRevisionInputSchema,
@@ -79,6 +80,7 @@ interface RunRow {
   autonomy: string;
   objective_id: string | null;
   approved_plan_revision: number | null;
+  workflow_revision_hash: string | null;
   plan_json: string | null;
 }
 
@@ -170,7 +172,7 @@ interface CheckRow {
   duration_ms: number;
 }
 
-export const LEDGER_SCHEMA_VERSION = 29;
+export const LEDGER_SCHEMA_VERSION = 30;
 
 export const REPOSITORY_ROLES = [
   "umbrella",
@@ -1249,6 +1251,25 @@ const MIGRATIONS: readonly LedgerMigration[] = [
       if (!columns.has("lens")) database.exec("ALTER TABLE review_receipts ADD COLUMN lens TEXT CHECK(lens IN ('artifact', 'claims') OR lens IS NULL);");
     },
   },
+  {
+    version: 30,
+    name: "workflow-revisions",
+    apply(database) {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS workflow_revisions (
+          revision_hash TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          document_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS workflow_revisions_name ON workflow_revisions(name, created_at);
+      `);
+      const runColumns = new Set(
+        (database.prepare("SELECT name FROM pragma_table_info('runs')").all() as unknown as Array<{ name: string }>).map((column) => column.name),
+      );
+      if (!runColumns.has("workflow_revision_hash")) database.exec("ALTER TABLE runs ADD COLUMN workflow_revision_hash TEXT;");
+    },
+  },
 ];
 
 function summarizeGoal(goal: string, maxLength = 180): string {
@@ -1258,7 +1279,8 @@ function summarizeGoal(goal: string, maxLength = 180): string {
 }
 
 const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
-  runs: ["id", "goal", "project_path", "status", "plan_json", "final_review", "resumed_from", "autonomy", "objective_id", "approved_plan_revision", "created_at", "updated_at"],
+  runs: ["id", "goal", "project_path", "status", "plan_json", "final_review", "resumed_from", "autonomy", "objective_id", "approved_plan_revision", "workflow_revision_hash", "created_at", "updated_at"],
+  workflow_revisions: ["revision_hash", "name", "document_json", "created_at"],
   tasks: [
     "run_id",
     "task_id",
@@ -2443,6 +2465,7 @@ export class Ledger {
       resumedFrom: run.resumed_from,
       objectiveId: run.objective_id,
       approvedPlanRevision: run.approved_plan_revision,
+      workflowRevisionHash: run.workflow_revision_hash ?? null,
       plan: run.plan_json ? JSON.parse(run.plan_json) as RunPlan : null,
       integrationSet: this.getIntegrationSet(runId),
       delivery: this.getDeliveryHandoff(runId),
@@ -3533,6 +3556,45 @@ export class Ledger {
       outputTokens: row.output_tokens === null ? null : Number(row.output_tokens),
       costUsd: row.cost_usd === null ? null : Number(row.cost_usd),
     }));
+  }
+
+  /**
+   * DH-810: idempotent by content hash. Re-recording identical content returns
+   * the original record untouched; changed content is a NEW revision beside the
+   * old one. Nothing here can rewrite what a historical run executed.
+   */
+  recordWorkflowRevision(input: { workflow: WorkflowDocument }): { revisionHash: string; createdAt: string } {
+    const revisionHash = workflowRevisionHash(input.workflow);
+    const existing = this.database.prepare("SELECT created_at FROM workflow_revisions WHERE revision_hash = ?").get(revisionHash) as { created_at: string } | undefined;
+    if (existing) return { revisionHash, createdAt: String(existing.created_at) };
+    const createdAt = new Date().toISOString();
+    this.database.prepare(
+      "INSERT INTO workflow_revisions (revision_hash, name, document_json, created_at) VALUES (?, ?, ?, ?)",
+    ).run(revisionHash, input.workflow.name, JSON.stringify(input.workflow), createdAt);
+    return { revisionHash, createdAt };
+  }
+
+  listWorkflowRevisions(): Array<{ revisionHash: string; name: string; createdAt: string }> {
+    const rows = this.database.prepare("SELECT revision_hash, name, created_at FROM workflow_revisions ORDER BY created_at, revision_hash").all() as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => ({ revisionHash: String(row.revision_hash), name: String(row.name), createdAt: String(row.created_at) }));
+  }
+
+  getWorkflowRevision(revisionHash: string): { revisionHash: string; name: string; workflow: WorkflowDocument; createdAt: string } | null {
+    const row = this.database.prepare("SELECT * FROM workflow_revisions WHERE revision_hash = ?").get(revisionHash) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return {
+      revisionHash: String(row.revision_hash),
+      name: String(row.name),
+      workflow: JSON.parse(String(row.document_json)) as WorkflowDocument,
+      createdAt: String(row.created_at),
+    };
+  }
+
+  /** A run may only pin a revision the ledger actually stores — fail closed on anything else. */
+  linkRunWorkflowRevision(runId: string, revisionHash: string): void {
+    if (!this.getWorkflowRevision(revisionHash)) throw new Error(`Unknown workflow revision '${revisionHash}'`);
+    const result = this.database.prepare("UPDATE runs SET workflow_revision_hash = ? WHERE id = ?").run(revisionHash, runId);
+    if (result.changes === 0) throw new Error(`Run '${runId}' was not found`);
   }
 
   listReviewReceipts(runId: string): ReviewReceiptRecord[] {

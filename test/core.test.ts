@@ -2625,6 +2625,57 @@ test("workflow documents parse with typed inputs and content-hash revision ident
   assert.equal(widened.ok, false, "ungated external writes are refused at parse time");
 });
 
+test("workflow revisions persist immutably and runs pin the exact revision executed", async () => {
+  // DH-810 S2: recording is idempotent by content hash, a stored revision
+  // never changes, and a run records which revision it executed — so editing
+  // a workflow can never rewrite what a historical run did.
+  const workflows = await import("../src/workflows.js") as Record<string, any>;
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-workflow-ledger-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db")) as Ledger & Record<string, any>;
+  try {
+    assert.equal(typeof ledger.recordWorkflowRevision, "function", "DH-810 requires workflow revision persistence");
+    const document = {
+      name: "release-truth-audit",
+      description: "Verify every release-page claim against the tagged artifact.",
+      inputs: [{ name: "tag", type: "string", required: true, description: "Release tag to audit" }],
+      objective: { outcomeTemplate: "Release ${tag} claims match its artifacts.", acceptanceCriteria: ["Every checksum on the release page matches"], risk: "high" },
+      evidenceRequirements: ["checksum transcript"],
+      approvalPoints: ["plan"],
+      completionContract: { deliverable: "audit report", reviewLenses: ["artifact", "claims"] },
+      permissions: { autonomy: "supervised", allowExternalWrites: false },
+    };
+    const parsed = workflows.parseWorkflowDocument(JSON.stringify(document));
+    assert.equal(parsed.ok, true);
+    const hash = workflows.workflowRevisionHash(parsed.workflow);
+
+    const first = ledger.recordWorkflowRevision({ workflow: parsed.workflow });
+    assert.equal(first.revisionHash, hash);
+    const second = ledger.recordWorkflowRevision({ workflow: parsed.workflow });
+    assert.equal(second.revisionHash, hash, "same content is the same revision, not a duplicate");
+    assert.equal(ledger.listWorkflowRevisions().length, 1);
+
+    const stored = ledger.getWorkflowRevision(hash)!;
+    assert.equal(stored.workflow.name, "release-truth-audit");
+    assert.equal(stored.createdAt, first.createdAt, "re-recording does not touch the original record");
+
+    // An edited workflow is a NEW revision beside the old one, never a rewrite.
+    const editedParse = workflows.parseWorkflowDocument(JSON.stringify({ ...document, description: "tightened" }));
+    const edited = ledger.recordWorkflowRevision({ workflow: editedParse.workflow });
+    assert.notEqual(edited.revisionHash, hash);
+    assert.equal(ledger.listWorkflowRevisions().length, 2);
+    assert.equal(ledger.getWorkflowRevision(hash)!.workflow.description, document.description, "the historical revision is untouched");
+
+    // Runs pin the revision they executed.
+    const runId = ledger.createRun("workflow-driven run", root);
+    ledger.linkRunWorkflowRevision(runId, hash);
+    assert.equal(ledger.getRun(runId)?.workflowRevisionHash, hash);
+    assert.throws(() => ledger.linkRunWorkflowRevision(runId, "0".repeat(64)), /unknown workflow revision/i, "a run cannot pin a revision the ledger never stored");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("verification-integrity gate fails closed on test weakening and reports bounded evidence", async () => {
   const integrityPath = "../src/verification-integrity.js";
   const integrityModule = await import(integrityPath).catch(() => ({})) as Record<string, any>;
@@ -3144,6 +3195,7 @@ test("ledger upgrades a v0.1 database transactionally and preserves a pre-migrat
           { version: 27, name: "approved-delivery-handoffs" },
           { version: 28, name: "live-run-steering" },
           { version: 29, name: "review-receipt-lens" },
+          { version: 30, name: "workflow-revisions" },
         ],
       );
     } finally {
@@ -4594,7 +4646,7 @@ test("steering directives persist with actor, target, disposition, and supersede
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-steering-ledger-"));
   const ledger = new Ledger(path.join(root, "devharmonics.db"));
   try {
-    assert.equal(LEDGER_SCHEMA_VERSION, 29, "review-receipt lens advances the ledger schema");
+    assert.equal(LEDGER_SCHEMA_VERSION, 30, "workflow revisions advance the ledger schema");
     const runId = ledger.createRun("Steer me", root);
     ledger.savePlan(runId, {
       summary: "One task",

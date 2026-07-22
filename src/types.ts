@@ -325,6 +325,8 @@ export interface RunSummary {
   resumedFrom: string | null;
   objectiveId: string | null;
   approvedPlanRevision: number | null;
+  /** The exact workflow revision this run executed (DH-810); null for runs not started from a workflow. */
+  workflowRevisionHash: string | null;
   plan: RunPlan | null;
   integrationSet: IntegrationSetRecord | null;
   delivery: DeliveryHandoffRecord | null;

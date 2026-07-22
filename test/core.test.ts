@@ -4029,6 +4029,7 @@ test("ledger upgrades a v0.1 database transactionally and preserves a pre-migrat
           { version: 31, name: "delivery-release-tag" },
           { version: 32, name: "workflow-revisions" },
           { version: 33, name: "objective-workflow-provenance" },
+          { version: 34, name: "delivery-merge-commit-oid" },
         ],
       );
     } finally {
@@ -5496,7 +5497,7 @@ test("steering directives persist with actor, target, disposition, and supersede
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-steering-ledger-"));
   const ledger = new Ledger(path.join(root, "devharmonics.db"));
   try {
-    assert.equal(LEDGER_SCHEMA_VERSION, 33, "objective workflow provenance advances the ledger schema");
+    assert.equal(LEDGER_SCHEMA_VERSION, 34, "the delivery merge-commit-oid column advances the ledger schema");
     const runId = ledger.createRun("Steer me", root);
     ledger.savePlan(runId, {
       summary: "One task",

@@ -267,6 +267,13 @@ export interface DeliveryRepositoryRecord {
   approvalId: string | null;
   /** The release tag actually pushed for this repository, once tagged. */
   releaseTag: string | null;
+  /**
+   * The immutable merge commit OID recorded when merge_pr completes — the exact
+   * commit the tag gate judges. The cockpit's post-merge tag prefill resolves
+   * the declared version from this OID, not the reviewed head, so it can never
+   * propose a version the gate will reject. Null before a merge commit exists.
+   */
+  mergeCommitOid: string | null;
   error: string | null;
   createdAt: string;
   updatedAt: string;

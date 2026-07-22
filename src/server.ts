@@ -993,13 +993,21 @@ async function route(
     }
     // The cockpit's tag field must show the REAL proposed tag, not decorative
     // placeholder text (owner finding, 2026-07-22): enrich each repository with
-    // the version its own files declare. Resolve it from the retained reviewed
-    // headCommit via the same immutable-commit lookup the tag gate uses, never
-    // from the mutable checkout (CRITICAL gate finding, 2026-07-22).
-    const repositories = await Promise.all((run.delivery?.repositories ?? []).map(async (repository) => ({
-      ...repository,
-      declaredVersion: await context.delivery.declaredVersionAtCommit(repository.localPath, repository.headCommit),
-    })));
+    // the version its own files declare, via the same immutable-commit lookup
+    // the tag gate uses, never from the mutable checkout (CRITICAL gate finding,
+    // 2026-07-22). Once merged, resolve from the persisted MERGE commit OID —
+    // the exact artifact the tag gate judges — so the prefill can never propose
+    // a version the gate will reject (ROUND2-002). Before a merge commit exists,
+    // the reviewed head is the only truth available.
+    const repositories = await Promise.all((run.delivery?.repositories ?? []).map(async (repository) => {
+      const versionCommit = ["merged", "tagged"].includes(repository.status) && repository.mergeCommitOid
+        ? repository.mergeCommitOid
+        : repository.headCommit;
+      return {
+        ...repository,
+        declaredVersion: await context.delivery.declaredVersionAtCommit(repository.localPath, versionCommit),
+      };
+    }));
     sendJson(response, 200, { delivery: run.delivery ? { ...run.delivery, repositories } : null });
     return;
   }

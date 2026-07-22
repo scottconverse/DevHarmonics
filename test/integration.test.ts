@@ -975,6 +975,96 @@ test("the delivery HTTP route serializes per repository, types its refusals, and
   }
 });
 
+test("the tag prefill follows the MERGE commit's declared version once merged, not the reviewed head", async () => {
+  // ROUND2-002: the tag GATE judges the merge commit, but the GET prefill used
+  // to read the reviewed head. When the merge commit declares a DIFFERENT
+  // version than the head (the base advanced, or merge resolution changed the
+  // manifest), the cockpit prefilled a version the gate would reject. Here the
+  // reviewed head declares 1.0.0 and the merge commit declares 2.0.0: the
+  // prefill must read 1.0.0 before merge and 2.0.0 after, matching the gate.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-divergent-prefill-"));
+  const project = await createRepository(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.runPolicy.allowExternalWrites = true;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+  const headOid = "b".repeat(40);
+  const mergeOid = "c".repeat(40);
+  const seedLedger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  const runId = seedLedger.createRun("Deliver with a divergent merge commit", project);
+  seedLedger.setRunStatus(runId, "running");
+  seedLedger.setRunStatus(runId, "ready", "READY");
+  seedLedger.prepareDeliveryRepository({ runId, repositoryId: "repo:div", localPath: project, baseBranch: "main", baseCommit: "a".repeat(40), headCommit: headOid, branch: "devharmonics/div1" });
+  seedLedger.close();
+
+  let prState = "OPEN";
+  const runner = async (request: { command: string; args: string[] }) => {
+    const joined = request.args.join(" ");
+    if (request.command === "git" && joined === "remote get-url origin") {
+      return { stdout: "https://github.com/civicsuite/div.git\n", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    // The reviewed head commit declares 1.0.0; the merge commit declares 2.0.0.
+    // The enrichment must resolve from whichever commit it asks `git show` about.
+    if (request.command === "git" && request.args[0] === "show" && joined.endsWith(":package.json")) {
+      const version = joined.includes(mergeOid) ? "2.0.0" : "1.0.0";
+      return { stdout: JSON.stringify({ name: "fixture", version }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "create") {
+      return { stdout: "https://github.com/civicsuite/div/pull/12\n", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "view" && joined.includes("state,isDraft,mergeable")) {
+      return { stdout: JSON.stringify({ state: prState, isDraft: true, mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", headRefOid: headOid, statusCheckRollup: [] }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "view" && joined.includes("mergeCommit")) {
+      return { stdout: JSON.stringify({ state: "MERGED", mergeCommit: { oid: mergeOid } }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "merge") prState = "MERGED";
+    if (request.command === "git" && request.args[0] === "rev-parse" && joined.includes("refs/tags/")) {
+      return { stdout: "", stderr: "", exitCode: 1, durationMs: 1, timedOut: false };
+    }
+    return { stdout: "", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+  };
+
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false, deliveryRunner: runner as never });
+  try {
+    const deliver = (body: Record<string, unknown>) => fetch(`${dashboard.url}/api/runs/${runId}/delivery`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repositoryId: "repo:div", expectedHeadCommit: headOid, ...body }),
+    });
+    const prefill = async () => {
+      const payload = await fetch(`${dashboard.url}/api/runs/${runId}/delivery`).then((response) => response.json()) as {
+        delivery: { repositories: Array<{ repositoryId: string; declaredVersion: string | null; mergeCommitOid: string | null }> };
+      };
+      return payload.delivery.repositories.find((repository) => repository.repositoryId === "repo:div")!;
+    };
+
+    // Before a merge commit exists, the reviewed head is the only truth: 1.0.0.
+    assert.equal((await deliver({ action: "push_branch" })).status, 200);
+    assert.equal((await deliver({ action: "create_draft_pr" })).status, 200);
+    const beforeMerge = await prefill();
+    assert.equal(beforeMerge.mergeCommitOid, null, "no merge commit is recorded before the merge");
+    assert.equal(beforeMerge.declaredVersion, "1.0.0", "before merge the prefill reads the reviewed head");
+
+    // After merge, the prefill must follow the MERGE commit (2.0.0) — the exact
+    // artifact the tag gate will judge — never the head's stale 1.0.0.
+    const merged = await deliver({ action: "merge_pr" });
+    assert.equal(merged.status, 200, JSON.stringify(await merged.clone().json()));
+    const afterMerge = await prefill();
+    assert.equal(afterMerge.mergeCommitOid, mergeOid, "the merge commit OID is persisted when the merge completes");
+    assert.equal(afterMerge.declaredVersion, "2.0.0", "after merge the prefill follows the merge commit, not the head");
+
+    // The gate now agrees with the prefill: the head's stale 1.0.0 is refused,
+    // and the merge-commit's 2.0.0 tags cleanly with no mismatch confirmation.
+    assert.equal((await deliver({ action: "tag_release", tag: "v1.0.0" })).status, 409, "the stale head version is refused by the gate");
+    assert.equal((await deliver({ action: "tag_release", tag: "v2.0.0" })).status, 200, "the merge-commit version tags cleanly");
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("run provenance pins before execution and survives pause and resume", async () => {
   // Audit DH810-AUD-001/002 at the orchestrator: an unknown pin refuses
   // BEFORE any run row exists, a valid pin is recorded at run creation, and a

@@ -192,7 +192,50 @@ The **Steer this run** panel lets you redirect live work without opening an agen
 
 Steering guides work inside the plan you approved. It cannot change a task's permissions, risk, acceptance criteria, or repository scope, and it cannot enable external writes or paid API use — those remain plan and policy decisions. Every steering request is recorded with who made it, what it targeted, and whether it was applied, rejected, or superseded by a later request, so a run's history explains every redirection after the fact.
 
-## 7. Cancel a run
+## 7. See everything waiting on you: Inbox and Program status
+
+**Inbox** is the first item in the navigation. It lists every decision waiting on you across every run, so you don't have to open each run to find out whether it needs you:
+
+- **Plan approval** — a run's proposed plan is ready and needs **Approve & continue**.
+- **Delivery approval** — a run has a delivery step (push, draft pull request, or merge) ready to go, or a delivery step that failed and needs your attention.
+- **Paused run** — a run is paused and needs you to resume it as a new recovery run, or cancel it.
+
+Clicking an item's button opens that exact run at the exact control you would use inside it. **The Inbox is not a second approval gate** — it is a different way to reach the same one; acting from inside the run itself is identical. The list is recomputed from live ledger state on every refresh and sorted oldest-waiting-first, so a decision you already resolved from inside a run drops out of the Inbox on its own.
+
+Two decisions the design considered are deliberately not shown, because the ledger has no "still pending" record of them to project:
+
+- **OpenRouter paid-spend confirmations.** A spend decision against your per-run/monthly limits is resolved synchronously, inside the same call that needs it — by the time any record of it exists, it has already been allowed or refused. There is nothing left open to list.
+- **A separate "blocked" run state.** DevHarmonics has no run-level "blocked" status. A blocked task — one whose dependency failed — resolves on its own into a finished run status (ready, not ready, or failed) without needing your direction. Only a genuinely **paused** run, which does need you, appears in the Inbox.
+
+### Program status: how the whole program is doing
+
+Below the Inbox list, the **Program status** panel shows every run the ledger currently knows about, grouped by its registered product — or by its repository folder path when it isn't linked to one — and sorted into exactly one of five buckets, computed fresh from ledger facts on every refresh:
+
+- **Waiting on you** — this run has an Inbox item; see it in the list above.
+- **Retrying** — a task failed a check and is being automatically retried.
+- **Stalled** — running or planning, but nothing has happened on it for more than 5 minutes; worth a look.
+- **Moving** — running or planning with recent activity.
+- **Finished** — ready, not ready, failed, or cancelled; nothing further happens on its own.
+
+A run that needs a decision is always shown as **Waiting on you**, even if it also happens to be quiet — "Stalled" is reserved for runs where there is genuinely nothing to do but wait. Clicking a run opens it directly.
+
+### Check delivery against GitHub
+
+From a delivery item in the Inbox, or from a run's **Approved delivery** panel, **Check against GitHub** reads what was actually pushed — the branch, the pull request, its status checks, and any release tag — directly from GitHub, and compares it with what the ledger recorded at delivery time. It changes nothing; it only reads and reports. Every finding is one of three honest states:
+
+- **Matches** — confirmed on GitHub, and it agrees with the ledger.
+- **Diverged** — confirmed on GitHub, and it disagrees: new commits landed on the branch, the pull request closed without merging, a status check now fails, or the branch or tag is gone.
+- **Could not check** — GitHub couldn't be reached, the check timed out, or the underlying command failed. This is never shown or treated as confirmation of anything; it means nothing was learned either way, not that something is fine.
+
+A branch that no longer exists is only reported as a divergence when the check can also confirm its pull request did not merge first. If the pull request merged at the reviewed commit, a deleted branch is reported as routine cleanup, not a problem — GitHub deletes merged branches automatically unless you turn that off. If whether it merged can't be determined either, the missing branch is honestly reported as could-not-check rather than guessed in either direction.
+
+### Export status page
+
+**Export status page**, next to Refresh inbox, downloads a single self-contained HTML file you can open in any browser, send to someone else, or check again later — even with DevHarmonics stopped. The file contains only identifiers DevHarmonics already recorded when it delivered: repository names and URLs, branch names, the reviewed commit, pull request numbers, and release tag names. It never contains anything written by an agent — no run summary, no review verdict, no error text.
+
+Opening the file makes it fetch each repository's current branch, pull request, checks, and tag state live from `api.github.com`, from your own browser, and classify each the same three ways described above (matches / diverged / could not check). These calls are unauthenticated, so GitHub allows only 60 per hour per network address; opening the file several times in a short window, or checking many deliveries at once, can exhaust that limit and turn every check into could-not-check until the hour resets — that outcome means try again later, not that anything is wrong. It also only works for public repositories: a private one will come back could-not-check, since there is no signed-in session to authorize the request.
+
+## 8. Cancel a run
 
 Select an active run and click **Cancel run**, then confirm the dialog. DevHarmonics stops scheduling new tasks, aborts active provider processes, and marks live tasks and the run as cancelled. Already-created branches, worktrees, commits, and ledger receipts remain available for inspection.
 
@@ -200,7 +243,7 @@ Closing the DevHarmonics server terminal also stops the local server. Prefer **C
 
 Refreshing or reconnecting the browser preserves ledger evidence, but DH-720 does not yet reconstruct and resume an interrupted multi-repository integration set after a server or machine restart or clean retained worktrees automatically. Cancel active work before a planned restart and inspect the retained branches/worktrees afterward.
 
-## 8. Review the result
+## 9. Review the result
 
 Passing task commits are merged into a run-specific integration branch. A standalone or single-repository run uses:
 
@@ -224,6 +267,8 @@ A **Do everything at once** control (labeled "push, open PR, merge — and tag i
 
 A multi-repository run creates a separate integration branch and worktree for every affected repository. Use the **Repositories being changed together** card or exported evidence to copy the precise branch name and base-to-HEAD commit range for each repository. The earlier v0.5.1 release does not push those branches or open pull requests; v0.6 performs the separately approved delivery flow above. No version merges them into a primary checkout automatically.
 
+Once something has been delivered, the same card offers **Check against GitHub** to confirm what actually landed on the remote, and the Inbox offers **Export status page** to check it later from a standalone file — see [§7](#7-see-everything-waiting-on-you-inbox-and-program-status).
+
 Useful commands:
 
 ```powershell
@@ -232,7 +277,7 @@ git log --oneline --decorate --graph --all
 git diff main...devharmonics/<run-prefix>
 ```
 
-## 9. Project files and configuration
+## 10. Project files and configuration
 
 DevHarmonics creates the following inside each target project:
 
@@ -292,7 +337,7 @@ Open a task and review **Why this model** to see the exact selected model, class
 
 DevHarmonics sends one exact `model` identifier and disables OpenRouter provider fallback. If spending or key limits cannot be verified, paid routing stops. Actual provider, resolved model, tokens, cost, and fallback reason are retained in the run ledger.
 
-## 10. Command reference
+## 11. Command reference
 
 ```text
 devharmonics serve [--project PATH] [--port 4317] [--open false]
@@ -324,7 +369,7 @@ While the dashboard is running, `GET /api/connections` and `GET /api/models` exp
 }
 ```
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 ### A provider says Sign-in required
 
@@ -392,7 +437,7 @@ Without it, a Docker-dependent test typically *skips* rather than fails — whic
 
 The token expands to the repository's primary root on whatever machine the run happens to be on. An absolute path breaks on every other machine; a bare `python` runs whatever interpreter is first on PATH, which is usually not the repository's own environment.
 
-## 12. Security and privacy
+## 13. Security and privacy
 
 - The dashboard listens only on the local loopback interface.
 - Authentication remains inside official provider tools.
@@ -405,7 +450,7 @@ The token expands to the repository's primary root on whatever machine the run h
 
 Report security issues using the private process in [SECURITY.md](https://github.com/scottconverse/DevHarmonics/blob/main/SECURITY.md), not a public issue or Discussion.
 
-## 13. Uninstall
+## 14. Uninstall
 
 If globally linked, remove the link:
 

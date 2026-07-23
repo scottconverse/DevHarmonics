@@ -50,6 +50,20 @@ function escapeHtml(value = "") {
     .replaceAll("'", "&#039;");
 }
 
+// M1 security fix (2026-07-22): review findings are reviewer-authored free text
+// (severity/location/rationale/disposition) that was concatenated straight into
+// innerHTML — a hostile or careless finding string could smuggle markup or script
+// into the cockpit. Escape every finding-sourced field. Extracted as a pure
+// function so the hostile-markup case is regression-tested directly against the
+// exact code path refreshEvidence() renders.
+function renderFindingHtml(finding) {
+  const severity = escapeHtml(String(finding.severity || "").toUpperCase());
+  const location = escapeHtml(finding.location || "no location");
+  const rationale = escapeHtml(finding.rationale || "");
+  const disposition = escapeHtml(finding.disposition || "");
+  return `${severity} ${location}: ${rationale} — Status: ${disposition}`;
+}
+
 // DH-632 visible operation feedback: one shared acknowledgement/lifecycle layer for
 // every DevHarmonics-owned asynchronous action. Local UI operations register here;
 // run tasks are projected into the same activity strip from durable ledger events,
@@ -183,7 +197,7 @@ function quietMarkup(lastActivityAt) {
   // The ticking duration stays permanently aria-hidden so the polite live region
   // never announces a clock; the warning note is separate, static text that is
   // announced once when it appears.
-  return `<span class="op-quiet ${warn ? "warn" : ""}" data-quiet-since="${lastActivityAt}"><span class="op-quiet-time" aria-hidden="true">quiet for ${operationElapsed(lastActivityAt)}</span>${warn ? '<span class="op-quiet-note"> — the provider call may still be running</span>' : ""}</span>`;
+  return `<span class="op-quiet ${warn ? "warn" : ""}" data-quiet-since="${lastActivityAt}" title="DevHarmonics doesn't get progress updates while an AI provider is generating a reply — &quot;quiet&quot; just means we're still waiting on them, not that anything has stalled. This note appears after 5 minutes of silence."><span class="op-quiet-time" aria-hidden="true">quiet for ${operationElapsed(lastActivityAt)}</span>${warn ? '<span class="op-quiet-note"> — the provider call may still be running</span>' : ""}</span>`;
 }
 
 let activityStripSignature = "";
@@ -213,7 +227,10 @@ function renderActivityStrip() {
   if (signature === activityStripSignature) return;
   activityStripSignature = signature;
   strip.classList.toggle("hidden", !items.length);
-  strip.innerHTML = items.join("");
+  // Gap fixed (Slice A): the floating strip had no heading of its own — a
+  // reader seeing it appear had no visible cue what it was without the
+  // screen-reader-only aria-label.
+  strip.innerHTML = items.length ? `<p class="strip-label">Working now</p>${items.join("")}` : "";
 }
 
 setInterval(() => {
@@ -234,8 +251,24 @@ setInterval(() => {
 }, 1_000);
 
 function providerDisplayName(provider) {
-  return provider === "gemini" ? "Google Antigravity" : provider || "Unassigned";
+  // Slice A: readers who signed in under the name "Gemini" (Google's own name
+  // for it) would not recognize "Google Antigravity" as the same product —
+  // the familiar name stays visible alongside the current product name.
+  return provider === "gemini" ? "Google Antigravity (Gemini)" : provider || "Unassigned";
 }
+
+// Slice A pattern #1: every view gets exactly one title and one purpose
+// sentence, rendered from this single source instead of a page-title ternary
+// that used to carry different, inconsistent copy per branch.
+const VIEW_DESCRIPTIONS = {
+  runs: { title: "Runs", purpose: "Define an objective, approve the team's plan, and watch the work happen." },
+  workbench: { title: "Workbench", purpose: "Ask one or more models questions about a project — read-only, nothing runs, nothing changes. Turn a good discussion into an objective when you're ready." },
+  products: { title: "Products", purpose: "Register the real products and repositories the team works on, and see what DevHarmonics has verified about them." },
+  workflows: { title: "Workflows", purpose: "Reusable, versioned job descriptions. Pick one, fill in its inputs, and it becomes a normal run." },
+  setup: { title: "Setup", purpose: "The rules every run follows: who plans, who builds, who reviews, and what the team may do without asking you." },
+  models: { title: "Models", purpose: "Every model DevHarmonics can use, what each has proven it can do, and why work gets routed where it does." },
+  evidence: { title: "Evidence", purpose: "The permanent record of a run: what was done, what was checked, who reviewed it, and whether it all still holds together." },
+};
 
 function connectionDisplayName(connectionId, provider) {
   return state.connections.find((connection) => connection.id === connectionId)?.displayName || providerDisplayName(provider);
@@ -249,19 +282,29 @@ function taskRouting(run, taskId) {
   return [...(run?.events || [])].reverse().find((event) => event.kind === "task.started" && event.data?.taskId === taskId && event.data?.routing)?.data?.routing || null;
 }
 
+// Slice A pattern #4: one canonical phrase for unverified model identity,
+// used everywhere DevHarmonics shows a model it asked for but hasn't had
+// confirmed back — "the provider did not report which exact model ran;
+// DevHarmonics shows what was requested and never claims more."
 function routingIdentity(routing, fallbackProvider) {
   if (!routing) return providerDisplayName(fallbackProvider);
   const connection = connectionDisplayName(routing.connectionId, routing.provider || fallbackProvider);
   const requestedModelId = routing.model?.requestedModelId;
-  return requestedModelId ? `${connection} / ${modelDisplayName(requestedModelId)} (requested)` : `${connection} / provider default (actual model unverified)`;
+  return requestedModelId ? `${connection} / ${modelDisplayName(requestedModelId)} — requested model (identity unverified)` : `${connection} / provider default — requested model (identity unverified)`;
 }
 
 function recordedModelIdentity(provider, modelId, resolution, connectionId) {
   const connection = connectionDisplayName(connectionId, provider);
   const model = modelDisplayName(modelId);
-  if (resolution === "requested_unverified") return `${connection} / ${model} requested (actual model unverified)`;
-  if (resolution === "provider_default_unresolved") return `${connection} / provider default (actual model unverified)`;
+  if (resolution === "requested_unverified") return `${connection} / ${model} — requested model (identity unverified)`;
+  if (resolution === "provider_default_unresolved") return `${connection} / provider default — requested model (identity unverified)`;
   return `${connection} / ${model}`;
+}
+
+// Slice A: "can edit files" / "read-only" is used at every place a task
+// shows its write permission — plan preview, board card, and task drawer.
+function permissionLabel(permission) {
+  return permission === "workspace_write" ? "can edit files" : permission === "read_only" ? "read-only" : String(permission || "").replaceAll("_", " ");
 }
 
 function eventDisplayMessage(event) {
@@ -277,6 +320,7 @@ function eventDisplayMessage(event) {
 }
 
 async function initialize() {
+  showView(state.view);
   $("#models-view").insertBefore($("#openrouter-panel"), $("#model-filter-bar"));
   state.bootstrap = await api("/api/bootstrap");
   $("#project-path").value = state.bootstrap.defaultProject;
@@ -322,27 +366,29 @@ async function refreshProducts() {
   })));
   const repositories = state.products.flatMap((product) => product.repositories);
   $("#repository-product").innerHTML = state.products.map((product) => `<option value="${escapeHtml(product.id)}">${escapeHtml(product.name)}</option>`).join("");
-  $("#add-local-repository").disabled = state.products.length === 0;
+  const noProducts = state.products.length === 0;
+  $("#add-local-repository").disabled = noProducts;
+  $("#add-local-repository-help").classList.toggle("hidden", !noProducts);
   $("#product-summary").innerHTML = `<div class="metric"><span>Products</span><strong>${state.products.length}</strong></div><div class="metric"><span>Repositories</span><strong>${repositories.length}</strong></div><div class="metric"><span>Active repositories</span><strong>${repositories.filter((repository) => !repository.archived).length}</strong></div><div class="metric"><span>Private repositories</span><strong>${repositories.filter((repository) => repository.visibility === "private").length}</strong></div>`;
   $("#products-empty").classList.toggle("hidden", state.products.length > 0);
   $("#product-list").innerHTML = state.products.map((product) => {
     const intelligence = state.productIntelligence[product.id];
     const localSources = product.repositories.reduce((sum, repository) => sum + (repository.localPath ? repository.governanceSources.length : 0), 0);
     const conflicts = intelligence?.findings.filter((finding) => finding.kind === "conflicting_claim").length || 0;
-    const missing = intelligence?.findings.filter((finding) => finding.kind === "missing_source" || finding.kind === "unreadable_source" || finding.kind === "unsafe_source").length || 0;
     const intelligenceMarkup = intelligence ? `<details class="product-intelligence" ${conflicts ? "open" : ""}>
-      <summary><strong>Intelligence ${escapeHtml(intelligence.status)}</strong><span>${intelligence.sources.filter((source) => source.status === "read").length} sources · ${intelligence.claims.length} claims · ${conflicts} conflicts · ${missing} unavailable</span></summary>
-      <p>Immutable snapshot <code>${escapeHtml(intelligence.id)}</code> · ${escapeHtml(new Date(intelligence.createdAt).toLocaleString())}</p>
+      <summary><strong>Intelligence scan: ${escapeHtml(intelligence.status)}</strong><span>Read ${intelligence.sources.filter((source) => source.status === "read").length} of the product's key documents, found ${intelligence.claims.length} factual statements, and ${conflicts} of them contradict each other across repositories.</span></summary>
+      <p class="muted">Scanned ${escapeHtml(new Date(intelligence.createdAt).toLocaleString())} (result #${escapeHtml(intelligence.id.slice(0, 8))}) — each scan is saved permanently and never edited; if the repositories change, scan again rather than overwrite this result.</p>
       ${intelligence.findings.length ? `<ul>${intelligence.findings.map((finding) => `<li class="${escapeHtml(finding.severity)}"><strong>${escapeHtml(finding.kind.replaceAll("_", " "))}</strong> ${escapeHtml(finding.message)}${finding.citations.length ? `<small>${finding.citations.map(escapeHtml).join(" · ")}</small>` : ""}</li>`).join("")}</ul>` : '<p class="muted">No conflicts or unavailable sources were found.</p>'}
-    </details>` : `<div class="product-intelligence empty"><strong>No intelligence snapshot yet</strong><span>${localSources ? `${localSources} configured canonical sources are ready to scan.` : "Attach local repositories and configure canonical sources first."}</span></div>`;
+    </details>` : `<div class="product-intelligence empty"><strong>No scan has run yet</strong><span>${localSources ? `${localSources} tracked files are ready to scan.` : "Attach a local repository and list its key documents first."}</span></div>`;
     return `<article class="panel product-card">
-    <div class="product-head"><div><span class="connection-kind">Registered product</span><h3>${escapeHtml(product.name)}</h3><p>${escapeHtml(product.description || "Registered product context")}</p></div><div class="product-actions"><a href="${escapeHtml(product.organizationUrl)}" target="_blank" rel="noreferrer">Open organization</a><button class="secondary small" type="button" data-scan-product="${escapeHtml(product.id)}">Scan intelligence</button></div></div>
+    <div class="product-head"><div><span class="connection-kind">Registered product</span><h3>${escapeHtml(product.name)}</h3><p>${escapeHtml(product.description || "Registered product context")}</p></div><div class="product-actions"><a href="${escapeHtml(product.organizationUrl)}" target="_blank" rel="noreferrer">Open organization</a><button class="secondary small" type="button" data-scan-product="${escapeHtml(product.id)}" title="Reads this product's tracked documents across all its repositories and flags outdated or conflicting information.">Scan intelligence</button></div></div>
     ${intelligenceMarkup}
     <div class="repository-list">${product.repositories.map((repository) => {
       const local = repository.inspection || null;
       const issues = local?.compatibilityIssues || [];
       const facts = [repository.role ? repository.role.replaceAll("_", " ") : null, local?.currentBranch || repository.defaultBranch, local ? local.dirty ? "dirty" : "clean" : null, ...issues.slice(0, 2)].filter(Boolean);
-      return `<div class="repository-row ${repository.localPath ? "local" : ""}"><span><strong>${escapeHtml(repository.name)}</strong><small>${escapeHtml(repository.localPath || repository.fullName)} · ${escapeHtml(repository.visibility)}${local?.headSha ? ` · ${escapeHtml(local.headSha.slice(0, 10))}` : ""}</small><span class="repository-facts">${facts.map((fact) => `<em class="${issues.includes(fact) ? "issue" : ""}">${escapeHtml(fact)}</em>`).join("")}</span></span><div class="repository-actions"><span class="lifecycle ${issues.length || local?.dirty ? "degraded" : repository.archived ? "retired" : "qualified"}">${issues.length ? `${issues.length} issues` : local?.dirty ? "dirty" : local ? "ready" : "observed"}</span>${repository.localPath ? `<button class="secondary small" type="button" data-refresh-repository="${escapeHtml(repository.id)}" data-product-id="${escapeHtml(product.id)}">Rescan</button>` : ""}</div></div>`;
+      const scanTitle = local ? "Checks again, in case the repository changed since the last check." : "Checks this repository's real files on disk and updates its status.";
+      return `<div class="repository-row ${repository.localPath ? "local" : ""}"><span><strong>${escapeHtml(repository.name)}</strong><small>ID: <code>${escapeHtml(repository.id)}</code> · ${escapeHtml(repository.localPath || repository.fullName)} · ${escapeHtml(repository.visibility)}${local?.headSha ? ` · ${escapeHtml(local.headSha.slice(0, 10))}` : ""}</small><span class="repository-facts">${facts.map((fact) => `<em class="${issues.includes(fact) ? "issue" : ""}">${escapeHtml(fact)}</em>`).join("")}</span></span><div class="repository-actions"><span class="lifecycle ${issues.length || local?.dirty ? "degraded" : repository.archived ? "retired" : "qualified"}">${issues.length ? `${issues.length} issues` : local?.dirty ? "dirty" : local ? "ready" : "observed"}</span>${repository.localPath ? `<button class="secondary small" type="button" data-refresh-repository="${escapeHtml(repository.id)}" data-product-id="${escapeHtml(product.id)}" title="${scanTitle}">${local ? "Rescan" : "Scan"}</button>` : ""}</div></div>`;
     }).join("")}</div>
   </article>`;
   }).join("");
@@ -368,15 +414,29 @@ function syncProjectPathFromRepositorySelection() {
   if (selected.length === 1 && selected[0].localPath) $("#project-path").value = selected[0].localPath;
 }
 
+// Slice A: "unknown"/"unmeasured" are placeholder values the backend has
+// never actually verified — never print them with the same visual weight as
+// a real, checked fact (doctor.ts:16-17, openrouter.ts:318-319, ollama.ts:127-128).
+function measuredValueMarkup(value) {
+  if (value === "unknown" || value === "unmeasured") return '<span class="muted">not yet measured</span>';
+  return escapeHtml(value);
+}
+
+const CONNECTION_KIND_LABELS = {
+  subscription_cli: "Subscription tool",
+  api: "Pay-per-use API",
+  local: "Local model",
+};
+
 function renderConnections() {
   $("#connection-cards").innerHTML = state.connections.map((connection) => {
     const diagnostics = connection.metadata?.diagnostics || [];
     const firstProblem = diagnostics.find((item) => item.state === "fail" || item.state === "unknown");
     return `<article class="connection-card ${connection.available ? "ready" : "attention"}">
-      <div class="connection-head"><div><span class="connection-kind">${escapeHtml(connection.transport.replaceAll("_", " "))}</span><h3>${escapeHtml(connection.displayName)}</h3></div><span class="auth-label ${connection.available ? "ready" : "required"}">${connection.available ? "Ready" : "Setup"}</span></div>
+      <div class="connection-head"><div><span class="connection-kind">${escapeHtml(CONNECTION_KIND_LABELS[connection.transport] || connection.transport.replaceAll("_", " "))}</span><h3>${escapeHtml(connection.displayName)}</h3></div><span class="auth-label ${connection.available ? "ready" : "required"}">${connection.available ? "Ready" : "Needs sign-in"}</span></div>
       <p>${escapeHtml(firstProblem?.detail || connection.metadata?.summary || "Connection is ready")}</p>
-      <dl><div><dt>Runtime</dt><dd>${escapeHtml(connection.runtimeVersion || "Not detected")}</dd></div><div><dt>Entitlement</dt><dd>${escapeHtml(connection.entitlement)}</dd></div><div><dt>Capacity</dt><dd>${escapeHtml(connection.capacity)}</dd></div></dl>
-      ${connection.transport === "subscription_cli" ? `<label class="connection-enable"><input type="checkbox" data-connection-provider="${escapeHtml(connection.provider)}" ${connection.enabled ? "checked" : ""}> Eligible for runs</label>` : `<span class="muted">${connection.transport === "api" ? "Controlled by the paid API policy below" : "Controlled from the local runtime configuration"}</span>`}
+      <dl><div><dt>Installed version</dt><dd>${escapeHtml(connection.runtimeVersion || "Not detected")}</dd></div><div><dt>Entitlement</dt><dd>${measuredValueMarkup(connection.entitlement)}</dd></div><div><dt>Capacity</dt><dd>${measuredValueMarkup(connection.capacity)}</dd></div></dl>
+      ${connection.transport === "subscription_cli" ? `<label class="connection-enable"><input type="checkbox" data-connection-provider="${escapeHtml(connection.provider)}" ${connection.enabled ? "checked" : ""}> Allow this tool to work on runs</label><p class="field-help">Unchecked tools are skipped everywhere — as architect, reviewer, or worker — even if they're signed in.</p>` : `<span class="muted">${connection.transport === "api" ? "Turned on/off using the OpenRouter settings further down this page" : "Managed on the Models page, not here"}</span>`}
     </article>`;
   }).join("");
 }
@@ -392,6 +452,7 @@ function renderSettings() {
   $("#setting-autonomy").value = config.runPolicy.autonomy;
   $("#run-autonomy").value = config.runPolicy.autonomy;
   renderRunAutonomyHelp();
+  renderRunAutonomyHelp("setting-autonomy", "setting-autonomy-help");
   $("#setting-plan-approval").checked = config.runPolicy.requirePlanApproval;
   $("#setting-external-writes").checked = config.runPolicy.allowExternalWrites;
   $("#setting-paid-api").checked = config.runPolicy.allowPaidApi;
@@ -414,10 +475,10 @@ function renderSettings() {
     const configuredModelIsEligible = eligibleModels.some((model) => model.id === configuredModel?.id);
     const configuredConnection = state.connections.find((item) => item.id === configuredModel?.connectionId);
     const unavailableConfiguredOption = configuredModel && !configuredModelIsEligible
-      ? `<option value="${escapeHtml(configuredModel.id)}" disabled>${escapeHtml(configuredConnection?.displayName || configuredModel.connectionId)} / ${escapeHtml(configuredModel.displayName)} (not currently role-qualified)</option>`
+      ? `<option value="${escapeHtml(configuredModel.id)}" disabled>${escapeHtml(configuredConnection?.displayName || configuredModel.connectionId)} / ${escapeHtml(configuredModel.displayName)} (not currently role-qualified — hasn't passed the check for this role; see Models)</option>`
       : "";
     const modelOptions = [
-      '<option value="">Configured provider default</option>',
+      '<option value="">Let the tool choose its own default model</option>',
       ...eligibleModels.map((model) => {
         const connection = state.connections.find((item) => item.id === model.connectionId);
         return `<option value="${escapeHtml(model.id)}">${escapeHtml(connection?.displayName || model.connectionId)} / ${escapeHtml(model.displayName)}</option>`;
@@ -441,19 +502,27 @@ function renderOpenRouterStatus() {
   const status = $("#openrouter-status");
   if (!status) return;
   status.textContent = state.openRouter.connected
-    ? `Connected. Provider credit/limit status is checked before paid routing.`
+    ? `Connected. DevHarmonics checks your OpenRouter balance and limits before spending.`
     : "Disconnected. No paid API request can run.";
   $("#openrouter-connect").classList.toggle("hidden", state.openRouter.connected);
   $("#openrouter-disconnect").classList.toggle("hidden", !state.openRouter.connected);
 }
 
-function renderRunAutonomyHelp() {
+// Slice A: the composer's "Run mode" and Setup's "Default run mode" are the
+// identical control — the same live consequence line is reused for both
+// instead of leaving Setup's copy unexplained (DESIGN-DECISIONS.md).
+function renderRunAutonomyHelp(selectId = "run-autonomy", helpId = "run-autonomy-help") {
+  // Slice A: the first clause is bolded so the consequence can't be skimmed
+  // past — this is the single highest-stakes control on the page.
   const help = {
-    observe: "Read-only diagnostics and evidence. No repository changes.",
-    supervised: "Agents may prepare repository changes after you approve the plan.",
-    bounded: "Agents may execute within the configured tool and repository boundaries.",
+    observe: "<strong>Nothing is changed.</strong> The AI only reads your code and reports back.",
+    supervised: "<strong>AI workers can write code,</strong> but a change only reaches your repository after you approve the plan.",
+    bounded: "<strong>AI workers can commit changes on their own,</strong> limited to the permissions and repositories you've allowed in Setup. Change what's allowed under Setup → Default team setup → policy checkboxes.",
   };
-  $("#run-autonomy-help").textContent = help[$("#run-autonomy").value] || help.supervised;
+  const select = $(`#${selectId}`);
+  const helpElement = $(`#${helpId}`);
+  if (!select || !helpElement) return;
+  helpElement.innerHTML = help[select.value] || help.supervised;
 }
 
 function requiresSpecialistBenchmark(model) {
@@ -498,6 +567,57 @@ function isModelSchedulable(model) {
     && hasCurrentSpecialistBenchmark(model));
 }
 
+// Slice A: translate the raw model-availability/quota enums the backend
+// reports (runtime.ts / registry.ts) into plain English wherever they reach
+// the page — never print a raw snake_case token to the PM.
+const HEALTH_STATE_LABELS = {
+  ready: "ready",
+  degraded: "temporarily slow",
+  cooling: "cooling down after an error",
+  quota_exhausted: "over its usage limit",
+  rate_limited: "rate-limited",
+  authentication: "signed out",
+  unavailable: "unavailable",
+};
+function healthStateLabel(state) {
+  return HEALTH_STATE_LABELS[state] || String(state).replaceAll("_", " ");
+}
+
+const ROLE_LABELS = {
+  general: "general capability",
+  architect: "planner",
+  worker: "worker",
+  reviewer: "reviewer",
+  analysis: "analysis",
+  benchmark: "accuracy benchmark",
+  local_tools: "file-editing permissions",
+};
+function roleLabel(role) {
+  return ROLE_LABELS[role] || String(role).replaceAll("_", " ");
+}
+
+const CONFIDENCE_LABELS = { insufficient: "low", emerging: "medium", established: "high" };
+
+function workloadLabel(workload) {
+  const [complexity, tier] = String(workload).split(":");
+  const complexityLabel = complexity ? complexity[0].toUpperCase() + complexity.slice(1) : "Unclassified";
+  return tier ? `${complexityLabel}, ${tier}-tier tasks` : `${complexityLabel} tasks`;
+}
+
+// Shared list-item formatter for both the model-wide "Observed performance"
+// summary and the per-workload "Performance by task type" slices — same
+// plain-English labels either way (DH inventory-02, app.js:514-518).
+function performanceSummaryItems(stats, { includeLatency }) {
+  const items = [
+    `Completed: ${Math.round(stats.successRate * 100)}%`,
+    `Succeeded on the first try: ${Math.round(stats.firstAttemptSuccessRate * 100)}%`,
+  ];
+  if (includeLatency) items.push(stats.averageLatencyMs == null ? "Typical time: unavailable" : `Typical time: ${formatDuration(stats.averageLatencyMs)}`);
+  items.push(stats.averageCostUsd == null ? "Typical cost: unavailable" : `Typical cost: $${Number(stats.averageCostUsd).toFixed(4)}${includeLatency ? ` (${stats.billedSampleCount} billed runs)` : ""}`);
+  items.push(`Editing conflicts: ${stats.integrationConflictCount}`, `Test/check failures: ${stats.validatorFailureCount}`, `Runs that ended not-ready with this model involved: ${stats.notReadyRunCount}`, `Based on ${stats.sampleSize} real runs`);
+  return items;
+}
+
 function renderModels() {
   const allCurrentModels = state.models.filter((model) => !model.retired);
   const query = $("#model-filter")?.value.trim().toLowerCase() || "";
@@ -511,12 +631,12 @@ function renderModels() {
   });
   const qualified = allCurrentModels.filter((model) => hasCurrentOperationalQualification(model) && !model.qualificationStale).length;
   const active = allCurrentModels.filter(isModelSchedulable).length;
-  $("#model-summary").innerHTML = `<div class="metric"><span>Current</span><strong>${allCurrentModels.length}</strong></div><div class="metric"><span>Role-qualified models</span><strong>${qualified}</strong></div><div class="metric"><span>Schedulable active</span><strong>${active}</strong></div><div class="metric"><span>Advisory local slots</span><strong>${state.resources?.advisoryLocalSlots ?? "?"}</strong></div>`;
+  $("#model-summary").innerHTML = `<div class="metric"><span>Known models</span><strong>${allCurrentModels.length}</strong></div><div class="metric"><span>Passed a role check</span><strong>${qualified}</strong></div><div class="metric"><span>Ready to be used</span><strong>${active}</strong></div><div class="metric"><span>Estimated local capacity</span><strong>${state.resources?.advisoryLocalSlots ?? "?"}</strong></div>`;
   const runtimes = state.bootstrap.config.localRuntimes?.ollama || [];
   $("#runtime-list").innerHTML = runtimes.map((runtime) => {
     const connection = state.connections.find((item) => item.metadata?.runtimeId === runtime.id);
-    const status = connection?.available ? "Ready" : connection?.installed ? "No installed models" : "Not reachable";
-    return `<article class="connection-card"><span class="connection-kind">LOCAL RUNTIME</span><h3>${escapeHtml(runtime.displayName)}</h3><p>${escapeHtml(runtime.baseUrl)}</p><span class="status ${connection?.available ? "ready" : "warning"}">${status}</span></article>`;
+    const status = connection?.available ? "Ready" : connection?.installed ? "No installed models" : "Can't connect";
+    return `<article class="connection-card"><span class="connection-kind">LOCAL MODEL SERVER</span><h3>${escapeHtml(runtime.displayName)}</h3><p>${escapeHtml(runtime.baseUrl)}</p><span class="status ${connection?.available ? "ready" : "warning"}">${status}</span>${status === "Can't connect" ? `<p class="field-help">DevHarmonics couldn't reach this address. Check that the local model server is running and the Base URL is correct.</p>` : ""}</article>`;
   }).join("");
   $("#model-list").innerHTML = currentModels.length ? currentModels.map((model) => {
     const connection = state.connections.find((item) => item.id === model.connectionId);
@@ -524,44 +644,66 @@ function renderModels() {
     const tier = profile.tier || "unclassified";
     const family = profile.family || "unclassified";
     const capabilities = Array.isArray(profile.capabilities) ? profile.capabilities : [];
-    const effort = profile.reasoningEffort ? ` · reasoning: ${profile.reasoningEffort}` : "";
-    const confidence = profile.confidence ? ` · evidence: ${profile.confidence}` : "";
+    const effort = profile.reasoningEffort ? ` · thinking effort: ${profile.reasoningEffort}` : "";
+    const confidence = profile.confidence ? ` · model info: ${profile.confidence}` : "";
     const allHistory = state.qualifications.filter((item) => item.modelId === model.id);
     const history = allHistory.slice(0, 5);
+    const hasAnyOperationalAttempt = allHistory.some((item) => item.role !== "benchmark");
     const currentRoleQualifications = allHistory.filter((item) => item.fingerprint === model.qualificationFingerprint);
     const hasCurrentRoleFailure = currentRoleQualifications.some((item) => !item.passed);
     const operationallyQualified = hasCurrentOperationalQualification(model);
     const specialistBenchmarkRequired = requiresSpecialistBenchmark(model);
     const specialistBenchmarkPassed = hasCurrentSpecialistBenchmark(model);
-    const qualify = `<button class="secondary small" data-qualify-model="${escapeHtml(model.id)}">${operationallyQualified ? "Requalify" : connection?.transport === "local" ? "Qualify locally" : connection?.provider === "openrouter" ? "Qualify paid model" : "Verify subscription model"}</button>`;
-    const qualifyTools = connection?.transport === "local" ? `<button class="secondary small" data-qualify-local-tools="${escapeHtml(model.id)}">Qualify bounded write tools</button>` : "";
-    const qualifyBenchmark = connection?.transport === "local" ? `<button class="secondary small" data-qualify-benchmark="${escapeHtml(model.id)}">Benchmark specialist</button>` : "";
+    const qualify = `<button class="secondary small" data-qualify-model="${escapeHtml(model.id)}">${operationallyQualified ? "Requalify" : connection?.transport === "local" ? "Qualify locally" : connection?.provider === "openrouter" ? "Qualify (may cost money)" : "Qualify"}</button>`;
+    const qualifyTools = connection?.transport === "local" ? `<button class="secondary small" data-qualify-local-tools="${escapeHtml(model.id)}">Test file-editing permissions</button>` : "";
+    const qualifyBenchmark = connection?.transport === "local" ? `<button class="secondary small" data-qualify-benchmark="${escapeHtml(model.id)}">Run accuracy test</button>` : "";
     const activate = `<button class="secondary small" data-activate-model="${escapeHtml(model.id)}">${model.active ? "Deactivate" : "Activate"}</button>`;
-    const health = model.health?.state && model.health.state !== "ready" ? ` · ${model.health.state}` : "";
+    const health = model.health?.state && model.health.state !== "ready" ? ` · ${healthStateLabel(model.health.state)}` : "";
     const performance = state.performanceProfiles.find((item) => item.modelId === model.id);
     const performancePolicy = state.performancePolicies.find((item) => item.modelId === model.id);
+    const confidenceLabel = performance ? (CONFIDENCE_LABELS[performance.uncertainty] || performance.uncertainty) : "";
     const empiricalHtml = performance
-      ? `<p class="empirical-profile"><strong>Observed performance:</strong> ${Math.round(performance.successRate * 100)}% completed · ${Math.round(performance.firstAttemptSuccessRate * 100)}% first-pass · ${performance.averageLatencyMs == null ? "latency unavailable" : `${formatDuration(performance.averageLatencyMs)} average`} · ${performance.averageCostUsd == null ? "cost unavailable" : `$${Number(performance.averageCostUsd).toFixed(4)} average billed cost (${performance.billedSampleCount} billed)`} · ${performance.validatorFailureCount} validator failures · ${performance.integrationConflictCount} integration conflicts · ${performance.notReadyRunCount} NOT READY runs (non-causal) · ${performance.sampleSize} samples · <span class="uncertainty ${escapeHtml(performance.uncertainty)}">${escapeHtml(performance.uncertainty)} evidence</span>${performance.observationsExcluded ? " · excluded by user" : performance.eligibleForAdaptiveWeighting ? " · eligible for adaptive weighting" : " · not used for adaptive weighting yet"}</p>`
-      : `<p class="empirical-profile"><strong>Observed performance:</strong> No observations in the current baseline; published capabilities only.${performancePolicy?.ignoredBefore ? ` Baseline reset ${escapeHtml(new Date(performancePolicy.ignoredBefore).toLocaleString())}.` : ""}</p>`;
+      ? `<p class="empirical-profile"><strong>Observed performance:</strong> ${performanceSummaryItems(performance, { includeLatency: true }).join(" · ")} · <span class="uncertainty ${escapeHtml(performance.uncertainty)}">Confidence: ${escapeHtml(confidenceLabel)}</span>${performance.observationsExcluded ? " · excluded by user" : performance.eligibleForAdaptiveWeighting ? " · eligible for adaptive weighting" : " · not used for adaptive weighting yet"}</p>`
+      : `<p class="empirical-profile"><strong>Observed performance:</strong> No real-run data yet — this shows only the provider's published specs.${performancePolicy?.ignoredBefore ? ` Performance history was reset on ${escapeHtml(new Date(performancePolicy.ignoredBefore).toLocaleString())}.` : ""}</p>`;
     const workloadHtml = performance && Object.keys(performance.workloads || {}).length
-      ? `<details class="qualification-history workload-history"><summary>Workload evidence (${Object.keys(performance.workloads).length})</summary>${Object.entries(performance.workloads).map(([workload, slice]) => `<p><strong>${escapeHtml(workload.replace(":", " / "))}</strong> · ${Math.round(slice.successRate * 100)}% completed · ${Math.round(slice.firstAttemptSuccessRate * 100)}% first-pass · ${slice.averageCostUsd == null ? "cost unavailable" : `$${Number(slice.averageCostUsd).toFixed(4)} average billed cost`} · ${slice.validatorFailureCount} validator failures · ${slice.integrationConflictCount} integration conflicts · ${slice.notReadyRunCount} NOT READY runs (non-causal) · ${slice.sampleSize} samples · ${escapeHtml(slice.uncertainty)}</p>`).join("")}</details>`
+      ? `<details class="qualification-history workload-history"><summary>Performance by task type (${Object.keys(performance.workloads).length})</summary>${Object.entries(performance.workloads).map(([workload, slice]) => `<p><strong>${escapeHtml(workloadLabel(workload))}</strong> · ${performanceSummaryItems(slice, { includeLatency: false }).join(" · ")}</p>`).join("")}</details>`
       : "";
-    const performanceActions = `<button class="secondary small" data-reset-performance="${escapeHtml(model.id)}">Reset observation baseline</button><button class="secondary small" data-exclude-performance="${escapeHtml(model.id)}">${performancePolicy?.excluded ? "Include empirical history" : "Exclude empirical history"}</button>`;
-    const historyHtml = `<details class="qualification-history"><summary>Qualification history (${history.length})</summary>${history.length ? history.map((item) => `<p><strong>${escapeHtml(item.passed ? "PASS" : "FAIL")}</strong> ${escapeHtml(item.role)} · ${escapeHtml(item.fixtureVersion)} · ${escapeHtml(new Date(item.createdAt).toLocaleString())}</p>`).join("") : "<p>No probes recorded.</p>"}</details>`;
+    const performanceActions = `<button class="secondary small" data-reset-performance="${escapeHtml(model.id)}">Reset performance history</button><button class="secondary small" data-exclude-performance="${escapeHtml(model.id)}">${performancePolicy?.excluded ? "Resume using past results for scheduling" : "Stop using past results for scheduling"}</button>`;
+    const historyHtml = `<details class="qualification-history"><summary>Qualification history (${history.length})</summary>${history.length ? history.map((item) => `<p><strong>${escapeHtml(item.passed ? "PASS" : "FAIL")}</strong> for ${escapeHtml(roleLabel(item.role))}, tested ${escapeHtml(new Date(item.createdAt).toLocaleString())}</p>`).join("") : "<p>No checks run yet.</p>"}</details>`;
     const isStale = model.qualified && model.qualificationStale;
-    const stateText = isStale ? "Qualification stale; it will not be scheduled until requalified" : model.excluded ? "Excluded from scheduling" : specialistBenchmarkRequired && !specialistBenchmarkPassed ? "Specialist scheduling requires the benchmark pass" : !operationallyQualified ? "No current role qualification; not schedulable" : hasCurrentRoleFailure ? "Qualified only for passing roles; failed roles remain unschedulable" : model.active ? "Active for adaptive scheduling" : "Qualified; activate to make it available to the adaptive scheduler";
-    const lifecycleText = isStale ? "stale" : !operationallyQualified && specialistBenchmarkPassed ? "benchmark only" : hasCurrentRoleFailure ? "partial" : model.lifecycle;
-    const lifecycleClass = isStale || !operationallyQualified || hasCurrentRoleFailure ? "degraded" : model.lifecycle;
+    const stateText = isStale ? "This model's check is out of date — the provider changed it since it last passed. It won't be used again until you re-run the check."
+      : model.excluded ? "You've excluded this model from being used"
+      : specialistBenchmarkRequired && !specialistBenchmarkPassed ? "This model needs an extra accuracy test before it can be used"
+      : !operationallyQualified ? "Hasn't passed a role check yet — can't be used"
+      : hasCurrentRoleFailure ? "Passed some roles, failed others — see qualification history below"
+      : model.active ? "Active — DevHarmonics can use this model"
+      : "Passed its check but turned off — click Activate to make it usable";
+    // Slice A: "you turned this off on purpose" (deliberate) reads and colors
+    // differently from "something needs attention" (degraded) — see the
+    // .lifecycle.deliberate / .lifecycle.degraded split in app.css.
+    // model.excluded is checked first in both the chip text and its color
+    // class so a deliberately-excluded model never shows an amber "needs
+    // attention" chip with a grey/deliberate meaning underneath, or vice versa.
+    const lifecycleText = model.excluded ? "Excluded"
+      : isStale ? "Needs re-checking"
+      : specialistBenchmarkRequired && !specialistBenchmarkPassed ? "Needs benchmark"
+      : !operationallyQualified ? (hasAnyOperationalAttempt ? "Not qualified" : "Not checked yet")
+      : hasCurrentRoleFailure ? "Not qualified"
+      : model.active ? "Active"
+      : "Qualified (inactive)";
+    const lifecycleClass = model.excluded ? "deliberate"
+      : (isStale || !operationallyQualified || hasCurrentRoleFailure || (specialistBenchmarkRequired && !specialistBenchmarkPassed)) ? "degraded"
+      : model.active ? "active" : "qualified";
     const detailParts = [
-      `Model vendor: ${model.metadata?.modelVendor || "not declared"}`,
-      `Quota group: ${model.metadata?.quotaGroupDisplayName || model.metadata?.quotaGroup || "not declared"}`,
-      model.quotaGroupHealth ? `Quota health: ${model.quotaGroupHealth.state}${model.quotaGroupHealth.cooldownUntil ? `; cooldown until ${new Date(model.quotaGroupHealth.cooldownUntil).toLocaleString()}` : ""}` : model.metadata?.quotaGroup ? "Quota health: no quota event observed" : "",
-      `Family: ${family}`,
+      model.metadata?.modelVendor ? `Made by: ${model.metadata.modelVendor}` : "",
+      `Shares usage limit with: ${model.metadata?.quotaGroupDisplayName || model.metadata?.quotaGroup || "nothing tracked"}`,
+      model.quotaGroupHealth ? `Usage limit status: ${healthStateLabel(model.quotaGroupHealth.state)}${model.quotaGroupHealth.cooldownUntil ? `, back at ${new Date(model.quotaGroupHealth.cooldownUntil).toLocaleString()}` : ""}` : "",
+      `Model line: ${family === "unclassified" ? "unknown" : family}`,
       `Capabilities: ${capabilities.length ? capabilities.join(", ") : "not declared"}`,
-      model.metadata?.details?.parameter_size ? `Parameters: ${model.metadata.details.parameter_size}` : "",
-      model.metadata?.details?.quantization_level ? `Quantization: ${model.metadata.details.quantization_level}` : "",
+      model.metadata?.details?.parameter_size ? `Model size: ${model.metadata.details.parameter_size}` : "",
+      model.metadata?.details?.quantization_level ? `Compression level: ${model.metadata.details.quantization_level}` : "",
     ].filter(Boolean).join(" · ");
-    return `<article class="model-card"><div><span class="connection-kind">${escapeHtml(connection?.displayName || model.connectionId)}</span><h3>${escapeHtml(model.displayName)}</h3><code>${escapeHtml(model.canonicalName)}</code></div><span class="lifecycle ${escapeHtml(lifecycleClass)}">${escapeHtml(lifecycleText)}</span><p>Tier: ${escapeHtml(tier + effort + confidence)}${escapeHtml(health)}. ${stateText}. Upgrade policy: ${model.upgradePolicy === "track_family" ? "track family" : "pinned exact"}.</p><p class="model-profile">${escapeHtml(detailParts)}.</p>${empiricalHtml}${workloadHtml}<div class="model-actions">${qualify}${qualifyTools}${qualifyBenchmark}${activate}<button class="secondary small" data-pin-model="${escapeHtml(model.id)}">${model.pinned ? "Unpin" : "Pin"}</button><button class="secondary small" data-track-model="${escapeHtml(model.id)}">${model.upgradePolicy === "track_family" ? "Pin exact" : "Track family"}</button><button class="secondary small" data-exclude-model="${escapeHtml(model.id)}">${model.excluded ? "Include" : "Exclude"}</button>${performanceActions}</div>${historyHtml}</article>`;
+    return `<article class="model-card"><div><span class="connection-kind">${escapeHtml(connection?.displayName || model.connectionId)}</span><h3>${escapeHtml(model.displayName)}</h3><code>${escapeHtml(model.canonicalName)}</code></div><span class="lifecycle ${escapeHtml(lifecycleClass)}">${escapeHtml(lifecycleText)}</span><p>Tier: ${escapeHtml(tier + effort + confidence)}${escapeHtml(health)}. ${stateText}. Update policy: ${model.upgradePolicy === "track_family" ? "auto-upgrading within its model line" : "staying on this exact version"}.</p><p class="model-profile">${escapeHtml(detailParts)}.</p>${empiricalHtml}${workloadHtml}<div class="model-actions">${qualify}${qualifyTools}${qualifyBenchmark}${activate}<button class="secondary small" data-pin-model="${escapeHtml(model.id)}">${model.pinned ? "Stop preferring this model" : "Always prefer this model"}</button><button class="secondary small" data-track-model="${escapeHtml(model.id)}">${model.upgradePolicy === "track_family" ? "Stay on this exact version" : "Auto-upgrade within this model line"}</button><button class="secondary small" data-exclude-model="${escapeHtml(model.id)}">${model.excluded ? "Include in automatic scheduling" : "Exclude from automatic scheduling"}</button>${performanceActions}</div>${historyHtml}</article>`;
   }).join("") : '<div class="panel empty-state">No current models match this filter.</div>';
   $("#model-connection").innerHTML = state.connections.map((connection) => `<option value="${escapeHtml(connection.id)}">${escapeHtml(connection.displayName)}</option>`).join("");
 }
@@ -589,10 +731,10 @@ async function refreshWorkbench(preferredSessionId = state.workbenchSession?.id)
 }
 
 function renderWorkbench() {
-  $("#workbench-count").textContent = `${state.workbenchSessions.length} saved`;
+  $("#workbench-count").textContent = `${state.workbenchSessions.length} saved discussions`;
   $("#workbench-session-list").innerHTML = state.workbenchSessions.length
     ? state.workbenchSessions.map((session) => `<button class="workbench-session ${session.id === state.workbenchSession?.id ? "active" : ""}" type="button" data-workbench-session="${escapeHtml(session.id)}"><strong>${escapeHtml(session.title)}</strong><span>${escapeHtml(session.projectPath)}</span></button>`).join("")
-    : '<div class="empty-state">No scratchpads yet.</div>';
+    : '<div class="empty-state">No discussions yet.</div>';
   $("#workbench-empty").classList.toggle("hidden", Boolean(state.workbenchSession));
   $("#workbench-active").classList.toggle("hidden", !state.workbenchSession);
   if (!state.workbenchSession) return;
@@ -614,12 +756,13 @@ function renderWorkbench() {
       const connection = state.connections.find((item) => item.id === model.connectionId);
       return `<label class="workbench-model"><input type="checkbox" name="workbench-model" value="${escapeHtml(model.id)}" ${index < Math.min(2, eligible.length) ? "checked" : ""}><span><strong>${escapeHtml(model.displayName)}</strong><small>${escapeHtml(connection?.displayName || model.connectionId)} · ${escapeHtml(model.canonicalName)}</small></span></label>`;
     }).join("")
-    : '<div class="empty-state">Activate and qualify at least one analysis-capable model in Models before consulting.</div>';
+    : '<div class="empty-state">No models are ready to answer questions yet. Go to Models, turn one on, and run its quick qualification test — that\'s a one-time check that the model can handle this kind of task. (Qualifying a model runs a short test before DevHarmonics trusts it for a given job.)</div>';
   $("#workbench-consult").disabled = eligible.length === 0;
   if (!$("#workbench-outcome").value && state.workbenchMessages.length) {
     const lastQuestion = [...state.workbenchMessages].reverse().find((message) => message.role === "user");
     $("#workbench-outcome").value = lastQuestion?.content || state.workbenchSession.title;
   }
+  renderRunAutonomyHelp("workbench-autonomy", "workbench-autonomy-help");
 }
 
 async function selectWorkbench(sessionId) {
@@ -643,12 +786,13 @@ function showView(view) {
   if (view === "runs") {
     $("#composer").classList.toggle("hidden", Boolean(state.selectedRunId) && !state.composing);
     $("#run-view").classList.toggle("hidden", !state.selectedRunId || state.composing);
-    $("#page-title").textContent = state.selectedRunId && !state.composing ? "Verified agent run" : "Assemble a verified agent team";
   } else {
     $("#composer").classList.add("hidden");
     $("#run-view").classList.add("hidden");
-    $("#page-title").textContent = view === "setup" ? "Configure the control plane" : view === "models" ? "Manage the model fleet" : view === "products" ? "Operate across real products" : view === "workbench" ? "Explore before you execute" : view === "workflows" ? "Run a versioned workflow" : "Inspect retained evidence";
   }
+  const description = VIEW_DESCRIPTIONS[view] || VIEW_DESCRIPTIONS.runs;
+  $("#page-title").textContent = description.title;
+  $("#page-purpose").textContent = description.purpose;
 }
 
 async function refreshWorkflows() {
@@ -657,9 +801,9 @@ async function refreshWorkflows() {
   $("#workflow-list").innerHTML = workflows.length
     ? workflows.map((workflow) => `<button class="connection-card" style="text-align:left;cursor:pointer" data-workflow-hash="${escapeHtml(workflow.revisionHash)}">
         <strong>${escapeHtml(workflow.name)}</strong>
-        <p class="field-help">revision ${escapeHtml(workflow.revisionHash.slice(0, 12))} · recorded ${escapeHtml(workflow.createdAt.slice(0, 10))}</p>
+        <p class="field-help" title="Workflows can be edited over time; this is the exact version you're looking at.">version ${escapeHtml(workflow.revisionHash.slice(0, 12))} · saved ${escapeHtml(workflow.createdAt.slice(0, 10))}</p>
       </button>`).join("")
-    : `<p class="field-help">No workflow revisions are recorded yet. The two shipped documents (in the install's <code>workflows/</code> directory) are recorded automatically at server start — an empty list here means seeding failed; check the server terminal. Record your own with <code>POST /api/workflows</code> and a JSON body of <code>{"document": { …workflow… }}</code>.</p>`;
+    : `<p class="field-help">The two built-in workflows appear here when the server starts. If this list stays empty, restart the DevHarmonics server.</p>`;
   $("#workflow-detail").classList.add("hidden");
 }
 
@@ -681,8 +825,8 @@ function renderWorkflowScope() {
   const container = $("#workflow-repositories");
   if (!container) return;
   container.innerHTML = product
-    ? product.repositories.map((repository) => `<label class="field-help"><input type="checkbox" name="workflow-repository" value="${escapeHtml(repository.id)}"> ${escapeHtml(repository.name)}${repository.localPath ? "" : " (no local checkout)"}</label>`).join("") || '<p class="field-help">This product has no attached repositories yet.</p>'
-    : '<p class="field-help">Standalone: the objective runs against the server project folder. Select a product to scope repositories.</p>';
+    ? product.repositories.map((repository) => `<label class="field-help"><input type="checkbox" name="workflow-repository" value="${escapeHtml(repository.id)}"> ${escapeHtml(repository.name)}${repository.localPath ? "" : " (not downloaded locally)"}</label>`).join("") || '<p class="field-help">This product has no attached repositories yet.</p>'
+    : '<p class="field-help">No product selected — this will run against the default project folder on this machine. Pick a product above to limit it to specific repositories instead.</p>';
 }
 
 async function showWorkflowDetail(revisionHash) {
@@ -691,7 +835,7 @@ async function showWorkflowDetail(revisionHash) {
     try { await refreshProducts(); } catch { /* products are optional for a standalone instantiation */ }
   }
   state.selectedWorkflow = revision;
-  $("#workflow-detail-name").textContent = `${revision.name} — revision ${revision.revisionHash.slice(0, 12)}`;
+  $("#workflow-detail-name").textContent = `Workflow: ${revision.name} (version ${revision.revisionHash.slice(0, 12)})`;
   $("#workflow-detail-description").textContent = revision.workflow.description;
   $("#workflow-detail-json").textContent = JSON.stringify(revision.workflow, null, 2);
   $("#workflow-detail-inputs").innerHTML = [
@@ -699,7 +843,7 @@ async function showWorkflowDetail(revisionHash) {
       ${workflowInputControl(input)}
     </label>`),
     `<label class="field-help">Product
-      <select id="workflow-product"><option value="">Standalone (no product)</option>${state.products.map((product) => `<option value="${escapeHtml(product.id)}">${escapeHtml(product.name)}</option>`).join("")}</select>
+      <select id="workflow-product"><option value="">No product — use default folder</option>${state.products.map((product) => `<option value="${escapeHtml(product.id)}">${escapeHtml(product.name)}</option>`).join("")}</select>
     </label>`,
     `<div id="workflow-repositories"></div>`,
   ].join("");
@@ -741,13 +885,13 @@ $("#workflow-instantiate").addEventListener("click", async (event) => {
   const productId = $("#workflow-product")?.value || "";
   const repositoryIds = [...document.querySelectorAll('input[name="workflow-repository"]:checked')].map((input) => input.value);
   $("#workflow-error").innerHTML = "";
-  await withOperation(event.currentTarget, "Creating the objective from the workflow", async () => {
+  await withOperation(event.currentTarget, "Creating the task from the workflow", async () => {
     const result = await api(`/api/workflows/${revision.revisionHash}/instantiate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ inputs, repositoryIds, ...(productId ? { productId } : {}) }),
     });
-    $("#workflow-instantiate-result").textContent = `Objective ${result.objective.id.slice(0, 8)} created from revision ${result.revisionHash.slice(0, 12)}. Propose and approve its plan in the composer — the run will pin this exact workflow revision.`;
+    $("#workflow-instantiate-result").textContent = `Task ${result.objective.id.slice(0, 8)} created from this workflow. Go to Runs → New run to review and approve its plan — it will run using exactly this version of the workflow.`;
   }, {
     // DH810-AUD-009: the API names the offending inputs — surface every named
     // issue, not just the top-level message.
@@ -779,10 +923,11 @@ async function refreshEvidence() {
   $("#evidence-verdict").innerHTML = derivedVerdictMarkup(report);
   $("#evidence-hash").textContent = evidence.integritySha256;
   $("#evidence-review-count").textContent = `${evidence.reviews.length} retained`;
-  $("#evidence-reviews").innerHTML = evidence.reviews.length ? evidence.reviews.map((review) => `<article><div><strong>Round ${review.round} · ${escapeHtml(providerDisplayName(review.provider))}</strong><span>${escapeHtml(review.provider === "gemini" ? `${modelDisplayName(review.modelId)} requested (actual model unverified)` : review.modelId || "provider default")} · integration ${escapeHtml(review.integrationSha256.slice(0, 12))}</span></div><span class="lifecycle ${review.invalidatedAt ? "retired" : review.verdict === "READY" ? "qualified" : "degraded"}">${review.invalidatedAt ? "invalidated" : escapeHtml(review.verdict.replaceAll("_", " "))}</span><p class="evidence-report">${escapeHtml(review.summary)}${review.findings.length ? `\n${review.findings.map((finding) => `${finding.severity.toUpperCase()} ${finding.location || "no location"}: ${finding.rationale} [${finding.disposition}]`).join("\n")}` : ""}${review.invalidationReason ? `\nInvalidated: ${escapeHtml(review.invalidationReason)}` : ""}</p></article>`).join("") : '<div class="empty-state">No structured review receipts were retained for this run.</div>';
-  $("#evidence-attempts").innerHTML = evidence.attempts.length ? evidence.attempts.map((attempt) => `<article><div><strong>${escapeHtml(attempt.task_id)}</strong><span>${escapeHtml(recordedModelIdentity(attempt.provider, attempt.model_id, attempt.model_resolution, attempt.connection_id))}</span></div><span class="lifecycle ${attempt.status === "completed" ? "qualified" : ""}">${escapeHtml(attempt.status)}</span><details class="evidence-report"><summary>View normalized report</summary><p>${escapeHtml(attempt.result_envelope?.summary || attempt.error || "No normalized summary")}</p></details></article>`).join("") : '<div class="empty-state">No attempts were started.</div>';
+  $("#evidence-reviews").innerHTML = evidence.reviews.length ? evidence.reviews.map((review) => `<article><div><strong>Round ${review.round}</strong><span>${escapeHtml(recordedModelIdentity(review.provider, review.modelId, review.provider === "gemini" ? "requested_unverified" : null, review.connectionId))} · reviewed at commit ${escapeHtml(review.integrationSha256.slice(0, 12))}</span></div><span class="lifecycle ${review.invalidatedAt ? "retired" : review.verdict === "READY" ? "qualified" : "degraded"}">${review.invalidatedAt ? "invalidated" : escapeHtml(review.verdict.replaceAll("_", " "))}</span><p class="evidence-report">${escapeHtml(review.summary)}${review.findings.length ? `\n${review.findings.map(renderFindingHtml).join("\n")}` : ""}${review.invalidationReason ? `\nInvalidated: ${escapeHtml(review.invalidationReason)}` : ""}</p></article>`).join("") : '<div class="empty-state">No independent reviews have been recorded for this run yet.</div>';
+  const evidenceRun = state.runs.find((item) => item.id === runId);
+  $("#evidence-attempts").innerHTML = evidence.attempts.length ? evidence.attempts.map((attempt) => `<article><div><strong>${escapeHtml(evidenceRun?.tasks.find((task) => task.id === attempt.task_id)?.title || attempt.task_id)}</strong><span>${escapeHtml(recordedModelIdentity(attempt.provider, attempt.model_id, attempt.model_resolution, attempt.connection_id))}</span></div><span class="lifecycle ${attempt.status === "completed" ? "qualified" : ""}">${escapeHtml(attempt.status)}</span><details class="evidence-report"><summary>View summary</summary><p>${escapeHtml(attempt.result_envelope?.summary || attempt.error || "No summary recorded")}</p></details></article>`).join("") : '<div class="empty-state">No attempts were started.</div>';
   $("#evidence-tool-count").textContent = `${evidence.toolReceipts.length} retained`;
-  $("#evidence-tools").innerHTML = evidence.toolReceipts.length ? evidence.toolReceipts.map((receipt) => `<article><div><strong>${escapeHtml(receipt.toolId)}</strong><span>${escapeHtml(receipt.actorRole)} · ${escapeHtml(receipt.stage)} · ${escapeHtml(receipt.sideEffect)}</span></div><span class="lifecycle ${receipt.outcome === "allow" ? "qualified" : receipt.outcome === "deny" ? "retired" : "degraded"}">${escapeHtml(receipt.outcome.replaceAll("_", " "))}</span><p class="evidence-report">${escapeHtml(receipt.reason)}${receipt.lockKeys.length ? `\nLocks: ${escapeHtml(receipt.lockKeys.join(", "))}` : ""}</p></article>`).join("") : '<div class="empty-state">No tool policy decisions were retained for this run.</div>';
+  $("#evidence-tools").innerHTML = evidence.toolReceipts.length ? evidence.toolReceipts.map((receipt) => `<article><div><strong>${escapeHtml(receipt.actorRole)} tried to ${escapeHtml(receipt.sideEffect.replaceAll("_", " "))} during ${escapeHtml(receipt.stage)}</strong><span class="muted">${escapeHtml(receipt.toolId)}</span></div><span class="lifecycle ${receipt.outcome === "allow" ? "qualified" : receipt.outcome === "deny" ? "retired" : "degraded"}">${escapeHtml(receipt.outcome.replaceAll("_", " "))}</span><p class="evidence-report">${escapeHtml(receipt.reason)}${receipt.lockKeys.length ? `\nLocks: ${escapeHtml(receipt.lockKeys.join(", "))} — prevents another agent from touching the same file or resource at the same time.` : ""}</p></article>`).join("") : '<div class="empty-state">No tool permission decisions have been recorded for this run yet.</div>';
 }
 
 // Owner-reported (2026-07-22): the derived verdict rendered the entire review
@@ -852,7 +997,7 @@ function parseReviewTargets(summary) {
 function derivedVerdictMarkup(report) {
   const reportIssues = [...report.missingEvidence.map((item) => `Missing: ${item}`), ...report.inconsistencies];
   const verdictLabel = escapeHtml(report.verdict.replaceAll("_", " "));
-  const headline = `<div><span class="connection-kind">DERIVED VERDICT</span><h3>${verdictLabel}</h3><p>${escapeHtml(verdictGuidance(report))}</p></div>
+  const headline = `<div><span class="connection-kind">OVERALL VERDICT</span><h3>${verdictLabel}</h3><p>${escapeHtml(verdictGuidance(report))}</p><p class="field-help">DevHarmonics' own check of whether the evidence kept for this run is complete and consistent — separate from what each individual reviewer concluded below.</p></div>
     <span class="status-pill report-${escapeHtml(report.verdict.toLowerCase())}">${verdictLabel}</span>
     ${reportIssues.length ? `<ul class="verdict-reasons">${reportIssues.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : '<p class="report-consistent">No missing or contradictory retained evidence detected.</p>'}`;
   const parsed = parseReviewTargets(report.summary || "");
@@ -874,6 +1019,18 @@ function derivedVerdictMarkup(report) {
     </div>`;
 }
 
+// Slice A pattern #3: these five words are a status system used throughout
+// the provider strip and worker pool, so each gets a one-line definition a
+// reader can find instead of guessing "Disabled" (you turned it off) apart
+// from "Unavailable" (something is actually broken).
+const PROVIDER_STATUS_DEFINITIONS = {
+  Ready: "Connected and usable right now.",
+  Disabled: "You've turned this provider off — flip it back on above.",
+  "Install required": "The provider's software isn't on this computer yet.",
+  "Sign-in required": "Installed but not logged in.",
+  Unavailable: "Installed and signed in, but something else is stopping it — check the detail line below the name.",
+};
+
 function renderProviders() {
   const providers = state.bootstrap.providers;
   const ready = (provider) => provider.available;
@@ -889,11 +1046,21 @@ function renderProviders() {
   $("#provider-status").innerHTML = providers
     .map((provider) => `<span class="provider-chip ${ready(provider) ? "online" : ""}" title="${escapeHtml(provider.summary)}"><i></i>${escapeHtml(providerDisplayName(provider.name))}</span>`)
     .join("");
+  // Gap fixed (Slice A): the reason a toggle is greyed out used to live only
+  // in a hover `title` — invisible on touch devices and easy to miss on
+  // desktop. It now prints as small visible text under the toggle too.
   $("#provider-toggles").innerHTML = providers
-    .map((provider) => `<label class="toggle" title="${escapeHtml(provider.summary)}"><input type="checkbox" name="provider" value="${provider.name}" ${ready(provider) ? "checked" : "disabled"}><span>${escapeHtml(providerDisplayName(provider.name))}</span></label>`)
+    .map((provider) => {
+      const label = statusLabel(provider);
+      const reason = ready(provider) ? "" : `<small class="toggle-reason">${escapeHtml(label)} — ${escapeHtml(provider.summary)}</small>`;
+      return `<label class="toggle" title="${escapeHtml(provider.summary)}"><input type="checkbox" name="provider" value="${provider.name}" ${ready(provider) ? "checked" : "disabled"}><span>${escapeHtml(providerDisplayName(provider.name))}</span>${reason}</label>`;
+    })
     .join("");
   $("#provider-help-content").innerHTML = providers
-    .map((provider) => `<section class="provider-help-card"><div><strong>${escapeHtml(providerDisplayName(provider.name))} <span class="auth-label ${ready(provider) ? "ready" : "required"}">${statusLabel(provider)}</span></strong><code>${escapeHtml(provider.loginCommand)}</code></div><p class="muted">${escapeHtml(provider.summary)}</p><ol>${provider.setupSteps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></section>`)
+    .map((provider) => {
+      const label = statusLabel(provider);
+      return `<section class="provider-help-card"><div><strong>${escapeHtml(providerDisplayName(provider.name))} <span class="auth-label ${ready(provider) ? "ready" : "required"}" title="${escapeHtml(PROVIDER_STATUS_DEFINITIONS[label] || "")}">${escapeHtml(label)}</span></strong></div><p class="muted">${escapeHtml(PROVIDER_STATUS_DEFINITIONS[label] || "")}</p><p class="muted">${escapeHtml(provider.summary)}</p><p class="field-help">Copy this exact line into a terminal window and press Enter:</p><code>${escapeHtml(provider.loginCommand)}</code><ol>${provider.setupSteps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></section>`;
+    })
     .join("");
   const unavailable = providers.filter((provider) => !ready(provider));
   $("#provider-auth-gate").classList.toggle("hidden", unavailable.length === 0);
@@ -988,7 +1155,6 @@ function renderSelectedRun() {
   if (state.view !== "runs") return;
   $("#composer").classList.add("hidden");
   $("#run-view").classList.remove("hidden");
-  $("#page-title").textContent = "Verified agent run";
   const autonomyLabel = run.autonomy === "observe" ? "Observe only" : run.autonomy === "bounded" ? "Bounded autonomy" : "Supervised";
   $("#run-project").textContent = `${run.projectPath} · ${autonomyLabel}`;
   const goalSummary = run.goalSummary || run.goal;
@@ -1042,10 +1208,10 @@ function renderSteering(run) {
     ? requested.kind === "hold_admission" ? "holding" : "resuming"
     : held ? "held" : "admitting";
   const admissionLabel = {
-    holding: "Hold requested — takes effect at the next admission boundary",
-    resuming: "Resume requested — takes effect at the next admission boundary",
-    held: "Admission held",
-    admitting: "Admitting tasks",
+    holding: "Pause requested — takes effect once the current task finishes",
+    resuming: "Resume requested — takes effect once the current task finishes",
+    held: "New tasks are paused",
+    admitting: "New tasks are starting normally",
   }[admissionState];
   $("#steering-admission").textContent = admissionLabel;
   $("#steering-admission").className = `lifecycle ${admissionState === "held" ? "warn" : admissionState === "admitting" ? "" : "pending"}`;
@@ -1064,7 +1230,7 @@ function renderSteering(run) {
     ? steerableTasks
       .map((task) => `<option value="${escapeHtml(task.id)}">${escapeHtml(task.title)} — ${escapeHtml(task.status)}</option>`)
       .join("")
-    : '<option value="">No steerable tasks right now</option>';
+    : '<option value="">No tasks can be steered right now — they\'re either finished or not yet queued.</option>';
   if (steerableTasks.some((task) => task.id === previous)) select.value = previous;
   // Only 'working' means a provider invocation is actually in flight. 'verifying'
   // runs DevHarmonics' own validators and 'retry' is a backoff gap — offering
@@ -1093,6 +1259,13 @@ function renderSteering(run) {
   renderSteeringDirectives(directives);
 }
 
+const STEERING_DISPOSITION_DEFINITIONS = {
+  applied: "This instruction has taken effect.",
+  pending: "Queued — takes effect at the next safe point.",
+  rejected: "DevHarmonics could not apply this — see the reason next to it.",
+  superseded: "A later instruction replaced this one before it took effect.",
+};
+
 function renderSteeringDirectives(directives) {
   const container = $("#steering-directives");
   if (!directives.length) {
@@ -1106,7 +1279,7 @@ function renderSteeringDirectives(directives) {
       return `<article class="steering-directive ${escapeHtml(directive.disposition)}">
         <div class="steering-directive-head">
           <strong>${escapeHtml(directive.kind.replaceAll("_", " "))}${directive.targetTaskId ? ` · ${escapeHtml(directive.targetTaskId)}` : ""}</strong>
-          <span class="steering-disposition ${escapeHtml(directive.disposition)}">${escapeHtml(directive.disposition)}</span>
+          <span class="steering-disposition ${escapeHtml(directive.disposition)}" title="${escapeHtml(STEERING_DISPOSITION_DEFINITIONS[directive.disposition] || "")}">${escapeHtml(directive.disposition)}</span>
         </div>
         ${detail ? `<p>${escapeHtml(detail)}</p>` : ""}
         <small>${escapeHtml(directive.actor)} · ${new Date(directive.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${directive.dispositionReason ? ` · ${escapeHtml(directive.dispositionReason)}` : ""}${directive.appliedAttemptId ? ` · attempt ${directive.appliedAttemptId}` : ""}</small>
@@ -1137,6 +1310,15 @@ async function submitSteering(button, runId, body, label) {
   }, { onError: (message) => { $("#steering-error").textContent = message; }, busyLabel: "Sending…" });
 }
 
+const DELIVERY_STATUS_DEFINITIONS = {
+  pending: "Nothing has been pushed for this repository yet.",
+  branch_pushed: "Your reviewed code is on GitHub, but not yet in a pull request.",
+  draft_pr_created: "A pull request exists on GitHub but hasn't been merged.",
+  merged: "The change is now in the base branch.",
+  tagged: "The change is merged and the release is tagged.",
+  failed: "The last delivery step for this repository didn't complete — see the error below.",
+};
+
 function renderDelivery(run) {
   const panel = $("#delivery-panel");
   const delivery = run.delivery;
@@ -1147,8 +1329,8 @@ function renderDelivery(run) {
   $("#delivery-status").textContent = delivery.status.replaceAll("_", " ");
   $("#delivery-status").className = `lifecycle ${done.includes(delivery.status) || delivery.status === "draft_pr_created" ? "qualified" : delivery.status === "failed" ? "degraded" : ""}`;
   $("#delivery-guidance").textContent = externalWritesAllowed
-    ? "Every step is your approval — push, draft PR, merge, and tag all run from here, and nothing happens without your click. DevHarmonics never merges or tags on its own."
-    : "External writes are disabled. Enable them in Setup before approving a branch push or draft pull request.";
+    ? "Push, draft PR, merge, and tag each need your approval. Approve them one at a time below, or use \"Do everything at once\" for a single approval that covers push, open PR, and merge — plus tag, only if you've filled in a tag. Nothing happens without your click, and DevHarmonics never merges or tags on its own."
+    : "Delivery is turned off. Turn on \"Allow GitHub delivery actions\" in Setup before you can push a branch or open a pull request.";
   $("#delivery-repositories").innerHTML = delivery.repositories.map((repository) => {
     const pushed = ["branch_pushed", "draft_pr_created", "merged", "tagged"].includes(repository.status);
     const created = ["draft_pr_created", "merged", "tagged"].includes(repository.status);
@@ -1156,7 +1338,8 @@ function renderDelivery(run) {
     const tagged = repository.status === "tagged";
     const settled = tagged;
     return `<article class="integration-repository-card delivery-repository-card">
-      <header><strong>${escapeHtml(repository.repositoryId)}</strong><span class="lifecycle ${created ? "qualified" : repository.status === "failed" ? "degraded" : ""}">${escapeHtml(repository.status.replaceAll("_", " "))}</span></header>
+      <header><strong>${escapeHtml(repository.repositoryId)}</strong><span class="lifecycle ${created ? "qualified" : repository.status === "failed" ? "degraded" : ""}" title="${escapeHtml(DELIVERY_STATUS_DEFINITIONS[repository.status] || "")}">${escapeHtml(repository.status.replaceAll("_", " "))}</span></header>
+      <small class="muted">commit range</small>
       <code class="integration-commit-range">${escapeHtml(repository.baseBranch)}: ${escapeHtml(repository.baseCommit)} → ${escapeHtml(repository.headCommit)}</code>
       <code>${escapeHtml(repository.branch)}</code>
       ${repository.remoteUrl ? `<a href="${escapeHtml(repository.remoteUrl)}" target="_blank" rel="noreferrer">${escapeHtml(repository.remoteUrl)}</a>` : ""}
@@ -1165,13 +1348,13 @@ function renderDelivery(run) {
       ${tagged ? `<p class="delivery-done">Delivered, merged, and tagged${repository.releaseTag ? ` as ${escapeHtml(repository.releaseTag)}` : ""} — this repository is fully shipped.</p>` : merged ? `<p class="delivery-done">Merged under your approval. Tag the release below when you are ready.</p>` : ""}
       <div class="plan-actions">
         <button class="secondary small" type="button" data-delivery-action="push_branch" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || pushed ? "disabled" : ""}>${pushed ? "Branch pushed ✓" : "Approve &amp; push branch"}</button>
-        <button class="secondary small" type="button" data-delivery-action="create_draft_pr" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || !pushed || created ? "disabled" : ""}>${created ? "Draft PR created ✓" : "Approve &amp; create draft PR"}</button>
+        <button class="secondary small" type="button" data-delivery-action="create_draft_pr" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || !pushed || created ? "disabled" : ""}>${created ? "Draft PR created ✓" : "Approve &amp; create draft pull request"}</button>
         <button class="${merged ? "secondary" : "primary"} small" type="button" data-delivery-action="merge_pr" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || !created || merged ? "disabled" : ""}>${merged ? "Merged ✓" : "Approve &amp; merge"}</button>
       </div>
       <div class="plan-actions delivery-tag-row">
-        <input class="delivery-tag-input" type="text" placeholder="no tag" aria-label="Release tag for ${escapeHtml(repository.repositoryId)}" data-tag-for="${escapeHtml(repository.repositoryId)}" ${!externalWritesAllowed || !merged || tagged ? "disabled" : ""}>
+        <input class="delivery-tag-input" type="text" placeholder="leave blank to skip tagging" aria-label="Release tag for ${escapeHtml(repository.repositoryId)}" data-tag-for="${escapeHtml(repository.repositoryId)}" ${!externalWritesAllowed || !merged || tagged ? "disabled" : ""}>
         <button class="${merged && !tagged ? "primary" : "secondary"} small" type="button" data-delivery-action="tag_release" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || !merged || tagged ? "disabled" : ""}>${tagged ? "Tagged ✓" : "Approve &amp; tag release"}</button>
-        ${merged ? "" : `<button class="primary small" type="button" data-delivery-action="complete_delivery" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed ? "disabled" : ""}>Complete delivery (push · PR · merge · tag if named)</button>`}
+        ${merged ? "" : `<button class="primary small" type="button" data-delivery-action="complete_delivery" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed ? "disabled" : ""} title="One approval covers push, open PR, and merge — plus tag, only if you've filled in the tag field. Leave it blank to skip tagging.">Do everything at once (push, open PR, merge — and tag if you've filled one in)</button>`}
       </div>
       <p class="field-help delivery-tag-help" data-tag-help-for="${escapeHtml(repository.repositoryId)}">${tagged ? `Tagged ${escapeHtml(repository.releaseTag || "")}.` : "Empty tag field = no tag is created. Reading this repository's declared version…"}</p>
     </article>`;
@@ -1217,7 +1400,7 @@ function deliveryTagCaption(repository) {
   // repository this client cannot back).
   return {
     prefill: null,
-    help: "Declared-version lookup needs a server restart on the current build. Empty tag field = no tag is created.",
+    help: "We can't check this repository's declared version right now — ask an engineer to restart the server. Until then: empty tag field = no tag is created.",
   };
 }
 
@@ -1249,8 +1432,8 @@ function renderIntegrationSet(run) {
   $("#integration-set-status").textContent = integrationSet.status.replaceAll("_", " ");
   $("#integration-set-status").className = `lifecycle ${integrationSet.status === "ready" ? "qualified" : integrationSet.status === "failed" || integrationSet.status === "not_ready" ? "degraded" : ""}`;
   $("#integration-set-conditions").textContent = integrationSet.integrationConditions.length
-    ? `Integration conditions: ${integrationSet.integrationConditions.join(" · ")}`
-    : "No cross-repository integration conditions were retained.";
+    ? `Sync rules: ${integrationSet.integrationConditions.join(" · ")}`
+    : "No extra rules were needed to keep these repositories in sync.";
   $("#integration-set-repositories").innerHTML = integrationSet.repositories.map((repository) => `
     <article class="integration-repository-card">
       <header><strong>${escapeHtml(repository.repositoryId)}</strong><span class="lifecycle ${repository.status === "ready" ? "qualified" : repository.status === "failed" ? "degraded" : ""}">${escapeHtml(repository.status)}</span></header>
@@ -1262,15 +1445,18 @@ function renderIntegrationSet(run) {
 }
 
 function renderBoard(run) {
+  // Slice A: "Plan" as a column name collided with the separate "plan
+  // preview" step earlier in the flow — "Queued" says what's actually true
+  // (waiting to start) without reusing an already-loaded word.
   const columns = [
-    ["Plan", ["queued"]],
+    ["Queued", ["queued"]],
     ["Working", ["working", "retry"]],
     ["Verifying", ["verifying"]],
     ["Resolved", ["passed", "paused", "failed", "blocked", "cancelled"]],
   ];
   $("#board").innerHTML = columns.map(([title, statuses]) => {
     const tasks = run.tasks.filter((task) => statuses.includes(task.status));
-    return `<section class="column"><div class="column-head"><span>${title}</span><b>${tasks.length}</b></div>${tasks.map((task) => taskCard(task, run)).join("") || '<div class="empty-state">No tasks</div>'}</section>`;
+    return `<section class="column"><div class="column-head"><span>${title}</span><b>${tasks.length}</b></div>${tasks.map((task) => taskCard(task, run)).join("") || '<div class="empty-state">No tasks in this column yet</div>'}</section>`;
   }).join("");
 }
 
@@ -1282,7 +1468,7 @@ function taskCard(task, run) {
     const elapsed = startedAt ? `<span class="op-spinner" aria-hidden="true"></span>active <span data-elapsed-since="${startedAt}" aria-hidden="true">${operationElapsed(startedAt)}</span>` : `<span class="op-spinner" aria-hidden="true"></span>starting`;
     timing = `<div class="task-timing">${elapsed}${quietMarkup(lastActivityAt)}</div>`;
   }
-  return `<button class="task-card ${task.status}" data-task-id="${escapeHtml(task.id)}"><strong>${escapeHtml(task.title)}</strong>${task.repositoryIds?.length ? `<small>${escapeHtml(task.repositoryIds.join(", "))}</small>` : ""}<div class="task-contract"><span>${escapeHtml(task.permission.replaceAll("_", " "))}</span><span>${escapeHtml(task.risk)} risk</span></div><div class="task-meta"><span class="provider-tag">${escapeHtml(routingIdentity(taskRouting(run, task.id), task.provider))}</span><span>${passed}/${task.checks.length} checks · ${task.attemptCount} tries</span></div>${timing}</button>`;
+  return `<button class="task-card ${task.status}" data-task-id="${escapeHtml(task.id)}"><strong>${escapeHtml(task.title)}</strong>${task.repositoryIds?.length ? `<small>${escapeHtml(task.repositoryIds.join(", "))}</small>` : ""}<div class="task-contract"><span>${escapeHtml(permissionLabel(task.permission))}</span><span>${escapeHtml(task.risk)} risk</span></div><div class="task-meta"><span class="provider-tag">${escapeHtml(routingIdentity(taskRouting(run, task.id), task.provider))}</span><span>${passed}/${task.checks.length} checks · ${task.attemptCount} tries</span></div>${timing}</button>`;
 }
 
 function renderActivity(run) {
@@ -1294,7 +1480,7 @@ function renderActivity(run) {
 function renderVerdict(run) {
   if (!run.finalReview) {
     $("#verdict").className = "empty-state";
-    $("#verdict").textContent = "The reviewer’s verdict will appear after integration.";
+    $("#verdict").textContent = "The independent reviewer's verdict will appear here once the run finishes and its changes are combined.";
     return;
   }
   const ready = run.finalReview.trimStart().startsWith("READY");
@@ -1308,24 +1494,25 @@ function openTask(taskId) {
   if (!task) return;
   const routing = taskRouting(run, taskId);
   $("#drawer-content").innerHTML = `
-    <p class="drawer-kicker">${escapeHtml(task.status)}</p>
+    <p class="drawer-kicker" title="Queued: waiting to start. Working: an AI is actively writing code. Verifying: DevHarmonics is running its own checks on the result. Passed / failed / blocked / cancelled: finished.">${escapeHtml(task.status)}</p>
     <h2 class="drawer-title">${escapeHtml(task.title)}</h2>
     <p class="drawer-meta">${escapeHtml(routingIdentity(routing, task.provider))} · ${task.attemptCount} attempts</p>
-    <h3>Task contract</h3>
+    <h3>What this task is allowed to do</h3>
     <dl class="contract-details">
-      <div><dt>Permission</dt><dd>${escapeHtml(task.permission.replaceAll("_", " "))}</dd></div>
+      <div><dt>Permission</dt><dd>${escapeHtml(permissionLabel(task.permission))}</dd></div>
       <div><dt>Risk</dt><dd>${escapeHtml(task.risk)}</dd></div>
-      <div><dt>Kind</dt><dd>${escapeHtml(task.kind)}</dd></div>
+      <div><dt>Type of work</dt><dd>${escapeHtml(task.kind)}</dd></div>
       <div><dt>Repositories</dt><dd>${task.repositoryIds?.length ? task.repositoryIds.map(escapeHtml).join("<br>") : "Current project"}</dd></div>
-      <div><dt>Repository scope</dt><dd>${task.repositoryScope.map(escapeHtml).join("<br>")}</dd></div>
+      <div><dt>Exactly what files it can touch</dt><dd>${task.repositoryScope.map(escapeHtml).join("<br>")}</dd></div>
     </dl>
+    <p class="field-help">Permission = can this task change files, or only look. Risk = how closely the result gets checked before it's accepted. Type of work = what category of task this is (e.g. write code, run tests, review). "Exactly what files it can touch" is the specific paths this task is restricted to — even in Bounded autonomy, it cannot write outside this list.</p>
     <p>${escapeHtml(task.description)}</p>
     ${routingEvidenceMarkup(routing)}
     <h3>Acceptance criteria</h3>
     ${task.acceptanceCriteria.length ? `<ul>${task.acceptanceCriteria.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : '<div class="empty-state">No acceptance criteria supplied.</div>'}
-    <h3>Expected artifacts</h3>
+    <h3>Files this task should produce</h3>
     ${task.expectedArtifacts.length ? `<ul>${task.expectedArtifacts.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : '<div class="empty-state">No expected artifacts supplied.</div>'}
-    <h3>Verification receipts</h3>
+    <h3>Checks run so far</h3>
     ${task.checks.length ? task.checks.map(checkMarkup).join("") : '<div class="empty-state">No checks have run yet.</div>'}
   `;
   $("#task-drawer").scrollTop = 0;
@@ -1337,7 +1524,7 @@ function openTask(taskId) {
 
 function checkMarkup(check) {
   const output = [check.stdout, check.stderr].filter(Boolean).join("\n") || "No output";
-  return `<div class="check"><div class="check-head"><strong>${escapeHtml(check.name)}</strong><span class="${check.passed ? "pass" : "fail"}">${check.passed ? "PASS" : `FAIL ${check.exitCode}`}</span></div><pre>${escapeHtml(output)}</pre></div>`;
+  return `<div class="check"><div class="check-head"><strong>${escapeHtml(check.name)}</strong><span class="${check.passed ? "pass" : "fail"}" title="Exit code: the number the check command returned — 0 always means pass; anything else is the check's own failure signal.">${check.passed ? "PASS" : `FAIL (code ${check.exitCode})`}</span></div><pre>${escapeHtml(output)}</pre></div>`;
 }
 
 function closeTask() {
@@ -1427,12 +1614,13 @@ function renderPlanPreview() {
   const highRisk = plan.tasks.filter((task) => task.risk === "high").length;
   const impacts = plan.repositoryImpact || [];
   const affectedRepositories = impacts.filter((impact) => impact.disposition === "affected").length;
-  $("#plan-metrics").innerHTML = `<div class="metric"><span>Tasks</span><strong>${plan.tasks.length}</strong></div><div class="metric"><span>Affected repositories</span><strong>${affectedRepositories}</strong></div><div class="metric"><span>Workspace writes</span><strong>${writeTasks}</strong></div><div class="metric"><span>High risk</span><strong>${highRisk}</strong></div><div class="metric"><span>Planned agents</span><strong>${state.planPreview.capacity.effectiveConcurrency}</strong></div>`;
+  $("#plan-metrics").innerHTML = `<div class="metric"><span>Tasks</span><strong>${plan.tasks.length}</strong></div><div class="metric"><span>Affected repositories</span><strong>${affectedRepositories}</strong></div><div class="metric"><span>Tasks that change files</span><strong>${writeTasks}</strong></div><div class="metric"><span>High risk</span><strong>${highRisk}</strong></div><div class="metric"><span>AI workers planned</span><strong>${state.planPreview.capacity.effectiveConcurrency}</strong></div>`;
   $("#plan-repository-impact").innerHTML = impacts.map((impact) => `<article class="repository-impact ${escapeHtml(impact.disposition)}"><strong>${escapeHtml(impact.repositoryId)} · ${escapeHtml(impact.disposition)}</strong><span>${escapeHtml(impact.rationale)}</span></article>`).join("");
   $("#plan-task-list").innerHTML = plan.tasks.map((task) => {
     const assignment = state.planPreview.assignments.find((item) => item.taskId === task.id);
     const dependencyText = task.dependencies.length ? `After ${task.dependencies.join(", ")}` : "No dependencies";
-    return `<article class="plan-task"><h3>${escapeHtml(task.title)}</h3><div class="plan-task-meta"><span>${escapeHtml(task.permission.replaceAll("_", " "))}</span><span>${escapeHtml(task.risk)} risk</span><span>${escapeHtml(assignment?.tier || "unassigned")}</span></div><p>${escapeHtml(task.description)}</p><details><summary>${escapeHtml(dependencyText)} · ${escapeHtml(providerDisplayName(assignment?.provider || "unassigned"))} / ${escapeHtml(assignment?.modelId ? `${modelDisplayName(assignment.modelId)} (requested)` : "provider default (actual model unverified)")} · ${task.checks.length} checks</summary><p>Repositories: ${(task.repositoryIds || []).map(escapeHtml).join(", ") || "Current workspace"}<br>Scope: ${task.repositoryScope.map(escapeHtml).join(", ")}<br>Acceptance: ${task.acceptanceCriteria.map(escapeHtml).join("; ") || "Not supplied"}<br>Capabilities: ${task.capabilityNeeds.map(escapeHtml).join(", ")}</p></details></article>`;
+    const identity = recordedModelIdentity(assignment?.provider || "unassigned", assignment?.modelId, assignment?.modelId ? "requested_unverified" : "provider_default_unresolved", assignment?.connectionId);
+    return `<article class="plan-task"><h3>${escapeHtml(task.title)}</h3><div class="plan-task-meta"><span>${escapeHtml(permissionLabel(task.permission))}</span><span>${escapeHtml(task.risk)} risk</span><span title="The quality/cost tier of AI model assigned — higher tiers cost more and are used for harder tasks.">${escapeHtml(assignment?.tier || "unassigned")}</span></div><p>${escapeHtml(task.description)}</p><details><summary>${escapeHtml(dependencyText)} · ${escapeHtml(identity)} · ${task.checks.length} checks</summary><p>Repositories: ${(task.repositoryIds || []).map(escapeHtml).join(", ") || "Current workspace"}<br>Exactly what it can touch: ${task.repositoryScope.map(escapeHtml).join(", ")}<br>Acceptance: ${task.acceptanceCriteria.map(escapeHtml).join("; ") || "Not supplied"}<br>What the AI needs to be able to do: ${task.capabilityNeeds.map(escapeHtml).join(", ") || "Nothing beyond a normal file edit"}</p></details></article>`;
   }).join("");
   const execution = state.planPreview.execution || { supported: true, reason: "Single workspace execution is available." };
   $("#plan-execution-note").textContent = execution.supported ? `Execution available: ${execution.reason}` : `Planning only: ${execution.reason}`;
@@ -1473,13 +1661,14 @@ function showComposer() {
   $("#plan-preview").classList.add("hidden");
   $("#composer").classList.remove("hidden");
   $("#run-view").classList.add("hidden");
-  $("#page-title").textContent = "Assemble a verified agent team";
   renderRunList();
   $("#goal").focus();
 }
 
 $("#agent-mode").addEventListener("change", (event) => { $("#agent-count").disabled = event.target.value === "auto"; });
-$("#run-autonomy").addEventListener("change", renderRunAutonomyHelp);
+$("#run-autonomy").addEventListener("change", () => renderRunAutonomyHelp());
+$("#setting-autonomy").addEventListener("change", () => renderRunAutonomyHelp("setting-autonomy", "setting-autonomy-help"));
+$("#workbench-autonomy").addEventListener("change", () => renderRunAutonomyHelp("workbench-autonomy", "workbench-autonomy-help"));
 $("#objective-product").addEventListener("change", () => {
   renderObjectiveRepositoryPicker();
 });
@@ -1491,6 +1680,10 @@ $("#refresh-provider-status").addEventListener("click", refreshProviderStatus);
 $("#cancel-run").addEventListener("click", async () => {
   const runId = state.selectedRunId;
   if (!runId) return;
+  // Gap fixed (Slice A): every other consequential action in this view
+  // (delivery push/merge/tag, steering interrupt) already confirms before
+  // acting — cancel was the one stray click that could not be undone.
+  if (!window.confirm("Cancel this run? Work in progress stops; evidence already recorded is kept.")) return;
   showError("");
   await withOperation($("#cancel-run"), "Cancelling the run", async () => {
     await api(`/api/runs/${runId}/cancel`, {
@@ -1606,11 +1799,11 @@ $("#new-workbench").addEventListener("click", () => {
 $("#workbench-new-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   $("#workbench-new-error").textContent = "";
-  await withOperation(event.currentTarget.querySelector('button[type="submit"]'), "Creating the Workbench scratchpad", async () => {
+  await withOperation(event.currentTarget.querySelector('button[type="submit"]'), "Creating the Workbench discussion", async () => {
     const result = await api("/api/workbench", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ projectPath: $("#workbench-project").value, title: $("#workbench-title-input").value.trim() || "Untitled scratchpad" }),
+      body: JSON.stringify({ projectPath: $("#workbench-project").value, title: $("#workbench-title-input").value.trim() || "Untitled discussion" }),
     });
     $("#workbench-new-form").classList.add("hidden");
     await refreshWorkbench(result.session.id);
@@ -1750,28 +1943,31 @@ $("#openrouter-model-query").addEventListener("keydown", (event) => { if (event.
 async function searchOpenRouterCatalog() {
   const query = $("#openrouter-model-query").value.trim();
   const result = await api(`/api/openrouter/catalog?q=${encodeURIComponent(query)}`);
-  $("#openrouter-catalog").innerHTML = result.models.map((model) => `<article class="model-card"><div><span class="connection-kind">OPENROUTER CATALOG</span><h3>${escapeHtml(model.displayName)}</h3><code>${escapeHtml(model.canonicalName)}</code></div><p>Context: ${Number(model.metadata.contextLength || 0).toLocaleString()} · estimated qualification: ${model.estimatedQualificationCostUsd == null ? "unknown" : `$${Number(model.estimatedQualificationCostUsd).toFixed(5)}`}</p>${model.exact ? `<button class="secondary small" data-import-openrouter="${escapeHtml(model.canonicalName)}">Import exact candidate</button>` : '<span class="muted">Moving alias · discovery only</span>'}</article>`).join("") || '<div class="empty-state">No matching catalog models.</div>';
+  $("#openrouter-catalog").innerHTML = result.models.map((model) => `<article class="model-card"><div><span class="connection-kind">OPENROUTER CATALOG</span><h3>${escapeHtml(model.displayName)}</h3><code>${escapeHtml(model.canonicalName)}</code></div><p>Reads up to ${Number(model.metadata.contextLength || 0).toLocaleString()} tokens at once · Estimated cost to test: ${model.estimatedQualificationCostUsd == null ? "unknown" : `$${Number(model.estimatedQualificationCostUsd).toFixed(5)}`}</p>${model.exact ? `<button class="secondary small" data-import-openrouter="${escapeHtml(model.canonicalName)}">Add to known models</button>` : '<span class="muted" title="OpenRouter sometimes points a name at whichever model is newest, so DevHarmonics can\'t lock a version to it. Search for the specific version name instead.">Not an exact match — can\'t be added yet</span>'}</article>`).join("") || '<div class="empty-state">No matching catalog models.</div>';
 }
 
+// Slice A: this is the same "why a model was picked" concept as the Models
+// view's Observed performance / Workload evidence blocks — one vocabulary
+// for both, and no raw scoring-system point values shown to a PM.
 function routingEvidenceMarkup(routing) {
-  if (!routing) return '<h3>Why this model</h3><div class="empty-state">Routing evidence is not available for this earlier attempt.</div>';
-  const labels = {
-    manualAssignment: "Manual assignment",
-    baseEligibility: "Eligible candidate",
-    tierFit: "Workload tier fit",
-    reasoningFit: "Reasoning fit",
-    userPin: "User pin",
-    preferredProvider: "Preferred provider",
-    fallbackProvider: "Fallback affinity",
-    empiricalReliability: "Empirical reliability",
-    empiricalLatency: "Workload latency",
-    providerDiversity: "Independent provider",
-    costAwareness: "Relative paid-model cost",
+  if (!routing) return '<h3>Why this model</h3><div class="empty-state">We don\'t have a record of why this model was picked for this earlier run.</div>';
+  const reasons = {
+    manualAssignment: "Manually assigned",
+    baseEligibility: "Qualified for this task",
+    tierFit: "Right capability level for the task's difficulty",
+    reasoningFit: "Matched the effort setting needed",
+    userPin: "You pinned this model",
+    preferredProvider: "Preferred provider for this task",
+    fallbackProvider: "Used as a fallback preference",
+    empiricalReliability: "Historically reliable on similar tasks",
+    empiricalLatency: "Historically fast on similar tasks",
+    providerDiversity: "Chosen from a different provider than the one that wrote the code, for independent review",
+    costAwareness: "Reasonable cost compared to similar models",
   };
-  const scoreRows = Object.entries(routing.scoreBreakdown || {}).filter(([, value]) => Number(value) !== 0)
-    .map(([key, value]) => `<div><dt>${escapeHtml(labels[key] || key)}</dt><dd>${Number(value) > 0 ? "+" : ""}${escapeHtml(value)}</dd></div>`).join("");
+  const reasonRows = Object.entries(routing.scoreBreakdown || {}).filter(([, value]) => Number(value) !== 0)
+    .map(([key]) => `<li>${escapeHtml(reasons[key] || key)}</li>`).join("");
   const modelName = routing.model?.alias || routing.model?.requestedModelId || "provider default";
-  return `<h3>Why this model</h3><p>${escapeHtml(connectionDisplayName(routing.connectionId, routing.provider))} / ${escapeHtml(modelName)} was requested for a ${escapeHtml(routing.workload?.complexity || "classified")} task requiring the ${escapeHtml(routing.workload?.requiredTier || "configured")} tier. The actual model is only treated as verified when the runtime reports it.</p><dl class="contract-details routing-score">${scoreRows}<div><dt>Total routing score</dt><dd>${escapeHtml(routing.score)}</dd></div></dl>${routing.factors?.length ? `<ul>${routing.factors.map((factor) => `<li>${escapeHtml(factor)}</li>`).join("")}</ul>` : ""}`;
+  return `<h3>Why this model</h3><p>${escapeHtml(connectionDisplayName(routing.connectionId, routing.provider))} / ${escapeHtml(modelName)} was requested for a ${escapeHtml(routing.workload?.complexity || "classified")} task that needed ${escapeHtml(routing.workload?.requiredTier || "configured")}-level capability. DevHarmonics only counts a model as confirmed once the tool itself reports back which model it actually used.</p>${reasonRows ? `<ul>${reasonRows}</ul>` : ""}${routing.factors?.length ? `<ul>${routing.factors.map((factor) => `<li>${escapeHtml(factor)}</li>`).join("")}</ul>` : ""}`;
 }
 
 function formatDuration(milliseconds) {
@@ -1791,7 +1987,7 @@ $("#settings-form").addEventListener("submit", async (event) => {
   const config = structuredClone(state.bootstrap.config);
   const workers = [...document.querySelectorAll('input[name="setting-worker"]:checked')].map((input) => input.value);
   if (!workers.length) {
-    $("#settings-message").textContent = "Choose at least one worker runtime.";
+    $("#settings-message").textContent = "Turn on at least one subscription tool under \"Subscription workers.\"";
     return;
   }
   config.product = { architect: $("#setting-architect").value, reviewer: $("#setting-reviewer").value, workers };
@@ -1879,10 +2075,10 @@ $("#model-list").addEventListener("click", async (event) => {
   const excludePerformance = event.target.closest("[data-exclude-performance]");
   const button = qualify || qualifyLocalTools || qualifyBenchmark || activate || pin || track || exclude || resetPerformance || excludePerformance;
   if (!button) return;
-  const operationLabel = qualify || qualifyLocalTools || qualifyBenchmark ? "Qualifying the model" : resetPerformance ? "Resetting the empirical baseline" : excludePerformance ? "Updating empirical-history policy" : "Updating the scheduling preference";
+  const operationLabel = qualify || qualifyLocalTools || qualifyBenchmark ? "Qualifying the model" : resetPerformance ? "Resetting performance history" : excludePerformance ? "Updating whether past results count" : "Updating this model's settings";
   // Confirm before the operation begins, so cancelling never registers a
   // started (let alone succeeded) operation.
-  if (resetPerformance && !window.confirm("Reset this model's empirical baseline? Existing attempt evidence stays in the ledger but will no longer affect its profile.")) return;
+  if (resetPerformance && !window.confirm("Reset this model's performance history? Past runs are still kept on record — they just won't count toward future scheduling decisions anymore.")) return;
   let qualifiedModelId = null;
   let preferenceModelId = null;
   await withOperation(button, operationLabel, async () => {
@@ -1899,11 +2095,11 @@ $("#model-list").addEventListener("click", async (event) => {
       const model = state.models.find((item) => item.id === (qualify?.dataset.qualifyModel || qualifyLocalTools?.dataset.qualifyLocalTools || qualifyBenchmark.dataset.qualifyBenchmark));
       const connection = state.connections.find((item) => item.id === model.connectionId);
       const role = qualifyLocalTools ? "local_tools" : qualifyBenchmark ? "benchmark" : connection?.transport === "local" ? "analysis" : "general";
-      $("#model-message").textContent = role === "local_tools" ? `Running a bounded read-and-patch qualification for ${model.displayName} in a disposable fixture...` : role === "benchmark" ? `Benchmarking structured output, contradiction detection, and requirement counting for ${model.displayName}...` : `Running a small, read-only ${role} qualification for ${model.displayName}...`;
+      $("#model-message").textContent = role === "local_tools" ? `Testing ${model.displayName}'s ability to safely edit files, in a throwaway test copy of your project...` : role === "benchmark" ? `Testing ${model.displayName}'s accuracy on structured answers, spotting contradictions, and counting requirements...` : `Running a quick, read-only check to see if ${model.displayName} qualifies as a ${roleLabel(role)}...`;
       try {
         await api(`/api/models/${encodeURIComponent(model.id)}/qualify`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role }) });
       } catch (error) {
-        if (!error.data?.requiresCostConfirmation || !window.confirm(`This paid qualification is estimated to cost ${error.data.estimatedCostUsd == null ? "an unknown amount" : `$${Number(error.data.estimatedCostUsd).toFixed(5)}`}. Continue?`)) throw error;
+        if (!error.data?.requiresCostConfirmation || !window.confirm(`This test uses a paid model. Estimated cost: ${error.data.estimatedCostUsd == null ? "couldn't be estimated — check OpenRouter's pricing page before continuing" : `$${Number(error.data.estimatedCostUsd).toFixed(5)}`}. Continue?`)) throw error;
         await api(`/api/models/${encodeURIComponent(model.id)}/qualify`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role, confirmPaidCost: true }) });
       }
       qualifiedModelId = model.id;
@@ -1915,7 +2111,7 @@ $("#model-list").addEventListener("click", async (event) => {
       try {
         await api(`/api/models/${encodeURIComponent(modelId)}/preference`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       } catch (error) {
-        if (!error.data?.requiresCostConfirmation || !window.confirm(`Activation requires a paid qualification estimated at ${error.data.estimatedCostUsd == null ? "an unknown amount" : `$${Number(error.data.estimatedCostUsd).toFixed(5)}`}. Continue?`)) throw error;
+        if (!error.data?.requiresCostConfirmation || !window.confirm(`Activation requires a paid qualification. Estimated cost: ${error.data.estimatedCostUsd == null ? "couldn't be estimated — check OpenRouter's pricing page before continuing" : `$${Number(error.data.estimatedCostUsd).toFixed(5)}`}. Continue?`)) throw error;
         await api(`/api/models/${encodeURIComponent(modelId)}/preference`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, confirmPaidCost: true }) });
       }
       preferenceModelId = modelId;
@@ -1923,15 +2119,15 @@ $("#model-list").addEventListener("click", async (event) => {
     await refreshFleet();
     if (qualifiedModelId) {
       const qualifiedModel = state.models.find((model) => model.id === qualifiedModelId);
-      const nextStep = isModelSchedulable(qualifiedModel) ? "It is active and schedulable."
-        : requiresSpecialistBenchmark(qualifiedModel) && !hasCurrentSpecialistBenchmark(qualifiedModel) ? "It still needs the specialist benchmark before it can be scheduled."
-          : !hasCurrentOperationalQualification(qualifiedModel) ? "It still needs a current role qualification before it can be scheduled."
-          : qualifiedModel?.active ? "It is active but not currently schedulable."
-            : "Activate it to schedule it.";
-      $("#model-message").textContent = `${qualifiedModel?.displayName || "Model"} passed qualification. ${nextStep}`;
+      const nextStep = isModelSchedulable(qualifiedModel) ? "It's active and ready to be used."
+        : requiresSpecialistBenchmark(qualifiedModel) && !hasCurrentSpecialistBenchmark(qualifiedModel) ? "It still needs the extra accuracy test before it can be used — see \"Run accuracy test\" below."
+          : !hasCurrentOperationalQualification(qualifiedModel) ? "It still needs to pass a role check before it can be used."
+          : qualifiedModel?.active ? "It's turned on but not currently usable — check its status above."
+            : "Click Activate to start using it.";
+      $("#model-message").textContent = `${qualifiedModel?.displayName || "Model"} passed its check. ${nextStep}`;
     } else if (preferenceModelId) {
       const preferenceModel = state.models.find((model) => model.id === preferenceModelId);
-      $("#model-message").textContent = `${preferenceModel?.displayName || "Model"} scheduling preference updated.`;
+      $("#model-message").textContent = `${preferenceModel?.displayName || "Model"}'s settings were updated.`;
     }
   }, { onError: async (message) => { $("#model-message").textContent = message; await refreshFleet(); } });
 });
@@ -1960,7 +2156,7 @@ $("#delivery-repositories").addEventListener("click", async (event) => {
     create_draft_pr: { confirm: "create a draft pull request for this exact reviewed branch", op: "Creating the draft pull request", busy: "Creating draft PR…" },
     merge_pr: { confirm: `mark the pull request ready and MERGE it into its base branch — only if GitHub still shows the exact reviewed commit ${(button.dataset.headCommit || "").slice(0, 12)}, no conflicts, and green checks`, op: "Merging the approved pull request", busy: "Merging…" },
     tag_release: { confirm: `create and push release tag ${tag ?? "(enter a tag name first)"} on the merge commit`, op: "Tagging the release", busy: "Tagging…" },
-    complete_delivery: { confirm: `run the complete delivery of reviewed commit ${(button.dataset.headCommit || "").slice(0, 12)}: push, draft PR, merge${tag ? `, and tag ${tag}` : ""} — one approval covering each named step; the merge still refuses conflicts, red checks, or a changed PR head`, op: "Completing the delivery", busy: "Delivering…" },
+    complete_delivery: { confirm: `run the complete delivery of reviewed commit ${(button.dataset.headCommit || "").slice(0, 12)}: push, draft PR, merge${tag ? `, and tag ${tag}` : ""} — one approval covering each named step; the merge step still refuses to run if there's a conflict, a red check, or if the pull request has changed since you approved it`, op: "Completing the delivery", busy: "Delivering…" },
   };
   const label = labels[action] ?? labels.push_branch;
   if (action === "tag_release" && !tag) { $("#delivery-error").textContent = "Enter a release tag name first."; return; }

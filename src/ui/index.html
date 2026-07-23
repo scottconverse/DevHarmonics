@@ -15,13 +15,13 @@
         </div>
         <button id="new-run" class="primary full">＋ New run</button>
         <nav class="app-nav" aria-label="Application">
-          <button class="nav-link active" data-view="runs">Runs</button>
-          <button class="nav-link" data-view="workbench">Workbench</button>
-          <button class="nav-link" data-view="products">Products</button>
-          <button class="nav-link" data-view="setup">Setup</button>
-          <button class="nav-link" data-view="models">Models</button>
-          <button class="nav-link" data-view="workflows">Workflows</button>
-          <button class="nav-link" data-view="evidence">Evidence</button>
+          <button class="nav-link active" data-view="runs" title="Define an objective, approve the team's plan, and watch the work happen.">Runs</button>
+          <button class="nav-link" data-view="workbench" title="Ask one or more models questions about a project — read-only, nothing runs, nothing changes.">Workbench</button>
+          <button class="nav-link" data-view="products" title="Register the real products and repositories the team works on.">Products</button>
+          <button class="nav-link" data-view="setup" title="The rules every run follows: who plans, who builds, who reviews, and what the team may do.">Setup</button>
+          <button class="nav-link" data-view="models" title="Every model DevHarmonics can use and what each has proven it can do.">Models</button>
+          <button class="nav-link" data-view="workflows" title="Reusable, versioned job descriptions you can turn into a run.">Workflows</button>
+          <button class="nav-link" data-view="evidence" title="The permanent record of a run: what was done, checked, and reviewed.">Evidence</button>
         </nav>
         <div class="section-label">Recent runs</div>
         <nav id="run-list" class="run-list" aria-label="Recent runs"></nav>
@@ -34,10 +34,13 @@
       <main>
         <header class="topbar">
           <div>
-            <p class="eyebrow">LOCAL ORCHESTRATOR</p>
-            <h1 id="page-title">Assemble a verified agent team</h1>
+            <h1 id="page-title">Runs</h1>
+            <p id="page-purpose" class="view-purpose">Define an objective, approve the team's plan, and watch the work happen.</p>
           </div>
-          <div id="provider-status" class="provider-status"></div>
+          <div class="provider-status-wrap">
+            <div id="provider-status" class="provider-status"></div>
+            <small class="field-help provider-status-legend">Green = signed in and ready to work. Grey = needs setup — see the Setup page to connect.</small>
+          </div>
         </header>
 
         <section id="composer" class="composer panel">
@@ -46,16 +49,17 @@
               <span class="step">01</span>
               <h2>Define the outcome</h2>
             </div>
-            <span class="muted">Your credentials stay inside the official CLIs.</span>
+            <span class="muted">Your sign-in stays with each AI provider's own app — DevHarmonics never sees or stores your password or API key.</span>
           </div>
 
           <label for="project-path">Project folder</label>
           <input id="project-path" class="input" spellcheck="false" />
 
           <div class="objective-repository-picker">
-            <label for="objective-product">Product context <small>Optional</small></label>
+            <label for="objective-product">Group with other repositories? <small>Optional</small></label>
             <select id="objective-product" class="input"><option value="">Standalone repository</option></select>
-            <fieldset id="objective-repositories-field" class="hidden"><legend>Repositories in scope</legend><p class="field-help">Select every repository the architect must assess. Planning can span repositories; execution remains disabled until the affected set has a supported integration topology.</p><div id="objective-repositories" class="repository-picker-list"></div></fieldset>
+            <small class="field-help">Pick a registered product to plan across several repositories at once. Leave blank to work in a single folder.</small>
+            <fieldset id="objective-repositories-field" class="hidden"><legend>Repositories this run touches</legend><p class="field-help">Check every repository the AI needs to look at or change. If you pick more than one, DevHarmonics checks first that it knows how to keep changes across them in sync — if it can't, it will only let you plan, not run, until that's resolved.</p><div id="objective-repositories" class="repository-picker-list"></div></fieldset>
           </div>
 
           <label for="goal">What should the team accomplish?</label>
@@ -66,49 +70,53 @@
           ></textarea>
 
           <div class="objective-grid">
-            <label for="acceptance-criteria">Acceptance criteria <small>One observable result per line</small><textarea id="acceptance-criteria" rows="4" placeholder="CSV downloads with the selected filters&#10;Export is covered by an automated test"></textarea></label>
-            <label for="constraints">Constraints <small>One boundary per line</small><textarea id="constraints" rows="4" placeholder="Preserve the existing report API&#10;Do not add a paid dependency"></textarea></label>
+            <label for="acceptance-criteria">Done means <small>one thing you can check per line</small><textarea id="acceptance-criteria" rows="4" placeholder="CSV downloads with the selected filters&#10;Export is covered by an automated test"></textarea><small class="field-help">Each line becomes a checklist item the AI must prove true before the run is marked complete.</small></label>
+            <label for="constraints">Rules to follow <small>one boundary per line</small><textarea id="constraints" rows="4" placeholder="Preserve the existing report API&#10;Do not add a paid dependency"></textarea><small class="field-help">Anything you don't want changed — e.g. "don't touch the database schema." The plan is built to respect these.</small></label>
           </div>
 
           <div class="objective-policy-grid">
-            <label for="objective-risk">Objective risk<select id="objective-risk" class="input"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option></select></label>
+            <label for="objective-risk">How risky is this change? <small>Low / Medium / High</small><select id="objective-risk" class="input"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option></select><small class="field-help">Higher risk asks the AI planner and reviewer to be more cautious and adds extra review steps before anything ships.</small></label>
             <label for="objective-priority">Priority<select id="objective-priority" class="input"><option value="low">Low</option><option value="normal" selected>Normal</option><option value="high">High</option><option value="urgent">Urgent</option></select></label>
             <label for="objective-deadline">Deadline <small>Optional</small><input id="objective-deadline" class="input" type="datetime-local"></label>
           </div>
 
-          <label for="policy-notes">Policy notes <small>Optional; one instruction per line</small></label>
+          <label for="policy-notes">Extra instructions for the team <small>optional, one per line</small></label>
           <textarea id="policy-notes" rows="2" placeholder="Require an independent accessibility review"></textarea>
+          <small class="field-help">Standing instructions that don't fit as a constraint or acceptance criterion — e.g. "require an independent accessibility review."</small>
 
           <div class="composer-grid">
             <div>
-              <label for="run-autonomy">Run mode</label>
+              <label for="run-autonomy">What can the AI actually do?</label>
               <select id="run-autonomy" class="input" aria-describedby="run-autonomy-help">
-                <option value="observe">Observe only</option>
-                <option value="supervised">Supervised</option>
-                <option value="bounded">Bounded autonomy</option>
+                <option value="observe">Look only, change nothing</option>
+                <option value="supervised">Prepare changes, I approve before anything runs</option>
+                <option value="bounded">Make changes within limits I've approved</option>
               </select>
-              <small id="run-autonomy-help" class="field-help">Read-only diagnostics and evidence. No repository changes.</small>
+              <small id="run-autonomy-help" class="field-help">Nothing is changed. The AI only reads your code and reports back.</small>
             </div>
             <div>
-              <label for="agent-mode">Concurrency</label>
+              <label for="agent-mode">How many AI workers at once?</label>
               <div class="joined">
                 <select id="agent-mode" class="input">
-                  <option value="auto">Architect decides</option>
+                  <option value="auto">Let the planner decide</option>
                   <option value="manual">I’ll choose</option>
                 </select>
                 <input id="agent-count" class="input count" type="number" min="1" value="20" aria-label="Agent count" disabled />
               </div>
+              <small class="field-help">More workers can finish faster but cost more and are harder to review. "Let the planner decide" picks a sensible number for the size of the job.</small>
             </div>
             <fieldset>
-              <legend>Worker pool</legend>
+              <legend>Which AI providers can work on this?</legend>
               <div id="provider-toggles" class="toggles"></div>
+              <p class="field-help">Only signed-in providers can be picked. If one is greyed out, the reason is printed under its name — open "First-time provider sign-in guide" below to connect it.</p>
             </fieldset>
           </div>
 
           <div id="provider-auth-gate" class="auth-gate hidden" role="status">
             <div>
-              <strong>Provider sign-in required</strong>
+              <strong>Sign in to at least one provider before you can start a run.</strong>
               <span id="provider-auth-message"></span>
+              <small class="field-help">You can still build a plan preview without signing in, but nothing can execute until at least one worker above is available.</small>
             </div>
             <button id="refresh-provider-status" class="secondary" type="button">Refresh sign-in status</button>
           </div>
@@ -127,16 +135,18 @@
               <div><span class="step">02</span><div><p class="eyebrow">APPROVAL PREVIEW</p><h2 id="plan-preview-title">Review the proposed plan</h2></div></div>
               <span id="plan-revision" class="status-pill"></span>
             </div>
+            <p class="field-help">Nothing runs until you click Approve below. Read every task — this is your one checkpoint before the AI starts working.</p>
             <p id="plan-summary" class="plan-summary"></p>
             <div id="plan-metrics" class="metrics"></div>
             <div id="plan-repository-impact" class="plan-repository-impact"></div>
+            <p class="field-help">Each task below shows whether it can edit files or only look (permission), how closely its result gets checked (risk), and which model quality tier it's assigned (tier).</p>
             <div id="plan-task-list" class="plan-task-list"></div>
             <label for="revision-feedback">What should change?</label>
             <textarea id="revision-feedback" rows="3" placeholder="Keep the first task, split browser verification from implementation, and restrict changes to src/reports."></textarea>
             <div class="plan-actions">
               <p id="plan-execution-note" class="muted">No repository write begins until you approve this exact revision.</p>
               <button id="revise-plan" class="secondary" type="button">Revise plan</button>
-              <button id="approve-plan-start" class="primary" type="button">Approve revision &amp; start</button>
+              <button id="approve-plan-start" class="primary" type="button">Approve this plan &amp; start the run</button>
             </div>
           </section>
         </section>
@@ -152,53 +162,62 @@
               </details>
             </div>
             <div id="run-status" class="status-pill"></div>
-            <button id="approve-run" class="primary hidden">Approve plan</button>
-            <button id="pause-run" class="secondary hidden">Pause run</button>
-            <button id="resume-run" class="primary hidden">Resume as recovery run</button>
+            <button id="approve-run" class="primary hidden">Approve &amp; continue</button>
+            <button id="pause-run" class="secondary hidden" title="Stops new work from starting; anything already in progress finishes its current step first.">Pause run</button>
+            <button id="resume-run" class="primary hidden" title="Starts a fresh recovery run linked to this one: everything recorded so far is kept for the record, but the work itself starts over — DevHarmonics plans again and re-runs the remaining tasks rather than continuing mid-task.">Resume this run</button>
             <button id="cancel-run" class="danger hidden">Cancel run</button>
           </div>
+          <details class="run-status-legend">
+            <summary>What do these run statuses mean?</summary>
+            <p class="field-help">Planning: the AI is still building the plan — nothing has changed yet. Awaiting approval: the run is stopped and needs your click above before it continues. Running: AI workers are actively making changes, inside the limits you approved. Paused: work is stopped; resuming starts a fresh recovery run. Ready: the run finished and its work is ready to deliver. Not ready: the run finished but something didn't pass — a task, a check, or the independent review — open the task cards and Final review below to see which. Failed: the run itself could not complete. Cancelled: the run was stopped before finishing.</p>
+          </details>
 
           <div class="metrics">
             <div class="metric"><span>Tasks</span><strong id="metric-tasks">0</strong></div>
             <div class="metric"><span>Passed checks</span><strong id="metric-checks">0</strong></div>
             <div class="metric"><span>Attempts</span><strong id="metric-attempts">0</strong></div>
-            <div class="metric"><span>Active agents</span><strong id="metric-active">0</strong></div>
+            <div class="metric"><span>AI workers active now</span><strong id="metric-active">0</strong></div>
           </div>
+          <p class="field-help">Checks = the test/build/check commands registered for this repository that the AI's work must pass. Attempts = how many tries it took across all tasks, including retries after a failed check.</p>
 
           <section id="integration-set-panel" class="panel integration-set-panel hidden" aria-labelledby="integration-set-title">
-            <div class="panel-heading"><div><span class="step">IS</span><h3 id="integration-set-title">Exact integration set</h3></div><span id="integration-set-status" class="lifecycle"></span></div>
+            <div class="panel-heading"><div><span class="step">IS</span><h3 id="integration-set-title">Repositories being changed together</h3></div><span id="integration-set-status" class="lifecycle" title="ready = all repositories are lined up and safe to deliver together · not ready = at least one repository isn't caught up yet · failed = something went wrong keeping them in sync"></span></div>
+            <p class="field-help">When a run touches more than one repository, DevHarmonics tracks them as one coordinated set so a change in one doesn't get delivered without its matching change in another.</p>
             <p id="integration-set-conditions" class="muted"></p>
             <div id="integration-set-repositories" class="integration-set-repositories"></div>
           </section>
 
           <section id="steering-panel" class="panel integration-set-panel hidden" aria-labelledby="steering-title">
             <div class="panel-heading"><div><span class="step">S</span><h3 id="steering-title">Steer this run</h3></div><span id="steering-admission" class="lifecycle"></span></div>
-            <p class="muted">Steering guides work inside the approved plan. It cannot change a task's permissions, risk, acceptance criteria, or repository scope.</p>
+            <p class="muted">Steering guides work inside the approved plan. It cannot change a task's permissions, risk, acceptance criteria, or repository scope (see "What this task is allowed to do" in a task's own details).</p>
+            <p class="field-help">"Admission" is DevHarmonics' term for a task moving from queued to working. Holding it stops new tasks from starting — anything already running keeps going.</p>
             <div class="steering-actions">
-              <button id="steering-hold" class="secondary" type="button">Hold new tasks</button>
-              <button id="steering-resume" class="secondary" type="button">Resume admission</button>
+              <button id="steering-hold" class="secondary" type="button">Pause starting new tasks</button>
+              <button id="steering-resume" class="secondary" type="button">Let new tasks start again</button>
             </div>
             <form id="steering-clarify-form" class="steering-form">
               <label for="steering-task">Task</label>
               <select id="steering-task" class="input"></select>
-              <label for="steering-clarification">Clarification <small>Applied at the next attempt boundary</small></label>
+              <label for="steering-clarification">Message to the AI <small>reaches it before its next try, not mid-response</small></label>
               <textarea id="steering-clarification" rows="2" placeholder="Prefer the existing helper instead of adding a dependency."></textarea>
+              <small class="field-help">If the AI is mid-response right now, this note is queued and delivered the next time it starts (or retries) the task — not instantly.</small>
               <div class="steering-actions">
                 <button id="steering-clarify" class="secondary" type="submit">Send clarification</button>
-                <button id="steering-interrupt" class="secondary" type="button">Interrupt &amp; hand off</button>
+                <button id="steering-interrupt" class="secondary" type="button">Stop &amp; restart with new instructions</button>
               </div>
             </form>
             <div class="steering-queue">
-              <label for="steering-provider">Reassign the selected task <small>Queued tasks only</small></label>
+              <label for="steering-provider">Send this task to a different AI <small>only works before it starts</small></label>
               <div class="joined">
                 <select id="steering-provider" class="input"></select>
                 <button id="steering-reassign" class="secondary" type="button">Reassign</button>
               </div>
-              <label for="steering-order">Admission order <small>Queued task IDs, highest priority first</small></label>
+              <label for="steering-order">Order queued tasks should start <small>list task IDs, most important first</small></label>
               <div class="joined">
                 <input id="steering-order" class="input" spellcheck="false" placeholder="beta, alpha" />
                 <button id="steering-reprioritize" class="secondary" type="button">Set order</button>
               </div>
+              <small class="field-help">Copy IDs from the task board below, separated by commas. This only reorders tasks that haven't started yet.</small>
             </div>
             <div id="steering-directives" class="steering-directives"></div>
             <p id="steering-error" class="error" role="alert"></p>
@@ -206,11 +225,13 @@
 
           <section id="delivery-panel" class="panel integration-set-panel hidden" aria-labelledby="delivery-title">
             <div class="panel-heading"><div><span class="step">D</span><h3 id="delivery-title">Approved delivery</h3></div><span id="delivery-status" class="lifecycle"></span></div>
+            <p class="field-help">This panel appears once at least one task has finished and passed review. Every button below pushes real changes to GitHub — nothing happens without your click.</p>
             <p id="delivery-guidance" class="muted"></p>
             <div id="delivery-repositories" class="integration-set-repositories"></div>
             <p id="delivery-error" class="error" role="alert"></p>
           </section>
 
+          <p class="field-help">Queued: waiting to start. Working: an AI is actively writing code. Verifying: DevHarmonics is running its own checks on the result. Resolved: finished — passed, paused, failed, blocked, or cancelled; open a card to see which.</p>
           <div id="board" class="board" aria-label="Task board"></div>
 
           <div class="lower-grid">
@@ -220,31 +241,33 @@
             </section>
             <section id="verdict-panel" class="panel verdict-panel">
               <div class="panel-heading"><h3>Final review</h3></div>
-              <div id="verdict" class="empty-state">The reviewer’s verdict will appear after integration.</div>
+              <p class="field-help">An independent AI reviewer checks the finished work and gives a verdict here — separate from the AI that did the work.</p>
+              <div id="verdict" class="empty-state">The independent reviewer's verdict will appear here once the run finishes and its changes are combined.</div>
             </section>
           </div>
         </section>
 
         <section id="workbench-view" class="workspace-view hidden" aria-labelledby="workbench-title">
           <div class="view-heading">
-            <div><p class="eyebrow">DISCUSSION-ONLY STUDIO</p><h2 id="workbench-title">Multi-model Workbench</h2></div>
-            <button id="new-workbench" class="secondary" type="button">New scratchpad</button>
+            <div><p class="eyebrow">READ-ONLY — NOTHING RUNS</p><h2 id="workbench-title">Ask AI models about this project</h2><p class="field-help">Ask one or more AI models questions about your codebase and compare their answers side by side. Nothing here starts a run or changes a file.</p></div>
+            <button id="new-workbench" class="secondary" type="button">New discussion</button>
           </div>
           <div class="workbench-boundary" role="note"><strong>Read-only by design.</strong><span>Workbench consultations cannot start a run or change a repository. Convert useful discussion into an objective draft when you are ready.</span></div>
           <form id="workbench-new-form" class="panel workbench-new hidden">
             <label for="workbench-project">Project folder</label>
             <input id="workbench-project" class="input" spellcheck="false">
-            <label for="workbench-title-input">Scratchpad title</label>
+            <label for="workbench-title-input">Discussion title</label>
             <input id="workbench-title-input" class="input" placeholder="Release strategy comparison">
-            <div class="composer-actions"><p id="workbench-new-error" class="error" role="alert"></p><button class="primary" type="submit">Create scratchpad</button></div>
+            <div class="composer-actions"><p id="workbench-new-error" class="error" role="alert"></p><button class="primary" type="submit">Start discussion</button></div>
           </form>
           <div class="workbench-layout">
-            <aside class="panel workbench-sessions" aria-label="Workbench scratchpads"><div class="panel-heading"><h3>Scratchpads</h3><span id="workbench-count" class="muted"></span></div><div id="workbench-session-list" class="workbench-session-list"></div></aside>
+            <aside class="panel workbench-sessions" aria-label="Workbench discussions"><div class="panel-heading"><h3>Discussions</h3><span id="workbench-count" class="muted"></span></div><div id="workbench-session-list" class="workbench-session-list"></div></aside>
             <section class="panel workbench-main">
-              <div id="workbench-empty" class="empty-state">Create a scratchpad to ask project questions and compare qualified models.</div>
+              <div id="workbench-empty" class="empty-state">Start a discussion to ask questions about this project and compare answers from more than one AI model.</div>
               <div id="workbench-active" class="hidden">
-                <div class="panel-heading workbench-heading"><div><span class="step">W</span><div><h2 id="workbench-active-title"></h2><p id="workbench-active-project" class="muted"></p></div></div><span class="lifecycle qualified">discussion only</span></div>
+                <div class="panel-heading workbench-heading"><div><span class="step">W</span><div><h2 id="workbench-active-title"></h2><p id="workbench-active-project" class="muted"></p></div></div><span class="lifecycle qualified">read-only</span></div>
                 <div id="workbench-messages" class="workbench-messages" aria-live="polite"></div>
+                <p class="field-help">When a message says "requested model (identity unverified)," the provider didn't confirm which exact model answered — DevHarmonics shows what it asked for, not a verified fact.</p>
                 <form id="workbench-consult-form" class="workbench-consult">
                   <label for="workbench-question">Ask the selected models</label>
                   <textarea id="workbench-question" rows="4" placeholder="Compare two safe approaches to this product decision. Inspect the repository when useful, and distinguish facts from inference."></textarea>
@@ -252,9 +275,10 @@
                   <div class="composer-actions"><p id="workbench-error" class="error" role="alert"></p><button id="workbench-consult" class="primary" type="submit">Consult selected models</button></div>
                 </form>
                 <details id="workbench-convert" class="workbench-convert">
-                  <summary>Convert this discussion into an objective draft</summary>
+                  <summary>Turn this into a new task for the agent team</summary>
+                  <p class="field-help">An objective is the goal statement that starts a new agent run. Turning this discussion into one only creates a draft — you still review and approve everything before anything runs.</p>
                   <form id="workbench-convert-form">
-                    <label for="workbench-outcome">Outcome</label><textarea id="workbench-outcome" rows="3" required></textarea>
+                    <label for="workbench-outcome">What should the team accomplish?</label><textarea id="workbench-outcome" rows="3" required></textarea>
                     <div class="objective-grid">
                       <label for="workbench-criteria">Acceptance criteria <small>One per line</small><textarea id="workbench-criteria" rows="3"></textarea></label>
                       <label for="workbench-constraints">Constraints <small>One per line</small><textarea id="workbench-constraints" rows="3"></textarea></label>
@@ -262,7 +286,7 @@
                     <div class="objective-policy-grid">
                       <label for="workbench-risk">Risk<select id="workbench-risk" class="input"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option></select></label>
                       <label for="workbench-priority">Priority<select id="workbench-priority" class="input"><option value="low">Low</option><option value="normal" selected>Normal</option><option value="high">High</option><option value="urgent">Urgent</option></select></label>
-                      <label for="workbench-autonomy">Run mode<select id="workbench-autonomy" class="input"><option value="observe">Observe only</option><option value="supervised" selected>Supervised</option><option value="bounded">Bounded autonomy</option></select></label>
+                      <label for="workbench-autonomy">Run mode<select id="workbench-autonomy" class="input" aria-describedby="workbench-autonomy-help"><option value="observe">Observe only</option><option value="supervised" selected>Supervised</option><option value="bounded">Bounded autonomy</option></select><small id="workbench-autonomy-help" class="field-help"></small></label>
                     </div>
                     <div class="composer-actions"><p class="muted">Creates a draft only. Planning and execution still require their own approval.</p><button class="primary" type="submit">Create objective draft</button></div>
                   </form>
@@ -274,16 +298,17 @@
 
         <section id="products-view" class="workspace-view hidden" aria-labelledby="products-title">
           <div class="view-heading">
-            <div><p class="eyebrow">PRODUCT OPERATIONS</p><h2 id="products-title">Product portfolio</h2></div>
+            <div><p class="eyebrow">PRODUCT OPERATIONS</p><h2 id="products-title">Product portfolio</h2><p class="field-help">A product is a named group of related repositories (for example, all the repos that make up one app). Register a product, then attach the repositories that belong to it — nothing here clones or changes any code.</p></div>
             <div class="evidence-actions"><button id="register-product" class="secondary" type="button">Register product</button><button id="add-local-repository" class="secondary" type="button">Add local repository</button><button id="refresh-products" class="secondary" type="button">Refresh portfolio</button></div>
           </div>
+          <small id="add-local-repository-help" class="field-help hidden">Register a product first — every repository must belong to one.</small>
           <form id="product-form" class="panel registry-form hidden">
-            <div class="panel-heading"><div><span class="step">P</span><h2>Register a product</h2></div><span class="muted">A product groups repositories without collapsing them into a monorepo.</span></div>
+            <div class="panel-heading"><div><span class="step">P</span><h2>Register a product</h2></div><span class="muted">A product groups related repositories together — they stay as separate repositories, they're just tracked as one product here.</span></div>
             <div class="settings-grid">
               <label>Product ID<input id="product-id" class="input" required placeholder="civicsuite"></label>
               <label>Name<input id="product-name" class="input" required placeholder="CivicSuite"></label>
               <label>Organization URL<input id="product-organization" class="input" required type="url" placeholder="https://github.com/civicsuite"></label>
-              <label>Description<input id="product-description" class="input" placeholder="Civic technology product suite"></label>
+              <label>Description <small>Optional</small><input id="product-description" class="input" placeholder="Civic technology product suite"></label>
             </div>
             <div class="composer-actions"><p id="product-form-error" class="error" role="alert"></p><button class="primary" type="submit">Save product</button></div>
           </form>
@@ -291,64 +316,68 @@
             <div class="panel-heading"><div><span class="step">R</span><h2>Add a local repository</h2></div><span class="muted">DevHarmonics inspects Git state read-only and records compatibility issues.</span></div>
             <div class="settings-grid">
               <label>Product<select id="repository-product" class="input" required></select></label>
-              <label>Local folder<input id="repository-path" class="input" required spellcheck="false" placeholder="C:\\Users\\Scott\\Documents\\GitHub\\CivicSuite"></label>
-              <label>Repository role<select id="repository-role" class="input"><option value="umbrella">Umbrella</option><option value="shared_platform">Shared platform</option><option value="module" selected>Module</option><option value="desktop">Desktop</option><option value="installer">Installer</option><option value="documentation">Documentation</option><option value="release_truth">Release truth</option><option value="other">Other</option></select></label>
+              <label>Local folder<input id="repository-path" class="input" required spellcheck="false" placeholder="C:\\Projects\\my-app"></label>
+              <label>Repository role<select id="repository-role" class="input"><option value="umbrella">Umbrella</option><option value="shared_platform">Shared platform</option><option value="module" selected>Module</option><option value="desktop">Desktop</option><option value="installer">Installer</option><option value="documentation">Documentation</option><option value="release_truth">Release truth</option><option value="other">Other</option></select><small class="field-help">Umbrella = the top-level repo that ties the others together · Shared platform = shared code other repos depend on · Release truth = the repo whose files declare the official current version.</small></label>
               <label>Expected branch <small>Optional</small><input id="repository-branch" class="input" placeholder="main"></label>
             </div>
             <div class="objective-grid">
               <label>Owners <small>One team or person per line</small><textarea id="repository-owners" rows="3"></textarea></label>
-              <label>Dependencies <small>One registered repository ID per line</small><textarea id="repository-dependencies" rows="3"></textarea></label>
-              <label>Canonical intelligence sources <small>Governance, architecture, status, version, compatibility, or release files; one path per line</small><textarea id="repository-governance" rows="3" placeholder="AGENTS.md&#10;README.md&#10;STATUS.md&#10;pyproject.toml"></textarea></label>
-              <label>Validator commands <small><code>name = command</code>, one per line</small><textarea id="repository-validators" rows="3" placeholder="test = npm test&#10;build = npm run build"></textarea></label>
+              <label>Dependencies <small>One registered repository ID per line</small><textarea id="repository-dependencies" rows="3"></textarea><small class="field-help">Find each repository's ID under its name in the product list below.</small></label>
+              <label>Key documents to track <small>Governance, architecture, status, version, compatibility, or release files — one file path per line</small><textarea id="repository-governance" rows="3" placeholder="AGENTS.md&#10;README.md&#10;STATUS.md&#10;pyproject.toml"></textarea><small class="field-help">These are the files the intelligence scan reads to find facts about this repository (e.g. README.md, STATUS.md).</small></label>
+              <label>Test/build commands <small><code>name = command</code>, one per line, e.g. <code>test = npm test</code></small><textarea id="repository-validators" rows="3" placeholder="test = npm test&#10;build = npm run build"></textarea><small class="field-help">Commands DevHarmonics can run to check that a change actually works, like your test suite or build.</small></label>
             </div>
             <div class="composer-actions"><p id="repository-form-error" class="error" role="alert"></p><button class="primary" type="submit">Inspect &amp; register repository</button></div>
           </form>
           <div id="product-summary" class="metrics"></div>
+          <p class="field-help">Active = not archived. Private = marked private on GitHub.</p>
+          <p class="field-help"><strong>observed</strong> = registered and inspected read-only · <strong>ready</strong> = clean checkout · <strong>dirty</strong> = uncommitted local changes · <strong>N issues</strong> = compatibility problems found during inspection</p>
+          <p class="field-help">An intelligence scan reads each repository's key documents (README, STATUS, version files, etc.) and pulls out factual claims — like which version is current — so it can catch places where two repositories disagree. Findings: <strong>conflicting claim</strong> = two repositories state different facts about the same thing (e.g. different version numbers) · <strong>missing source</strong> = a tracked file doesn't exist · <strong>unreadable source</strong> = a tracked file exists but couldn't be read · <strong>unsafe source</strong> = a tracked file was skipped for safety reasons.</p>
           <div id="product-list" class="product-list"></div>
-          <div id="products-empty" class="panel empty-state product-empty">No products registered yet. An Observe pass can add a product and its repositories without cloning or changing them.</div>
+          <div id="products-empty" class="panel empty-state product-empty">No products registered yet. Register one below, or start a run in <strong>Observe only</strong> mode (read-only, makes no changes) and let the agent team discover and add products and repositories automatically.</div>
         </section>
 
         <section id="setup-view" class="workspace-view hidden" aria-labelledby="setup-title">
           <div class="view-heading">
-            <div><p class="eyebrow">CONTROL PLANE</p><h2 id="setup-title">Connections and run policy</h2></div>
-            <button id="refresh-setup" class="secondary" type="button">Refresh diagnostics</button>
+            <div><p class="eyebrow">PROJECT SETTINGS</p><h2 id="setup-title">Connect your AI providers and set what the team is allowed to do</h2></div>
+            <button id="refresh-setup" class="secondary" type="button" title="Re-tests whether each connected AI tool is signed in and reachable. Does not change any setting.">Recheck sign-in status</button>
           </div>
           <div id="connection-cards" class="connection-grid"></div>
           <form id="settings-form" class="panel settings-panel">
-            <div class="panel-heading"><div><span class="step">02</span><h2>Team defaults</h2></div><span class="muted">No passwords or API keys are stored here.</span></div>
+            <div class="panel-heading"><div><span class="step">02</span><h2>Default team setup</h2></div><span class="muted">No passwords or API keys are stored here.</span></div>
+            <p class="field-help">These are the starting choices for every new run. You can change most of them per run when you describe an objective.</p>
             <div class="settings-grid">
-              <label>Architect<select id="setting-architect" class="input"></select></label>
-              <label>Reviewer<select id="setting-reviewer" class="input"></select></label>
-              <label>Default agents<input id="setting-agents" class="input" type="number" min="1"></label>
-              <label>Autonomy<select id="setting-autonomy" class="input"><option value="observe">Observe only</option><option value="supervised">Supervised</option><option value="bounded">Bounded autonomy</option></select></label>
-              <label>Model scheduling<select id="setting-routing-mode" class="input"><option value="adaptive">Adaptive by task</option><option value="manual">Manual role defaults</option></select></label>
-              <label>Architect model<select id="setting-architect-model" class="input"></select></label>
-              <label>Architect tier<select id="setting-architect-tier" class="input"></select></label>
-              <label>Architect effort<select id="setting-architect-effort" class="input"></select></label>
-              <label>Architect upgrades<select id="setting-architect-upgrade" class="input"><option value="pinned">Pinned exact model</option><option value="track_family">Track qualified family</option></select></label>
-              <label>Worker model<select id="setting-worker-model" class="input"></select></label>
-              <label>Worker tier<select id="setting-worker-tier" class="input"></select></label>
-              <label>Worker effort<select id="setting-worker-effort" class="input"></select></label>
-              <label>Worker upgrades<select id="setting-worker-upgrade" class="input"><option value="pinned">Pinned exact model</option><option value="track_family">Track qualified family</option></select></label>
-              <label>Reviewer model<select id="setting-reviewer-model" class="input"></select></label>
-              <label>Reviewer tier<select id="setting-reviewer-tier" class="input"></select></label>
-              <label>Reviewer effort<select id="setting-reviewer-effort" class="input"></select></label>
-              <label>Reviewer upgrades<select id="setting-reviewer-upgrade" class="input"><option value="pinned">Pinned exact model</option><option value="track_family">Track qualified family</option></select></label>
+              <label>Planner (writes the task plan)<select id="setting-architect" class="input"></select><small class="field-help">Planning needs a signed-in subscription CLI (Codex, Claude Code, or Antigravity) — local models can build and review, but cannot be the architect.</small></label>
+              <label>Reviewer (checks finished work)<select id="setting-reviewer" class="input"></select><small class="field-help">The reviewer looks at each task's result independently of whoever built it and decides pass/fail. Restricted to Claude, Codex, and Antigravity for the same reason as the planner.</small></label>
+              <label>Default number of workers running at once<input id="setting-agents" class="input" type="number" min="1"><small class="field-help">How many AI workers can work in parallel on a new run, by default. Higher runs faster but produces more simultaneous changes to review. You can override this per run.</small></label>
+              <label>Default run mode<select id="setting-autonomy" class="input" aria-describedby="setting-autonomy-help"><option value="observe">Look only, change nothing</option><option value="supervised">Prepare changes, I approve before anything runs</option><option value="bounded">Make changes within limits I've approved</option></select><small id="setting-autonomy-help" class="field-help"></small></label>
+              <label>How models get picked<select id="setting-routing-mode" class="input"><option value="adaptive">Adaptive by task</option><option value="manual">Manual role defaults</option></select><small class="field-help">Adaptive by task — DevHarmonics automatically picks the best qualified model for each task's difficulty and cost. Manual role defaults — always use the exact model and effort level you set below for that role.</small></label>
+              <label>Planner: exact model (optional)<select id="setting-architect-model" class="input"></select><small class="field-help">Leave as "Let the tool choose its own default model" to let the planner's own CLI pick its normal model. Pin an exact model here to always use that one instead — it can be from a different provider than the Planner choice above.</small></label>
+              <label>Planner: capability level<select id="setting-architect-tier" class="input"></select><small class="field-help">Premium = most capable and most expensive; Economy = fastest and cheapest; Standard = in between. Automatic lets the scheduler choose.</small></label>
+              <label>Planner: how hard it thinks<select id="setting-architect-effort" class="input"></select><small class="field-help">Higher effort can improve plan quality on hard objectives but costs more and takes longer. Only used when Model scheduling is set to Manual role defaults.</small></label>
+              <label>Planner: stay pinned or auto-upgrade<select id="setting-architect-upgrade" class="input"><option value="pinned">Pinned exact model</option><option value="track_family">Track qualified family</option></select><small class="field-help">Pinned exact model — always use exactly the model chosen above, even after a newer version is qualified. Track qualified family — automatically switch to the newest qualified version of the same model line (e.g. a new Claude Sonnet release) once it passes qualification.</small></label>
+              <label>Worker: exact model (optional)<select id="setting-worker-model" class="input"></select><small class="field-help">Leave as "Let the tool choose its own default model" to let the worker's own CLI pick its normal model. Pin an exact model here to always use that one instead, regardless of which subscription tools are eligible to work below.</small></label>
+              <label>Worker: capability level<select id="setting-worker-tier" class="input"></select><small class="field-help">Premium = most capable and most expensive; Economy = fastest and cheapest; Standard = in between. Automatic lets the scheduler choose.</small></label>
+              <label>Worker: how hard it thinks<select id="setting-worker-effort" class="input"></select><small class="field-help">Higher effort can improve the worker's results on hard tasks but costs more and takes longer. Only used when Model scheduling is set to Manual role defaults.</small></label>
+              <label>Worker: stay pinned or auto-upgrade<select id="setting-worker-upgrade" class="input"><option value="pinned">Pinned exact model</option><option value="track_family">Track qualified family</option></select><small class="field-help">Pinned exact model — always use exactly the model chosen above, even after a newer version is qualified. Track qualified family — automatically switch to the newest qualified version of the same model line once it passes qualification.</small></label>
+              <label>Reviewer: exact model (optional)<select id="setting-reviewer-model" class="input"></select><small class="field-help">Leave as "Let the tool choose its own default model" to let the reviewer's own CLI pick its normal model. Pin an exact model here to always use that one instead — it can be from a different provider than the Reviewer choice above.</small></label>
+              <label>Reviewer: capability level<select id="setting-reviewer-tier" class="input"></select><small class="field-help">Premium = most capable and most expensive; Economy = fastest and cheapest; Standard = in between. Automatic lets the scheduler choose.</small></label>
+              <label>Reviewer: how hard it thinks<select id="setting-reviewer-effort" class="input"></select><small class="field-help">Higher effort can improve the reviewer's judgment on hard tasks but costs more and takes longer. Only used when Model scheduling is set to Manual role defaults.</small></label>
+              <label>Reviewer: stay pinned or auto-upgrade<select id="setting-reviewer-upgrade" class="input"><option value="pinned">Pinned exact model</option><option value="track_family">Track qualified family</option></select><small class="field-help">Pinned exact model — always use exactly the model chosen above, even after a newer version is qualified. Track qualified family — automatically switch to the newest qualified version of the same model line once it passes qualification.</small></label>
             </div>
-            <fieldset><legend>Eligible subscription workers</legend><div id="setting-workers" class="toggles"></div></fieldset>
+            <fieldset><legend>Subscription workers</legend><p class="field-help">The signed-in provider CLIs that can take implementation work. Local models join the worker pool separately: activate and qualify them on the Models page.</p><div id="setting-workers" class="toggles"></div></fieldset>
             <div class="policy-list">
-              <label><input id="setting-plan-approval" type="checkbox"> Require plan approval before execution</label>
-              <label><input id="setting-external-writes" type="checkbox"> Allow external writes when a tool policy permits them</label>
-              <label><input id="setting-paid-api" type="checkbox"> Allow paid API runtimes for this project</label>
-              <label><input id="setting-fallback" type="checkbox"> Allow qualified fallback when the assigned runtime is unavailable</label>
+              <label><input id="setting-plan-approval" type="checkbox"><span>Wait for my approval before doing any work<small class="field-help">Every run stops after planning until you approve the exact plan. Off = supervised runs still stop at the approval points below; nothing ever writes outside your machine without a per-action approval.</small></span></label>
+              <label><input id="setting-external-writes" type="checkbox"><span>Allow GitHub delivery actions (push, PR, merge, tag)<small class="field-help">Master switch for the four delivery actions. Even when on, each individual push, PR, merge, or tag still needs your explicit approval click — this switch only makes those buttons available.</small></span></label>
+              <label><input id="setting-paid-api" type="checkbox"><span>Allow OpenRouter (pay-per-use) models for this project<small class="field-help">This is one of two switches that must both be on before any paid API model can be used — the other is "Enable OpenRouter connection" below. Your subscription tools (Claude, Codex, Gemini) are unaffected either way.</small></span></label>
+              <label><input id="setting-fallback" type="checkbox"><span>If your chosen model is unavailable, let DevHarmonics substitute a qualified one<small class="field-help">If the exact model or tool you assigned to a role is signed out, over its rate limit, or temporarily cooling down, this lets DevHarmonics automatically use a different model that has already passed the same qualification checks, instead of stopping the run.</small></span></label>
             </div>
             <section class="api-policy">
-              <div><strong>OpenRouter paid fallback</strong><p class="muted">OAuth connection alone never enables spending. DevHarmonics chooses the exact model and performs fallback itself.</p></div>
+              <div><strong>OpenRouter (pay-per-use models)</strong><p class="muted">OpenRouter is a separate, pay-per-use service — unlike Claude/Codex/Gemini above, it charges your card per request instead of a flat subscription. Everything in this section is off by default. Connecting your account does not spend money by itself. Spending requires the checkbox below.</p></div>
               <div class="settings-grid">
-                <label><span><input id="openrouter-enabled" type="checkbox"> Enable OpenRouter connection</span></label>
-                <label><span><input id="openrouter-paid-fallback" type="checkbox"> Allow paid API fallback</span></label>
-                <label>Per-run limit (USD)<input id="openrouter-run-limit" class="input" type="number" min="0" step="0.01"></label>
-                <label>Monthly limit (USD)<input id="openrouter-month-limit" class="input" type="number" min="0" step="0.01"></label>
+                <label><span><input id="openrouter-enabled" type="checkbox"> Allow OpenRouter to be used at all</span><small class="field-help">Turn this on before connecting your account. It doesn't connect anything by itself — click "Connect OpenRouter with OAuth" below to actually sign in.</small></label>
+                <label><span><input id="openrouter-paid-fallback" type="checkbox"> Allow spending on OpenRouter models</span><small class="field-help">Must be on, together with "Allow OpenRouter (pay-per-use) models for this project" above, before DevHarmonics will ever use a paid OpenRouter model — for example if your subscription tools are all unavailable and fallback is allowed.</small></label>
+                <label>Per-run limit (USD)<input id="openrouter-run-limit" class="input" type="number" min="0" step="0.01"><small class="field-help">The most this run is allowed to spend on OpenRouter models before it stops.</small></label>
+                <label>Monthly limit (USD)<input id="openrouter-month-limit" class="input" type="number" min="0" step="0.01"><small class="field-help">The most OpenRouter can spend across all runs in a calendar month.</small></label>
               </div>
               <div class="model-actions"><button id="openrouter-connect" class="secondary" type="button">Connect OpenRouter with OAuth</button><button id="openrouter-disconnect" class="secondary" type="button">Disconnect</button><span id="openrouter-status" class="muted"></span></div>
             </section>
@@ -357,31 +386,35 @@
         </section>
 
         <section id="models-view" class="workspace-view hidden" aria-labelledby="models-title">
-          <div class="view-heading"><div><p class="eyebrow">MODEL FLEET</p><h2 id="models-title">Known models</h2></div><button id="refresh-models" class="secondary" type="button">Refresh fleet</button></div>
+          <div class="view-heading"><div><p class="eyebrow">AI MODELS</p><h2 id="models-title">Known models</h2><p class="field-help">Nothing here spends money or changes code by itself.</p></div><button id="refresh-models" class="secondary" type="button" title="Asks each connected provider what models it currently offers, and updates this list. Existing qualifications are not affected.">Check for new models</button></div>
           <div id="model-summary" class="metrics"></div>
+          <p class="field-help">Known models: every model DevHarmonics has seen from a connected provider or you added manually (excludes retired models). Passed a role check: has passed at least one check proving it can do a specific job (planning, working, or reviewing). Ready to be used: turned on, currently qualified, and eligible to be picked for a run right now. Estimated local capacity: a rough guess at how many local-model tasks can run at once on this machine — an estimate DevHarmonics uses for planning, not something it enforces.</p>
           <div id="runtime-list" class="connection-grid"></div>
-          <div id="model-filter-bar" class="panel joined"><input id="model-filter" class="input" placeholder="Filter known models"><select id="model-status-filter" class="input"><option value="all">All current models</option><option value="active">Active</option><option value="qualified">Qualified</option><option value="stale">Stale</option><option value="unqualified">Unqualified</option></select></div>
+          <div id="model-filter-bar" class="panel joined"><input id="model-filter" class="input" placeholder="Filter known models"><select id="model-status-filter" class="input"><option value="all">All current models</option><option value="active">Ready to be used</option><option value="qualified">Passed a role check</option><option value="stale">Needs re-checking</option><option value="unqualified">Not yet checked</option></select></div>
+          <p class="field-help">Qualifying runs a small test task through the model to confirm it can safely do a specific job before DevHarmonics will use it. Higher thinking effort can improve results on hard tasks but costs more and is slower. Model info is "verified" when it comes from the provider's own published specs, or "inferred" when DevHarmonics estimated it from limited data.</p>
+          <p class="field-help">Status meanings: <strong>Not checked yet</strong> — never tested · <strong>Needs re-checking</strong> — the provider changed the model since it last passed · <strong>Excluded</strong> — you turned this model off on purpose · <strong>Needs benchmark</strong> — needs an extra accuracy test before it can be used · <strong>Not qualified</strong> — failed, or hasn't passed a role check yet · <strong>Qualified (inactive)</strong> — passed its check but turned off · <strong>Active</strong> — DevHarmonics can use this model now.</p>
           <div id="model-list" class="model-grid"></div>
           <section id="openrouter-panel" class="panel settings-panel">
-            <div class="panel-heading"><div><span class="step">API</span><h2>OpenRouter catalog</h2></div><span class="muted">Searching is free. Importing a model does not qualify it or enable paid routing.</span></div>
-            <div class="joined"><input id="openrouter-model-query" class="input" placeholder="Search exact OpenRouter models"><button id="openrouter-search" class="secondary" type="button">Search catalog</button></div>
+            <div class="panel-heading"><div><span class="step">API</span><h2>Search OpenRouter's model catalog</h2></div><span class="muted">Searching is free. Importing a model does not qualify it or enable paid routing.</span></div>
+            <div class="joined"><input id="openrouter-model-query" class="input" placeholder="Search by model name"><button id="openrouter-search" class="secondary" type="button">Search catalog</button></div>
             <div id="openrouter-catalog" class="model-grid"></div>
           </section>
           <form id="runtime-form" class="panel settings-panel">
-            <div class="panel-heading"><div><span class="step">+</span><h2>Add a local Ollama runtime</h2></div><span class="muted">Loopback endpoints only. DevHarmonics never downloads models automatically.</span></div>
+            <div class="panel-heading"><div><span class="step">+</span><h2>Connect a local model server</h2></div><span class="muted">Only works with a server running on this machine. DevHarmonics never downloads models automatically.</span></div>
+            <p class="field-help">Ollama is free software that runs AI models directly on this machine, with no subscription and no per-request cost. Use this if you're already running one.</p>
             <div class="settings-grid">
-              <label>Runtime ID<input id="runtime-id" class="input" required pattern="[A-Za-z0-9][A-Za-z0-9_-]*" placeholder="civicsuite"></label>
+              <label>Short name (for DevHarmonics to refer to it by)<input id="runtime-id" class="input" required pattern="[A-Za-z0-9][A-Za-z0-9_-]*" placeholder="civicsuite"></label>
               <label>Display name<input id="runtime-display" class="input" required placeholder="CivicSuite Ollama"></label>
-              <label>Base URL<input id="runtime-url" class="input" required type="url" value="http://127.0.0.1:15434"></label>
+              <label>Server address<input id="runtime-url" class="input" required type="url" value="http://127.0.0.1:15434"><small class="field-help">The address Ollama is listening on. The default value works for a typical local install — change it only if you configured a different port.</small></label>
             </div>
-            <div class="composer-actions"><p class="muted">Refresh Fleet probes configured runtimes.</p><button class="primary" type="submit">Add runtime</button></div>
+            <div class="composer-actions"><p class="muted">Clicking "Check for new models" above will also re-check this connection.</p><button class="primary" type="submit">Connect server</button></div>
           </form>
           <form id="model-form" class="panel settings-panel">
-            <div class="panel-heading"><div><span class="step">+</span><h2>Add a known model</h2></div><span class="muted">Manual entries remain unschedulable until verified and qualified.</span></div>
+            <div class="panel-heading"><div><span class="step">+</span><h2>Add a model manually</h2></div><span class="muted">A manually added model can't be used until it passes qualification, same as any other model.</span></div>
             <div class="settings-grid">
               <label>Connection<select id="model-connection" class="input" required></select></label>
               <label>Model identifier<input id="model-id" class="input" required placeholder="provider:model-name"></label>
-              <label>Canonical name<input id="model-canonical" class="input" required placeholder="model-name"></label>
+              <label>Base model name (without provider prefix)<input id="model-canonical" class="input" required placeholder="model-name"></label>
               <label>Display name<input id="model-display" class="input" required placeholder="Model Name"></label>
             </div>
             <div class="composer-actions"><p id="model-message" class="muted" role="status"></p><button class="primary" type="submit">Add model</button></div>
@@ -391,34 +424,35 @@
         <section id="workflows-view" class="workspace-view hidden" aria-labelledby="workflows-title">
           <div class="view-heading">
             <div>
-              <p class="eyebrow">Reusable workflows</p>
-              <h2 id="workflows-title">Versioned, reviewable, receipted</h2>
+              <p class="eyebrow">REUSABLE WORKFLOWS</p>
+              <h2 id="workflows-title">Workflows</h2>
+              <p class="field-help">A workflow is a saved, ready-to-run task template. Picking one and filling in a few details creates a new task for the agent team — you still review and approve the plan before anything runs, and the run always uses the exact version of the workflow you started from, even if it's edited later.</p>
             </div>
           </div>
-          <p class="field-help">A workflow is a Git-versioned document. Starting one creates an objective through the normal composer — you still review and approve the plan before anything runs, and the run pins the exact workflow revision it executed.</p>
           <div id="workflow-list" class="connection-grid"></div>
           <article id="workflow-detail" class="connection-card hidden">
             <h3 id="workflow-detail-name"></h3>
             <p id="workflow-detail-description" class="field-help"></p>
             <div id="workflow-detail-inputs"></div>
             <div class="plan-actions">
-              <button id="workflow-instantiate" class="primary small" type="button">Create objective from this workflow</button>
+              <button id="workflow-instantiate" class="primary small" type="button">Create a task from this workflow</button>
             </div>
             <p id="workflow-instantiate-result" class="field-help"></p>
             <p id="workflow-error" role="alert" class="error"></p>
-            <details><summary>Full document (this exact revision)</summary><pre id="workflow-detail-json" class="integration-commit-range" style="white-space:pre-wrap"></pre></details>
+            <details><summary>Full workflow definition (technical, JSON)</summary><p class="field-help">The raw file that defines this workflow's steps and inputs — useful for engineers, not required reading.</p><pre id="workflow-detail-json" class="integration-commit-range" style="white-space:pre-wrap"></pre></details>
           </article>
         </section>
 
         <section id="evidence-view" class="workspace-view hidden" aria-labelledby="evidence-title">
-          <div class="view-heading"><div><p class="eyebrow">READ-ONLY REPORTER</p><h2 id="evidence-title">Run evidence</h2></div><div class="evidence-actions"><button id="refresh-evidence" class="secondary" type="button">Refresh evidence</button><button id="export-evidence" class="primary" type="button">Export JSON</button></div></div>
-          <div id="evidence-empty" class="panel empty-state">Select a run to inspect its immutable execution receipts.</div>
+          <div class="view-heading"><div><p class="eyebrow">READ-ONLY REPORTER</p><h2 id="evidence-title">Run evidence</h2><p class="field-help">Every attempt, review, and tool decision from a run is recorded here as it happens — this is the record you'd show someone to explain what actually happened. This view is read-only.</p></div><div class="evidence-actions"><button id="refresh-evidence" class="secondary" type="button">Refresh evidence</button><button id="export-evidence" class="primary" type="button" title="Downloads this run's complete evidence file to your computer, exactly as recorded.">Export JSON</button></div></div>
+          <div id="evidence-empty" class="panel empty-state">Select a run on the left to see its permanent record — every attempt, review, and tool decision, exactly as it happened.</div>
           <div id="evidence-content" class="hidden">
             <div id="evidence-metrics" class="metrics"></div>
+            <p class="field-help">Checks = the test/build/check commands registered for this repository that ran, and whether they passed. Reviews = times an independent AI reviewer assessed the work. Tool decisions = times an agent tried to use a tool (write a file, run a command) and whether it was allowed.</p>
             <section id="evidence-verdict" class="panel evidence-verdict" aria-live="polite"></section>
-            <section class="panel evidence-panel"><div class="panel-heading"><h3>Independent review receipts</h3><span id="evidence-review-count" class="muted"></span></div><div id="evidence-reviews" class="evidence-list"></div></section>
-            <section class="panel evidence-panel"><div class="panel-heading"><h3>Integrity and attempts</h3><code id="evidence-hash"></code></div><div id="evidence-attempts" class="evidence-list"></div></section>
-            <section class="panel evidence-panel"><div class="panel-heading"><h3>Tool policy receipts</h3><span id="evidence-tool-count" class="muted"></span></div><div id="evidence-tools" class="evidence-list"></div></section>
+            <section class="panel evidence-panel"><div class="panel-heading"><h3>Independent review receipts</h3><span id="evidence-review-count" class="muted"></span></div><p class="field-help"><strong>READY</strong> = no blocking problems found, safe to deliver · <strong>NOT READY</strong> = problems found that must be fixed first · <strong>INCONCLUSIVE</strong> = the reviewer couldn't reach a definite verdict, often from missing evidence · <strong>invalidated</strong> = this review's verdict no longer applies because something changed after it ran; kept for the record, but don't rely on it. Each target is a repository (or path within one) the reviewer assessed separately.</p><div id="evidence-reviews" class="evidence-list"></div></section>
+            <section class="panel evidence-panel"><div class="panel-heading"><h3>Integrity and attempts</h3><span class="muted">Evidence fingerprint (sha256):</span> <code id="evidence-hash"></code></div><p class="field-help">A fingerprint of this record, useful for comparing copies or citing it — it does not prove the record was never edited. It's recomputed from the database each time you view it, so it reflects the record's current contents, not a sealed original.</p><div id="evidence-attempts" class="evidence-list"></div></section>
+            <section class="panel evidence-panel"><div class="panel-heading"><h3>Tool policy receipts</h3><span id="evidence-tool-count" class="muted"></span></div><p class="field-help"><strong>allow</strong> = the step was permitted under the rules you configured (including your approval when one was required) — it does not by itself mean the step succeeded; look at the step's own result entry for that · <strong>deny</strong> = the tool call was blocked. "Locks" prevent another agent from touching the same file or resource at the same time.</p><div id="evidence-tools" class="evidence-list"></div></section>
           </div>
         </section>
       </main>

@@ -1401,14 +1401,19 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
     const page = await fetch(dashboard.url);
     assert.equal(page.status, 200);
     const pageText = await page.text();
-    assert.match(pageText, /Assemble a verified agent team/);
+    // Slice A: the composer's own h1 lost its bespoke copy in favor of a
+    // shared VIEW_DESCRIPTIONS title + purpose sentence rendered in the
+    // topbar for every view — this pins the new canonical Runs purpose line.
+    assert.match(pageText, /Define an objective, approve the team's plan, and watch the work happen\./);
     assert.match(pageText, /aria-label="Agent count"/);
     assert.match(pageText, /id="run-autonomy"/);
     assert.match(pageText, /id="delivery-panel"/);
     const appText = await fetch(`${dashboard.url}/app.js`).then((response) => response.text());
     assert.match(appText, /create_draft_pr/);
     assert.match(appText, /Approve &amp; push branch/);
-    assert.match(appText, /Approve &amp; create draft PR/);
+    // Slice A: "PR" was unexplained shorthand — the button now spells out
+    // "pull request" to match the rest of the delivery panel's wording.
+    assert.match(appText, /Approve &amp; create draft pull request/);
     // Owner-corrected rule (2026-07-22): the cockpit COMPLETES the delivery.
     // Merge and tag exist as owner-approved actions; what must never exist is
     // a merge that happens without a confirmation carrying the approval.
@@ -1595,16 +1600,16 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
     assert.match(appScript, /\/api\/runs\/\$\{runId\}\/evidence\/export/);
     assert.match(appScript, /data-qualify-benchmark/);
     assert.match(appScript, /model\.qualified\s*&&\s*!model\.qualificationStale\s*&&\s*!model\.excluded/);
-    assert.match(appScript, /Specialist scheduling requires the benchmark pass/);
+    assert.match(appScript, /This model needs an extra accuracy test before it can be used/);
     assert.match(appScript, /function isModelSchedulable\(model\)/);
     assert.match(appScript, /function hasCurrentOperationalQualification\(model\)/);
     assert.match(appScript, /function hasCurrentQualificationForUiRole\(model, role\)/);
     assert.match(appScript, /hasCurrentQualificationForUiRole\(model, role\)/);
     assert.match(appScript, /not currently role-qualified/);
-    assert.match(appScript, /isModelSchedulable\(qualifiedModel\)\s*\?\s*"It is active and schedulable\."/);
-    assert.match(appScript, /Role-qualified models/);
-    assert.match(appScript, /Qualified only for passing roles; failed roles remain unschedulable/);
-    assert.match(appScript, /No current role qualification; not schedulable/);
+    assert.match(appScript, /isModelSchedulable\(qualifiedModel\)\s*\?\s*"It's active and ready to be used\."/);
+    assert.match(appScript, /Passed a role check/);
+    assert.match(appScript, /Passed some roles, failed others — see qualification history below/);
+    assert.match(appScript, /Hasn't passed a role check yet — can't be used/);
 
     // DH-632 visible operation feedback: shared acknowledgement helper, honest busy
     // state, global activity surface, evidence-based elapsed/heartbeat, no fabricated progress.
@@ -2483,7 +2488,7 @@ test("Workbench creates a durable read-only discussion and converts it to an obj
   const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
   try {
     const pageText = await fetch(dashboard.url).then((response) => response.text());
-    assert.match(pageText, /Multi-model Workbench/);
+    assert.match(pageText, /Ask AI models about this project/);
     assert.match(pageText, /Read-only by design/);
 
     const createdResponse = await fetch(`${dashboard.url}/api/workbench`, {
@@ -3153,8 +3158,8 @@ test("the steering panel reports requested admission changes honestly before the
     const appScript = await fetch(`${dashboard.url}/app.js`).then((response) => response.text());
     // A directive is only in force once the scheduler consumes it, so a merely
     // requested hold must never render as an applied one.
-    assert.match(appScript, /Hold requested/, "a pending hold is reported as requested, not as held");
-    assert.match(appScript, /takes effect at the next admission boundary/, "the panel says when a request takes effect");
+    assert.match(appScript, /Pause requested/, "a pending hold is reported as requested, not as held");
+    assert.match(appScript, /takes effect once the current task finishes/, "the panel says when a request takes effect");
     assert.match(appScript, /admissionState === "held" \|\| admissionState === "holding"/, "hold is disabled while its own request is still in flight");
     assert.match(appScript, /admissionState === "admitting" \|\| admissionState === "resuming"/, "resume is disabled while its own request is still in flight");
     // The interrupt confirmation must not promise mid-response injection.

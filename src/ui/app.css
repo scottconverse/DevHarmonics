@@ -85,6 +85,11 @@ button { cursor: pointer; }
 .model-card code { color: var(--muted); overflow-wrap: anywhere; }
 .lifecycle { align-self: start; border: 1px solid var(--border); border-radius: 999px; padding: 5px 8px; color: var(--muted); font-size: 10px; font-weight: 800; text-transform: uppercase; }
 .lifecycle.qualified, .lifecycle.active { color: var(--lime); border-color: #3d5428; }
+/* Slice A: "you turned this off on purpose" (deliberate) is visually distinct
+   from "an automatic check failed or needs attention" (degraded) — same base
+   shape, different color, so a PM can tell them apart by color alone. */
+.lifecycle.degraded { color: var(--amber); border-color: #6d5838; }
+.lifecycle.deliberate { color: var(--muted); border-color: var(--border); }
 .evidence-panel { margin-top: 16px; padding: 20px; }
 .evidence-actions { display: flex; gap: 9px; flex-wrap: wrap; }
 .evidence-verdict { margin-top: 16px; padding: 20px; display: grid; grid-template-columns: 1fr auto; gap: 12px 20px; align-items: start; }
@@ -177,11 +182,16 @@ button { cursor: pointer; }
 .workbench-convert form { margin-top: 12px; }
 
 main { width: min(1500px, 100%); min-width: 0; padding: 28px 36px 60px; margin: 0 auto; }
-.topbar { display: flex; justify-content: space-between; align-items: center; gap: 24px; margin-bottom: 26px; }
+.topbar { display: flex; justify-content: space-between; align-items: start; gap: 24px; margin-bottom: 26px; }
 .eyebrow { color: var(--lime); font-size: 10px; line-height: 1.4; letter-spacing: .16em; font-weight: 800; margin: 0 0 6px; text-transform: uppercase; }
 h1, h2, h3, p { margin-top: 0; }
 h1 { font-size: clamp(25px, 3vw, 38px); margin-bottom: 0; letter-spacing: -.04em; }
 h2 { letter-spacing: -.025em; }
+/* Slice A pattern #1: the one title + one purpose sentence every view gets,
+   rendered from VIEW_DESCRIPTIONS directly under the page title. */
+.view-purpose { color: var(--muted); font-size: 14px; line-height: 1.4; margin-top: 6px; max-width: 640px; }
+.provider-status-wrap { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+.provider-status-legend { text-align: right; max-width: 260px; margin-top: 0; }
 .provider-status { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .provider-chip { display: flex; align-items: center; gap: 7px; border: 1px solid var(--border); border-radius: 999px; padding: 7px 10px; color: var(--muted); font-size: 12px; background: var(--panel); }
 .provider-chip i { width: 7px; height: 7px; border-radius: 50%; background: var(--red); }
@@ -222,6 +232,9 @@ textarea { resize: vertical; min-height: 122px; line-height: 1.55; }
 .toggle input { position: absolute; opacity: 0; pointer-events: none; }
 .toggle span { display: block; border: 1px solid var(--border); border-radius: 9px; padding: 11px 13px; color: var(--muted); font-size: 12px; background: #0d1014; }
 .toggle input:checked + span { color: var(--text); border-color: #59663e; background: var(--lime-dark); }
+/* Gap fixed (Slice A): a disabled toggle's reason used to live only in a
+   hover title — invisible on touch, easy to miss on desktop. Now visible. */
+.toggle-reason { display: block; margin-top: 5px; color: var(--amber); font-size: 10px; line-height: 1.35; max-width: 175px; }
 .composer-actions { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-top: 26px; }
 .plan-preview { margin-top: 28px; padding-top: 28px; border-top: 1px solid var(--border); }
 .plan-preview-head, .plan-preview-head > div, .plan-actions { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
@@ -268,8 +281,14 @@ textarea { resize: vertical; min-height: 122px; line-height: 1.55; }
 .run-summary h2 { margin: 0; font-size: 20px; max-width: 900px; }
 .run-objective { margin-top: 10px; color: var(--muted); font-size: 12px; }
 .run-objective summary { cursor: pointer; color: var(--amber); font-weight: 750; }
+.run-status-legend { margin-top: -6px; }
+.run-status-legend summary { cursor: pointer; color: var(--muted); font-size: 11px; }
+.run-status-legend p { margin-top: 6px; }
 .run-objective p { max-height: 240px; margin: 10px 0 0; overflow: auto; padding-right: 8px; line-height: 1.55; white-space: pre-wrap; }
-.status-pill { border: 1px solid var(--border); border-radius: 999px; padding: 8px 12px; text-transform: uppercase; letter-spacing: .09em; font-size: 10px; font-weight: 900; color: var(--amber); }
+/* Slice A: default status-pill color is neutral (muted), not amber — amber
+   now means "needs attention" and must be set explicitly by a status class,
+   never implied by leaving a status unstyled. */
+.status-pill { border: 1px solid var(--border); border-radius: 999px; padding: 8px 12px; text-transform: uppercase; letter-spacing: .09em; font-size: 10px; font-weight: 900; color: var(--muted); }
 .status-pill.ready { color: var(--lime); border-color: #526338; }
 .status-pill.failed, .status-pill.not_ready { color: var(--red); border-color: #663b3b; }
 .status-pill.cancelled { color: var(--muted); border-color: var(--border); }
@@ -385,6 +404,7 @@ pre { margin: 0; padding: 12px; overflow: auto; max-height: 280px; background: #
 .op-quiet.warn { color: var(--amber); }
 .activity-strip { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 40; display: grid; gap: 6px; max-width: min(720px, calc(100vw - 28px)); max-height: 34vh; overflow-y: auto; padding: 10px 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 10px 34px rgba(0,0,0,.5); font-size: 12.5px; }
 .activity-strip.hidden { display: none; }
+.strip-label { margin: 0 0 2px; color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
 .strip-item { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--muted); }
 .strip-item strong { color: var(--text); font-weight: 650; }
 .strip-item.succeeded { color: var(--lime); }

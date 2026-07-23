@@ -108,6 +108,62 @@ test("bounded timeout: a hanging tool is reported unobserved, not left to hang t
   assert.match(branch.message, /timed out/i);
 });
 
+test("branch artifact: a missing branch on a MERGED pull request is not a divergence — routine cleanup", async () => {
+  const delivery = fixtureDelivery({ status: "merged", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(""); // branch deleted after merge
+    if (request.command === "gh") return ok(JSON.stringify({ state: "MERGED", statusCheckRollup: [] }));
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const branch = findingFor(result.findings, "branch")!;
+  assert.equal(branch.state, "matches");
+  assert.match(branch.message, /routine cleanup/i);
+  assert.equal(result.hasDivergence, false);
+});
+
+test("branch artifact: a missing branch on a NON-merged (open) pull request still diverges", async () => {
+  const delivery = fixtureDelivery({ status: "draft_pr_created", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(""); // branch missing, PR never merged
+    if (request.command === "gh") return ok(JSON.stringify({ state: "OPEN", headRefOid: delivery.headCommit, statusCheckRollup: [] }));
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const branch = findingFor(result.findings, "branch")!;
+  assert.equal(branch.state, "diverged");
+  assert.match(branch.message, /no longer has that branch/i);
+});
+
+test("branch artifact: a missing branch is unobserved (never matches, never diverged) when the PR state itself could not be checked", async () => {
+  const delivery = fixtureDelivery({ status: "merged", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(""); // branch missing
+    if (request.command === "gh") return fail("gh: not logged in to any GitHub hosts. Run gh auth login");
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const branch = findingFor(result.findings, "branch")!;
+  assert.equal(branch.state, "unobserved");
+  assert.match(branch.message, /could not check/i);
+  assert.equal(result.hasDivergence, false);
+  assert.equal(result.hasUnobserved, true);
+});
+
+test("branch artifact: a branch that exists but moved to a different commit still diverges even when the pull request is merged", async () => {
+  const delivery = fixtureDelivery({ status: "merged", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
+  const movedOid = "c".repeat(40);
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(`${movedOid}\trefs/heads/${delivery.branch}\n`);
+    if (request.command === "gh") return ok(JSON.stringify({ state: "MERGED", statusCheckRollup: [] }));
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const branch = findingFor(result.findings, "branch")!;
+  assert.equal(branch.state, "diverged");
+  assert.match(branch.message, /new commits landed after review/i);
+});
+
 test("pull_request artifact: an open draft PR at the reviewed head matches", async () => {
   const delivery = fixtureDelivery({ status: "draft_pr_created", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
   const runner = async (request: ProcessRequest) => {

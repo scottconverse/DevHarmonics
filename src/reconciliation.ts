@@ -113,13 +113,45 @@ interface PullRequestView {
   statusCheckRollup?: Array<{ status?: string; conclusion?: string | null }> | null;
 }
 
-async function checkBranch(delivery: DeliveryRepositoryRecord, runner: ProcessRunner, timeoutMs: number): Promise<ReconciliationFinding> {
+/**
+ * What the same repository's pull-request artifact tells us about a missing
+ * head branch, so `checkBranch` can tell routine post-merge cleanup from a
+ * real loss. `undefined` means no PR is recorded for this delivery at all
+ * (the pre-existing, unaffected case: a missing branch always diverges).
+ */
+type PullRequestMergeSignal = "merged" | "not_merged" | "unobserved";
+
+async function checkBranch(
+  delivery: DeliveryRepositoryRecord,
+  runner: ProcessRunner,
+  timeoutMs: number,
+  prMergeSignal?: PullRequestMergeSignal,
+): Promise<ReconciliationFinding> {
   const context = `whether branch '${delivery.branch}' still exists at the reviewed commit`;
   const observed = await observe(runner, { command: "git", args: ["ls-remote", "origin", `refs/heads/${delivery.branch}`], cwd: delivery.localPath, timeoutMs }, timeoutMs, context);
   if (!observed.ok) return { artifact: "branch", ...observed.finding };
 
   const line = observed.result.stdout.trim().split(/\r?\n/)[0]?.trim() ?? "";
   if (!line) {
+    // A missing head branch is routine GitHub hygiene once its pull request
+    // merged (auto-delete or manual cleanup) — never an alarm. But we can
+    // only tell that apart from a real loss by knowing the PR actually
+    // merged, so an unobservable PR state must stay honestly unobserved
+    // rather than guessing either way.
+    if (prMergeSignal === "merged") {
+      return {
+        artifact: "branch",
+        state: "matches",
+        message: `Branch deleted after merge — routine cleanup, nothing wrong.`,
+      };
+    }
+    if (prMergeSignal === "unobserved") {
+      return {
+        artifact: "branch",
+        state: "unobserved",
+        message: `Could not check whether branch '${delivery.branch}' was deleted after a merge or actually lost: the pull request state could not be checked.`,
+      };
+    }
     return {
       artifact: "branch",
       state: "diverged",
@@ -137,12 +169,18 @@ async function checkBranch(delivery: DeliveryRepositoryRecord, runner: ProcessRu
   };
 }
 
+interface PullRequestAndChecksResult {
+  findings: ReconciliationFinding[];
+  /** What this PR read tells `checkBranch` about a missing head branch — see `PullRequestMergeSignal`. */
+  mergeSignal: PullRequestMergeSignal;
+}
+
 async function checkPullRequestAndChecks(
   delivery: DeliveryRepositoryRecord,
   expectMerged: boolean,
   runner: ProcessRunner,
   timeoutMs: number,
-): Promise<ReconciliationFinding[]> {
+): Promise<PullRequestAndChecksResult> {
   const context = `pull request ${delivery.pullRequestUrl}`;
   const observed = await observe(
     runner,
@@ -153,7 +191,10 @@ async function checkPullRequestAndChecks(
   if (!observed.ok) {
     // A single failed read means BOTH the pull-request and checks artifacts
     // could not be observed — never invent one finding from the other.
-    return [{ artifact: "pull_request", ...observed.finding }, { artifact: "checks", ...observed.finding }];
+    return {
+      findings: [{ artifact: "pull_request", ...observed.finding }, { artifact: "checks", ...observed.finding }],
+      mergeSignal: "unobserved",
+    };
   }
 
   let view: PullRequestView;
@@ -161,7 +202,10 @@ async function checkPullRequestAndChecks(
     view = JSON.parse(observed.result.stdout) as PullRequestView;
   } catch (error) {
     const message = `Could not check ${context}: GitHub returned an unreadable response (${errorMessage(error)})`;
-    return [{ artifact: "pull_request", state: "unobserved", message }, { artifact: "checks", state: "unobserved", message }];
+    return {
+      findings: [{ artifact: "pull_request", state: "unobserved", message }, { artifact: "checks", state: "unobserved", message }],
+      mergeSignal: "unobserved",
+    };
   }
 
   const findings: ReconciliationFinding[] = [];
@@ -220,7 +264,10 @@ async function checkPullRequestAndChecks(
     findings.push({ artifact: "checks", state: "matches", message: `No status checks currently report a failing result.` });
   }
 
-  return findings;
+  // Raw GitHub truth about merge state, independent of whether it matches
+  // the ledger's expectation — this is what `checkBranch` needs to tell
+  // routine post-merge branch cleanup from a real loss.
+  return { findings, mergeSignal: state === "MERGED" ? "merged" : "not_merged" };
 }
 
 async function checkTag(delivery: DeliveryRepositoryRecord, runner: ProcessRunner, timeoutMs: number): Promise<ReconciliationFinding> {
@@ -249,11 +296,19 @@ export async function reconcileDeliveryRepository(
   const findings: ReconciliationFinding[] = [];
 
   if (DELIVERED_STATUSES.includes(delivery.status)) {
-    findings.push(await checkBranch(delivery, runner, timeoutMs));
-
+    // The pull-request read runs first (when one is recorded) so its merge
+    // state can inform the branch check: a missing head branch is routine
+    // GitHub cleanup once the PR merged, not a divergence — see checkBranch.
+    let prResult: PullRequestAndChecksResult | null = null;
     if (delivery.pullRequestUrl) {
       const expectMerged = delivery.status === "merged" || delivery.status === "tagged";
-      findings.push(...(await checkPullRequestAndChecks(delivery, expectMerged, runner, timeoutMs)));
+      prResult = await checkPullRequestAndChecks(delivery, expectMerged, runner, timeoutMs);
+    }
+
+    findings.push(await checkBranch(delivery, runner, timeoutMs, prResult?.mergeSignal));
+
+    if (prResult) {
+      findings.push(...prResult.findings);
     }
 
     if (delivery.status === "tagged" && delivery.releaseTag) {

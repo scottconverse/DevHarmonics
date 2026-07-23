@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
@@ -41,10 +41,6 @@ const expectations = [
   // LEDGER_SCHEMA_VERSION or renames the prior-tag rollback target.
   ["docs/ROLLBACK.md", `backup-v33-to-v34`],
   ["docs/ROLLBACK.md", `Ledger schema 33 → 34`],
-  // The test count below must be bumped by hand whenever the suite size
-  // changes (README.md:397) — this string match is not truth-sourced from
-  // the actual `npm test` output, only kept in sync manually. See R4-003.
-  ["README.md", `191 tests across`],
 ];
 
 const failures = [];
@@ -110,6 +106,28 @@ if (process.argv.includes("--release")) {
     if (tag !== `v${version}`) failures.push(`Git: expected exact release tag v${version}, found ${tag || "none"}`);
   } catch {
     failures.push(`Git: HEAD is not tagged v${version}`);
+  }
+  checks += 1;
+}
+
+// Truth-sourced test count (R4-003, fixed for good): the README states a test
+// total that drifted four times because it was a hand-maintained literal. Count
+// the actual `test(` declarations in test/*.test.ts and require the README to
+// match — so the number can never again claim a total the suite doesn't have.
+{
+  const testDir = path.join(root, "test");
+  const testFiles = (await readdir(testDir)).filter((name) => name.endsWith(".test.ts"));
+  let declared = 0;
+  for (const file of testFiles) {
+    const contents = await readFile(path.join(testDir, file), "utf8");
+    declared += (contents.match(/^test\(/gm) ?? []).length;
+  }
+  const readme = await readFile(path.join(root, "README.md"), "utf8");
+  const claimed = readme.match(/(\d+) tests across/);
+  if (!claimed) {
+    failures.push("README.md: missing the 'N tests across' automated-suite count");
+  } else if (Number(claimed[1]) !== declared) {
+    failures.push(`README.md: claims ${claimed[1]} tests across, but test/*.test.ts declares ${declared} — update README.md:397 to ${declared}`);
   }
   checks += 1;
 }

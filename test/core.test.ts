@@ -28,7 +28,7 @@ import {
   isAbortError,
   type InvocationEvent,
 } from "../src/runtime.js";
-import type { DeliveryRepositoryRecord, DeliveryRepositoryStatus, DevHarmonicsConfig, PlannedTask, RunPlan, RunSummary, SteeringDirectiveRecord } from "../src/types.js";
+import type { DeliveryRepositoryRecord, DeliveryRepositoryStatus, DevHarmonicsConfig, ObjectiveRecord, PlannedTask, RunPlan, RunSummary, SteeringDirectiveRecord } from "../src/types.js";
 import { devHarmonicsConfigSchema, manualModelSchema, objectiveInputSchema, runPlanSchema, steeringPayloadSchema } from "../src/schemas.js";
 import { runProcess, subscriptionEnvironment } from "../src/process.js";
 import { REDACTED, redactText } from "../src/redaction.js";
@@ -52,6 +52,8 @@ import { expandValidatorTokens, mergeRepositoryValidators, runValidator } from "
 import { parseReviewerResponse } from "../src/review.js";
 import { DeliveryService } from "../src/delivery.js";
 import { projectInbox, type InboxItem } from "../src/inbox.js";
+import { projectProgramStatus, PROGRAM_QUIET_THRESHOLD_MS, type ProgramBucket } from "../src/program-status.js";
+import type { ProductRecord } from "../src/ledger.js";
 
 test("provider output parsers extract each CLI's final response", () => {
   const codex = [
@@ -3210,6 +3212,204 @@ test("projectInbox covers plan approval, pending delivery steps, and paused runs
   ]);
 });
 
+function programFixtureTask(overrides: Partial<RunSummary["tasks"][number]> = {}): RunSummary["tasks"][number] {
+  return {
+    id: "t1",
+    title: "Implement export",
+    description: "d",
+    kind: "implementation",
+    repositoryIds: [],
+    repositoryScope: ["."],
+    permission: "workspace_write",
+    risk: "medium",
+    acceptanceCriteria: [],
+    expectedArtifacts: [],
+    status: "working",
+    provider: null,
+    assignment: null,
+    attemptCount: 1,
+    checks: [],
+    ...overrides,
+  };
+}
+
+function programFixtureProduct(overrides: Partial<ProductRecord> = {}): ProductRecord {
+  return {
+    id: "product-1",
+    name: "CivicSuite",
+    organizationUrl: "https://github.com/example",
+    description: "",
+    repositories: [],
+    createdAt: "2026-07-01T00:00:00.000Z",
+    updatedAt: "2026-07-01T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+test("projectProgramStatus puts every run in exactly one bucket, owner-actionable states winning by precedence", () => {
+  const now = Date.parse("2026-07-22T12:00:00.000Z");
+
+  // waiting_on_you wins over retrying: a paused run (inbox item) whose task
+  // is ALSO stuck in 'retry' — the owner decision must win, not the retry.
+  const pausedWithRetry = inboxFixtureRun({
+    id: "run-paused-retry",
+    status: "paused",
+    updatedAt: "2026-07-22T11:00:00.000Z",
+    tasks: [programFixtureTask({ id: "t1", status: "retry", attemptCount: 2 })],
+    events: [inboxFixtureEvent({ id: 1, cursor: 1, runId: "run-paused-retry", kind: "run.paused", message: "Needs a decision", createdAt: "2026-07-22T11:00:00.000Z" })],
+  });
+
+  // retrying wins over stalled: running, quiet for 30 minutes, but a task
+  // is currently retrying — that is a live loop, not silence.
+  const retryingQuiet = inboxFixtureRun({
+    id: "run-retrying",
+    status: "running",
+    updatedAt: "2026-07-22T11:30:00.000Z",
+    tasks: [programFixtureTask({ id: "t1", status: "retry", attemptCount: 3 })],
+    events: [inboxFixtureEvent({ id: 2, cursor: 2, runId: "run-retrying", kind: "task.retry", message: "retrying", createdAt: "2026-07-22T11:30:00.000Z" })],
+  });
+
+  // stalled: running, quiet for exactly the threshold (boundary is inclusive).
+  const stalledBoundary = inboxFixtureRun({
+    id: "run-stalled",
+    status: "running",
+    updatedAt: "2026-07-22T11:00:00.000Z",
+    tasks: [programFixtureTask({ id: "t1", status: "working" })],
+    events: [inboxFixtureEvent({ id: 3, cursor: 3, runId: "run-stalled", kind: "task.started", message: "started", createdAt: new Date(now - PROGRAM_QUIET_THRESHOLD_MS).toISOString() })],
+  });
+
+  // moving: running, quiet for one millisecond LESS than the threshold.
+  const movingBoundary = inboxFixtureRun({
+    id: "run-moving",
+    status: "running",
+    updatedAt: "2026-07-22T11:59:00.000Z",
+    tasks: [
+      programFixtureTask({ id: "t1", status: "passed" }),
+      programFixtureTask({ id: "t2", status: "working" }),
+    ],
+    events: [inboxFixtureEvent({ id: 4, cursor: 4, runId: "run-moving", kind: "task.started", message: "started", createdAt: new Date(now - PROGRAM_QUIET_THRESHOLD_MS + 1).toISOString() })],
+  });
+
+  // finished: ready with nothing pending.
+  const finishedReady = inboxFixtureRun({ id: "run-finished", status: "ready", tasks: [programFixtureTask({ id: "t1", status: "passed" })] });
+  const finishedFailed = inboxFixtureRun({ id: "run-failed", status: "failed" });
+  const finishedCancelled = inboxFixtureRun({ id: "run-cancelled", status: "cancelled" });
+  const finishedNotReady = inboxFixtureRun({ id: "run-not-ready", status: "not_ready" });
+
+  const runs = [pausedWithRetry, retryingQuiet, stalledBoundary, movingBoundary, finishedReady, finishedFailed, finishedCancelled, finishedNotReady];
+  const program = projectProgramStatus(runs, [], [], now);
+
+  assert.equal(program.totals.waiting_on_you + program.totals.retrying + program.totals.stalled + program.totals.moving + program.totals.finished, runs.length, "every run lands in exactly one bucket");
+
+  const bucketOf = (runId: string): ProgramBucket => {
+    const entry = program.groups.flatMap((group) => group.runs).find((run) => run.runId === runId);
+    assert.ok(entry, `${runId} must appear exactly once in the projection`);
+    return entry!.bucket;
+  };
+
+  assert.equal(bucketOf("run-paused-retry"), "waiting_on_you", "an owner decision wins over a concurrent retry");
+  assert.equal(bucketOf("run-retrying"), "retrying", "a live retry wins over quiet time");
+  assert.equal(bucketOf("run-stalled"), "stalled", "quiet AT the threshold counts as stalled (inclusive boundary)");
+  assert.equal(bucketOf("run-moving"), "moving", "quiet one millisecond under the threshold is still moving");
+  assert.equal(bucketOf("run-finished"), "finished");
+  assert.equal(bucketOf("run-failed"), "finished");
+  assert.equal(bucketOf("run-cancelled"), "finished");
+  assert.equal(bucketOf("run-not-ready"), "finished");
+
+  assert.match(program.groups.flatMap((group) => group.runs).find((run) => run.runId === "run-stalled")!.reason, /quiet for 5m/);
+  assert.equal(program.groups.flatMap((group) => group.runs).find((run) => run.runId === "run-moving")!.reason, "1 of 2 tasks done");
+  assert.equal(program.groups.flatMap((group) => group.runs).find((run) => run.runId === "run-finished")!.reason, "1 of 1 task done");
+
+  // No run appears twice anywhere in the projection.
+  const allRunIds = program.groups.flatMap((group) => group.runs.map((run) => run.runId));
+  assert.equal(new Set(allRunIds).size, allRunIds.length, "a run must never appear in more than one bucket/group entry");
+});
+
+function programFixtureObjective(overrides: Partial<ObjectiveRecord> = {}): ObjectiveRecord {
+  return {
+    id: "objective-1",
+    outcome: "Ship it",
+    acceptanceCriteria: [],
+    constraints: [],
+    projectPath: "/tmp/project",
+    productId: undefined,
+    repositoryIds: [],
+    risk: "medium",
+    autonomy: "supervised",
+    priority: "normal",
+    policyNotes: [],
+    workflowRevisionHash: null,
+    revision: 1,
+    createdAt: "2026-07-22T09:00:00.000Z",
+    updatedAt: "2026-07-22T09:00:00.000Z",
+    ...overrides,
+  };
+}
+
+test("projectProgramStatus groups by product — via the objective link (single-repo) or the integration set (multi-repo) — otherwise by repository path", () => {
+  const product = programFixtureProduct({ id: "prod-civic", name: "CivicSuite" });
+
+  // Multi-repository run: the ONLY case that gets a real IntegrationSetRecord
+  // (Orchestrator.executeMultiRepository, src/orchestrator.ts, requires a
+  // registered product and creates the set from it).
+  const multiRepoRun = inboxFixtureRun({
+    id: "run-multi-repo",
+    status: "running",
+    projectPath: "/tmp/should-not-be-used",
+    integrationSet: {
+      id: "iset-1",
+      runId: "run-multi-repo",
+      productId: "prod-civic",
+      status: "running",
+      integrationConditions: [],
+      repositories: [],
+      createdAt: "2026-07-22T10:00:00.000Z",
+      updatedAt: "2026-07-22T10:00:00.000Z",
+    },
+    events: [inboxFixtureEvent({ id: 1, cursor: 1, runId: "run-multi-repo", kind: "run.created", createdAt: "2026-07-22T11:59:59.000Z" })],
+  });
+
+  // Single-repository run started from a product-linked objective: NO
+  // integration set exists (single-repo execution never creates one), so the
+  // objective's productId is the ONLY signal this run belongs to CivicSuite.
+  const singleRepoObjective = programFixtureObjective({ id: "obj-single", productId: "prod-civic" });
+  const singleRepoRun = inboxFixtureRun({
+    id: "run-single-repo",
+    status: "running",
+    projectPath: "/tmp/should-not-be-used-either",
+    objectiveId: "obj-single",
+    integrationSet: null,
+    events: [inboxFixtureEvent({ id: 2, cursor: 2, runId: "run-single-repo", kind: "run.created", createdAt: "2026-07-22T11:59:59.000Z" })],
+  });
+
+  const unlinkedRun = inboxFixtureRun({
+    id: "run-unlinked",
+    status: "running",
+    projectPath: "/repos/standalone-tool",
+    events: [inboxFixtureEvent({ id: 3, cursor: 3, runId: "run-unlinked", kind: "run.created", createdAt: "2026-07-22T11:59:59.000Z" })],
+  });
+
+  const program = projectProgramStatus(
+    [multiRepoRun, singleRepoRun, unlinkedRun],
+    [product],
+    [singleRepoObjective],
+    Date.parse("2026-07-22T12:00:00.000Z"),
+  );
+
+  const groupOf = (runId: string) => program.groups.find((group) => group.runs.some((run) => run.runId === runId));
+
+  const civicGroupViaIntegrationSet = groupOf("run-multi-repo");
+  assert.equal(civicGroupViaIntegrationSet?.label, "CivicSuite", "a multi-repo run groups under the product's NAME via its integration set");
+
+  const civicGroupViaObjective = groupOf("run-single-repo");
+  assert.equal(civicGroupViaObjective?.label, "CivicSuite", "a single-repo run with NO integration set still groups under the product's NAME via its objective's productId");
+  assert.equal(civicGroupViaObjective?.key, civicGroupViaIntegrationSet?.key, "both paths to the same product land in the SAME group");
+
+  const pathGroup = groupOf("run-unlinked");
+  assert.equal(pathGroup?.label, "/repos/standalone-tool", "a run with no product link groups under its own repository path");
+  assert.notEqual(civicGroupViaIntegrationSet?.key, pathGroup?.key);
+});
+
 test("projectInbox drops a plan approval the instant the ledger shows it resolved", () => {
   // "Resolution honesty": the projection is recomputed from CURRENT ledger
   // state on every call, never cached — approving the plan (awaiting_approval
@@ -3300,6 +3500,38 @@ test("the inbox item HTML seam (src/ui/app.js) escapes every interpolated field"
   assert.match(html, /&quot;&gt;&lt;svg onload=alert\(2\)&gt;/, "plainSummary is escaped, not dropped");
   assert.match(html, /&lt;iframe src=javascript:alert\(3\)&gt;/, "evidence is escaped, not dropped");
   assert.match(html, /&lt;img src=x onerror=alert\(4\)&gt;/, "the action label is escaped, not dropped");
+});
+
+test("the program run HTML seam (src/ui/app.js) escapes every interpolated field", () => {
+  // DH-645 S2. Same threat shape as renderInboxItemHtml above: goalSummary
+  // and reason ultimately derive from run goals and free-text ledger
+  // evidence. Drive the REAL shipped renderProgramRunHtml pure seam
+  // extracted from src/ui/app.js so a future refactor that drops the
+  // escaping fails HERE.
+  const appSource = readFileSync(path.join(process.cwd(), "src", "ui", "app.js"), "utf8");
+  const start = appSource.indexOf('function escapeHtml(value = "")');
+  const end = appSource.indexOf("\n// DH-632 visible operation feedback");
+  assert.ok(start >= 0 && end > start, "escapeHtml/renderProgramRunHtml must be extractable from app.js");
+  const { renderProgramRunHtml } = new Function(
+    `${appSource.slice(start, end)}; return { escapeHtml, renderProgramRunHtml };`,
+  )() as { renderProgramRunHtml: (entry: Record<string, unknown>) => string };
+
+  const hostileEntry = {
+    runId: '"><img src=x onerror=alert(1)>',
+    bucket: "stalled",
+    goalSummary: "Ship it </strong><script>alert(document.cookie)</script>",
+    reason: '"><svg onload=alert(2)>quiet for </p><iframe src=javascript:alert(3)>',
+  };
+  const html = renderProgramRunHtml(hostileEntry);
+
+  assert.doesNotMatch(html, /<img/i, "an <img> tag must never reach innerHTML unescaped");
+  assert.doesNotMatch(html, /<script/i, "a <script> tag must never reach innerHTML unescaped");
+  assert.doesNotMatch(html, /<svg/i, "an <svg onload> payload must never reach innerHTML unescaped");
+  assert.doesNotMatch(html, /<iframe/i, "an <iframe> payload must never reach innerHTML unescaped");
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/, "runId is escaped, not dropped");
+  assert.match(html, /&lt;script&gt;alert\(document\.cookie\)&lt;\/script&gt;/, "goalSummary is escaped, not dropped");
+  assert.match(html, /&quot;&gt;&lt;svg onload=alert\(2\)&gt;/, "reason is escaped, not dropped");
+  assert.match(html, /&lt;iframe src=javascript:alert\(3\)&gt;/, "reason is escaped in full, not dropped");
 });
 
 test("migration 30's delivery-table rebuild preserves row data from a physical schema-29 database", async () => {

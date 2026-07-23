@@ -28,6 +28,7 @@ const state = {
   workbenchMessages: [],
   steering: {},
   inboxItems: [],
+  program: { groups: [], totals: {} },
 };
 const $ = (selector) => document.querySelector(selector);
 
@@ -111,6 +112,45 @@ function renderInboxItemHtml(item) {
     </div>
     <button class="secondary small" type="button" data-inbox-run-id="${runId}">${label}</button>
   </article>`;
+}
+
+// DH-645 S2 program-status helpers, kept next to the inbox helpers above
+// for the same reason: a fully self-contained, independently testable pure
+// function. goalSummary and reason ultimately derive from run goals and
+// free-text ledger evidence (src/program-status.ts) — same threat shape as
+// renderInboxItemHtml, so every interpolated field goes through escapeHtml
+// before reaching innerHTML.
+const PROGRAM_BUCKET_LABELS = {
+  waiting_on_you: "Waiting on you",
+  retrying: "Retrying",
+  stalled: "Stalled",
+  moving: "Moving",
+  finished: "Finished",
+};
+const PROGRAM_BUCKET_ORDER = ["waiting_on_you", "retrying", "stalled", "moving", "finished"];
+
+function renderProgramRunHtml(entry) {
+  const runId = escapeHtml(entry.runId || "");
+  const bucket = escapeHtml(String(entry.bucket || ""));
+  const goal = escapeHtml(entry.goalSummary || "");
+  const reason = escapeHtml(entry.reason || "");
+  return `<button type="button" class="program-run" data-program-bucket="${bucket}" data-program-run-id="${runId}">
+    <strong>${goal}</strong>
+    <span class="program-run-bucket">${PROGRAM_BUCKET_LABELS[entry.bucket] || bucket}</span>
+    <span class="program-run-reason">${reason}</span>
+  </button>`;
+}
+
+function renderProgramGroupHtml(group) {
+  const label = escapeHtml(group.label || "");
+  const counts = PROGRAM_BUCKET_ORDER
+    .filter((bucket) => group.counts?.[bucket])
+    .map((bucket) => `${PROGRAM_BUCKET_LABELS[bucket]}: ${group.counts[bucket]}`)
+    .join(" · ");
+  return `<section class="program-group">
+    <h3>${label}<span class="program-group-counts">${escapeHtml(counts)}</span></h3>
+    ${(group.runs || []).map(renderProgramRunHtml).join("")}
+  </section>`;
 }
 
 // DH-632 visible operation feedback: one shared acknowledgement/lifecycle layer for
@@ -1159,10 +1199,11 @@ async function refreshRuns() {
 // the rest of the cockpit, so an item can only disappear because its
 // underlying state genuinely resolved (never a stale client-side cache).
 async function refreshInbox() {
-  const { items } = await api("/api/inbox");
+  const { items, program } = await api("/api/inbox");
   state.inboxItems = items;
+  state.program = program || { groups: [], totals: {} };
   renderInboxBadge();
-  if (state.view === "inbox") renderInboxList();
+  if (state.view === "inbox") { renderInboxList(); renderProgramStatus(); }
 }
 
 function renderInboxBadge() {
@@ -1178,6 +1219,19 @@ function renderInboxList() {
   $("#inbox-empty").classList.toggle("hidden", items.length > 0);
   $("#inbox-list").classList.toggle("hidden", items.length === 0);
   $("#inbox-list").innerHTML = items.map(renderInboxItemHtml).join("");
+}
+
+// DH-645 S2. Same recompute-on-every-refresh discipline as renderInboxList:
+// the program panel is never a stale client cache, only ever a render of
+// whatever /api/inbox's `program` field says right now.
+function renderProgramStatus() {
+  const panel = $("#program-status-list");
+  const empty = $("#program-status-empty");
+  if (!panel || !empty) return;
+  const groups = state.program?.groups || [];
+  empty.classList.toggle("hidden", groups.length > 0);
+  panel.classList.toggle("hidden", groups.length === 0);
+  panel.innerHTML = groups.map(renderProgramGroupHtml).join("");
 }
 
 function connectEventStream() {
@@ -1782,12 +1836,13 @@ document.querySelector(".app-nav").addEventListener("click", async (event) => {
   if (button.dataset.view === "products") await refreshProducts();
   if (button.dataset.view === "workbench") await refreshWorkbench();
   if (button.dataset.view === "workflows") await refreshWorkflows();
-  if (button.dataset.view === "inbox") { await refreshInbox(); renderInboxList(); }
+  if (button.dataset.view === "inbox") { await refreshInbox(); renderInboxList(); renderProgramStatus(); }
 });
 $("#refresh-inbox").addEventListener("click", async () => {
   await withOperation($("#refresh-inbox"), "Refreshing inbox", async () => {
     await refreshInbox();
     renderInboxList();
+    renderProgramStatus();
   }, { busyLabel: "Refreshing…" });
 });
 $("#inbox-list").addEventListener("click", (event) => {
@@ -1795,6 +1850,15 @@ $("#inbox-list").addEventListener("click", (event) => {
   if (!button) return;
   state.composing = false;
   state.selectedRunId = button.dataset.inboxRunId;
+  showView("runs");
+  renderRunList();
+  renderSelectedRun();
+});
+$("#program-status-list").addEventListener("click", (event) => {
+  const item = event.target.closest("[data-program-run-id]");
+  if (!item) return;
+  state.composing = false;
+  state.selectedRunId = item.dataset.programRunId;
   showView("runs");
   renderRunList();
   renderSelectedRun();

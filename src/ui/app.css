@@ -442,3 +442,19 @@ pre { margin: 0; padding: 12px; overflow: auto; max-height: 280px; background: #
 .steering-queue { display: grid; gap: 6px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
 .steering-queue .joined { display: flex; gap: 8px; }
 .steering-queue .joined .input { flex: 1; min-width: 0; }
+
+/* DH-645 S2 program status panel. */
+.program-status-heading { margin-top: 26px; }
+.program-status-legend { list-style: none; margin: 0 0 16px; padding: 0; display: grid; gap: 4px; }
+.program-status-groups { display: grid; gap: 16px; }
+.program-group { border: 1px solid var(--border); border-radius: 10px; padding: 13px; background: #0d1014; }
+.program-group h3 { margin: 0 0 8px; font-size: 13px; display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.program-group-counts { color: var(--muted); font-weight: 400; font-size: 11px; }
+.program-run { display: grid; gap: 4px; width: 100%; padding: 9px 0; border: none; border-top: 1px solid var(--border); border-radius: 0; background: none; color: inherit; text-align: left; font: inherit; cursor: pointer; }
+.program-run:first-of-type { border-top: none; }
+.program-run:hover { background: var(--panel-2); }
+.program-run-bucket { color: var(--lime); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; font-weight: 700; }
+.program-run[data-program-bucket="stalled"] .program-run-bucket { color: var(--amber); }
+.program-run[data-program-bucket="waiting_on_you"] .program-run-bucket { color: var(--blue); }
+.program-run[data-program-bucket="finished"] .program-run-bucket { color: var(--muted); }
+.program-run-reason { color: var(--muted); font-size: 12px; }

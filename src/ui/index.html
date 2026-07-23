@@ -51,6 +51,19 @@
           </div>
           <div id="inbox-empty" class="panel empty-state hidden">Nothing is waiting on you. A plan approval, a delivery step, or a paused run needing your direction will appear here the moment one does.</div>
           <div id="inbox-list" class="evidence-list hidden"></div>
+
+          <div class="view-heading program-status-heading">
+            <div><p class="eyebrow">HOW THE WHOLE PROGRAM IS DOING</p><h2>Program status</h2><p class="field-help">Every run the ledger knows about, grouped by product (or by repository path when a run isn't linked to one) and sorted into what's actually happening — computed fresh from ledger facts every refresh, never from a guess.</p></div>
+          </div>
+          <ul class="program-status-legend field-help">
+            <li><strong>Waiting on you</strong> — a decision only you can make is blocking this run; see it in the list above.</li>
+            <li><strong>Retrying</strong> — a task failed a check and the crew is automatically retrying it.</li>
+            <li><strong>Stalled</strong> — running or planning, but quiet for over 5 minutes; worth checking on.</li>
+            <li><strong>Moving</strong> — running or planning with recent activity.</li>
+            <li><strong>Finished</strong> — ready, not ready, failed, or cancelled; nothing more will happen on its own.</li>
+          </ul>
+          <div id="program-status-empty" class="panel empty-state hidden">No runs to show yet. Start a run and its progress will appear here.</div>
+          <div id="program-status-list" class="program-status-groups hidden"></div>
         </section>
 
         <section id="composer" class="composer panel">

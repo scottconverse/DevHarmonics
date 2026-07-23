@@ -22,6 +22,7 @@ import { observeLocalResources } from "./resources.js";
 import { inspectLocalRepository } from "./repository-intelligence.js";
 import { DeliveryRefusal, DeliveryService, VersionMismatchRefusal, type DeliveryAction } from "./delivery.js";
 import { projectInbox } from "./inbox.js";
+import { projectProgramStatus } from "./program-status.js";
 import { scanProductIntelligence } from "./product-intelligence.js";
 import { manualModelSchema, objectiveInputSchema, productRegistrationSchema, steeringDirectiveInputSchema, workbenchSessionInputSchema } from "./schemas.js";
 import type { ObjectiveInput, ProviderName, RunRequest, WorkbenchMessageRecord } from "./types.js";
@@ -229,11 +230,20 @@ async function route(
     return;
   }
 
-  // DH-645 S1: a read-only projection of existing ledger state — no new
-  // approval state, no writes. See src/inbox.ts for what this does and does
-  // not cover yet.
+  // DH-645 S1+S2: a read-only projection of existing ledger state — no new
+  // approval state, no writes. See src/inbox.ts for `items` (decisions
+  // waiting on the owner) and src/program-status.ts for `program` (the
+  // cross-run/product program view). One endpoint serves the one Inbox
+  // view — S2 extends this route rather than adding a second GET, matching
+  // this route's own existing convention of returning everything a single
+  // view needs in one payload (e.g. /api/models already folds in health and
+  // quota-group health alongside the model list).
   if (request.method === "GET" && url.pathname === "/api/inbox") {
-    sendJson(response, 200, { items: projectInbox(context.ledger.listRuns()) });
+    const runs = context.ledger.listRuns();
+    sendJson(response, 200, {
+      items: projectInbox(runs),
+      program: projectProgramStatus(runs, context.ledger.listProducts(), context.ledger.listObjectives()),
+    });
     return;
   }
 

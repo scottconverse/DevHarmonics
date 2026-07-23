@@ -1081,6 +1081,103 @@ test("GET /api/inbox projects pending decisions read-only and drops them the ins
   }
 });
 
+test("GET /api/inbox also serves the program status view, read-only, grouped by product and by repository path", async () => {
+  // DH-645 S2. One endpoint serving the one Inbox view (per the design
+  // brief's "the inbox is a route, never a second gate" spirit extended to
+  // the program view: one view, one fetch). Seeded AFTER startDashboard for
+  // the same reason as the S1 inbox test above: reconcileInterruptedRuns()
+  // would otherwise auto-pause a freshly seeded 'running' run.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-program-status-http-"));
+  const project = await createRepository(root);
+  await initializeProject(project);
+  const dbPath = path.join(devHarmonicsDirectory(project), "devharmonics.db");
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+
+  const seedLedger = new Ledger(dbPath);
+
+  seedLedger.upsertProduct({
+    id: "prod-civic",
+    name: "CivicSuite",
+    organizationUrl: "https://github.com/example/civicsuite",
+    description: "",
+    repositories: [{
+      id: "repo:civic",
+      name: "civiccore",
+      fullName: "example/civiccore",
+      url: "https://github.com/example/civiccore",
+      cloneUrl: "https://github.com/example/civiccore.git",
+      defaultBranch: "main",
+      visibility: "public",
+      archived: false,
+      sizeKb: 100,
+      language: "TypeScript",
+      description: null,
+      intelligence: {},
+    }],
+  });
+
+  // (a) a run linked to a registered product via its integration set — must
+  // group under the product's NAME.
+  const linkedRunId = seedLedger.createRun("Ship the reporting module", project);
+  seedLedger.setRunStatus(linkedRunId, "running");
+  seedLedger.createIntegrationSet({
+    runId: linkedRunId,
+    productId: "prod-civic",
+    integrationConditions: [],
+    repositories: [{ repositoryId: "repo:civic", localPath: project, baseCommit: "a".repeat(40), integrationBranch: "devharmonics/civic", integrationWorktreePath: project }],
+  });
+
+  // (b) a run with a task currently retrying — must land in 'retrying',
+  // never 'stalled' or 'moving', regardless of how long it has been quiet.
+  const retryRunId = seedLedger.createRun("Fix the flaky check", project);
+  seedLedger.setRunStatus(retryRunId, "running");
+  seedLedger.addTask(retryRunId, { id: "t1", title: "Fix it", description: "d", dependencies: [], preferredProvider: null, checks: [] });
+  seedLedger.setTaskStatus(retryRunId, "t1", "working");
+  seedLedger.setTaskStatus(retryRunId, "t1", "retry");
+
+  // (c) a run with no product link — must group under its own project path.
+  const unlinkedRunId = seedLedger.createRun("Tidy up the standalone tool", project);
+  seedLedger.setRunStatus(unlinkedRunId, "running");
+
+  seedLedger.close();
+
+  try {
+    const response = await fetch(`${dashboard.url}/api/inbox`);
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { items: unknown[]; program: { groups: Array<{ key: string; label: string; counts: Record<string, number>; runs: Array<Record<string, any>> }>; totals: Record<string, number> } };
+
+    assert.ok(Array.isArray(body.items), "the existing /api/inbox items field is unchanged");
+    assert.ok(body.program, "the response now also carries a program field");
+
+    const allRuns = body.program.groups.flatMap((group) => group.runs);
+    const linked = allRuns.find((run) => run.runId === linkedRunId)!;
+    const retrying = allRuns.find((run) => run.runId === retryRunId)!;
+    const unlinked = allRuns.find((run) => run.runId === unlinkedRunId)!;
+
+    assert.ok(linked, "the product-linked run appears in the program view");
+    assert.ok(retrying, "the retrying run appears in the program view");
+    assert.ok(unlinked, "the unlinked run appears in the program view");
+
+    assert.equal(retrying.bucket, "retrying");
+
+    const civicGroup = body.program.groups.find((group) => group.runs.some((run) => run.runId === linkedRunId));
+    assert.equal(civicGroup?.label, "CivicSuite", "the linked run groups under the registered product's NAME");
+
+    const pathGroup = body.program.groups.find((group) => group.runs.some((run) => run.runId === unlinkedRunId));
+    assert.equal(pathGroup?.label, project, "the unlinked run groups under its own repository path");
+    assert.notEqual(civicGroup?.key, pathGroup?.key);
+
+    // Read-only: a GET must never mutate the ledger it reads.
+    const before = await (await fetch(`${dashboard.url}/api/runs`)).json();
+    await fetch(`${dashboard.url}/api/inbox`);
+    const after = await (await fetch(`${dashboard.url}/api/runs`)).json();
+    assert.deepEqual(after, before, "GET /api/inbox must not change any run, task, or integration-set state");
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("the tag prefill follows the MERGE commit's declared version once merged, not the reviewed head", async () => {
   // ROUND2-002: the tag GATE judges the merge commit, but the GET prefill used
   // to read the reviewed head. When the merge commit declares a DIFFERENT

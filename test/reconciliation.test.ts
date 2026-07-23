@@ -1066,6 +1066,54 @@ if (process.platform === "win32") {
     assert.equal(result.timedOut, true);
     assert.equal(result.treeKillUnconfirmed, false, "a confirmed successful tree-kill must not be flagged unconfirmed");
   });
+
+  // round4 finding 1: the direct child's 'close' event can fire
+  // independently of — and BEFORE — the taskkill state machine reaching a
+  // terminal state. Here the real direct child exits on its own (a short
+  // self-terminating script, standing in for "the Windows parent exits
+  // before taskkill reports it could not enumerate the already-dead
+  // parent"), while the faked taskkill's failure response only arrives
+  // ~200ms later (via one retry, then the fallback). Against the pre-fix
+  // code, 'close' resolves the promise immediately using
+  // treeKillUnconfirmed's not-yet-final value (false) — false confidence.
+  // The fix must make 'close' wait for the taskkill state machine to reach
+  // its terminal (fallback) state before resolving.
+  test("runProcess does not publish treeKillUnconfirmed: false when the direct child exits before the taskkill state machine concludes", async () => {
+    let taskkillCalls = 0;
+    const fakeTaskkillSpawn = (): ChildProcess => {
+      taskkillCalls += 1;
+      const fake = new EventEmitter() as unknown as ChildProcess;
+      // Each attempt's nonzero exit lands ~100ms after being spawned (two
+      // attempts ~200ms total: first attempt, then the single retry), well
+      // after the direct child below has already exited on its own.
+      setTimeout(() => fake.emit("exit", 1), 100);
+      return fake;
+    };
+    const startedAt = Date.now();
+    const result = await runProcess({
+      // Exits on its own shortly after start — independent of termination —
+      // standing in for a Windows parent that is already dead by the time
+      // taskkill tries (and fails) to enumerate it.
+      command: process.execPath,
+      args: ["-e", "setTimeout(() => {}, 30)"],
+      cwd: process.cwd(),
+      // Fires terminate() almost immediately, well before the child's own
+      // ~30ms natural exit, and well before either fake taskkill attempt's
+      // ~100ms response.
+      timeoutMs: 5,
+      killGraceMs: 5_000,
+      windowsTaskkillSpawn: fakeTaskkillSpawn,
+    });
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(taskkillCalls, 2, "expected exactly one retry after the first taskkill attempt failed");
+    assert.equal(result.timedOut, true);
+    assert.equal(
+      result.treeKillUnconfirmed,
+      true,
+      "the direct child exiting before taskkill's fallback concluded must still be reported as tree-kill unconfirmed, never a false-confidence confirmed timeout",
+    );
+    assert.ok(elapsedMs < 5_000, `expected the close-vs-taskkill race to resolve well under 5s, took ${elapsedMs}ms`);
+  });
 }
 
 // round3 "Confirmed process-tree shutdown NOT RESOLVED" (POSIX half): a

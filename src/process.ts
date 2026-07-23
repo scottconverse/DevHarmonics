@@ -66,6 +66,16 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
     let terminating = false;
     // R11(c)/round3: see ProcessResult.treeKillUnconfirmed.
     let treeKillUnconfirmed = false;
+    // round4: on win32, resolves once the taskkill state machine reaches a
+    // terminal state (confirmed success, or the flagged direct-child
+    // fallback) — see terminate()'s win32 branch. The direct child's own
+    // 'close' event can fire independently and BEFORE this concludes (e.g.
+    // the child was already exiting on its own while taskkill was still
+    // mid-flight); the close handler below awaits this (bounded by a hard
+    // cap) instead of publishing treeKillUnconfirmed's not-yet-final value.
+    // Stays null on POSIX and in the no-pid win32 branch, where there is
+    // nothing async left to wait for.
+    let windowsTerminationSettled: Promise<void> | null = null;
 
     const resolved = resolveCommand(request.command, request.args);
     // The child is NOT spawned with `signal` directly: Node's own
@@ -144,6 +154,15 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
           ((targetPid: number) => spawn("taskkill", ["/pid", String(targetPid), "/T", "/F"], { windowsHide: true, stdio: "ignore" }));
         const taskkillDeadlineMs = request.windowsTaskkillDeadlineMs ?? 5_000;
 
+        // round4: created up front so the close handler below can always
+        // await it once terminate() has taken the win32 tree-kill path,
+        // regardless of which branch (success/retry/fallback) ultimately
+        // resolves it.
+        let resolveWindowsTermination: (() => void) | null = null;
+        windowsTerminationSettled = new Promise<void>((resolve) => {
+          resolveWindowsTermination = resolve;
+        });
+
         const fallbackToDirectChild = (): void => {
           // R11(c)/round3: from here on, full tree termination cannot be
           // guaranteed — taskkill's /T tree enumeration needs the target
@@ -156,6 +175,9 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
           } catch {
             // already gone
           }
+          // round4: the flag above is now final — safe for the close
+          // handler to read.
+          resolveWindowsTermination?.();
         };
 
         const attemptTaskkill = (isRetry: boolean): void => {
@@ -165,7 +187,13 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
             if (attemptSettled) return;
             attemptSettled = true;
             if (deadline) clearTimeout(deadline);
-            if (succeeded) return;
+            if (succeeded) {
+              // round4: confirmed tree-kill success — treeKillUnconfirmed
+              // stays false, and that's now final, so unblock the close
+              // handler if it's waiting on us.
+              resolveWindowsTermination?.();
+              return;
+            }
             if (!isRetry) {
               attemptTaskkill(true);
               return;
@@ -295,7 +323,7 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
     // settles this promise — including after a SIGKILL escalation — so a
     // caller awaiting a timed-out or aborted check learns the external
     // process is actually dead, not merely that we asked it to stop.
-    child.on("close", (code) => {
+    function finalizeClose(code: number | null): void {
       cleanupTimers();
       if (!settled) {
         settled = true;
@@ -308,6 +336,40 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
           treeKillUnconfirmed,
         });
       }
+    }
+
+    child.on("close", (code) => {
+      // round4: on win32, the direct child's 'close' can fire independently
+      // of — and BEFORE — the taskkill state machine reaching a terminal
+      // state (e.g. the direct child was already exiting on its own while
+      // the first taskkill attempt was still mid-flight). Resolving here
+      // immediately would publish treeKillUnconfirmed's CURRENT value,
+      // which may still flip to true once the fallback runs — false
+      // confidence. Wait for windowsTerminationSettled first, bounded by a
+      // hard cap (both attempts' deadlines + a margin) so this can never
+      // hang unboundedly; if the cap is hit, resolve conservatively with
+      // treeKillUnconfirmed: true rather than trust an unconcluded flag.
+      // A non-terminating (normal) close is unaffected — it never took the
+      // win32 terminate() path, so windowsTerminationSettled is null.
+      if (process.platform === "win32" && windowsTerminationSettled) {
+        const hardCapMs = 2 * (request.windowsTaskkillDeadlineMs ?? 5_000) + 1_000;
+        let raced = false;
+        let capTimer: ReturnType<typeof setTimeout> | null = null;
+        windowsTerminationSettled.then(() => {
+          if (raced) return;
+          raced = true;
+          if (capTimer) clearTimeout(capTimer);
+          finalizeClose(code);
+        });
+        capTimer = setTimeout(() => {
+          if (raced) return;
+          raced = true;
+          treeKillUnconfirmed = true;
+          finalizeClose(code);
+        }, hardCapMs);
+        return;
+      }
+      finalizeClose(code);
     });
 
     child.stdin.on("error", () => {

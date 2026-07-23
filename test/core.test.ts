@@ -3025,6 +3025,43 @@ test("delivery tag caption never claims 'declares no version' during a mergeVers
   assert.doesNotMatch(staleButUnavailable.help, /declares version/, "the outage guidance is never masked by a stale declaredVersion");
 });
 
+test("review finding fields are HTML-escaped before they reach innerHTML (M1 security fix)", async () => {
+  // M1 (2026-07-22 review): refreshEvidence() concatenated finding.location,
+  // finding.rationale, and finding.disposition straight into innerHTML with no
+  // escaping. A reviewer/finding-source string containing markup or a <script>
+  // tag would execute in the cockpit. Drive the REAL shipped renderFindingHtml
+  // pure seam extracted from src/ui/app.js — the exact function
+  // refreshEvidence() maps every review finding through — so a future refactor
+  // that drops the escaping fails HERE, not in production.
+  const appSource = readFileSync(path.join(process.cwd(), "src", "ui", "app.js"), "utf8");
+  const start = appSource.indexOf('function escapeHtml(value = "")');
+  const end = appSource.indexOf("\n// DH-632 visible operation feedback");
+  assert.ok(start >= 0 && end > start, "escapeHtml/renderFindingHtml must be extractable from app.js");
+  const { renderFindingHtml } = new Function(
+    `${appSource.slice(start, end)}; return { escapeHtml, renderFindingHtml };`,
+  )() as { renderFindingHtml: (finding: Record<string, unknown>) => string };
+
+  const hostileFinding = {
+    severity: "major",
+    location: '<img src=x onerror=alert(1)>',
+    rationale: "looks fine </div><script>alert(document.cookie)</script>",
+    disposition: '"><svg onload=alert(2)>',
+  };
+  const html = renderFindingHtml(hostileFinding);
+
+  // The literal dangerous fragments must never survive unescaped.
+  assert.doesNotMatch(html, /<img/i, "an <img> tag must never reach innerHTML unescaped");
+  assert.doesNotMatch(html, /<script/i, "a <script> tag must never reach innerHTML unescaped");
+  assert.doesNotMatch(html, /<\/div>/i, "a raw closing </div> must never reach innerHTML unescaped");
+  assert.doesNotMatch(html, /<svg/i, "an <svg onload> payload must never reach innerHTML unescaped");
+
+  // And the escaped equivalents must be present, proving the content itself
+  // (not just its danger) survived the round trip.
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/, "location is escaped, not dropped");
+  assert.match(html, /&lt;script&gt;alert\(document\.cookie\)&lt;\/script&gt;/, "rationale is escaped, not dropped");
+  assert.match(html, /&quot;&gt;&lt;svg onload=alert\(2\)&gt;/, "disposition is escaped, not dropped");
+});
+
 test("migration 30's delivery-table rebuild preserves row data from a physical schema-29 database", async () => {
   // Gate finding ENG-3 (2026-07-22): the CHECK-widening RENAME/rebuild in
   // migration 30 had no test proving a delivery row's VALUES survive it.

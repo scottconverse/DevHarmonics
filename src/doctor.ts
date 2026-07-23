@@ -68,7 +68,7 @@ const setupSteps: Record<ProviderName, string[]> = {
   gemini: [
     "Run agy and sign in with the Google account tied to your Gemini subscription.",
     "When the browser displays a one-time code, copy it, return to the Antigravity terminal, paste it at the authorization prompt, and press Enter. Never paste it into DevHarmonics or chat.",
-    "Complete the full first-run onboarding. After the color scheme, Antigravity 1.1.1 presents several additional preference screens; review each choice and navigate with the displayed arrow/Enter controls.",
+    "Complete the full first-run onboarding. After the color scheme, recent Antigravity versions present several additional preference screens; review each choice and navigate with the displayed arrow/Enter controls.",
     "Onboarding is finished only when the normal prompt shows your account, subscription tier, selected Gemini model, project path, and a > input line. Exit with Ctrl+C, then run agy models to verify the cached login.",
   ],
 };

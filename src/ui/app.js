@@ -50,6 +50,20 @@ function escapeHtml(value = "") {
     .replaceAll("'", "&#039;");
 }
 
+// M1 security fix (2026-07-22): review findings are reviewer-authored free text
+// (severity/location/rationale/disposition) that was concatenated straight into
+// innerHTML — a hostile or careless finding string could inject markup or script
+// into the cockpit. Escape every finding-sourced field. Extracted as a pure
+// function so the injection case is regression-tested directly against the
+// exact code path refreshEvidence() renders.
+function renderFindingHtml(finding) {
+  const severity = escapeHtml(String(finding.severity || "").toUpperCase());
+  const location = escapeHtml(finding.location || "no location");
+  const rationale = escapeHtml(finding.rationale || "");
+  const disposition = escapeHtml(finding.disposition || "");
+  return `${severity} ${location}: ${rationale} — Status: ${disposition}`;
+}
+
 // DH-632 visible operation feedback: one shared acknowledgement/lifecycle layer for
 // every DevHarmonics-owned asynchronous action. Local UI operations register here;
 // run tasks are projected into the same activity strip from durable ledger events,
@@ -600,7 +614,7 @@ function performanceSummaryItems(stats, { includeLatency }) {
   ];
   if (includeLatency) items.push(stats.averageLatencyMs == null ? "Typical time: unavailable" : `Typical time: ${formatDuration(stats.averageLatencyMs)}`);
   items.push(stats.averageCostUsd == null ? "Typical cost: unavailable" : `Typical cost: $${Number(stats.averageCostUsd).toFixed(4)}${includeLatency ? ` (${stats.billedSampleCount} billed runs)` : ""}`);
-  items.push(`Editing conflicts: ${stats.integrationConflictCount}`, `Test/check failures: ${stats.validatorFailureCount}`, `Runs that didn't finish (not the model's fault): ${stats.notReadyRunCount}`, `Based on ${stats.sampleSize} real runs`);
+  items.push(`Editing conflicts: ${stats.integrationConflictCount}`, `Test/check failures: ${stats.validatorFailureCount}`, `Runs that ended not-ready with this model involved: ${stats.notReadyRunCount}`, `Based on ${stats.sampleSize} real runs`);
   return items;
 }
 
@@ -681,7 +695,7 @@ function renderModels() {
       : (isStale || !operationallyQualified || hasCurrentRoleFailure || (specialistBenchmarkRequired && !specialistBenchmarkPassed)) ? "degraded"
       : model.active ? "active" : "qualified";
     const detailParts = [
-      `Made by: ${model.metadata?.modelVendor || "unknown"}`,
+      model.metadata?.modelVendor ? `Made by: ${model.metadata.modelVendor}` : "",
       `Shares usage limit with: ${model.metadata?.quotaGroupDisplayName || model.metadata?.quotaGroup || "nothing tracked"}`,
       model.quotaGroupHealth ? `Usage limit status: ${healthStateLabel(model.quotaGroupHealth.state)}${model.quotaGroupHealth.cooldownUntil ? `, back at ${new Date(model.quotaGroupHealth.cooldownUntil).toLocaleString()}` : ""}` : "",
       `Model line: ${family === "unclassified" ? "unknown" : family}`,
@@ -909,7 +923,7 @@ async function refreshEvidence() {
   $("#evidence-verdict").innerHTML = derivedVerdictMarkup(report);
   $("#evidence-hash").textContent = evidence.integritySha256;
   $("#evidence-review-count").textContent = `${evidence.reviews.length} retained`;
-  $("#evidence-reviews").innerHTML = evidence.reviews.length ? evidence.reviews.map((review) => `<article><div><strong>Round ${review.round}</strong><span>${escapeHtml(recordedModelIdentity(review.provider, review.modelId, review.provider === "gemini" ? "requested_unverified" : null, review.connectionId))} · reviewed at commit ${escapeHtml(review.integrationSha256.slice(0, 12))}</span></div><span class="lifecycle ${review.invalidatedAt ? "retired" : review.verdict === "READY" ? "qualified" : "degraded"}">${review.invalidatedAt ? "invalidated" : escapeHtml(review.verdict.replaceAll("_", " "))}</span><p class="evidence-report">${escapeHtml(review.summary)}${review.findings.length ? `\n${review.findings.map((finding) => `${finding.severity.toUpperCase()} ${finding.location || "no location"}: ${finding.rationale} — Status: ${finding.disposition}`).join("\n")}` : ""}${review.invalidationReason ? `\nInvalidated: ${escapeHtml(review.invalidationReason)}` : ""}</p></article>`).join("") : '<div class="empty-state">No independent reviews have been recorded for this run yet.</div>';
+  $("#evidence-reviews").innerHTML = evidence.reviews.length ? evidence.reviews.map((review) => `<article><div><strong>Round ${review.round}</strong><span>${escapeHtml(recordedModelIdentity(review.provider, review.modelId, review.provider === "gemini" ? "requested_unverified" : null, review.connectionId))} · reviewed at commit ${escapeHtml(review.integrationSha256.slice(0, 12))}</span></div><span class="lifecycle ${review.invalidatedAt ? "retired" : review.verdict === "READY" ? "qualified" : "degraded"}">${review.invalidatedAt ? "invalidated" : escapeHtml(review.verdict.replaceAll("_", " "))}</span><p class="evidence-report">${escapeHtml(review.summary)}${review.findings.length ? `\n${review.findings.map(renderFindingHtml).join("\n")}` : ""}${review.invalidationReason ? `\nInvalidated: ${escapeHtml(review.invalidationReason)}` : ""}</p></article>`).join("") : '<div class="empty-state">No independent reviews have been recorded for this run yet.</div>';
   const evidenceRun = state.runs.find((item) => item.id === runId);
   $("#evidence-attempts").innerHTML = evidence.attempts.length ? evidence.attempts.map((attempt) => `<article><div><strong>${escapeHtml(evidenceRun?.tasks.find((task) => task.id === attempt.task_id)?.title || attempt.task_id)}</strong><span>${escapeHtml(recordedModelIdentity(attempt.provider, attempt.model_id, attempt.model_resolution, attempt.connection_id))}</span></div><span class="lifecycle ${attempt.status === "completed" ? "qualified" : ""}">${escapeHtml(attempt.status)}</span><details class="evidence-report"><summary>View summary</summary><p>${escapeHtml(attempt.result_envelope?.summary || attempt.error || "No summary recorded")}</p></details></article>`).join("") : '<div class="empty-state">No attempts were started.</div>';
   $("#evidence-tool-count").textContent = `${evidence.toolReceipts.length} retained`;
@@ -1315,7 +1329,7 @@ function renderDelivery(run) {
   $("#delivery-status").textContent = delivery.status.replaceAll("_", " ");
   $("#delivery-status").className = `lifecycle ${done.includes(delivery.status) || delivery.status === "draft_pr_created" ? "qualified" : delivery.status === "failed" ? "degraded" : ""}`;
   $("#delivery-guidance").textContent = externalWritesAllowed
-    ? "Every step is your approval — push, draft PR, merge, and tag all run from here, and nothing happens without your click. DevHarmonics never merges or tags on its own."
+    ? "Push, draft PR, merge, and tag each need your approval. Approve them one at a time below, or use \"Do everything at once\" for a single approval that covers push, open PR, and merge — plus tag, only if you've filled in a tag. Nothing happens without your click, and DevHarmonics never merges or tags on its own."
     : "Delivery is turned off. Turn on \"Allow GitHub delivery actions\" in Setup before you can push a branch or open a pull request.";
   $("#delivery-repositories").innerHTML = delivery.repositories.map((repository) => {
     const pushed = ["branch_pushed", "draft_pr_created", "merged", "tagged"].includes(repository.status);
@@ -1340,7 +1354,7 @@ function renderDelivery(run) {
       <div class="plan-actions delivery-tag-row">
         <input class="delivery-tag-input" type="text" placeholder="leave blank to skip tagging" aria-label="Release tag for ${escapeHtml(repository.repositoryId)}" data-tag-for="${escapeHtml(repository.repositoryId)}" ${!externalWritesAllowed || !merged || tagged ? "disabled" : ""}>
         <button class="${merged && !tagged ? "primary" : "secondary"} small" type="button" data-delivery-action="tag_release" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || !merged || tagged ? "disabled" : ""}>${tagged ? "Tagged ✓" : "Approve &amp; tag release"}</button>
-        ${merged ? "" : `<button class="primary small" type="button" data-delivery-action="complete_delivery" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed ? "disabled" : ""}>Do everything at once (push, open PR, merge, tag)</button>`}
+        ${merged ? "" : `<button class="primary small" type="button" data-delivery-action="complete_delivery" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed ? "disabled" : ""} title="One approval covers push, open PR, and merge — plus tag, only if you've filled in the tag field. Leave it blank to skip tagging.">Do everything at once (push, open PR, merge — and tag if you've filled one in)</button>`}
       </div>
       <p class="field-help delivery-tag-help" data-tag-help-for="${escapeHtml(repository.repositoryId)}">${tagged ? `Tagged ${escapeHtml(repository.releaseTag || "")}.` : "Empty tag field = no tag is created. Reading this repository's declared version…"}</p>
     </article>`;

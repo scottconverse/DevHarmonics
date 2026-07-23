@@ -1,5 +1,3 @@
-import { readFile } from "node:fs/promises";
-import path from "node:path";
 import type { Ledger } from "./ledger.js";
 import { evaluateToolRequest, type ToolApprovalReceipt } from "./policy.js";
 import { runProcess, type ProcessRequest, type ProcessResult } from "./process.js";
@@ -71,20 +69,48 @@ export class VersionMismatchRefusal extends DeliveryRefusal {
   }
 }
 
-/** Best-effort read of the version the repository declares about itself: package.json first, then pyproject.toml. Null when no claim is discoverable. */
-export async function readDeclaredVersion(localPath: string): Promise<string | null> {
-  try {
-    const parsed = JSON.parse(await readFile(path.join(localPath, "package.json"), "utf-8")) as { version?: unknown };
-    if (typeof parsed.version === "string" && parsed.version.trim()) return parsed.version.trim();
-  } catch {
-    // no package.json or unparsable — fall through to pyproject
-  }
-  try {
-    const pyproject = await readFile(path.join(localPath, "pyproject.toml"), "utf-8");
-    const match = pyproject.match(/^\s*version\s*=\s*["']([^"']+)["']/m);
+/**
+ * Read ONLY the PEP 621 `[project].version` from pyproject text. A section-
+ * scoped scan (gate finding, 2026-07-22): the previous whole-file regex took
+ * the FIRST `version = "..."` anywhere, so a `[tool.something] version` before
+ * `[project]` masqueraded as the project's own version. We walk table headers
+ * and read `version` only while inside the exact `[project]` table, stopping at
+ * the next table header. Hand-rolled — no TOML dependency.
+ */
+function pyprojectProjectVersion(text: string): string | null {
+  let inProject = false;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.replace(/^\s+/, "");
+    if (line.startsWith("[")) {
+      // A table header. Only the exact `[project]` table carries the canonical
+      // version; `[project.scripts]`, `[tool.x]`, etc. do not.
+      inProject = /^\[project\]\s*(#.*)?$/.test(line);
+      continue;
+    }
+    if (!inProject) continue;
+    const match = line.match(/^version\s*=\s*["']([^"']+)["']/);
     if (match?.[1]) return match[1].trim();
-  } catch {
-    // no pyproject either — the repository makes no discoverable version claim
+  }
+  return null;
+}
+
+/**
+ * Resolve the version a manifest declares, from its raw text: package.json
+ * wins; pyproject only when package.json makes no usable claim. Pure so both
+ * the immutable-commit lookup and its tests share one parser.
+ */
+export function parseDeclaredVersion(packageJson: string | null, pyproject: string | null): string | null {
+  if (packageJson) {
+    try {
+      const parsed = JSON.parse(packageJson) as { version?: unknown };
+      if (typeof parsed.version === "string" && parsed.version.trim()) return parsed.version.trim();
+    } catch {
+      // package.json present but unparsable — fall through to pyproject
+    }
+  }
+  if (pyproject) {
+    const version = pyprojectProjectVersion(pyproject);
+    if (version) return version;
   }
   return null;
 }
@@ -97,6 +123,93 @@ function versionsAgree(tag: string, declared: string): boolean {
 
 export class DeliveryService {
   constructor(private readonly ledger: Ledger, private readonly runner: ProcessRunner = runProcess) {}
+
+  /**
+   * The version an IMMUTABLE commit declares about itself, read from that
+   * commit's own blobs via `git show <commitish>:<manifest>` — never from the
+   * mutable working tree (CRITICAL gate finding, 2026-07-22). A stale or
+   * locally edited checkout must not be able to falsely refuse a correct tag or
+   * authorize a tag the merged artifact contradicts. Bounded and read-only.
+   */
+  async declaredVersionAtCommit(localPath: string, commitish: string): Promise<string | null> {
+    const show = async (file: string): Promise<string | null> => {
+      const result = await this.runner({ command: "git", args: ["show", `${commitish}:${file}`], cwd: localPath, timeoutMs: 30_000 });
+      return result.exitCode === 0 ? result.stdout : null;
+    };
+    const packageJson = await show("package.json");
+    const pyproject = await show("pyproject.toml");
+    return parseDeclaredVersion(packageJson, pyproject);
+  }
+
+  /** Is the object for `oid` present in the local object store? Bounded, read-only. */
+  private async commitObjectPresent(localPath: string, oid: string): Promise<boolean> {
+    const result = await this.runner({ command: "git", args: ["cat-file", "-e", `${oid}^{commit}`], cwd: localPath, timeoutMs: 30_000 });
+    return result.exitCode === 0;
+  }
+
+  /** Resolve a merged PR's immutable merge-commit OID from the LIVE pull request, or null. */
+  private async resolveMergeCommitOid(delivery: DeliveryRepositoryRecord): Promise<string | null> {
+    if (!delivery.pullRequestUrl) return null;
+    const view = await this.runner({ command: "gh", args: ["pr", "view", delivery.pullRequestUrl, "--json", "state,mergeCommit"], cwd: delivery.localPath, timeoutMs: 60_000 });
+    if (view.exitCode !== 0 || !view.stdout.trim()) return null;
+    try {
+      const state = JSON.parse(view.stdout) as { state?: string; mergeCommit?: { oid?: string } | null };
+      if (state.state === "MERGED" && state.mergeCommit?.oid) return state.mergeCommit.oid;
+    } catch {
+      // A malformed live read cannot resolve the OID right now; the caller
+      // reports "temporarily unavailable" rather than substituting a wrong one.
+    }
+    return null;
+  }
+
+  /**
+   * The declared version to prefill for a delivery's tag field, resolved LAZILY
+   * and AUTHORITATIVELY at read time (ROUND3-001, 2026-07-22). Before a merge
+   * commit exists, the reviewed head is the only truth. Once the repository is
+   * merged or tagged, the version MUST come from the immutable merge commit the
+   * tag gate judges — NEVER the reviewed head, which can declare a stale version
+   * and provoke a tag the gate would reject, or no version at all. Post-merge
+   * enrichment in `merge_pr` is a mere cache: this method is the authority and
+   * self-heals the two transient failure paths that cache can leave behind —
+   *   1. the merge-commit OID was never persisted (a `gh pr view` failure at
+   *      merge time): it is re-resolved from the live PR and persisted
+   *      opportunistically, so the repair is durable;
+   *   2. the OID is known but its object is not yet local (a failed or skipped
+   *      fetch at merge time): the merge commit is fetched once, bounded, then
+   *      the manifest is read from it.
+   * If the merge OID genuinely cannot be resolved right now (no PR reachable) or
+   * the object cannot be fetched, it returns `declaredVersion: null` with
+   * `mergeVersionUnavailable: true` — an explicit, honest signal the caller can
+   * render as "merge version temporarily unavailable — retry". It never
+   * substitutes the reviewed head for a merged repository.
+   */
+  async resolveDeliveryVersion(delivery: DeliveryRepositoryRecord): Promise<{ declaredVersion: string | null; mergeVersionUnavailable: boolean; mergeCommitOid: string | null }> {
+    const merged = delivery.status === "merged" || delivery.status === "tagged";
+    if (!merged) {
+      // Before a merge commit exists, the reviewed head is the only truth.
+      return { declaredVersion: await this.declaredVersionAtCommit(delivery.localPath, delivery.headCommit), mergeVersionUnavailable: false, mergeCommitOid: delivery.mergeCommitOid };
+    }
+    let mergeOid = delivery.mergeCommitOid;
+    if (!mergeOid) {
+      // Failure path 1: the OID was never persisted. Re-resolve it from the live
+      // PR and persist so the repair survives the next read.
+      mergeOid = await this.resolveMergeCommitOid(delivery);
+      if (mergeOid) {
+        this.ledger.updateDeliveryRepository(delivery.runId, delivery.repositoryId, { status: delivery.status, mergeCommitOid: mergeOid });
+      }
+    }
+    if (!mergeOid) {
+      return { declaredVersion: null, mergeVersionUnavailable: true, mergeCommitOid: null };
+    }
+    // Failure path 2: ensure the merge commit's object is local, fetching once.
+    if (!(await this.commitObjectPresent(delivery.localPath, mergeOid))) {
+      await this.runner({ command: "git", args: ["fetch", "origin", delivery.baseBranch], cwd: delivery.localPath, timeoutMs: 120_000 });
+      if (!(await this.commitObjectPresent(delivery.localPath, mergeOid))) {
+        return { declaredVersion: null, mergeVersionUnavailable: true, mergeCommitOid: mergeOid };
+      }
+    }
+    return { declaredVersion: await this.declaredVersionAtCommit(delivery.localPath, mergeOid), mergeVersionUnavailable: false, mergeCommitOid: mergeOid };
+  }
 
   async execute(input: DeliveryExecutionInput): Promise<DeliveryRepositoryRecord> {
     const run = this.ledger.getRun(input.runId);
@@ -130,13 +243,9 @@ export class DeliveryService {
     if (input.action === "tag_release") {
       if (delivery.status !== "merged") throw new DeliveryRefusal("Merge the pull request before tagging the release");
       if (!input.tag || !RELEASE_TAG_PATTERN.test(input.tag)) throw new DeliveryRefusal("Release tag names must be short version-like identifiers (letters, digits, dot, dash, underscore)");
-      // Tag-truth gate: when the repository declares a version about itself
-      // and the requested tag contradicts it, refuse with both values unless
-      // the owner has explicitly confirmed the mismatch.
-      const declaredVersion = await readDeclaredVersion(delivery.localPath);
-      if (declaredVersion && !versionsAgree(input.tag, declaredVersion) && !input.confirmVersionMismatch) {
-        throw new VersionMismatchRefusal(declaredVersion, input.tag);
-      }
+      // The tag-truth gate runs INSIDE tag execution, after the immutable merge
+      // commit OID is known, so it judges the artifact that will actually be
+      // tagged rather than the mutable checkout (see declaredVersionAtCommit).
     }
 
     const remoteResult = await this.runner({ command: "git", args: ["remote", "get-url", "origin"], cwd: delivery.localPath, timeoutMs: 30_000 });
@@ -259,8 +368,32 @@ export class DeliveryService {
           const merge = await this.runner({ command: "gh", args: ["pr", "merge", delivery.pullRequestUrl, "--merge"], cwd: delivery.localPath, timeoutMs: 120_000 });
           if (merge.exitCode !== 0) throw new Error(failureMessage(merge, "Pull request merge failed"));
         }
+        // ROUND2-002: capture the immutable merge commit OID now, and fetch its
+        // object, as a CACHE that saves the GET path a round-trip on the happy
+        // path. This persistence is deliberately best-effort — the merge is
+        // already durable, so a missing OID or a failed fetch must never fail an
+        // accomplished merge. It is NOT the source of truth: after ROUND3-001 the
+        // GET path (resolveDeliveryVersion) is authoritative and self-heals both
+        // transient failures here — a never-persisted OID is re-resolved from the
+        // live PR at read time, and an unfetched object is fetched then — so a
+        // merged repository's prefill always follows the merge commit and NEVER
+        // degrades to the reviewed head.
+        let mergeCommitOid: string | null = null;
+        const mergeCommitView = await this.runner({ command: "gh", args: ["pr", "view", delivery.pullRequestUrl, "--json", "state,mergeCommit"], cwd: delivery.localPath, timeoutMs: 60_000 });
+        if (mergeCommitView.exitCode === 0 && mergeCommitView.stdout.trim()) {
+          try {
+            const mergeCommitState = JSON.parse(mergeCommitView.stdout) as { state?: string; mergeCommit?: { oid?: string } | null };
+            if (mergeCommitState.state === "MERGED" && mergeCommitState.mergeCommit?.oid) {
+              mergeCommitOid = mergeCommitState.mergeCommit.oid;
+              await this.runner({ command: "git", args: ["fetch", "origin", delivery.baseBranch], cwd: delivery.localPath, timeoutMs: 120_000 });
+            }
+          } catch {
+            // A malformed merge-commit read is best-effort enrichment only; the
+            // merge stands and the tag step re-resolves the OID authoritatively.
+          }
+        }
         const updated = this.ledger.updateDeliveryRepository(input.runId, input.repositoryId, {
-          status: "merged", remoteUrl: remote.webUrl, approvalId: input.approval.id, error: null,
+          status: "merged", remoteUrl: remote.webUrl, approvalId: input.approval.id, error: null, mergeCommitOid,
         });
         this.ledger.addEvent(input.runId, "delivery.merged", `${input.repositoryId}: merged the reviewed pull request under owner approval`, requestRecord);
         return updated;
@@ -274,6 +407,18 @@ export class DeliveryService {
       if (mergedState.state !== "MERGED" || !mergedState.mergeCommit?.oid) throw new DeliveryRefusal("The pull request has no merge commit to tag");
       const fetch = await this.runner({ command: "git", args: ["fetch", "origin", delivery.baseBranch], cwd: delivery.localPath, timeoutMs: 120_000 });
       if (fetch.exitCode !== 0) throw new Error(failureMessage(fetch, "Could not fetch the merged base branch"));
+      // Tag-truth gate: resolve the declared version from the exact merge commit
+      // that will be tagged, not the checkout. This MUST run after the fetch —
+      // the merge commit was just created on GitHub, and before the fetch it
+      // does not exist locally, so `git show` would fail and the gate would
+      // silently no-op on the most common real path (boss-review finding on
+      // the audit fix, 2026-07-22). When the merged artifact's own files
+      // contradict the requested tag, refuse with both values unless the owner
+      // explicitly confirmed the mismatch.
+      const declaredVersion = await this.declaredVersionAtCommit(delivery.localPath, mergedState.mergeCommit.oid);
+      if (declaredVersion && !versionsAgree(input.tag!, declaredVersion) && !input.confirmVersionMismatch) {
+        throw new VersionMismatchRefusal(declaredVersion, input.tag!);
+      }
       // A prior attempt may have created the local tag and failed only the
       // push (panel finding): reuse a local tag that points at the exact merge
       // commit; refuse one that points anywhere else.

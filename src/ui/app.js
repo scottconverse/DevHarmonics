@@ -59,6 +59,29 @@ const OPERATION_QUIET_WARNING_MS = 5 * 60 * 1000;
 let operationSequence = 0;
 const operations = new Map();
 
+// A declined confirmation is neither a success nor a failure: the owner said
+// "No" and nothing broke (MINOR gate finding, 2026-07-22). An action returns
+// this sentinel so withOperation ends the shared operation as CANCELLED with
+// honest copy, instead of the "done" that a plain return would have implied.
+const OPERATION_CANCELLED = Symbol("dh-operation-cancelled");
+function cancelledOperation(detail = "") {
+  return { [OPERATION_CANCELLED]: true, detail };
+}
+
+// The end-state decision for an operation action that RESOLVED. A thrown error
+// is a "failed" end state, handled separately in withOperation's catch, so this
+// classifier only ever returns "cancelled" or "succeeded" — never "failed". A
+// returned cancellation sentinel ends the operation as "cancelled" (the owner
+// declined and nothing broke), carrying its own detail; every other resolved
+// value is a plain "succeeded". Pulled out as a PURE seam so the shipped wrapper
+// and its regression test classify identically (MINOR gate finding, 2026-07-22).
+function classifyOperationOutcome(result) {
+  if (result && result[OPERATION_CANCELLED]) {
+    return { status: "cancelled", detail: result.detail || "" };
+  }
+  return { status: "succeeded", detail: "" };
+}
+
 function beginOperation(label) {
   const id = `op-${++operationSequence}`;
   operations.set(id, { id, label, status: "running", startedAt: Date.now(), detail: "" });
@@ -95,7 +118,12 @@ async function withOperation(button, label, action, { onError = showError, busyL
   }
   try {
     const result = await action();
-    endOperation(id, "succeeded");
+    const outcome = classifyOperationOutcome(result);
+    if (outcome.status === "cancelled") {
+      endOperation(id, outcome.status, outcome.detail);
+      return undefined;
+    }
+    endOperation(id, outcome.status);
     return result;
   } catch (error) {
     endOperation(id, "failed", error.message);
@@ -166,7 +194,9 @@ function renderActivityStrip() {
   const local = [...operations.values()].map((operation) => {
     const stateLabel = operation.status === "running"
       ? `<span class="op-spinner" aria-hidden="true"></span>working · <span data-elapsed-since="${operation.startedAt}" aria-hidden="true">${operationElapsed(operation.startedAt)}</span>`
-      : operation.status === "succeeded" ? "done" : `failed — ${escapeHtml(operation.detail || "see the error message")}`;
+      : operation.status === "succeeded" ? "done"
+        : operation.status === "cancelled" ? `declined — ${escapeHtml(operation.detail || "you declined this step; nothing was changed")}`
+          : `failed — ${escapeHtml(operation.detail || "see the error message")}`;
     return `<div class="strip-item ${operation.status}"><strong>${escapeHtml(operation.label)}</strong><span>${stateLabel}</span></div>`;
   });
   const runItems = activeRunOperations().map(({ run, task, startedAt, lastActivityAt }) => {
@@ -899,12 +929,27 @@ function evidenceInline(text) {
     .replace(/`([^`\n]+)`/g, "<code>$1</code>");
 }
 
-function verdictGuidance(report, issueCount) {
+// Owner/gate finding (2026-07-22): the historical-READY wording must be earned
+// by a RETAINED READY verdict, not merely by "there is at least one issue". An
+// ordinary in-progress or never-reviewed run is INCONCLUSIVE with issues too,
+// and telling the owner "the review passed at the time it ran" for a run that
+// was never reviewed is a false trust claim. Base the wording on report
+// CONTENT: the reporter records the absence of a review as the missingEvidence
+// strings "final review" / "machine-readable final verdict" (see reporter.ts).
+// A retained READY verdict is present only when NEITHER of those is missing —
+// and within an INCONCLUSIVE report a retained machine-readable verdict can
+// only be READY (a NOT_READY one would make the verdict NOT_READY). So reserve
+// the historical wording for a retained READY invalidated by later inconsistency.
+function verdictGuidance(report) {
   if (report.verdict === "READY") return "The run is reviewed and its retained evidence is internally consistent. Deliver when you are ready.";
   if (report.verdict === "NOT_READY") return "The review or the run itself did not pass. Open the review findings below — they name what must change.";
-  return issueCount
-    ? "The review passed at the time it ran, but the retained evidence no longer lines up — the reasons are listed below. This commonly happens when the repository moved after review (for example, the delivery was merged). Treat the READY as historical; re-run the review if you need a current verdict."
-    : "The run has not reached a reviewed state yet, so no verdict can be derived. Let the run finish, or open the run board to see what it is waiting on.";
+  const missing = report.missingEvidence || [];
+  const retainedReadyVerdict = !missing.includes("final review") && !missing.includes("machine-readable final verdict");
+  const wentInconsistent = (report.inconsistencies || []).length > 0;
+  if (retainedReadyVerdict && wentInconsistent) {
+    return "The review passed at the time it ran, but the retained evidence no longer lines up — the reasons are listed below. This commonly happens when the repository moved after review (for example, the delivery was merged). Treat the READY as historical; re-run the review if you need a current verdict.";
+  }
+  return "The run has not reached a reviewed state yet, so no verdict can be derived. Let the run finish, or open the run board to see what it is waiting on.";
 }
 
 function parseReviewTargets(summary) {
@@ -938,7 +983,7 @@ function parseReviewTargets(summary) {
 function derivedVerdictMarkup(report) {
   const reportIssues = [...report.missingEvidence.map((item) => `Missing: ${item}`), ...report.inconsistencies];
   const verdictLabel = escapeHtml(report.verdict.replaceAll("_", " "));
-  const headline = `<div><span class="connection-kind">OVERALL VERDICT</span><h3>${verdictLabel}</h3><p>${escapeHtml(verdictGuidance(report, reportIssues.length))}</p><p class="field-help">DevHarmonics' own check of whether the evidence kept for this run is complete and consistent — separate from what each individual reviewer concluded below.</p></div>
+  const headline = `<div><span class="connection-kind">OVERALL VERDICT</span><h3>${verdictLabel}</h3><p>${escapeHtml(verdictGuidance(report))}</p><p class="field-help">DevHarmonics' own check of whether the evidence kept for this run is complete and consistent — separate from what each individual reviewer concluded below.</p></div>
     <span class="status-pill report-${escapeHtml(report.verdict.toLowerCase())}">${verdictLabel}</span>
     ${reportIssues.length ? `<ul class="verdict-reasons">${reportIssues.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : '<p class="report-consistent">No missing or contradictory retained evidence detected.</p>'}`;
   const parsed = parseReviewTargets(report.summary || "");
@@ -1306,6 +1351,45 @@ function renderDelivery(run) {
 // text that read exactly like the value about to be applied. The field now
 // carries the repository's REAL declared version as its editable value, and
 // the caption states plainly what an empty field means.
+//
+// PR #38 finding R4-002 (2026-07-22): GET /api/runs/:id/delivery started
+// returning `mergeVersionUnavailable: true` for a repository whose merged
+// version could not be re-resolved (transient GitHub/network failure), but
+// this caption logic never checked the flag — the `declaredVersion === null`
+// branch fired instead and told the owner the repository "declares no
+// version", which is false during an outage and directly contradicts the
+// CHANGELOG's promised retry copy. mergeVersionUnavailable is now checked
+// FIRST, before the generic null branch, and never prefills a tag in that
+// state. Pulled out as a pure function of the repository record so it can be
+// tested without the DOM.
+function deliveryTagCaption(repository) {
+  if (repository.mergeVersionUnavailable) {
+    return {
+      prefill: null,
+      help: "The merged version can't be read right now (GitHub or network hiccup). Refresh to retry — the tag field will fill in once it's readable.",
+    };
+  }
+  if (repository.declaredVersion) {
+    return {
+      prefill: `v${repository.declaredVersion.replace(/^v/i, "")}`,
+      help: `This repository declares version ${repository.declaredVersion} — the field is pre-filled to match. Edit it to tag differently (you will be asked to confirm a mismatch), or clear it to skip tagging.`,
+    };
+  }
+  if (repository.declaredVersion === null) {
+    return {
+      prefill: null,
+      help: "This repository declares no version in its own files. Enter a tag to create one, or leave empty to skip tagging.",
+    };
+  }
+  // The field is absent entirely — a server built before version enrichment.
+  // Say that, never "declares no version" (which would be a claim about the
+  // repository this client cannot back).
+  return {
+    prefill: null,
+    help: "We can't check this repository's declared version right now — ask an engineer to restart the server. Until then: empty tag field = no tag is created.",
+  };
+}
+
 async function fillDeclaredTagVersions(run) {
   if (!run?.delivery?.repositories?.length) return;
   try {
@@ -1317,18 +1401,9 @@ async function fillDeclaredTagVersions(run) {
         if (help && repository.status === "tagged") help.textContent = `Tagged ${repository.releaseTag || ""}.`;
         continue;
       }
-      if (repository.declaredVersion) {
-        const proposed = `v${repository.declaredVersion.replace(/^v/i, "")}`;
-        if (!input.value && document.activeElement !== input) input.value = proposed;
-        if (help) help.textContent = `This repository declares version ${repository.declaredVersion} — the field is pre-filled to match. Edit it to tag differently (you will be asked to confirm a mismatch), or clear it to skip tagging.`;
-      } else if (repository.declaredVersion === null && help) {
-        help.textContent = "This repository declares no version in its own files. Enter a tag to create one, or leave empty to skip tagging.";
-      } else if (help) {
-        // The field is absent entirely — a server built before version
-        // enrichment. Say that, never "declares no version" (which would be a
-        // claim about the repository this client cannot back).
-        help.textContent = "We can't check this repository's declared version right now — ask an engineer to restart the server. Until then: empty tag field = no tag is created.";
-      }
+      const caption = deliveryTagCaption(repository);
+      if (caption.prefill && !input.value && document.activeElement !== input) input.value = caption.prefill;
+      if (help) help.textContent = caption.help;
     }
   } catch {
     // Enrichment is a nicety; the buttons stay honest without it.
@@ -2095,8 +2170,11 @@ $("#delivery-repositories").addEventListener("click", async (event) => {
         const mismatch = error?.data?.versionMismatch;
         if (!mismatch) throw error;
         if (!window.confirm(`Hold on — this repository's own files declare version ${mismatch.declaredVersion}, but you typed ${mismatch.requestedTag}. A tag the repo contradicts is public and hard to undo.\n\nTag it as ${mismatch.requestedTag} anyway?`)) {
+          // The owner declined the override: nothing was tagged and nothing
+          // broke. Report it as a declined operation, not a success (and not a
+          // failure) so the shared activity strip stays honest.
           $("#delivery-error").textContent = `Tag not applied: the repository declares ${mismatch.declaredVersion}. Re-tag with the matching version, or confirm the mismatch deliberately.`;
-          return;
+          return cancelledOperation(`Tag not applied — you declined tagging ${mismatch.requestedTag} over the declared ${mismatch.declaredVersion}.`);
         }
         await submit(true);
       }

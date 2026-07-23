@@ -394,8 +394,8 @@ What that judgement rests on, in both directions:
 
 | Signal | Reading |
 |---|---|
-| Automated suite | 184 tests across configuration, credential stripping, provider parsing, plan validation, cancellation, SQLite receipts, local-model qualification and chunked review, review-lens quorums and the claims/diff divergence gate, workflow parsing/provenance/promotion guards, cockpit delivery gates, workspace-isolation guards, the dashboard server, and full fake-provider orchestration through real Git worktrees |
-| Schema handling | Ordered transactional migrations to ledger schema 33, automatic pre-upgrade backups, integrity + foreign-key validation, rollback on failure, and refusal to open a newer schema |
+| Automated suite | 192 tests across configuration, credential stripping, provider parsing, plan validation, cancellation, SQLite receipts, local-model qualification and chunked review, review-lens quorums and the claims/diff divergence gate, workflow parsing/provenance/promotion guards, cockpit delivery gates, workspace-isolation guards, the dashboard server, and full fake-provider orchestration through real Git worktrees |
+| Schema handling | Ordered transactional migrations to ledger schema 34, automatic pre-upgrade backups, integrity + foreign-key validation, rollback on failure, and refusal to open a newer schema |
 | Continuous integration | **None in this repository.** The merge gate is the local suite plus independent review — nothing automated catches a regression on push |
 | Distribution | Source checkout only. No installer, no published package |
 | Operational tooling | Temporary worktrees are retained for inspection until explicit cleanup is added; an interrupted integration set is not reconstructed after restart |

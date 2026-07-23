@@ -876,6 +876,12 @@ test("the delivery HTTP route serializes per repository, types its refusals, and
     if (request.command === "git" && joined === "remote get-url origin") {
       return { stdout: "https://github.com/civicsuite/http.git\n", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
     }
+    // The tag-truth gate and the GET enrichment now read the version from the
+    // IMMUTABLE commit via `git show <oid>:package.json`, not the checkout. This
+    // fixture's commits (reviewed head and merge commit) declare 9.9.9.
+    if (request.command === "git" && request.args[0] === "show" && joined.endsWith(":package.json")) {
+      return { stdout: JSON.stringify({ name: "fixture", version: "9.9.9" }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
     if (request.command === "git" && request.args[0] === "push" && !joined.includes("refs/tags/")) {
       pushCalls += 1;
       if (pushCalls === 1) await firstPushHeld; // hold the lock long enough for the racing request to arrive
@@ -944,10 +950,10 @@ test("the delivery HTTP route serializes per repository, types its refusals, and
     assert.deepEqual(completed.completedSteps, ["push_branch", "create_draft_pr", "merge_pr"]);
     assert.ok(completed.approvalId, "the composite carries its single approval id");
 
-    // Tag-truth gate (owner-requested, 2026-07-22): the repository declares
-    // 9.9.9 about itself; a contradicting tag refuses with BOTH values, and
+    // Tag-truth gate (owner-requested, 2026-07-22): the reviewed/merge COMMIT
+    // declares 9.9.9 about itself (supplied by the fake runner's `git show`, not
+    // the mutable checkout); a contradicting tag refuses with BOTH values, and
     // only an explicit owner confirmation mints it anyway.
-    await writeFile(path.join(project, "package.json"), JSON.stringify({ name: "fixture", version: "9.9.9" }), "utf8");
     // The delivery payload carries the declared version, so the cockpit's tag
     // field can show the REAL proposed tag instead of decorative ghost text
     // (owner finding, 2026-07-22).
@@ -963,6 +969,308 @@ test("the delivery HTTP route serializes per repository, types its refusals, and
     const agreed = await deliver({ action: "tag_release", tag: "v9.9.9" });
     assert.equal(agreed.status, 200, JSON.stringify(await agreed.clone().json()));
     assert.equal(((await agreed.json()) as { delivery: { status: string; releaseTag: string | null } }).delivery.releaseTag, "v9.9.9");
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the tag prefill follows the MERGE commit's declared version once merged, not the reviewed head", async () => {
+  // ROUND2-002: the tag GATE judges the merge commit, but the GET prefill used
+  // to read the reviewed head. When the merge commit declares a DIFFERENT
+  // version than the head (the base advanced, or merge resolution changed the
+  // manifest), the cockpit prefilled a version the gate would reject. Here the
+  // reviewed head declares 1.0.0 and the merge commit declares 2.0.0: the
+  // prefill must read 1.0.0 before merge and 2.0.0 after, matching the gate.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-divergent-prefill-"));
+  const project = await createRepository(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.runPolicy.allowExternalWrites = true;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+  const headOid = "b".repeat(40);
+  const mergeOid = "c".repeat(40);
+  const seedLedger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  const runId = seedLedger.createRun("Deliver with a divergent merge commit", project);
+  seedLedger.setRunStatus(runId, "running");
+  seedLedger.setRunStatus(runId, "ready", "READY");
+  seedLedger.prepareDeliveryRepository({ runId, repositoryId: "repo:div", localPath: project, baseBranch: "main", baseCommit: "a".repeat(40), headCommit: headOid, branch: "devharmonics/div1" });
+  seedLedger.close();
+
+  let prState = "OPEN";
+  const runner = async (request: { command: string; args: string[] }) => {
+    const joined = request.args.join(" ");
+    if (request.command === "git" && joined === "remote get-url origin") {
+      return { stdout: "https://github.com/civicsuite/div.git\n", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    // The reviewed head commit declares 1.0.0; the merge commit declares 2.0.0.
+    // The enrichment must resolve from whichever commit it asks `git show` about.
+    if (request.command === "git" && request.args[0] === "show" && joined.endsWith(":package.json")) {
+      const version = joined.includes(mergeOid) ? "2.0.0" : "1.0.0";
+      return { stdout: JSON.stringify({ name: "fixture", version }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "create") {
+      return { stdout: "https://github.com/civicsuite/div/pull/12\n", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "view" && joined.includes("state,isDraft,mergeable")) {
+      return { stdout: JSON.stringify({ state: prState, isDraft: true, mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", headRefOid: headOid, statusCheckRollup: [] }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "view" && joined.includes("mergeCommit")) {
+      return { stdout: JSON.stringify({ state: "MERGED", mergeCommit: { oid: mergeOid } }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "merge") prState = "MERGED";
+    if (request.command === "git" && request.args[0] === "rev-parse" && joined.includes("refs/tags/")) {
+      return { stdout: "", stderr: "", exitCode: 1, durationMs: 1, timedOut: false };
+    }
+    return { stdout: "", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+  };
+
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false, deliveryRunner: runner as never });
+  try {
+    const deliver = (body: Record<string, unknown>) => fetch(`${dashboard.url}/api/runs/${runId}/delivery`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repositoryId: "repo:div", expectedHeadCommit: headOid, ...body }),
+    });
+    const prefill = async () => {
+      const payload = await fetch(`${dashboard.url}/api/runs/${runId}/delivery`).then((response) => response.json()) as {
+        delivery: { repositories: Array<{ repositoryId: string; declaredVersion: string | null; mergeCommitOid: string | null }> };
+      };
+      return payload.delivery.repositories.find((repository) => repository.repositoryId === "repo:div")!;
+    };
+
+    // Before a merge commit exists, the reviewed head is the only truth: 1.0.0.
+    assert.equal((await deliver({ action: "push_branch" })).status, 200);
+    assert.equal((await deliver({ action: "create_draft_pr" })).status, 200);
+    const beforeMerge = await prefill();
+    assert.equal(beforeMerge.mergeCommitOid, null, "no merge commit is recorded before the merge");
+    assert.equal(beforeMerge.declaredVersion, "1.0.0", "before merge the prefill reads the reviewed head");
+
+    // After merge, the prefill must follow the MERGE commit (2.0.0) — the exact
+    // artifact the tag gate will judge — never the head's stale 1.0.0.
+    const merged = await deliver({ action: "merge_pr" });
+    assert.equal(merged.status, 200, JSON.stringify(await merged.clone().json()));
+    const afterMerge = await prefill();
+    assert.equal(afterMerge.mergeCommitOid, mergeOid, "the merge commit OID is persisted when the merge completes");
+    assert.equal(afterMerge.declaredVersion, "2.0.0", "after merge the prefill follows the merge commit, not the head");
+
+    // The gate now agrees with the prefill: the head's stale 1.0.0 is refused,
+    // and the merge-commit's 2.0.0 tags cleanly with no mismatch confirmation.
+    assert.equal((await deliver({ action: "tag_release", tag: "v1.0.0" })).status, 409, "the stale head version is refused by the gate");
+    assert.equal((await deliver({ action: "tag_release", tag: "v2.0.0" })).status, 200, "the merge-commit version tags cleanly");
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a transient merge-time gh mergeCommit failure is repaired lazily at read time, never the stale head", async () => {
+  // ROUND3-001, failure path 1: the merge succeeds and is durable, but the
+  // post-merge `gh pr view ... mergeCommit` lookup fails, so no merge OID is
+  // persisted. The old GET fell back to the reviewed head (1.0.0) — exactly the
+  // stale prefill ROUND2-002 fixed — and merge_pr cannot retry (it returns early
+  // once merged). The GET path must now be the authority: while the gh failure
+  // persists it reports the version as temporarily unavailable (never 1.0.0),
+  // and once the live PR is readable again it resolves and persists the merge
+  // commit's 2.0.0.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-merge-oid-repair-"));
+  const project = await createRepository(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.runPolicy.allowExternalWrites = true;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+  const headOid = "b".repeat(40);
+  const mergeOid = "c".repeat(40);
+  const seedLedger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  const runId = seedLedger.createRun("Deliver with a transient merge-commit lookup failure", project);
+  seedLedger.setRunStatus(runId, "running");
+  seedLedger.setRunStatus(runId, "ready", "READY");
+  seedLedger.prepareDeliveryRepository({ runId, repositoryId: "repo:div", localPath: project, baseBranch: "main", baseCommit: "a".repeat(40), headCommit: headOid, branch: "devharmonics/div1" });
+  seedLedger.close();
+
+  let prState = "OPEN";
+  // The merge-commit lookup fails at merge time and is repaired only after the
+  // test clears this flag, standing in for a transient GitHub/API failure that
+  // outlives the (early-returning) merge_pr call.
+  let failMergeCommitView = true;
+  const runner = async (request: { command: string; args: string[] }) => {
+    const joined = request.args.join(" ");
+    if (request.command === "git" && joined === "remote get-url origin") {
+      return { stdout: "https://github.com/civicsuite/div.git\n", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "git" && request.args[0] === "show" && joined.endsWith(":package.json")) {
+      const version = joined.includes(mergeOid) ? "2.0.0" : "1.0.0";
+      return { stdout: JSON.stringify({ name: "fixture", version }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "create") {
+      return { stdout: "https://github.com/civicsuite/div/pull/12\n", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "view" && joined.includes("state,isDraft,mergeable")) {
+      return { stdout: JSON.stringify({ state: prState, isDraft: true, mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", headRefOid: headOid, statusCheckRollup: [] }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "view" && joined.includes("mergeCommit")) {
+      // The real failure: gh exits nonzero with no usable stdout.
+      if (failMergeCommitView) return { stdout: "", stderr: "gh: could not read pull request\n", exitCode: 1, durationMs: 1, timedOut: false };
+      return { stdout: JSON.stringify({ state: "MERGED", mergeCommit: { oid: mergeOid } }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "merge") prState = "MERGED";
+    if (request.command === "git" && request.args[0] === "rev-parse" && joined.includes("refs/tags/")) {
+      return { stdout: "", stderr: "", exitCode: 1, durationMs: 1, timedOut: false };
+    }
+    return { stdout: "", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+  };
+
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false, deliveryRunner: runner as never });
+  try {
+    const deliver = (body: Record<string, unknown>) => fetch(`${dashboard.url}/api/runs/${runId}/delivery`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repositoryId: "repo:div", expectedHeadCommit: headOid, ...body }),
+    });
+    const prefill = async () => {
+      const payload = await fetch(`${dashboard.url}/api/runs/${runId}/delivery`).then((response) => response.json()) as {
+        delivery: { repositories: Array<{ repositoryId: string; declaredVersion: string | null; mergeCommitOid: string | null; mergeVersionUnavailable?: boolean }> };
+      };
+      return payload.delivery.repositories.find((repository) => repository.repositoryId === "repo:div")!;
+    };
+
+    assert.equal((await deliver({ action: "push_branch" })).status, 200);
+    assert.equal((await deliver({ action: "create_draft_pr" })).status, 200);
+
+    // The merge is durable even though the merge-commit lookup failed; no OID
+    // is persisted.
+    const merged = await deliver({ action: "merge_pr" });
+    assert.equal(merged.status, 200, JSON.stringify(await merged.clone().json()));
+    assert.equal(((await merged.json()) as { delivery: { mergeCommitOid: string | null } }).delivery.mergeCommitOid, null, "a failed merge-commit lookup leaves the OID unpersisted");
+
+    // While the live PR is still unreadable, GET is honest: temporarily
+    // unavailable, NOT the stale head 1.0.0.
+    const stillFailing = await prefill();
+    assert.equal(stillFailing.declaredVersion, null, "with the merge OID unresolvable, the prefill is null — never the stale head");
+    assert.equal(stillFailing.mergeVersionUnavailable, true, "the caller gets an explicit retry signal");
+
+    // Once the live PR is readable again, GET resolves the merge commit (2.0.0),
+    // persists the OID, and never returns the head's 1.0.0.
+    failMergeCommitView = false;
+    const repaired = await prefill();
+    assert.equal(repaired.mergeCommitOid, mergeOid, "the merge OID is re-resolved and persisted at read time");
+    assert.equal(repaired.declaredVersion, "2.0.0", "the prefill follows the merge commit, never the reviewed head 1.0.0");
+    assert.notEqual(repaired.mergeVersionUnavailable, true, "resolved reads carry no unavailable signal");
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a persisted merge OID whose object is not local is fetched at read time, never null or the head", async () => {
+  // ROUND3-001, failure path 2: the merge-commit OID IS persisted, but the
+  // merge-time fetch failed, so the object is not in the local store. The old
+  // GET ran `git show` on the missing object and yielded no version at all (not
+  // even the head fallback the comment promised). The GET path must fetch the
+  // merge commit before reading it: while the fetch keeps failing it reports the
+  // version as temporarily unavailable, and once the fetch succeeds it returns
+  // the merge commit's 2.0.0 — never null, never the head.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-merge-fetch-repair-"));
+  const project = await createRepository(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.runPolicy.allowExternalWrites = true;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+  const headOid = "b".repeat(40);
+  const mergeOid = "c".repeat(40);
+  const seedLedger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  const runId = seedLedger.createRun("Deliver with an unfetched merge commit", project);
+  seedLedger.setRunStatus(runId, "running");
+  seedLedger.setRunStatus(runId, "ready", "READY");
+  seedLedger.prepareDeliveryRepository({ runId, repositoryId: "repo:div", localPath: project, baseBranch: "main", baseCommit: "a".repeat(40), headCommit: headOid, branch: "devharmonics/div1" });
+  seedLedger.close();
+
+  let prState = "OPEN";
+  // The merge object becomes local only once a fetch succeeds; the merge-time
+  // fetch (and the first GET-time fetch) fail, standing in for a network/API
+  // failure that leaves the merge commit unavailable locally.
+  let fetchWorks = false;
+  let mergeObjectLocal = false;
+  const runner = async (request: { command: string; args: string[] }) => {
+    const joined = request.args.join(" ");
+    if (request.command === "git" && joined === "remote get-url origin") {
+      return { stdout: "https://github.com/civicsuite/div.git\n", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "git" && request.args[0] === "fetch") {
+      if (fetchWorks) {
+        mergeObjectLocal = true;
+        return { stdout: "", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+      }
+      return { stdout: "", stderr: "fatal: could not fetch\n", exitCode: 1, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "git" && request.args[0] === "cat-file") {
+      // The merge object is present only after a successful fetch; the head is
+      // always local.
+      const present = joined.includes(mergeOid) ? mergeObjectLocal : true;
+      return { stdout: present ? `${joined}\n` : "", stderr: present ? "" : "fatal: Not a valid object name\n", exitCode: present ? 0 : 1, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "git" && request.args[0] === "show" && joined.endsWith(":package.json")) {
+      if (joined.includes(mergeOid)) {
+        if (!mergeObjectLocal) return { stdout: "", stderr: "fatal: invalid object name\n", exitCode: 128, durationMs: 1, timedOut: false };
+        return { stdout: JSON.stringify({ name: "fixture", version: "2.0.0" }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+      }
+      return { stdout: JSON.stringify({ name: "fixture", version: "1.0.0" }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "create") {
+      return { stdout: "https://github.com/civicsuite/div/pull/12\n", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "view" && joined.includes("state,isDraft,mergeable")) {
+      return { stdout: JSON.stringify({ state: prState, isDraft: true, mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", headRefOid: headOid, statusCheckRollup: [] }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "view" && joined.includes("mergeCommit")) {
+      return { stdout: JSON.stringify({ state: "MERGED", mergeCommit: { oid: mergeOid } }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "gh" && request.args[1] === "merge") prState = "MERGED";
+    if (request.command === "git" && request.args[0] === "rev-parse" && joined.includes("refs/tags/")) {
+      return { stdout: "", stderr: "", exitCode: 1, durationMs: 1, timedOut: false };
+    }
+    return { stdout: "", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+  };
+
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false, deliveryRunner: runner as never });
+  try {
+    const deliver = (body: Record<string, unknown>) => fetch(`${dashboard.url}/api/runs/${runId}/delivery`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repositoryId: "repo:div", expectedHeadCommit: headOid, ...body }),
+    });
+    const prefill = async () => {
+      const payload = await fetch(`${dashboard.url}/api/runs/${runId}/delivery`).then((response) => response.json()) as {
+        delivery: { repositories: Array<{ repositoryId: string; declaredVersion: string | null; mergeCommitOid: string | null; mergeVersionUnavailable?: boolean }> };
+      };
+      return payload.delivery.repositories.find((repository) => repository.repositoryId === "repo:div")!;
+    };
+
+    assert.equal((await deliver({ action: "push_branch" })).status, 200);
+    assert.equal((await deliver({ action: "create_draft_pr" })).status, 200);
+
+    // The OID is persisted at merge time, but the merge-time fetch failed, so
+    // the object is not local.
+    const merged = await deliver({ action: "merge_pr" });
+    assert.equal(merged.status, 200, JSON.stringify(await merged.clone().json()));
+    assert.equal(((await merged.json()) as { delivery: { mergeCommitOid: string | null } }).delivery.mergeCommitOid, mergeOid, "the merge OID is persisted even though its object was not fetched");
+    assert.equal(mergeObjectLocal, false, "the merge-time fetch failed, so the object is not local");
+
+    // While the fetch keeps failing, GET is honest: temporarily unavailable,
+    // NOT null-forever and NOT the head.
+    const stillMissing = await prefill();
+    assert.equal(stillMissing.declaredVersion, null, "an unfetchable merge object yields no version — never the head");
+    assert.equal(stillMissing.mergeVersionUnavailable, true, "the caller gets an explicit retry signal");
+    assert.equal(stillMissing.mergeCommitOid, mergeOid, "the persisted OID is preserved through the failed read");
+
+    // Once the fetch succeeds, GET fetches the merge commit and returns 2.0.0.
+    fetchWorks = true;
+    const repaired = await prefill();
+    assert.equal(repaired.declaredVersion, "2.0.0", "the read path fetches the merge commit and returns its version, never null");
+    assert.notEqual(repaired.mergeVersionUnavailable, true, "resolved reads carry no unavailable signal");
   } finally {
     await dashboard.close();
     await rm(root, { recursive: true, force: true });

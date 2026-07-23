@@ -20,7 +20,7 @@ import { redactText } from "./redaction.js";
 import { createRunEvidenceExport, createRunReport } from "./reporter.js";
 import { observeLocalResources } from "./resources.js";
 import { inspectLocalRepository } from "./repository-intelligence.js";
-import { DeliveryRefusal, DeliveryService, VersionMismatchRefusal, readDeclaredVersion, type DeliveryAction } from "./delivery.js";
+import { DeliveryRefusal, DeliveryService, VersionMismatchRefusal, type DeliveryAction } from "./delivery.js";
 import { scanProductIntelligence } from "./product-intelligence.js";
 import { manualModelSchema, objectiveInputSchema, productRegistrationSchema, steeringDirectiveInputSchema, workbenchSessionInputSchema } from "./schemas.js";
 import type { ObjectiveInput, ProviderName, RunRequest, WorkbenchMessageRecord } from "./types.js";
@@ -992,12 +992,26 @@ async function route(
       return;
     }
     // The cockpit's tag field must show the REAL proposed tag, not decorative
-    // placeholder text (owner finding, 2026-07-22): enrich each repository
-    // with the version its own files declare.
-    const repositories = await Promise.all((run.delivery?.repositories ?? []).map(async (repository) => ({
-      ...repository,
-      declaredVersion: await readDeclaredVersion(repository.localPath),
-    })));
+    // placeholder text (owner finding, 2026-07-22): enrich each repository with
+    // the version its own files declare, via the same immutable-commit lookup
+    // the tag gate uses, never from the mutable checkout (CRITICAL gate finding,
+    // 2026-07-22). resolveDeliveryVersion is the AUTHORITY (ROUND3-001): before a
+    // merge commit exists it reads the reviewed head; once merged/tagged it
+    // follows the MERGE commit the tag gate judges — the exact artifact — even
+    // when merge-time enrichment failed, re-resolving the OID from the live PR
+    // and fetching its object at read time. It NEVER falls back to the reviewed
+    // head for a merged repository; if the merge version genuinely cannot be
+    // resolved right now it returns null with mergeVersionUnavailable so the
+    // cockpit shows an honest "retry" rather than a silently-wrong version.
+    const repositories = await Promise.all((run.delivery?.repositories ?? []).map(async (repository) => {
+      const resolved = await context.delivery.resolveDeliveryVersion(repository);
+      return {
+        ...repository,
+        mergeCommitOid: resolved.mergeCommitOid,
+        declaredVersion: resolved.declaredVersion,
+        ...(resolved.mergeVersionUnavailable ? { mergeVersionUnavailable: true } : {}),
+      };
+    }));
     sendJson(response, 200, { delivery: run.delivery ? { ...run.delivery, repositories } : null });
     return;
   }

@@ -40,6 +40,11 @@ import {
 } from "./registry.js";
 import type {
   CheckResult,
+  DecisionOption,
+  DecisionRecord,
+  DecisionRecordInput,
+  DecisionScope,
+  DecisionSource,
   DeliveryHandoffRecord,
   DeliveryRepositoryRecord,
   DeliveryRepositoryStatus,
@@ -172,7 +177,7 @@ interface CheckRow {
   duration_ms: number;
 }
 
-export const LEDGER_SCHEMA_VERSION = 35;
+export const LEDGER_SCHEMA_VERSION = 36;
 
 export const REPOSITORY_ROLES = [
   "umbrella",
@@ -1368,6 +1373,41 @@ const MIGRATIONS: readonly LedgerMigration[] = [
       if (columns.has("status")) database.exec("CREATE INDEX IF NOT EXISTS runs_status ON runs(status);");
     },
   },
+  {
+    version: 36,
+    name: "decision-records",
+    apply(database) {
+      // DH-647: a durable, append-only record of what was decided and what
+      // was rejected, so a killed approach is never re-proposed from scratch
+      // as if it were fresh analysis. `supersedes` self-references this same
+      // table (no ON DELETE CASCADE — a superseded record must keep existing
+      // even if something downstream ever removed its successor) and
+      // `product_id`/`run_id` are deliberately plain, unconstrained columns,
+      // matching `objectives.product_id`: a decision record must OUTLIVE the
+      // run that produced it, so it cannot be pinned to that run's lifetime
+      // by a cascading foreign key.
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS decision_records (
+          id TEXT PRIMARY KEY,
+          subject TEXT NOT NULL,
+          question TEXT NOT NULL,
+          options_json TEXT NOT NULL,
+          deciding_constraint TEXT NOT NULL,
+          evidence TEXT NOT NULL,
+          accepted_cost TEXT NOT NULL,
+          scope TEXT NOT NULL CHECK(scope IN ('run', 'product', 'machine')),
+          product_id TEXT,
+          run_id TEXT,
+          source TEXT NOT NULL CHECK(source IN ('owner', 'architect')),
+          supersedes TEXT REFERENCES decision_records(id),
+          what_changed TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS decision_records_subject ON decision_records(subject);
+        CREATE INDEX IF NOT EXISTS decision_records_product ON decision_records(product_id);
+      `);
+    },
+  },
 ];
 
 function summarizeGoal(goal: string, maxLength = 180): string {
@@ -1503,6 +1543,7 @@ const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
   product_intelligence_snapshots: ["id", "product_id", "status", "snapshot_json", "created_at"],
   model_performance_policies: ["model_id", "ignored_before", "excluded", "updated_at"],
   steering_directives: ["id", "run_id", "kind", "target_task_id", "actor", "payload_json", "disposition", "disposition_reason", "applied_attempt_id", "created_at", "updated_at"],
+  decision_records: ["id", "subject", "question", "options_json", "deciding_constraint", "evidence", "accepted_cost", "scope", "product_id", "run_id", "source", "supersedes", "what_changed", "created_at"],
   schema_migrations: ["version", "name", "applied_at"],
 };
 
@@ -1530,6 +1571,39 @@ function toSteeringDirectiveRecord(row: Record<string, unknown>): SteeringDirect
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
+}
+
+function toDecisionRecord(row: Record<string, unknown>, supersededBy: string | null): DecisionRecord {
+  return {
+    id: String(row.id),
+    subject: String(row.subject),
+    question: String(row.question),
+    options: JSON.parse(String(row.options_json)) as DecisionOption[],
+    decidingConstraint: String(row.deciding_constraint),
+    evidence: String(row.evidence),
+    acceptedCost: String(row.accepted_cost),
+    scope: String(row.scope) as DecisionScope,
+    productId: row.product_id == null ? null : String(row.product_id),
+    runId: row.run_id == null ? null : String(row.run_id),
+    source: String(row.source) as DecisionSource,
+    supersedes: row.supersedes == null ? null : String(row.supersedes),
+    supersededBy,
+    whatChanged: row.what_changed == null ? null : String(row.what_changed),
+    createdAt: String(row.created_at),
+  };
+}
+
+/**
+ * DH-647 retrieval normalization: lowercase, split on non-alphanumerics,
+ * drop tokens under 3 characters. Deterministic keyword matching only — no
+ * embeddings, no network — so "has this been decided before?" answers the
+ * same way on every machine, forever.
+ */
+function normalizeDecisionSearchTokens(query: string): string[] {
+  return query
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 3);
 }
 
 export interface ModelPerformancePolicyRecord {
@@ -3902,6 +3976,210 @@ export class Ledger {
       "UPDATE review_receipts SET invalidated_at = ?, invalidation_reason = ? WHERE run_id = ? AND invalidated_at IS NULL",
     ).run(new Date().toISOString(), redactText(reason), runId);
     return Number(result.changes);
+  }
+
+  /**
+   * DH-647. Append-only by design: this is the ONLY way a decision's content
+   * ever reaches the ledger, and there is deliberately no counterpart that
+   * edits one afterward. A changed mind is recorded by creating a NEW record
+   * that supersedes this one (see `supersedes`), never by mutating this one's
+   * fields — so a rejected approach and the reason it was rejected read the
+   * same way to every future reader, unaltered by hindsight.
+   */
+  createDecisionRecord(input: DecisionRecordInput): DecisionRecord {
+    const subject = input.subject.trim();
+    const question = input.question.trim();
+    const decidingConstraint = input.decidingConstraint.trim();
+    const evidence = input.evidence.trim();
+    const acceptedCost = input.acceptedCost.trim();
+    if (!subject) throw new Error("A decision record requires a subject");
+    if (!question) throw new Error("A decision record requires a question");
+    if (!decidingConstraint) throw new Error("A decision record requires the deciding constraint");
+    if (!evidence) throw new Error("A decision record requires the evidence relied on");
+    if (!acceptedCost) throw new Error("A decision record requires the accepted cost — what the choice gave up");
+    if (!input.options.length) throw new Error("A decision record requires at least one option");
+
+    const options = input.options.map((option) => ({
+      option: option.option.trim(),
+      disposition: option.disposition,
+      reason: option.reason && option.reason.trim() ? option.reason.trim() : null,
+    }));
+    for (const option of options) {
+      if (!option.option) throw new Error("Every option requires a description");
+    }
+    const selected = options.filter((option) => option.disposition === "selected");
+    if (selected.length !== 1) {
+      throw new Error(`A decision record must select exactly one option (found ${selected.length})`);
+    }
+    for (const option of options) {
+      if (option.disposition === "rejected" && !option.reason) {
+        throw new Error(`Rejected option '${option.option}' requires a reason`);
+      }
+    }
+
+    const supersedes = input.supersedes?.trim() || null;
+    const whatChanged = input.whatChanged?.trim() || null;
+    if (supersedes && !whatChanged) {
+      throw new Error("Superseding a decision record requires stating what changed");
+    }
+    if (!supersedes && whatChanged) {
+      throw new Error("whatChanged is only meaningful when supersedes is set");
+    }
+
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    this.writeAtomically(() => {
+      if (supersedes) {
+        const target = this.database.prepare("SELECT id, subject FROM decision_records WHERE id = ?").get(supersedes) as
+          | { id: string; subject: string }
+          | undefined;
+        if (!target) throw new Error(`Unknown decision record '${supersedes}' to supersede`);
+        // Walk the supersession chain forward from the target to find whether
+        // it is already the head, or already superseded — in which case the
+        // refusal names the actual head so the caller can retarget instead of
+        // guessing which record in the chain is current.
+        let head = target;
+        for (;;) {
+          const child = this.database.prepare("SELECT id, subject FROM decision_records WHERE supersedes = ?").get(head.id) as
+            | { id: string; subject: string }
+            | undefined;
+          if (!child) break;
+          head = child;
+        }
+        if (head.id !== target.id) {
+          throw new Error(
+            `Decision record '${supersedes}' has already been superseded; supersede the current head '${head.id}' (subject: '${head.subject}') instead`,
+          );
+        }
+      }
+      this.database.prepare(
+        `INSERT INTO decision_records
+         (id, subject, question, options_json, deciding_constraint, evidence, accepted_cost, scope, product_id, run_id, source, supersedes, what_changed, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        id,
+        redactText(subject),
+        redactText(question),
+        JSON.stringify(redactValue(options)),
+        redactText(decidingConstraint),
+        redactText(evidence),
+        redactText(acceptedCost),
+        input.scope,
+        input.productId ?? null,
+        input.runId ?? null,
+        input.source,
+        supersedes,
+        whatChanged ? redactText(whatChanged) : null,
+        now,
+      );
+    });
+    return this.getDecisionRecord(id)!;
+  }
+
+  getDecisionRecord(id: string): DecisionRecord | null {
+    const row = this.database.prepare("SELECT * FROM decision_records WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    const child = this.database.prepare("SELECT id FROM decision_records WHERE supersedes = ?").get(id) as { id: string } | undefined;
+    return toDecisionRecord(row, child?.id ?? null);
+  }
+
+  /** Map of `supersedes -> id` for every decision record that supersedes another, built once per call. */
+  private decisionSupersededByMap(): Map<string, string> {
+    const rows = this.database
+      .prepare("SELECT id, supersedes FROM decision_records WHERE supersedes IS NOT NULL")
+      .all() as unknown as Array<{ id: string; supersedes: string }>;
+    const map = new Map<string, string>();
+    for (const row of rows) map.set(row.supersedes, row.id);
+    return map;
+  }
+
+  /**
+   * Excludes superseded records by default — a reader asking "has this been
+   * decided before?" wants the current answer, not every draft of it. Pass
+   * `includeSuperseded` to see the full history; superseded rows still carry
+   * their `supersededBy` link either way.
+   */
+  listDecisionRecords(options: { productId?: string; scope?: DecisionScope; includeSuperseded?: boolean } = {}): DecisionRecord[] {
+    const conditions: string[] = [];
+    const params: string[] = [];
+    if (options.productId) {
+      conditions.push("product_id = ?");
+      params.push(options.productId);
+    }
+    if (options.scope) {
+      conditions.push("scope = ?");
+      params.push(options.scope);
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    const rows = this.database
+      .prepare(`SELECT * FROM decision_records ${where} ORDER BY created_at ASC, id ASC`)
+      .all(...params) as unknown as Array<Record<string, unknown>>;
+    const supersededBy = this.decisionSupersededByMap();
+    return rows
+      .filter((row) => options.includeSuperseded || !supersededBy.has(String(row.id)))
+      .map((row) => toDecisionRecord(row, supersededBy.get(String(row.id)) ?? null));
+  }
+
+  /**
+   * Walks `supersedes` links in both directions from `id` and returns the
+   * whole chain oldest-first, so the trail reads as one history rather than
+   * contradicting notes.
+   */
+  getDecisionChain(id: string): DecisionRecord[] {
+    const root = this.getDecisionRecord(id);
+    if (!root) throw new Error(`Unknown decision record '${id}'`);
+    const older: DecisionRecord[] = [];
+    for (let cursor = root; cursor.supersedes; ) {
+      const previous = this.getDecisionRecord(cursor.supersedes);
+      if (!previous) break;
+      older.push(previous);
+      cursor = previous;
+    }
+    older.reverse();
+    const newer: DecisionRecord[] = [];
+    for (let cursor = root; cursor.supersededBy; ) {
+      const next = this.getDecisionRecord(cursor.supersededBy);
+      if (!next) break;
+      newer.push(next);
+      cursor = next;
+    }
+    return [...older, root, ...newer];
+  }
+
+  /**
+   * Deterministic keyword search over subject and question — SQL LIKE per
+   * normalized token, no embeddings, no network (locked design decision 2).
+   * Relevance-ordered: a subject hit ranks before a question-only hit, and
+   * ties break newest-first. Excludes superseded records, mirroring
+   * `listDecisionRecords`'s default — "has this been decided before?" wants
+   * the CURRENT answer; the superseded drafts stay reachable through
+   * `getDecisionChain` or `listDecisionRecords({ includeSuperseded: true })`.
+   */
+  searchDecisionRecords(query: string, options: { productId?: string } = {}): DecisionRecord[] {
+    const tokens = normalizeDecisionSearchTokens(query);
+    if (!tokens.length) return [];
+    const conditions = [`(${tokens.map(() => "(lower(subject) LIKE ? OR lower(question) LIKE ?)").join(" OR ")})`];
+    const params: string[] = [];
+    for (const token of tokens) params.push(`%${token}%`, `%${token}%`);
+    if (options.productId) {
+      conditions.push("product_id = ?");
+      params.push(options.productId);
+    }
+    const rows = this.database
+      .prepare(`SELECT * FROM decision_records WHERE ${conditions.join(" AND ")}`)
+      .all(...params) as unknown as Array<Record<string, unknown>>;
+    const supersededBy = this.decisionSupersededByMap();
+    const ranked = rows
+      .filter((row) => !supersededBy.has(String(row.id)))
+      .map((row) => ({
+        row,
+        subjectHit: tokens.some((token) => String(row.subject).toLowerCase().includes(token)),
+      }));
+    ranked.sort((a, b) => {
+      if (a.subjectHit !== b.subjectHit) return a.subjectHit ? -1 : 1;
+      return String(b.row.created_at).localeCompare(String(a.row.created_at));
+    });
+    return ranked.map(({ row }) => toDecisionRecord(row, supersededBy.get(String(row.id)) ?? null));
   }
 
   listModels(connectionId?: string): ModelRecord[] {

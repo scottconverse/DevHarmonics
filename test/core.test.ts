@@ -28,7 +28,7 @@ import {
   isAbortError,
   type InvocationEvent,
 } from "../src/runtime.js";
-import type { DeliveryRepositoryRecord, DeliveryRepositoryStatus, DevHarmonicsConfig, ObjectiveRecord, PlannedTask, RunPlan, RunSummary, SteeringDirectiveRecord } from "../src/types.js";
+import type { DecisionRecord, DeliveryRepositoryRecord, DeliveryRepositoryStatus, DevHarmonicsConfig, ObjectiveRecord, PlannedTask, RunPlan, RunSummary, SteeringDirectiveRecord } from "../src/types.js";
 import { devHarmonicsConfigSchema, manualModelSchema, objectiveInputSchema, runPlanSchema, steeringPayloadSchema } from "../src/schemas.js";
 import { runProcess, subscriptionEnvironment } from "../src/process.js";
 import { REDACTED, redactText } from "../src/redaction.js";
@@ -4747,6 +4747,7 @@ test("ledger upgrades a v0.1 database transactionally and preserves a pre-migrat
           { version: 33, name: "objective-workflow-provenance" },
           { version: 34, name: "delivery-merge-commit-oid" },
           { version: 35, name: "runs-status-index" },
+          { version: 36, name: "decision-records" },
         ],
       );
     } finally {
@@ -6265,7 +6266,7 @@ test("steering directives persist with actor, target, disposition, and supersede
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-steering-ledger-"));
   const ledger = new Ledger(path.join(root, "devharmonics.db"));
   try {
-    assert.equal(LEDGER_SCHEMA_VERSION, 35, "the runs-status-index migration advances the ledger schema");
+    assert.equal(LEDGER_SCHEMA_VERSION, 36, "the decision-records migration advances the ledger schema");
     const runId = ledger.createRun("Steer me", root);
     ledger.savePlan(runId, {
       summary: "One task",
@@ -7760,5 +7761,361 @@ test("every evidence form the diagnostic gate accepts is resolved by the citatio
     await rm(path.join(path.dirname(root), "outside.ts"), { force: true, maxRetries: 10, retryDelay: 100 });
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+// DH-647: decision records. A durable, append-only entity holding what was
+// decided, what was rejected and why, so a killed approach is never
+// re-proposed from scratch as if it were fresh analysis.
+
+test("decision-records migration 36 applies cleanly to a pre-36 database and the table is usable afterward", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-migration-36-"));
+  const filename = path.join(root, "devharmonics.db");
+  const seeded = new Ledger(filename);
+  const sentinelRun = seeded.createRun("Survive the 35-to-36 upgrade", root);
+  seeded.close();
+
+  // Reconstruct exactly what a v35 database looks like: no decision_records
+  // table, migration history and user_version both capped at 35.
+  const surgery = new DatabaseSync(filename);
+  surgery.exec(`
+    DROP TABLE decision_records;
+    DELETE FROM schema_migrations WHERE version > 35;
+    PRAGMA user_version = 35;
+  `);
+  surgery.close();
+
+  const upgraded = new Ledger(filename);
+  try {
+    assert.equal(upgraded.getSchemaVersion(), LEDGER_SCHEMA_VERSION, "the physical v35 database reaches the current schema");
+    assert.equal(upgraded.getRun(sentinelRun)?.goal, "Survive the 35-to-36 upgrade", "sentinel run survives the upgrade");
+
+    const record = upgraded.createDecisionRecord({
+      subject: "container runtime",
+      question: "Which container runtime should this machine standardize on?",
+      options: [
+        { option: "Podman", disposition: "selected", reason: "Rootless by default" },
+        { option: "Docker Desktop", disposition: "rejected", reason: "Requires a paid license at this org's seat count" },
+      ],
+      decidingConstraint: "No paid license available",
+      evidence: "Podman installed and verified rootless on this machine 2026-07-14",
+      acceptedCost: "Some Docker-only tooling (docker-compose v1 quirks) is unavailable",
+      scope: "machine",
+      source: "owner",
+    });
+    assert.equal(record.subject, "container runtime", "the migrated table accepts a real write");
+  } finally {
+    upgraded.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Ledger's decision-record surface is append-only: no method exists that could mutate a record's content", () => {
+  const decisionMethods = Object.getOwnPropertyNames(Ledger.prototype)
+    .filter((name) => /decision/i.test(name))
+    .sort();
+  // `decisionSupersededByMap` is a private read-only lookup helper (used by
+  // list/get/search to compute the derived `supersededBy` link) — it never
+  // writes to the table. Everything else in this surface must be exactly the
+  // create + read/search set: no update/patch/edit/revise/supersede-in-place
+  // method that could rewrite a record's content after creation.
+  assert.deepEqual(
+    decisionMethods,
+    [
+      "createDecisionRecord",
+      "decisionSupersededByMap",
+      "getDecisionChain",
+      "getDecisionRecord",
+      "listDecisionRecords",
+      "searchDecisionRecords",
+    ].sort(),
+  );
+});
+
+function baseDecisionInput(overrides: Partial<Parameters<Ledger["createDecisionRecord"]>[0]> = {}) {
+  return {
+    subject: "container runtime",
+    question: "Which container runtime should this machine standardize on?",
+    options: [
+      { option: "Podman", disposition: "selected" as const, reason: "Rootless by default" },
+      { option: "Docker Desktop", disposition: "rejected" as const, reason: "Requires a paid license at this org's seat count" },
+    ],
+    decidingConstraint: "No paid license available",
+    evidence: "Podman installed and verified rootless on this machine 2026-07-14",
+    acceptedCost: "Some Docker-only tooling (docker-compose v1 quirks) is unavailable",
+    scope: "machine" as const,
+    source: "owner" as const,
+    ...overrides,
+  };
+}
+
+test("createDecisionRecord refuses zero or multiple selected options", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-decisions-validation-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    assert.throws(
+      () =>
+        ledger.createDecisionRecord(
+          baseDecisionInput({
+            options: [
+              { option: "Podman", disposition: "rejected", reason: "Changed course" },
+              { option: "Docker Desktop", disposition: "rejected", reason: "Paid license" },
+            ],
+          }),
+        ),
+      /exactly one option/i,
+      "zero selected options is refused",
+    );
+    assert.throws(
+      () =>
+        ledger.createDecisionRecord(
+          baseDecisionInput({
+            options: [
+              { option: "Podman", disposition: "selected", reason: null },
+              { option: "Docker Desktop", disposition: "selected", reason: null },
+            ],
+          }),
+        ),
+      /exactly one option/i,
+      "two selected options is refused",
+    );
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("createDecisionRecord refuses a rejected option with no reason", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-decisions-reason-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    assert.throws(
+      () =>
+        ledger.createDecisionRecord(
+          baseDecisionInput({
+            options: [
+              { option: "Podman", disposition: "selected", reason: null },
+              { option: "Docker Desktop", disposition: "rejected", reason: "   " },
+            ],
+          }),
+        ),
+      /requires a reason/i,
+    );
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("createDecisionRecord ties whatChanged to supersedes exactly (required iff set)", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-decisions-whatchanged-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    const original = ledger.createDecisionRecord(baseDecisionInput());
+
+    assert.throws(
+      () => ledger.createDecisionRecord(baseDecisionInput({ whatChanged: "Podman now requires a paid add-on too" })),
+      /whatChanged is only meaningful when supersedes is set/i,
+      "whatChanged without supersedes is refused",
+    );
+
+    assert.throws(
+      () => ledger.createDecisionRecord(baseDecisionInput({ supersedes: original.id })),
+      /requires stating what changed/i,
+      "supersedes without whatChanged is refused",
+    );
+
+    const supersession = ledger.createDecisionRecord(
+      baseDecisionInput({ supersedes: original.id, whatChanged: "Podman now requires a paid add-on too" }),
+    );
+    assert.equal(supersession.supersedes, original.id);
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("createDecisionRecord refuses an unknown supersedes target and refuses superseding an already-superseded record, naming the head", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-decisions-double-supersede-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    assert.throws(
+      () => ledger.createDecisionRecord(baseDecisionInput({ supersedes: "not-a-real-id", whatChanged: "Anything" })),
+      /unknown decision record/i,
+    );
+
+    const original = ledger.createDecisionRecord(baseDecisionInput());
+    const head = ledger.createDecisionRecord(
+      baseDecisionInput({ supersedes: original.id, whatChanged: "Podman now requires a paid add-on too" }),
+    );
+
+    // Superseding the ALREADY-superseded original must be refused, naming the
+    // current head of the chain rather than silently forking history.
+    assert.throws(
+      () =>
+        ledger.createDecisionRecord(
+          baseDecisionInput({ supersedes: original.id, whatChanged: "Trying to fork the chain" }),
+        ),
+      new RegExp(`already been superseded.*${head.id}`, "is"),
+      "the refusal names the head of the chain, not just the target",
+    );
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("getDecisionChain walks supersession links both ways, oldest first, with supersededBy set on every non-head record", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-decisions-chain-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    const original = ledger.createDecisionRecord(baseDecisionInput());
+    const middle = ledger.createDecisionRecord(
+      baseDecisionInput({ supersedes: original.id, whatChanged: "First revision" }),
+    );
+    const head = ledger.createDecisionRecord(
+      baseDecisionInput({ supersedes: middle.id, whatChanged: "Second revision" }),
+    );
+
+    for (const anchor of [original.id, middle.id, head.id]) {
+      const chain = ledger.getDecisionChain(anchor);
+      assert.deepEqual(
+        chain.map((record) => record.id),
+        [original.id, middle.id, head.id],
+        `the chain reads oldest-first regardless of which record (${anchor}) it is fetched from`,
+      );
+    }
+
+    const chain = ledger.getDecisionChain(original.id);
+    assert.equal(chain[0]?.supersededBy, middle.id);
+    assert.equal(chain[1]?.supersededBy, head.id);
+    assert.equal(chain[2]?.supersededBy, null, "the head has no successor");
+    assert.equal(chain[0]?.supersedes, null, "the original supersedes nothing");
+    assert.equal(chain[1]?.supersedes, original.id);
+    assert.equal(chain[2]?.supersedes, middle.id);
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("listDecisionRecords excludes superseded records by default, includes them with supersededBy when asked, and filters by product/scope", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-decisions-list-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    const product = ledger.upsertProduct({
+      id: "github:civiccast",
+      name: "CivicCast",
+      organizationUrl: "https://github.com/CivicCast",
+      description: "Public education and government channel platform",
+      repositories: [],
+    });
+    const original = ledger.createDecisionRecord(baseDecisionInput({ scope: "product", productId: product.id }));
+    const superseding = ledger.createDecisionRecord(
+      baseDecisionInput({ scope: "product", productId: product.id, supersedes: original.id, whatChanged: "Revised" }),
+    );
+    const machineScoped = ledger.createDecisionRecord(baseDecisionInput({ subject: "editor choice", scope: "machine" }));
+
+    const defaultList = ledger.listDecisionRecords({ productId: product.id });
+    assert.deepEqual(
+      defaultList.map((record) => record.id).sort(),
+      [superseding.id],
+      "the superseded original is excluded by default",
+    );
+
+    const fullList = ledger.listDecisionRecords({ productId: product.id, includeSuperseded: true });
+    assert.deepEqual(
+      fullList.map((record) => record.id).sort(),
+      [original.id, superseding.id].sort(),
+    );
+    assert.equal(fullList.find((record) => record.id === original.id)?.supersededBy, superseding.id);
+    assert.equal(fullList.find((record) => record.id === superseding.id)?.supersededBy, null);
+
+    const machineList = ledger.listDecisionRecords({ scope: "machine" });
+    assert.deepEqual(machineList.map((record) => record.id), [machineScoped.id]);
+
+    const otherProductList = ledger.listDecisionRecords({ productId: "not-a-real-product" });
+    assert.deepEqual(otherProductList, [], "an unrelated product sees no records");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("searchDecisionRecords normalizes tokens (lowercase, split on non-alphanumerics, drop <3-char tokens) and ranks subject hits before question-only hits, newest first", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-decisions-search-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    // Subject hit: "container-runtime" contains the token "container".
+    const subjectHit = ledger.createDecisionRecord(
+      baseDecisionInput({ subject: "container-runtime", question: "Which sandbox should we use for builds?" }),
+    );
+    // Question-only hit: subject has no overlap, but the question mentions "container".
+    const questionOnlyHit = ledger.createDecisionRecord(
+      baseDecisionInput({ subject: "editor choice", question: "Should the editor run inside a container?" }),
+    );
+    // No match at all: neither field mentions "container".
+    ledger.createDecisionRecord(baseDecisionInput({ subject: "font choice", question: "Which font renders best?" }));
+
+    const results = ledger.searchDecisionRecords("Container!! runtime");
+    assert.deepEqual(
+      results.map((record) => record.id),
+      [subjectHit.id, questionOnlyHit.id],
+      "subject hits rank before question-only hits, and non-matches are excluded",
+    );
+
+    // A short token ("to") must be dropped rather than matching everything.
+    const shortTokenResults = ledger.searchDecisionRecords("to");
+    assert.deepEqual(shortTokenResults, [], "tokens under 3 characters are dropped, not treated as a wildcard");
+
+    // Newest-first tie-break among records that hit the same field.
+    const older = ledger.createDecisionRecord(baseDecisionInput({ subject: "logging pipeline", question: "How should logs be shipped?" }));
+    const newer = ledger.createDecisionRecord(baseDecisionInput({ subject: "logging retention", question: "How long should logs be kept?" }));
+    const bothSubjectHits = ledger.searchDecisionRecords("logging");
+    assert.deepEqual(
+      bothSubjectHits.map((record) => record.id),
+      [newer.id, older.id],
+      "equal-relevance results are ordered newest first",
+    );
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("decision records are readable through a fresh Ledger connection after close (restart survival)", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-decisions-restart-"));
+  const filename = path.join(root, "devharmonics.db");
+  const ledger = new Ledger(filename);
+  let originalId: string;
+  let supersedingId: string;
+  try {
+    const original = ledger.createDecisionRecord(baseDecisionInput());
+    originalId = original.id;
+    const superseding = ledger.createDecisionRecord(
+      baseDecisionInput({ supersedes: original.id, whatChanged: "Podman now requires a paid add-on too" }),
+    );
+    supersedingId = superseding.id;
+  } finally {
+    ledger.close();
+  }
+
+  const reopened = new Ledger(filename);
+  try {
+    const fetched = reopened.getDecisionRecord(originalId);
+    assert.ok(fetched, "the original record survives a restart");
+    assert.equal(fetched?.subject, "container runtime");
+    assert.equal(fetched?.options[0]?.option, "Podman");
+    assert.equal(fetched?.options[1]?.reason, "Requires a paid license at this org's seat count");
+    assert.equal(fetched?.supersededBy, supersedingId, "the supersession link survives a restart too");
+
+    const chain = reopened.getDecisionChain(originalId);
+    assert.deepEqual(chain.map((record) => record.id), [originalId, supersedingId]);
+
+    const found = reopened.searchDecisionRecords("container runtime");
+    assert.deepEqual(found.map((record) => record.id), [supersedingId]);
+  } finally {
+    reopened.close();
+    await rm(root, { recursive: true, force: true });
   }
 });

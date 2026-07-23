@@ -407,3 +407,62 @@ export interface SteeringDirectiveRecord {
   createdAt: string;
   updatedAt: string;
 }
+
+/**
+ * DH-647. A decision an owner or architect made deliberately, kept so a
+ * rejected approach is never re-proposed from scratch as if it were fresh
+ * analysis. Append-only: nothing here is ever edited after creation — a
+ * changed mind is a NEW record that supersedes this one, never a mutation of
+ * it, so the original reasoning stays readable verbatim.
+ */
+export type DecisionOptionDisposition = "selected" | "rejected";
+
+export interface DecisionOption {
+  /** Short label for the option considered, e.g. "Podman" or "Docker Desktop". */
+  option: string;
+  disposition: DecisionOptionDisposition;
+  /** Required when disposition is 'rejected'; optional for the selected option. */
+  reason: string | null;
+}
+
+export type DecisionScope = "run" | "product" | "machine";
+export type DecisionSource = "owner" | "architect";
+
+export interface DecisionRecordInput {
+  /** Short noun phrase — the retrieval key readers search by. */
+  subject: string;
+  question: string;
+  options: DecisionOption[];
+  decidingConstraint: string;
+  evidence: string;
+  /** What the choice gave up, not only what it chose. */
+  acceptedCost: string;
+  scope: DecisionScope;
+  productId?: string | null;
+  /** The run that originated the decision, if any. */
+  runId?: string | null;
+  source: DecisionSource;
+  /** The id of the decision record this one replaces, if any. */
+  supersedes?: string | null;
+  /** Required iff supersedes is set. */
+  whatChanged?: string | null;
+}
+
+export interface DecisionRecord {
+  id: string;
+  subject: string;
+  question: string;
+  options: DecisionOption[];
+  decidingConstraint: string;
+  evidence: string;
+  acceptedCost: string;
+  scope: DecisionScope;
+  productId: string | null;
+  runId: string | null;
+  source: DecisionSource;
+  supersedes: string | null;
+  /** The id of the record that superseded this one, if any — derived, not stored. */
+  supersededBy: string | null;
+  whatChanged: string | null;
+  createdAt: string;
+}

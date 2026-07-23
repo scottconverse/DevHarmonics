@@ -2171,7 +2171,7 @@ test("dashboard serves its UI and bootstrap data on localhost", async () => {
     assert.match(exportResponse.headers.get("content-disposition") ?? "", new RegExp(`attachment; filename="devharmonics-${runId}-evidence\\.json"`));
     const exportValue = await exportResponse.json() as { version: number; evidenceVersion: number; integritySha256: string; report: { runId: string } };
     assert.equal(exportValue.version, 1);
-    assert.equal(exportValue.evidenceVersion, 5);
+    assert.equal(exportValue.evidenceVersion, 6);
     assert.equal(exportValue.integritySha256, reportValue.evidenceHash);
     assert.equal(exportValue.report.runId, runId);
     const reporterMutation = await fetch(`${dashboard.url}/api/runs/${runId}/report`, {
@@ -2716,6 +2716,152 @@ test("an architect plan decision missing a rejection reason is refused by plan-s
     seedLedger.close();
     await dashboard.close();
     await rm(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+  }
+});
+
+function fixtureDecisionBody(overrides: Record<string, unknown> = {}) {
+  return {
+    subject: "container runtime",
+    question: "Which container runtime should this box use?",
+    options: [
+      { option: "Podman", disposition: "selected" },
+      { option: "Docker Desktop", disposition: "rejected", reason: "Requires a paid license at this org's seat count" },
+    ],
+    decidingConstraint: "No paid licensing budget",
+    evidence: "Podman installed and verified rootless",
+    acceptedCost: "Some Docker-only tutorials do not apply directly",
+    scope: "machine",
+    ...overrides,
+  };
+}
+
+// DH-647 S3 items 1-2 (Decisions API). Validation refusals surface as the
+// API's normal 400 shape (same convention as productRegistrationSchema's
+// /api/products, see src/server.ts), owner writes always carry source
+// 'owner' regardless of what the caller claims, and a supersede-of-superseded
+// refusal maps to a clear 4xx (not a 500) — same convention the steering
+// directive route already uses for a ledger-thrown business-rule error.
+test("the Decisions API: list/search, chain, owner-authored create, and supersede — 400s name the field, supersede-of-superseded is a clear 4xx", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-decisions-api-"));
+  const project = await createRepository(root);
+  await initializeProject(project);
+
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  try {
+    const invalid = await fetch(`${dashboard.url}/api/decisions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(fixtureDecisionBody({
+        options: [
+          { option: "Podman", disposition: "selected" },
+          { option: "Docker Desktop", disposition: "selected" },
+        ],
+      })),
+    });
+    assert.equal(invalid.status, 400);
+    const invalidBody = await invalid.json() as { error: string; issues: Array<{ path: string; message: string }> };
+    assert.equal(invalidBody.error, "Invalid decision record");
+    assert.ok(invalidBody.issues.some((issue) => issue.path === "options" && /exactly one option/.test(issue.message)), "the 400 names the options field");
+
+    const created = await fetch(`${dashboard.url}/api/decisions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(fixtureDecisionBody({ source: "architect" })), // must be ignored
+    });
+    assert.equal(created.status, 201, await created.clone().text());
+    const createdBody = await created.json() as { record: { id: string; source: string; subject: string } };
+    assert.equal(createdBody.record.source, "owner", "an owner-authored record via this route is always source 'owner', regardless of the request body");
+    const originalId = createdBody.record.id;
+
+    const listed = await fetch(`${dashboard.url}/api/decisions`).then((response) => response.json()) as { decisions: Array<{ id: string }> };
+    assert.ok(listed.decisions.some((record) => record.id === originalId));
+    const searched = await fetch(`${dashboard.url}/api/decisions?query=${encodeURIComponent("container runtime")}`).then((response) => response.json()) as { decisions: Array<{ id: string }> };
+    assert.deepEqual(searched.decisions.map((record) => record.id), [originalId]);
+
+    const missingWhatChanged = await fetch(`${dashboard.url}/api/decisions/${originalId}/supersede`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(fixtureDecisionBody()),
+    });
+    assert.equal(missingWhatChanged.status, 400);
+    const missingWhatChangedBody = await missingWhatChanged.json() as { issues: Array<{ path: string }> };
+    assert.ok(missingWhatChangedBody.issues.some((issue) => issue.path === "whatChanged"));
+
+    const superseded = await fetch(`${dashboard.url}/api/decisions/${originalId}/supersede`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(fixtureDecisionBody({ whatChanged: "Podman now requires a paid add-on too" })),
+    });
+    assert.equal(superseded.status, 201, await superseded.clone().text());
+    const supersededBody = await superseded.json() as { record: { id: string; supersedes: string } };
+    assert.equal(supersededBody.record.supersedes, originalId);
+    const supersedingId = supersededBody.record.id;
+
+    const chain = await fetch(`${dashboard.url}/api/decisions/${originalId}/chain`).then((response) => response.json()) as { chain: Array<{ id: string }> };
+    assert.deepEqual(chain.chain.map((record) => record.id), [originalId, supersedingId], "the chain is oldest-first");
+
+    const alreadySuperseded = await fetch(`${dashboard.url}/api/decisions/${originalId}/supersede`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(fixtureDecisionBody({ whatChanged: "Trying to supersede an already-superseded record" })),
+    });
+    assert.ok(alreadySuperseded.status >= 400 && alreadySuperseded.status < 500, `supersede-of-superseded must be a clear 4xx, got ${alreadySuperseded.status}`);
+    const alreadySupersededBody = await alreadySuperseded.json() as { error: string };
+    assert.match(alreadySupersededBody.error, /already been superseded/);
+
+    const unknownChain = await fetch(`${dashboard.url}/api/decisions/${"0".repeat(8)}-0000-0000-0000-${"0".repeat(12)}/chain`);
+    assert.equal(unknownChain.status, 404, "a chain lookup for an unknown id is a 404, not a 500");
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+// DH-647 S3 item 3. The acceptance line: "decision records survive restarts
+// and are included in the exported evidence package". Create via the API,
+// restart the dashboard (a fresh instance over the same database file — no
+// process is killed here, this dashboard's own .close() releases the port),
+// export, assert presence.
+test("decision records survive restarts and are included in the exported evidence package", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-decisions-evidence-export-"));
+  const project = await createRepository(root);
+  await initializeProject(project);
+  const dbPath = path.join(devHarmonicsDirectory(project), "devharmonics.db");
+
+  let dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  // Seeding directly against the ledger AFTER startDashboard, same lesson as
+  // the reconcile-delivery test above.
+  const seedLedger = new Ledger(dbPath);
+  const runId = seedLedger.createRun("Evidence export decision fixture", project);
+  seedLedger.setRunStatus(runId, "running");
+  seedLedger.setRunStatus(runId, "ready", "READY");
+  seedLedger.close();
+
+  let decisionId = "";
+  try {
+    const created = await fetch(`${dashboard.url}/api/decisions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(fixtureDecisionBody({ scope: "run", runId })),
+    });
+    assert.equal(created.status, 201, await created.clone().text());
+    decisionId = ((await created.json()) as { record: { id: string } }).record.id;
+  } finally {
+    await dashboard.close();
+  }
+
+  dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  try {
+    const exportResponse = await fetch(`${dashboard.url}/api/runs/${runId}/evidence/export`);
+    assert.equal(exportResponse.status, 200);
+    const exportValue = await exportResponse.json() as { evidence: { decisions: Array<{ id: string; subject: string }> } };
+    assert.ok(
+      exportValue.evidence.decisions.some((record) => record.id === decisionId && record.subject === "container runtime"),
+      "the decision record created before the restart is present in the exported evidence package after it",
+    );
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 

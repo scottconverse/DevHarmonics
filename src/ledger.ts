@@ -495,7 +495,7 @@ export interface ReviewEvidenceBinding {
 }
 
 export interface RunEvidencePackage {
-  version: 5;
+  version: 6;
   generatedAt: string;
   run: RunSummary;
   attempts: Array<Record<string, unknown>>;
@@ -504,6 +504,13 @@ export interface RunEvidencePackage {
   reviews: ReviewReceiptRecord[];
   integrationSet: IntegrationSetRecord | null;
   delivery: DeliveryHandoffRecord | null;
+  /**
+   * DH-647 S3. Every decision record linked to this run (run_id match),
+   * current and superseded alike — evidence must not silently drop a
+   * record's history just because a later record superseded it. See
+   * Ledger.listDecisionRecords's `runId` filter below.
+   */
+  decisions: DecisionRecord[];
   integritySha256: string;
 }
 
@@ -2823,9 +2830,13 @@ export class Ledger {
     const reviews = this.listReviewReceipts(runId);
     const integrationSet = this.getIntegrationSet(runId);
     const delivery = this.getDeliveryHandoff(runId);
-    const canonical = JSON.stringify({ run, attempts: normalizedAttempts, blackboard, toolReceipts, reviews, integrationSet, delivery });
+    // DH-647 S3: includeSuperseded so the export is a complete record of what
+    // this run decided, not just the current answer — a superseded decision
+    // is still part of the run's history.
+    const decisions = this.listDecisionRecords({ runId, includeSuperseded: true });
+    const canonical = JSON.stringify({ run, attempts: normalizedAttempts, blackboard, toolReceipts, reviews, integrationSet, delivery, decisions });
     return {
-      version: 5,
+      version: 6,
       generatedAt: new Date().toISOString(),
       run,
       attempts: normalizedAttempts,
@@ -2834,6 +2845,7 @@ export class Ledger {
       reviews,
       integrationSet,
       delivery,
+      decisions,
       integritySha256: createHash("sha256").update(canonical).digest("hex"),
     };
   }
@@ -4115,12 +4127,16 @@ export class Ledger {
    * `includeSuperseded` to see the full history; superseded rows still carry
    * their `supersededBy` link either way.
    */
-  listDecisionRecords(options: { productId?: string; scope?: DecisionScope; includeSuperseded?: boolean } = {}): DecisionRecord[] {
+  listDecisionRecords(options: { productId?: string; runId?: string; scope?: DecisionScope; includeSuperseded?: boolean } = {}): DecisionRecord[] {
     const conditions: string[] = [];
     const params: string[] = [];
     if (options.productId) {
       conditions.push("product_id = ?");
       params.push(options.productId);
+    }
+    if (options.runId) {
+      conditions.push("run_id = ?");
+      params.push(options.runId);
     }
     if (options.scope) {
       conditions.push("scope = ?");

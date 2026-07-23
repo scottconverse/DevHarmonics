@@ -29,7 +29,7 @@ import {
   type InvocationEvent,
 } from "../src/runtime.js";
 import type { DecisionRecord, DeliveryRepositoryRecord, DeliveryRepositoryStatus, DevHarmonicsConfig, ObjectiveRecord, PlannedTask, RunPlan, RunSummary, SteeringDirectiveRecord } from "../src/types.js";
-import { devHarmonicsConfigSchema, manualModelSchema, objectiveInputSchema, runPlanSchema, steeringPayloadSchema } from "../src/schemas.js";
+import { decisionRecordCreateSchema, decisionRecordSupersedeSchema, devHarmonicsConfigSchema, manualModelSchema, objectiveInputSchema, runPlanSchema, steeringPayloadSchema } from "../src/schemas.js";
 import { runProcess, subscriptionEnvironment } from "../src/process.js";
 import { REDACTED, redactText } from "../src/redaction.js";
 import { parseNvidiaSmi } from "../src/resources.js";
@@ -701,6 +701,75 @@ test("plan schema validates decisions[] with S1's exactly-one-selected and reaso
   });
   assert.equal(rejectedWithoutReason.success, false, "a rejected option without a reason must be refused");
   assert.match(JSON.stringify(rejectedWithoutReason.success ? {} : rejectedWithoutReason.error.issues), /requires a reason/);
+});
+
+// DH-647 S3. decisionRecordCreateSchema/decisionRecordSupersedeSchema
+// (src/schemas.ts, POST /api/decisions and POST /api/decisions/:id/supersede)
+// mirror S1's createDecisionRecord rules exactly, same as planDecisionSchema
+// above — and the refusal issue names the offending field (`options`, or
+// `options.<index>.reason`) so a 400 response can say exactly what was wrong.
+function baseDecisionRecordBody(overrides: Record<string, unknown> = {}) {
+  return {
+    subject: "container runtime",
+    question: "Which container runtime should this box use?",
+    options: [
+      { option: "Podman", disposition: "selected" as const },
+      { option: "Docker Desktop", disposition: "rejected" as const, reason: "Requires a paid license at this org's seat count" },
+    ],
+    decidingConstraint: "No paid licensing budget",
+    evidence: "Podman installed and verified rootless",
+    acceptedCost: "Some Docker-only tutorials do not apply directly",
+    scope: "machine" as const,
+    ...overrides,
+  };
+}
+
+test("decisionRecordCreateSchema accepts a valid body and refuses zero/multiple selected options and rejections without a reason, naming the field", () => {
+  const valid = decisionRecordCreateSchema.safeParse(baseDecisionRecordBody());
+  assert.equal(valid.success, true, valid.success ? "" : JSON.stringify((valid as { error: unknown }).error));
+  if (valid.success) {
+    assert.equal(valid.data.productId, null, "productId defaults to null, not omitted");
+    assert.equal(valid.data.runId, null, "runId defaults to null, not omitted");
+  }
+
+  const twoSelected = decisionRecordCreateSchema.safeParse(baseDecisionRecordBody({
+    options: [
+      { option: "Podman", disposition: "selected" as const },
+      { option: "Docker Desktop", disposition: "selected" as const },
+    ],
+  }));
+  assert.equal(twoSelected.success, false, "two selected options must be refused");
+  if (!twoSelected.success) {
+    assert.match(twoSelected.error.issues.map((issue) => issue.message).join(" "), /must select exactly one option/);
+    assert.deepEqual(twoSelected.error.issues.find((issue) => /must select exactly one option/.test(issue.message))?.path, ["options"], "the refusal names the options field");
+  }
+
+  const rejectedWithoutReason = decisionRecordCreateSchema.safeParse(baseDecisionRecordBody({
+    options: [
+      { option: "Podman", disposition: "selected" as const },
+      { option: "Docker Desktop", disposition: "rejected" as const },
+    ],
+  }));
+  assert.equal(rejectedWithoutReason.success, false, "a rejected option without a reason must be refused");
+  if (!rejectedWithoutReason.success) {
+    assert.match(rejectedWithoutReason.error.issues.map((issue) => issue.message).join(" "), /requires a reason/);
+    assert.deepEqual(
+      rejectedWithoutReason.error.issues.find((issue) => /requires a reason/.test(issue.message))?.path,
+      ["options", 1, "reason"],
+      "the refusal names the exact option's reason field",
+    );
+  }
+});
+
+test("decisionRecordSupersedeSchema requires the same option rules plus a non-empty whatChanged", () => {
+  const missingWhatChanged = decisionRecordSupersedeSchema.safeParse(baseDecisionRecordBody());
+  assert.equal(missingWhatChanged.success, false, "supersede requires whatChanged");
+  if (!missingWhatChanged.success) {
+    assert.ok(missingWhatChanged.error.issues.some((issue) => issue.path.join(".") === "whatChanged"), "the refusal names whatChanged");
+  }
+
+  const valid = decisionRecordSupersedeSchema.safeParse(baseDecisionRecordBody({ whatChanged: "Podman now requires a paid add-on too" }));
+  assert.equal(valid.success, true, valid.success ? "" : JSON.stringify((valid as { error: unknown }).error));
 });
 
 test("Claude official catalog watcher selects the newest exact model in each tracked family", () => {
@@ -1969,7 +2038,7 @@ test("ledger retains redacted tool-policy receipts in the run evidence package",
     const evidence = ledger.getRunEvidence(runId) as ReturnType<Ledger["getRunEvidence"]> & {
       toolReceipts?: Array<Record<string, unknown>>;
     };
-    assert.equal((evidence as unknown as { version: number } | null)?.version, 5);
+    assert.equal((evidence as unknown as { version: number } | null)?.version, 6);
     assert.equal(evidence?.toolReceipts?.length, 1);
     assert.equal(evidence?.toolReceipts?.[0]?.id, receiptId);
   } finally {
@@ -2134,7 +2203,7 @@ test("ledger retains structured reviews and invalidates them when fixer evidence
     assert.ok(reviews[0]!.invalidatedAt);
     assert.match(reviews[0]!.invalidationReason!, /fixer changed/i);
     const evidence = ledger.getRunEvidence(runId) as Record<string, any>;
-    assert.equal(evidence.version, 5);
+    assert.equal(evidence.version, 6);
     assert.equal(evidence.reviews[0].id, reviewId);
     assert.ok(evidence.reviews[0].invalidatedAt);
   } finally {
@@ -3688,27 +3757,33 @@ test("the inbox item HTML seam (src/ui/app.js) escapes every interpolated field"
   assert.match(html, /&lt;img src=x onerror=alert\(4\)&gt;/, "the action label is escaped, not dropped");
 });
 
-// DH-647 S2. The plan-approval preview's decision-comparison render seams:
-// subjectsOverlap (the token-overlap match rule), renderPriorDecisionHtml
-// (the "Prior decisions on this subject" list), renderPlanDecisionHtml (this
-// plan's own decisions[], with the prior-rejection collision markup), and
-// consequentialChoiceFlagHtml (the per-task compared/uncompared flag). Same
-// extraction discipline and same threat shape as the inbox/finding seams
-// above — every interpolated field is free text ultimately sourced from a
-// decision record or an architect's plan output.
+// DH-647 S2/S3. The plan-approval preview's AND the Decisions panel's
+// (Products view) decision render seams: subjectsOverlap (the token-overlap
+// match rule), renderPriorDecisionHtml (the "Prior decisions on this
+// subject" list), renderPlanDecisionHtml (this plan's own decisions[], with
+// the prior-rejection collision markup), consequentialChoiceFlagHtml (the
+// per-task compared/uncompared flag), and S3's renderDecisionOptionsHtml/
+// renderDecisionChainHtml/renderDecisionCardHtml (the Decisions panel's own
+// record cards and supersession trail). Same extraction discipline and same
+// threat shape as the inbox/finding seams above — every interpolated field
+// is free text ultimately sourced from a decision record or an architect's
+// plan output.
 function extractDecisionPreviewSeams(): {
   escapeHtml: (value?: string) => string;
   subjectsOverlap: (a: string, b: string) => boolean;
   renderPriorDecisionHtml: (record: Record<string, unknown>) => string;
   renderPlanDecisionHtml: (decision: Record<string, unknown>, priorRecords: Array<Record<string, unknown>>) => string;
   consequentialChoiceFlagHtml: (task: Record<string, unknown>, decisions: Array<Record<string, unknown>>) => string;
+  renderDecisionOptionsHtml: (options: Array<Record<string, unknown>>) => string;
+  renderDecisionChainHtml: (chain: Array<Record<string, unknown>> | undefined, currentId: string) => string;
+  renderDecisionCardHtml: (record: Record<string, unknown>, chain?: Array<Record<string, unknown>>) => string;
 } {
   const appSource = readFileSync(path.join(process.cwd(), "src", "ui", "app.js"), "utf8");
   const start = appSource.indexOf('function escapeHtml(value = "")');
   const end = appSource.indexOf("\n// DH-632 visible operation feedback");
   assert.ok(start >= 0 && end > start, "escapeHtml and the DH-647 decision-preview seams must be extractable from app.js");
   return new Function(
-    `${appSource.slice(start, end)}; return { escapeHtml, subjectsOverlap, renderPriorDecisionHtml, renderPlanDecisionHtml, consequentialChoiceFlagHtml };`,
+    `${appSource.slice(start, end)}; return { escapeHtml, subjectsOverlap, renderPriorDecisionHtml, renderPlanDecisionHtml, consequentialChoiceFlagHtml, renderDecisionOptionsHtml, renderDecisionChainHtml, renderDecisionCardHtml };`,
   )() as ReturnType<typeof extractDecisionPreviewSeams>;
 }
 
@@ -3801,6 +3876,97 @@ test("consequentialChoiceFlagHtml distinguishes a compared choice from one propo
   // Same rule with zero recorded decisions at all: still just a flag, never
   // a false claim that a comparison exists.
   assert.match(consequentialChoiceFlagHtml(uncomparedTask, []), /proposed without recorded alternatives/i);
+});
+
+// DH-647 S3. The Decisions panel's own render seams (Products view):
+// renderDecisionOptionsHtml (selected/rejected options and reasons),
+// renderDecisionChainHtml (the supersession trail, oldest-first, with
+// what-changed notes and a superseded label on every non-head entry), and
+// renderDecisionCardHtml (the full card, escaping every field and labeling
+// a superseded record). Same threat shape and extraction discipline as
+// every other DH-647 seam above.
+test("renderDecisionOptionsHtml escapes hostile markup in the selected/rejected options and reasons, and names when nothing was rejected", () => {
+  const { renderDecisionOptionsHtml } = extractDecisionPreviewSeams();
+  const hostileOptions = [
+    { option: 'Podman</strong><script>alert(1)</script>', disposition: "selected" },
+    { option: '<img src=x onerror=alert(2)>', disposition: "rejected", reason: '"><svg onload=alert(3)>' },
+  ];
+  const html = renderDecisionOptionsHtml(hostileOptions);
+  assert.doesNotMatch(html, /<script/i, "a <script> tag in the selected option must never reach innerHTML unescaped");
+  assert.doesNotMatch(html, /<img/i, "an <img> tag in a rejected option must never reach innerHTML unescaped");
+  assert.doesNotMatch(html, /<svg/i, "an <svg onload> payload in a reason must never reach innerHTML unescaped");
+  assert.match(html, /Selected: Podman/);
+
+  const noneRejected = renderDecisionOptionsHtml([{ option: "Podman", disposition: "selected" }]);
+  assert.match(noneRejected, /No options were rejected/i);
+});
+
+test("renderDecisionChainHtml orders the trail oldest-first, labels every non-head entry Superseded, and shows what-changed notes; a chain shorter than 2 renders nothing", () => {
+  const { renderDecisionChainHtml } = extractDecisionPreviewSeams();
+  const original = {
+    id: "original",
+    options: [{ option: "Podman", disposition: "selected" }],
+    createdAt: "2026-07-01T00:00:00.000Z",
+    supersededBy: "middle",
+    whatChanged: null,
+  };
+  const middle = {
+    id: "middle",
+    options: [{ option: "Docker Desktop", disposition: "selected" }],
+    createdAt: "2026-07-10T00:00:00.000Z",
+    supersededBy: "current",
+    whatChanged: 'Podman rootless mode broke</strong><script>alert(1)</script>',
+  };
+  const current = {
+    id: "current",
+    options: [{ option: "Podman", disposition: "selected" }],
+    createdAt: "2026-07-20T00:00:00.000Z",
+    supersededBy: null,
+    whatChanged: "Docker Desktop's license terms changed again",
+  };
+  const html = renderDecisionChainHtml([original, middle, current], "current");
+  // Ordering is verified structurally: each entry's selected-option label
+  // must appear in document order oldest -> newest.
+  assert.ok(html.indexOf("Podman") < html.indexOf("Docker Desktop"), "the trail renders oldest first");
+  assert.ok(html.lastIndexOf("Podman") > html.indexOf("Docker Desktop"), "the current (newest) entry renders after the middle entry");
+  assert.equal((html.match(/Superseded/g) || []).length, 2, "both non-head entries (original and middle) are labeled Superseded, the current head is not");
+  assert.doesNotMatch(html, /<script/i, "a <script> tag in a whatChanged note must never reach innerHTML unescaped");
+  assert.match(html, /What changed: Podman rootless mode broke/);
+  assert.match(html, /What changed: Docker Desktop&#039;s license terms changed again/);
+
+  assert.equal(renderDecisionChainHtml([current], "current"), "", "a chain of length 1 (no supersession at all) renders nothing");
+  assert.equal(renderDecisionChainHtml(undefined, "current"), "", "no chain fetched yet renders nothing");
+});
+
+test("renderDecisionCardHtml escapes every field and visibly labels a superseded record", () => {
+  const { renderDecisionCardHtml } = extractDecisionPreviewSeams();
+  const hostileRecord = {
+    id: "rec-1",
+    subject: 'container runtime</strong><script>alert(1)</script>',
+    question: '"><img src=x onerror=alert(2)>',
+    options: [
+      { option: "Podman", disposition: "selected" },
+      { option: "Docker Desktop", disposition: "rejected", reason: '<svg onload=alert(3)>' },
+    ],
+    decidingConstraint: "No paid licensing budget</em>",
+    acceptedCost: "Some Docker-only tutorials do not apply directly",
+    scope: "machine",
+    source: "owner",
+    createdAt: "2026-07-20T00:00:00.000Z",
+    supersedes: null,
+    supersededBy: null,
+  };
+  const html = renderDecisionCardHtml(hostileRecord);
+  assert.doesNotMatch(html, /<script/i);
+  assert.doesNotMatch(html, /<img/i);
+  assert.doesNotMatch(html, /<svg/i);
+  assert.doesNotMatch(html, /<\/em>/i, "a raw closing tag in decidingConstraint must never reach innerHTML unescaped");
+  assert.doesNotMatch(html, /Superseded/, "a current (non-superseded) record must not be labeled Superseded");
+  assert.match(html, /Podman/);
+
+  const supersededRecord = { ...hostileRecord, id: "rec-0", supersededBy: "rec-1" };
+  const supersededHtml = renderDecisionCardHtml(supersededRecord);
+  assert.match(supersededHtml, /Superseded/, "a record with a supersededBy link is visibly labeled Superseded");
 });
 
 test("the program run HTML seam (src/ui/app.js) escapes every interpolated field", () => {
@@ -8371,6 +8537,68 @@ test("decision records are readable through a fresh Ledger connection after clos
     assert.deepEqual(found.map((record) => record.id), [supersedingId]);
   } finally {
     reopened.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// DH-647 S3 item 3 (evidence export). listDecisionRecords gains a `runId`
+// filter (extending the existing S1 method rather than adding a new one —
+// the append-only-surface enumeration test above pins the exact method set,
+// so a genuinely new read filter belongs on an existing method, not a new
+// one) so getRunEvidence below can pull exactly the records this run
+// produced or referenced.
+test("listDecisionRecords filters by runId, excluding superseded by default and including them with includeSuperseded", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-decisions-run-filter-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    const runId = ledger.createRun("Ship the container runtime switch", root);
+    const otherRunId = ledger.createRun("Unrelated run", root);
+    const original = ledger.createDecisionRecord(baseDecisionInput({ scope: "run", runId }));
+    const superseding = ledger.createDecisionRecord(
+      baseDecisionInput({ scope: "run", runId, supersedes: original.id, whatChanged: "Podman now requires a paid add-on too" }),
+    );
+    ledger.createDecisionRecord(baseDecisionInput({ subject: "editor choice", scope: "run", runId: otherRunId }));
+
+    const current = ledger.listDecisionRecords({ runId });
+    assert.deepEqual(current.map((record) => record.id), [superseding.id], "only the current (non-superseded) run-linked record is returned by default");
+
+    const full = ledger.listDecisionRecords({ runId, includeSuperseded: true });
+    assert.deepEqual(full.map((record) => record.id).sort(), [original.id, superseding.id].sort(), "includeSuperseded returns every record linked to the run");
+
+    assert.equal(ledger.listDecisionRecords({ runId: otherRunId }).length, 1, "the runId filter excludes records linked to a different run");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// DH-647 S3 item 3. "Decision records survive restarts and are included in
+// the exported evidence package" starts here at the ledger layer: the
+// evidence package must not silently drop history — a superseded record is
+// still evidence of what was decided and why it changed, so getRunEvidence
+// includes the whole run-linked set, not just the current answer. The
+// version bump (5 -> 6) is an honest signal that the evidence shape changed.
+test("getRunEvidence includes every decision record linked to the run, current and superseded, and bumps the evidence version", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-decisions-evidence-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    const runId = ledger.createRun("Ship the container runtime switch", root);
+    const original = ledger.createDecisionRecord(baseDecisionInput({ scope: "run", runId }));
+    const superseding = ledger.createDecisionRecord(
+      baseDecisionInput({ scope: "run", runId, supersedes: original.id, whatChanged: "Podman now requires a paid add-on too" }),
+    );
+    ledger.createDecisionRecord(baseDecisionInput({ subject: "editor choice", scope: "machine" })); // unlinked, must not appear
+
+    const evidence = ledger.getRunEvidence(runId);
+    assert.ok(evidence, "run evidence exists");
+    assert.equal(evidence!.version, 6, "the evidence package version reflects the new decisions field");
+    assert.deepEqual(
+      evidence!.decisions.map((record) => record.id).sort(),
+      [original.id, superseding.id].sort(),
+      "the run evidence package includes every decision record linked to this run, including the superseded one",
+    );
+  } finally {
+    ledger.close();
     await rm(root, { recursive: true, force: true });
   }
 });

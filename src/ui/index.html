@@ -362,6 +362,37 @@
           <p class="field-help">An intelligence scan reads each repository's key documents (README, STATUS, version files, etc.) and pulls out factual claims — like which version is current — so it can catch places where two repositories disagree. Findings: <strong>conflicting claim</strong> = two repositories state different facts about the same thing (e.g. different version numbers) · <strong>missing source</strong> = a tracked file doesn't exist · <strong>unreadable source</strong> = a tracked file exists but couldn't be read · <strong>unsafe source</strong> = a tracked file was skipped for safety reasons.</p>
           <div id="product-list" class="product-list"></div>
           <div id="products-empty" class="panel empty-state product-empty">No products registered yet. Register one below, or start a run in <strong>Observe only</strong> mode (read-only, makes no changes) and let the agent team discover and add products and repositories automatically.</div>
+
+          <div class="view-heading">
+            <div><p class="eyebrow">DECISION RECORDS</p><h2 id="decisions-title">Decisions</h2><p class="field-help">A decision record captures a question the team faced, every option it weighed, which one was chosen, and — just as important — every option that was rejected and why. Rejections matter: without them, a killed approach gets re-proposed and re-argued from scratch at full cost. Recording it once means it never has to be re-litigated.</p></div>
+            <div class="evidence-actions"><button id="record-decision" class="secondary" type="button">Record a decision</button><button id="refresh-decisions" class="secondary" type="button">Refresh decisions</button></div>
+          </div>
+          <div class="joined">
+            <input id="decision-search" class="input" placeholder='Search by subject or question, e.g. "container runtime"'>
+            <select id="decision-search-product" class="input"><option value="">All products</option></select>
+            <button id="decision-search-button" class="secondary" type="button">Search</button>
+          </div>
+          <label class="decision-include-superseded"><input id="decision-include-superseded" type="checkbox"> Include superseded records <small class="field-help">Only applies when the search box is empty — search always shows the current answer, not the full history. Use "View history" on a record to see its supersession trail.</small></label>
+          <form id="decision-form" class="panel registry-form hidden">
+            <div class="panel-heading"><div><span class="step">D</span><h2 id="decision-form-title">Record a decision</h2></div><span id="decision-form-subtitle" class="muted">Options considered, the constraint that decided it, and what the choice gave up.</span></div>
+            <input type="hidden" id="decision-supersedes" value="">
+            <div class="settings-grid">
+              <label>Subject <small>Short noun phrase — this is what people will search for later</small><input id="decision-subject" class="input" required placeholder="container runtime"></label>
+              <label>Product <small>Optional</small><select id="decision-product" class="input"><option value="">Not tied to a specific product</option></select></label>
+              <label>Scope<select id="decision-scope" class="input"><option value="run">This run only</option><option value="product" selected>This product</option><option value="machine">This machine</option></select><small class="field-help">Run = only matters for the run that made it · Product = applies across the whole product · Machine = a standing choice for this computer, independent of any one product.</small></label>
+            </div>
+            <label for="decision-question">Question<textarea id="decision-question" rows="2" required placeholder="Which container runtime should this machine standardize on?"></textarea></label>
+            <label for="decision-options">Options considered <small>One per line: <code>Option name | selected</code> or <code>Option name | rejected | reason it was rejected</code></small><textarea id="decision-options" rows="4" required placeholder="Podman | selected | Rootless by default&#10;Docker Desktop | rejected | Requires a paid license at this org's seat count"></textarea><small class="field-help">Exactly one option must be marked <code>selected</code>. Every <code>rejected</code> option needs a reason — that reason is the whole point of this record.</small></label>
+            <div class="objective-grid">
+              <label>Deciding constraint<textarea id="decision-constraint" rows="2" required placeholder="No paid license available"></textarea></label>
+              <label>Evidence relied on<textarea id="decision-evidence" rows="2" required placeholder="Podman installed and verified rootless on this machine"></textarea></label>
+              <label>Accepted cost <small>What the choice gave up, not just what it chose</small><textarea id="decision-cost" rows="2" required placeholder="Some Docker-only tooling is unavailable"></textarea></label>
+            </div>
+            <label id="decision-what-changed-field" class="hidden" for="decision-what-changed">What changed since the record being superseded<textarea id="decision-what-changed" rows="2" placeholder="Podman now requires a paid add-on too"></textarea></label>
+            <div class="composer-actions"><p id="decision-form-error" class="error" role="alert"></p><button class="primary" type="submit" id="decision-form-submit">Save decision</button></div>
+          </form>
+          <div id="decision-list" class="decision-list"></div>
+          <div id="decisions-empty" class="panel empty-state">No decisions recorded yet. Record one below, or approve a plan that compares options — DevHarmonics records those automatically.</div>
         </section>
 
         <section id="setup-view" class="workspace-view hidden" aria-labelledby="setup-title">

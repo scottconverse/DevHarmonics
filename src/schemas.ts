@@ -132,6 +132,63 @@ export const runPlanSchema = z
   })
   .transform((plan) => ({ ...plan, repositoryImpact: plan.repositoryImpact ?? [] }));
 
+// DH-647 S3. POST /api/decisions and POST /api/decisions/:id/supersede
+// (src/server.ts): same shape and the same exactly-one-selected /
+// reason-on-rejection rules as S1's createDecisionRecord (Ledger, src/
+// ledger.ts) and S2's planDecisionSchema above — an owner-authored record
+// must satisfy the same honesty rules an architect-authored one does before
+// the ledger ever sees it. Validated here (not only at the ledger layer) so
+// a bad request gets a 400 naming the exact field, matching the
+// productRegistrationSchema convention (src/server.ts's /api/products).
+const decisionOptionSchema = z.object({
+  option: z.string().trim().min(1).max(300),
+  disposition: z.enum(["selected", "rejected"]),
+  reason: z.string().trim().min(1).max(2_000).nullable().default(null),
+});
+
+const decisionRecordFieldsSchema = z.object({
+  subject: z.string().trim().min(1).max(300),
+  question: z.string().trim().min(1).max(2_000),
+  options: z.array(decisionOptionSchema).min(1),
+  decidingConstraint: z.string().trim().min(1).max(2_000),
+  evidence: z.string().trim().min(1).max(2_000),
+  acceptedCost: z.string().trim().min(1).max(2_000),
+  scope: z.enum(["run", "product", "machine"]),
+  productId: z.string().trim().min(1).max(200).nullable().default(null),
+  runId: z.string().trim().min(1).max(200).nullable().default(null),
+});
+
+export const decisionRecordCreateSchema = decisionRecordFieldsSchema.superRefine((decision, context) => {
+  const selected = decision.options.filter((option) => option.disposition === "selected");
+  if (selected.length !== 1) {
+    context.addIssue({ code: "custom", path: ["options"], message: `A decision record must select exactly one option (found ${selected.length})` });
+  }
+  for (const [index, option] of decision.options.entries()) {
+    if (option.disposition === "rejected" && !option.reason) {
+      context.addIssue({ code: "custom", path: ["options", index, "reason"], message: `Rejected option '${option.option}' requires a reason` });
+    }
+  }
+});
+
+// The supersede route's schema is the same fields plus a required
+// whatChanged — mirrors createDecisionRecord's "whatChanged is required iff
+// supersedes is set" rule, except supersedes itself is never a body field
+// here: it comes from the :id path segment, so the caller cannot name a
+// different target than the one they're actually calling supersede on.
+export const decisionRecordSupersedeSchema = decisionRecordFieldsSchema
+  .extend({ whatChanged: z.string().trim().min(1).max(2_000) })
+  .superRefine((decision, context) => {
+    const selected = decision.options.filter((option) => option.disposition === "selected");
+    if (selected.length !== 1) {
+      context.addIssue({ code: "custom", path: ["options"], message: `A decision record must select exactly one option (found ${selected.length})` });
+    }
+    for (const [index, option] of decision.options.entries()) {
+      if (option.disposition === "rejected" && !option.reason) {
+        context.addIssue({ code: "custom", path: ["options", index, "reason"], message: `Rejected option '${option.option}' requires a reason` });
+      }
+    }
+  });
+
 export const objectiveInputSchema = z.object({
   outcome: z.string().trim().min(1).max(20_000),
   acceptanceCriteria: z.array(z.string().trim().min(1).max(2_000)).max(200),

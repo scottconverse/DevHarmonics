@@ -94,14 +94,27 @@ export class Orchestrator {
     if (request.workflowRevisionHash && !this.ledger.getWorkflowRevision(request.workflowRevisionHash)) {
       throw new Error(`Cannot start a run pinned to unknown workflow revision '${request.workflowRevisionHash}'`);
     }
-    const runId = this.ledger.createRun(request.goal, request.projectPath, resumedFrom, request.autonomy ?? "supervised", request.objectiveLink ?? null);
-    if (request.workflowRevisionHash) this.ledger.linkRunWorkflowRevision(runId, request.workflowRevisionHash);
-    // DH-647 M2. A synchronous prelaunch step (approved-plan decision
-    // persistence) runs AFTER the run row exists but BEFORE any background
-    // execution is scheduled. If it throws, the start request fails cleanly
-    // here: no background task is ever launched, so there is no live run
-    // carrying half-persisted decisions.
-    if (beforeLaunch) beforeLaunch(runId);
+    // DH-647 M2 / NEW-1. Run creation, the workflow pin, and the synchronous
+    // prelaunch step (approved-plan decision persistence) commit as ONE atomic
+    // ledger transaction. If the prelaunch step throws, the whole unit rolls
+    // back — NO run row and NO decision rows survive — and the error
+    // propagates to the caller cleanly. Previously createRun committed the run
+    // row before the prelaunch step ran, so a decision-persistence failure
+    // stranded a durable 'planning' run that findRunForApprovedPlan then handed
+    // back on every retry (M2 + NEW-1). With nothing committed on failure, a
+    // retry after the cause is fixed starts a genuinely fresh run instead.
+    const runId = this.ledger.createRunForApprovedPlan({
+      goal: request.goal,
+      projectPath: request.projectPath,
+      resumedFrom,
+      autonomy: request.autonomy ?? "supervised",
+      linkage: request.objectiveLink ?? null,
+      workflowRevisionHash: request.workflowRevisionHash ?? null,
+    }, (createdRunId) => {
+      if (beforeLaunch) beforeLaunch(createdRunId);
+    });
+    // Background execution is armed ONLY after the transaction commits, so a
+    // rollback registers no AbortController and no backgroundRuns entry.
     const controller = new AbortController();
     this.cancellations.set(runId, controller);
     const execution = this.execute(runId, request, controller.signal)

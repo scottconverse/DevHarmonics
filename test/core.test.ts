@@ -8887,6 +8887,129 @@ test("searchDecisionRecords breaks equal-timestamp ties by record id, stabilizin
   }
 });
 
+// DH-647 M2 / NEW-1 (failure injection). A prelaunch decision-persistence
+// failure must leave NO run row and NO decision rows behind — run creation and
+// approved-plan decision persistence commit as one atomic unit — so the ledger
+// never carries a stranded 'planning' run with no execution scheduled.
+//
+// RED against the pre-fix code: createRun committed the run row before the
+// prelaunch step ran, so a throw in persistence stranded a durable run
+// (listRuns() returned 1). GREEN after the fix: the whole unit rolls back.
+test("M2: a prelaunch decision-persistence failure leaves no run row and no decision rows (atomic begin)", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-atomic-begin-fail-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  const orchestrator = new Orchestrator(ledger);
+  try {
+    // A valid decision followed by one that fails validation at persist time (a
+    // rejected option with no reason). Under the fix these persist inside the
+    // run-creation transaction, so the valid insert rolls back with the run.
+    const validDecision = {
+      subject: "container runtime",
+      question: "Which container runtime should this run standardize on?",
+      optionsConsidered: [
+        { option: "Podman", disposition: "selected" as const, reason: "Rootless by default" },
+        { option: "Docker Desktop", disposition: "rejected" as const, reason: "Paid license required" },
+      ],
+      decidingConstraint: "No paid license available",
+      acceptedCost: "Some docker-only tooling is unavailable",
+    };
+    const invalidDecision = {
+      subject: "logging library",
+      question: "Which logger?",
+      optionsConsidered: [
+        { option: "pino", disposition: "selected" as const, reason: "fast" },
+        { option: "winston", disposition: "rejected" as const, reason: "   " }, // rejected with no real reason -> throws at persist
+      ],
+      decidingConstraint: "throughput",
+      acceptedCost: "less human-friendly output",
+    };
+
+    assert.throws(
+      () =>
+        orchestrator.begin({ goal: "Atomic begin fixture", projectPath: root }, null, (runId) => {
+          ledger.persistApprovedPlanDecisions({
+            runId,
+            objectiveId: null,
+            planRevision: 1,
+            productId: null,
+            scope: "run",
+            planSummary: "fixture",
+            decisions: [validDecision, invalidDecision],
+          });
+        }),
+      /requires a reason/i,
+      "the prelaunch persistence failure propagates out of begin()",
+    );
+
+    assert.equal(ledger.listRuns().length, 0, "no run row survives a prelaunch persistence failure (was a stranded 'planning' run before the fix)");
+    assert.equal(ledger.listDecisionRecords({ scope: "run" }).length, 0, "no decision rows survive the failed prelaunch step");
+    // Nothing was armed: there is no cancellable run because none was committed.
+    assert.equal(orchestrator.cancel("any-run-id"), false, "no background execution was scheduled for the rolled-back start");
+  } finally {
+    await orchestrator.shutdown();
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// DH-647 NEW-1 (retry after failure). Because a failed prelaunch commits
+// nothing, a subsequent valid start for the same work creates a genuinely
+// fresh run, persists its decisions exactly once, and arms execution — it does
+// NOT return a stranded 'planning' run left by the earlier failure. This closes
+// the sticky duplicate-start retry path findRunForApprovedPlan created.
+test("NEW-1: a valid start after a prelaunch failure creates a fresh run, persists decisions once, and arms execution", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-atomic-begin-retry-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  const orchestrator = new Orchestrator(ledger);
+  const request = { goal: "Atomic begin retry fixture", projectPath: root };
+  const validDecision = {
+    subject: "container runtime",
+    question: "Which container runtime should this run standardize on?",
+    optionsConsidered: [
+      { option: "Podman", disposition: "selected" as const, reason: "Rootless by default" },
+      { option: "Docker Desktop", disposition: "rejected" as const, reason: "Paid license required" },
+    ],
+    decidingConstraint: "No paid license available",
+    acceptedCost: "Some docker-only tooling is unavailable",
+  };
+  let runId = "";
+  try {
+    // First start fails during prelaunch persistence and must leave nothing.
+    assert.throws(
+      () =>
+        orchestrator.begin(request, null, () => {
+          throw new Error("simulated decision-persistence failure");
+        }),
+      /simulated decision-persistence failure/,
+    );
+    assert.equal(ledger.listRuns().length, 0, "the failed start left no run to become a sticky retry target");
+
+    // The retry is a clean, valid start.
+    let persistedCount = 0;
+    runId = orchestrator.begin(request, null, (id) => {
+      persistedCount += ledger.persistApprovedPlanDecisions({
+        runId: id,
+        objectiveId: null,
+        planRevision: 1,
+        productId: null,
+        scope: "run",
+        planSummary: "fixture",
+        decisions: [validDecision],
+      }).persisted;
+    });
+
+    assert.equal(ledger.listRuns().length, 1, "the retry created exactly one fresh run, not a return of a stranded one");
+    assert.equal(persistedCount, 1, "the fresh run persisted its architect decision exactly once");
+    assert.equal(ledger.listDecisionRecords({ scope: "run" }).length, 1, "exactly one decision row after the successful retry");
+    assert.equal(ledger.listDecisionRecords({ runId }).length, 1, "the persisted decision links to the fresh run");
+    assert.equal(orchestrator.cancel(runId), true, "background execution was armed for the fresh run (a cancellable controller exists)");
+  } finally {
+    await orchestrator.shutdown();
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 // DH-647 minor-2 + M1/M3 (storage half). Append-only immutability and the
 // single-successor / provenance-uniqueness invariants are enforced by the
 // engine, not merely by application convention.

@@ -1980,6 +1980,46 @@ export class Ledger {
   }
 
   /**
+   * DH-647 M2 / NEW-1. Create a run, pin its workflow revision (when the
+   * request carries one), and run the caller's approved-plan persistence step
+   * as ONE atomic ledger transaction. A throw anywhere inside — an invalid
+   * decision rejected at persist time, a pin failure — rolls back the whole
+   * unit, so a decision-persistence failure leaves NO run row, NO run.created
+   * event, and NO decision rows rather than a stranded 'planning' run with no
+   * execution scheduled.
+   *
+   * writeAtomically is reentrant (see the openWriteTransactions depth counter):
+   * persistApprovedPlanDecisions, called from inside `persist`, sees the open
+   * transaction and participates in it instead of opening and committing its
+   * own. That reentrancy is exactly what binds run creation and decision
+   * persistence into a single all-or-nothing commit — neither double-opens a
+   * transaction, and a failure cannot leave one committed without the other.
+   *
+   * Because a failed persist commits nothing, findRunForApprovedPlan can only
+   * ever observe a durably-created run: an abandoned prelaunch record is
+   * impossible, so the sticky duplicate-start retry path is closed. The caller
+   * MUST arm background execution only after this returns.
+   */
+  createRunForApprovedPlan(
+    input: {
+      goal: string;
+      projectPath: string;
+      resumedFrom?: string | null;
+      autonomy?: RunAutonomy;
+      linkage?: RunObjectiveLink | null;
+      workflowRevisionHash?: string | null;
+    },
+    persist: (runId: string) => void,
+  ): string {
+    return this.writeAtomically(() => {
+      const runId = this.createRun(input.goal, input.projectPath, input.resumedFrom ?? null, input.autonomy ?? "supervised", input.linkage ?? null);
+      if (input.workflowRevisionHash) this.linkRunWorkflowRevision(runId, input.workflowRevisionHash);
+      persist(runId);
+      return runId;
+    });
+  }
+
+  /**
    * DH-647 M3. The earliest run started for an exact (objective, approved
    * plan revision) pair, if any — the anchor that makes a repeated start
    * request idempotent: the caller returns this existing run rather than

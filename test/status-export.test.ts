@@ -11,6 +11,7 @@ import {
   generateStatusExportHtml,
   parseGitHubRepo,
   renderStatusExportHtml,
+  short,
   type StatusExportRecord,
 } from "../src/status-export.js";
 import type { DeliveryRepositoryRecord, ObjectiveRecord, RunSummary } from "../src/types.js";
@@ -309,6 +310,31 @@ test("the shipped page gives every GitHub fetch an abort timeout and processes r
   assert.match(html, /runBoundedQueue/, "records must be processed through a bounded concurrency queue, not launched all at once");
 });
 
+test("the shipped page peels an annotated tag through a second GET .../git/tags/:sha fetch, threaded through fetchGitHub (R6-export)", () => {
+  const html = renderStatusExportHtml([], new Date("2026-07-22T12:00:00.000Z"));
+  assert.match(html, /\/git\/ref\/tags\//, "checkRecord must first read the tag ref");
+  assert.match(
+    html,
+    /await\s+fetchGitHub\([^)]*\/git\/tags\//,
+    "checkRecord must peel an annotated tag object through the SAME fetchGitHub helper (and its timeout), not a second bespoke fetch call",
+  );
+  assert.match(
+    html,
+    /object\.type\s*===\s*["']tag["']/,
+    "checkRecord must only issue the second (peeling) fetch when the ref names a tag object, not a commit",
+  );
+  assert.match(html, /tagObjectResponse/, "the peeled fetch result must be threaded into the response classifyTag reads");
+});
+
+test("the shipped page only reports mergeSignal 'merged' once classifyPullRequest's full merge-identity check actually matched (R9-export)", () => {
+  const html = renderStatusExportHtml([], new Date("2026-07-22T12:00:00.000Z"));
+  assert.match(
+    html,
+    /prResult\.state\s*===\s*["']matches["']\s*\?\s*["']merged["']\s*:\s*prResult\.state\s*===\s*["']unobserved["']\s*\?\s*["']unobserved["']\s*:\s*["']not_merged["']/,
+    "mergeSignal must be derived from classifyPullRequest's own matches/unobserved/diverged verdict for a merged-state PR, never set to 'merged' from raw state+merged_at alone",
+  );
+});
+
 // --- classify(): the pure view-time classifier, unit-tested directly in
 // Node with FAKE fetch responses (never a real GitHub call), per DH-645 S4's
 // TDD instruction. These are the exact functions whose .toString() is
@@ -366,7 +392,7 @@ test("classifyPullRequest: matches when open at the reviewed commit", () => {
 test("classifyPullRequest: a merged PR matches only when its merge commit can be compared against the recorded merge commit OID (M-merged-head)", () => {
   const noIdentityRecorded = classifyPullRequest(
     { number: 42, reviewedCommitSha: "b".repeat(40) },
-    { ok: true, status: 200, body: { state: "closed", merged_at: "2026-07-21T00:00:00.000Z", merge_commit_sha: "d".repeat(40) } },
+    { ok: true, status: 200, body: { state: "closed", merged_at: "2026-07-21T00:00:00.000Z", merge_commit_sha: "d".repeat(40), head: { sha: "b".repeat(40) } } },
   );
   assert.equal(
     noIdentityRecorded.state,
@@ -376,21 +402,47 @@ test("classifyPullRequest: a merged PR matches only when its merge commit can be
 
   const noObservedSha = classifyPullRequest(
     { number: 42, reviewedCommitSha: "b".repeat(40), mergeCommitOid: "d".repeat(40) },
-    { ok: true, status: 200, body: { state: "closed", merged_at: "2026-07-21T00:00:00.000Z" } },
+    { ok: true, status: 200, body: { state: "closed", merged_at: "2026-07-21T00:00:00.000Z", head: { sha: "b".repeat(40) } } },
   );
   assert.equal(noObservedSha.state, "unobserved", "GitHub reported no merge commit to compare — unobserved, never a silent match");
 
   const mismatched = classifyPullRequest(
     { number: 42, reviewedCommitSha: "b".repeat(40), mergeCommitOid: "d".repeat(40) },
-    { ok: true, status: 200, body: { state: "closed", merged_at: "2026-07-21T00:00:00.000Z", merge_commit_sha: "e".repeat(40) } },
+    { ok: true, status: 200, body: { state: "closed", merged_at: "2026-07-21T00:00:00.000Z", merge_commit_sha: "e".repeat(40), head: { sha: "b".repeat(40) } } },
   );
   assert.equal(mismatched.state, "diverged", "the observed merge commit does not match the recorded merge commit OID");
 
   const matched = classifyPullRequest(
     { number: 42, reviewedCommitSha: "b".repeat(40), mergeCommitOid: "d".repeat(40) },
-    { ok: true, status: 200, body: { state: "closed", merged_at: "2026-07-21T00:00:00.000Z", merge_commit_sha: "d".repeat(40) } },
+    { ok: true, status: 200, body: { state: "closed", merged_at: "2026-07-21T00:00:00.000Z", merge_commit_sha: "d".repeat(40), head: { sha: "b".repeat(40) } } },
   );
   assert.equal(matched.state, "matches");
+});
+
+test("classifyPullRequest: a merged PR also requires the observed head sha to match the reviewed commit (R9-export)", () => {
+  const missingHead = classifyPullRequest(
+    { number: 42, reviewedCommitSha: "b".repeat(40), mergeCommitOid: "d".repeat(40) },
+    { ok: true, status: 200, body: { state: "closed", merged_at: "2026-07-21T00:00:00.000Z", merge_commit_sha: "d".repeat(40) } },
+  );
+  assert.equal(
+    missingHead.state,
+    "unobserved",
+    "GitHub did not report a head sha to compare against the reviewed commit — missing identity is unobserved, never a silent match",
+  );
+
+  const mismatchedHead = classifyPullRequest(
+    { number: 42, reviewedCommitSha: "b".repeat(40), mergeCommitOid: "d".repeat(40) },
+    { ok: true, status: 200, body: { state: "closed", merged_at: "2026-07-21T00:00:00.000Z", merge_commit_sha: "d".repeat(40), head: { sha: "f".repeat(40) } } },
+  );
+  assert.equal(mismatchedHead.state, "diverged", "the merge commit matches, but a different commit than the reviewed one was actually merged");
+  assert.match(mismatchedHead.message, new RegExp(short("f".repeat(40))), "the diverged message must name the observed head commit");
+  assert.match(mismatchedHead.message, new RegExp(short("b".repeat(40))), "the diverged message must name the reviewed commit");
+
+  const matchedBoth = classifyPullRequest(
+    { number: 42, reviewedCommitSha: "b".repeat(40), mergeCommitOid: "d".repeat(40) },
+    { ok: true, status: 200, body: { state: "closed", merged_at: "2026-07-21T00:00:00.000Z", merge_commit_sha: "d".repeat(40), head: { sha: "b".repeat(40) } } },
+  );
+  assert.equal(matchedBoth.state, "matches", "both the merge commit and the reviewed head sha match");
 });
 
 test("classifyPullRequest: diverged when open with new commits, or closed without merging", () => {
@@ -463,10 +515,100 @@ test("classifyChecks: an incomplete (paginated) result set is unobserved, never 
   assert.match(incomplete.message, /incomplete|only.*could be read/i);
 });
 
-test("classifyTag: matches when present, diverged when gone, unobserved on fetch failure", () => {
-  assert.equal(classifyTag({ tag: "v1.2.0" }, { ok: true, status: 200, body: {} }).state, "matches");
-  assert.equal(classifyTag({ tag: "v1.2.0" }, { ok: true, status: 404 }).state, "diverged");
-  assert.equal(classifyTag({ tag: "v1.2.0" }, { ok: false, reason: "offline" }).state, "unobserved");
+// R6-export: classifyTag is presence-only no longer — a lightweight tag's ref
+// object points directly at a commit; an annotated tag's ref object points at
+// the tag object itself (`type: "tag"`), which must be peeled one more hop
+// (GET .../git/tags/:sha) to reach the commit it actually names. Only the
+// PEELED commit is ever compared against the record's mergeCommitOid.
+test("classifyTag: diverged when the tag ref is gone, unobserved on fetch failure", () => {
+  const gone = classifyTag({ tag: "v1.2.0", mergeCommitOid: "d".repeat(40) }, { ok: true, status: 404 });
+  assert.equal(gone.state, "diverged");
+
+  const failed = classifyTag({ tag: "v1.2.0", mergeCommitOid: "d".repeat(40) }, { ok: false, reason: "offline" });
+  assert.equal(failed.state, "unobserved");
+});
+
+test("classifyTag: a lightweight tag (object.type 'commit') compares its own sha directly against the recorded merge commit", () => {
+  const matches = classifyTag(
+    { tag: "v1.2.0", mergeCommitOid: "d".repeat(40) },
+    { ok: true, status: 200, body: { object: { sha: "d".repeat(40), type: "commit" } } },
+  );
+  assert.equal(matches.state, "matches");
+
+  const moved = classifyTag(
+    { tag: "v1.2.0", mergeCommitOid: "d".repeat(40) },
+    { ok: true, status: 200, body: { object: { sha: "f".repeat(40), type: "commit" } } },
+  );
+  assert.equal(moved.state, "diverged", "a force-moved lightweight tag now names a different commit than the recorded merge commit");
+  assert.match(moved.message, new RegExp(short("f".repeat(40))), "the diverged message must name the observed (moved-to) commit");
+  assert.match(moved.message, new RegExp(short("d".repeat(40))), "the diverged message must name the recorded merge commit");
+});
+
+test("classifyTag: an annotated tag (object.type 'tag') is peeled through the second git/tags fetch before comparison", () => {
+  const matches = classifyTag(
+    { tag: "v1.2.0", mergeCommitOid: "d".repeat(40) },
+    {
+      ok: true,
+      status: 200,
+      body: { object: { sha: "aa11".padEnd(40, "a"), type: "tag" } },
+      tagObjectResponse: { ok: true, status: 200, body: { object: { sha: "d".repeat(40), type: "commit" } } },
+    },
+  );
+  assert.equal(matches.state, "matches", "the peeled commit (from the second fetch) equals the recorded merge commit");
+
+  const diverged = classifyTag(
+    { tag: "v1.2.0", mergeCommitOid: "d".repeat(40) },
+    {
+      ok: true,
+      status: 200,
+      body: { object: { sha: "aa11".padEnd(40, "a"), type: "tag" } },
+      tagObjectResponse: { ok: true, status: 200, body: { object: { sha: "f".repeat(40), type: "commit" } } },
+    },
+  );
+  assert.equal(diverged.state, "diverged", "a force-moved annotated tag's peeled commit differs from the recorded merge commit");
+});
+
+test("classifyTag: an unpeelable or unfetchable annotated tag object is unobserved, never a silent match", () => {
+  const noSecondFetch = classifyTag(
+    { tag: "v1.2.0", mergeCommitOid: "d".repeat(40) },
+    { ok: true, status: 200, body: { object: { sha: "aa11".padEnd(40, "a"), type: "tag" } } },
+  );
+  assert.equal(noSecondFetch.state, "unobserved", "an annotated tag with no second (peeling) fetch result cannot be resolved to a commit");
+
+  const secondFetchFailed = classifyTag(
+    { tag: "v1.2.0", mergeCommitOid: "d".repeat(40) },
+    {
+      ok: true,
+      status: 200,
+      body: { object: { sha: "aa11".padEnd(40, "a"), type: "tag" } },
+      tagObjectResponse: { ok: false, reason: "rate limited" },
+    },
+  );
+  assert.equal(secondFetchFailed.state, "unobserved");
+
+  const secondFetchUnreadable = classifyTag(
+    { tag: "v1.2.0", mergeCommitOid: "d".repeat(40) },
+    {
+      ok: true,
+      status: 200,
+      body: { object: { sha: "aa11".padEnd(40, "a"), type: "tag" } },
+      tagObjectResponse: { ok: true, status: 200, body: {} },
+    },
+  );
+  assert.equal(secondFetchUnreadable.state, "unobserved", "GitHub's peeled-tag-object response did not name a commit");
+});
+
+test("classifyTag: a missing recorded merge commit is unobserved even when the tag resolves cleanly (R6-export)", () => {
+  const result = classifyTag(
+    { tag: "v1.2.0" },
+    { ok: true, status: 200, body: { object: { sha: "d".repeat(40), type: "commit" } } },
+  );
+  assert.equal(result.state, "unobserved", "no merge commit was recorded to compare the resolved tag against");
+});
+
+test("classifyTag: an unreadable ref response (no object/sha) is unobserved", () => {
+  const result = classifyTag({ tag: "v1.2.0", mergeCommitOid: "d".repeat(40) }, { ok: true, status: 200, body: {} });
+  assert.equal(result.state, "unobserved");
 });
 
 test("classifyRepositoryVisible: matches when the repository responds 2xx, unobserved on a 404 or a failed fetch (C2)", () => {

@@ -45,12 +45,21 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
     // signal-kills the process with a single SIGTERM and no escalation. We
     // manage termination ourselves below so a process that ignores SIGTERM
     // is still confirmed dead via SIGKILL before this promise settles.
+    // R11b: on POSIX, the child is its own process group leader (detached)
+    // so termination below can signal the WHOLE tree via a negative pid
+    // (process.kill(-pid, ...)), not just this direct child — a grandchild
+    // (e.g. a shell wrapper's real worker) would otherwise survive a
+    // SIGTERM/SIGKILL sent only to the direct child. `detached` only
+    // affects process-group leadership here; stdio piping is unaffected
+    // since stdio is still explicitly piped below. Windows has no POSIX
+    // process groups — its tree-kill instead goes through `taskkill /T`.
     const child = spawn(resolved.command, resolved.args, {
       cwd: request.cwd,
       env: request.env ?? process.env,
       windowsHide: true,
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
+      detached: process.platform !== "win32",
     });
 
     const killGraceMs = request.killGraceMs ?? 5_000;
@@ -74,25 +83,79 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
       if (terminating) return;
       terminating = true;
       if (process.platform === "win32") {
-        if (typeof child.pid === "number") {
-          try {
-            spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
-          } catch {
-            // best-effort; the backstop drain timer below still guarantees settlement
-          }
-        }
-      } else {
-        try {
-          child.kill("SIGTERM");
-        } catch {
-          // already gone
-        }
-        killTimer = setTimeout(() => {
+        const pid = child.pid;
+        if (typeof pid !== "number") {
+          // No pid was ever assigned — nothing to enumerate a tree from.
+          // Fall straight back to killing the direct child so 'exit' still
+          // fires and this promise doesn't hang forever.
           try {
             child.kill("SIGKILL");
           } catch {
             // already gone
           }
+          return;
+        }
+        // R11a: `spawn("taskkill", ...)` is itself just another child
+        // process — a launch failure normally arrives asynchronously as an
+        // 'error' event, not a thrown exception. With no listener, that
+        // becomes an unhandled EventEmitter error. And even when taskkill
+        // does launch, a nonzero exit means the tree was NOT actually torn
+        // down (e.g. the pid it targeted was already gone). Either way, we
+        // must fall back to killing the direct child so 'exit' (and the
+        // drain backstop below) still fires and runProcess always settles —
+        // never silently trust that taskkill worked.
+        let killer: ReturnType<typeof spawn> | null = null;
+        try {
+          killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+        } catch {
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            // already gone
+          }
+          return;
+        }
+        killer.on("error", () => {
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            // already gone
+          }
+        });
+        killer.on("exit", (code) => {
+          if (code !== 0) {
+            try {
+              child.kill("SIGKILL");
+            } catch {
+              // already gone
+            }
+          }
+        });
+      } else {
+        // R11b: signal the whole process group (negative pid) so a
+        // grandchild spawned by the direct child is torn down too, not just
+        // the direct child itself. Fall back to child.kill() if the group
+        // kill throws (e.g. the group is already gone, or this pid/platform
+        // shape doesn't support it).
+        const pid = child.pid;
+        const killGroup = (signal: NodeJS.Signals): void => {
+          if (typeof pid === "number") {
+            try {
+              process.kill(-pid, signal);
+              return;
+            } catch {
+              // fall through to the direct-child fallback below
+            }
+          }
+          try {
+            child.kill(signal);
+          } catch {
+            // already gone
+          }
+        };
+        killGroup("SIGTERM");
+        killTimer = setTimeout(() => {
+          killGroup("SIGKILL");
         }, killGraceMs);
       }
     }

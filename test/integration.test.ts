@@ -1230,12 +1230,14 @@ test("GET /api/inbox projects pending decisions read-only and drops them the ins
   }
 });
 
-test("GET /api/inbox also serves the program status view, read-only, grouped by product and by repository path", async () => {
-  // DH-645 S2. One endpoint serving the one Inbox view (per the design
-  // brief's "the inbox is a route, never a second gate" spirit extended to
-  // the program view: one view, one fetch). Seeded AFTER startDashboard for
-  // the same reason as the S1 inbox test above: reconcileInterruptedRuns()
-  // would otherwise auto-pause a freshly seeded 'running' run.
+test("GET /api/program-status serves the program status view, read-only, grouped by product and by repository path", async () => {
+  // DH-645 S2, split under new-Major (scan cost) onto its own route: the
+  // Program status view's lifetime-run-history scan (Ledger.listAllRuns())
+  // no longer rides GET /api/inbox's SSE-driven cockpit refresh path — see
+  // GET /api/program-status's comment in src/server.ts. Seeded AFTER
+  // startDashboard for the same reason as the S1 inbox test above:
+  // reconcileInterruptedRuns() would otherwise auto-pause a freshly seeded
+  // 'running' run.
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-program-status-http-"));
   const project = await createRepository(root);
   await initializeProject(project);
@@ -1291,12 +1293,11 @@ test("GET /api/inbox also serves the program status view, read-only, grouped by 
   seedLedger.close();
 
   try {
-    const response = await fetch(`${dashboard.url}/api/inbox`);
+    const response = await fetch(`${dashboard.url}/api/program-status`);
     assert.equal(response.status, 200);
-    const body = (await response.json()) as { items: unknown[]; program: { groups: Array<{ key: string; label: string; counts: Record<string, number>; runs: Array<Record<string, any>> }>; totals: Record<string, number> } };
+    const body = (await response.json()) as { program: { groups: Array<{ key: string; label: string; counts: Record<string, number>; runs: Array<Record<string, any>> }>; totals: Record<string, number> } };
 
-    assert.ok(Array.isArray(body.items), "the existing /api/inbox items field is unchanged");
-    assert.ok(body.program, "the response now also carries a program field");
+    assert.ok(body.program, "the response carries a program field");
 
     const allRuns = body.program.groups.flatMap((group) => group.runs);
     const linked = allRuns.find((run) => run.runId === linkedRunId)!;
@@ -1318,24 +1319,64 @@ test("GET /api/inbox also serves the program status view, read-only, grouped by 
 
     // Read-only: a GET must never mutate the ledger it reads.
     const before = await (await fetch(`${dashboard.url}/api/runs`)).json();
-    await fetch(`${dashboard.url}/api/inbox`);
+    await fetch(`${dashboard.url}/api/program-status`);
     const after = await (await fetch(`${dashboard.url}/api/runs`)).json();
-    assert.deepEqual(after, before, "GET /api/inbox must not change any run, task, or integration-set state");
+    assert.deepEqual(after, before, "GET /api/program-status must not change any run, task, or integration-set state");
   } finally {
     await dashboard.close();
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("GET /api/inbox and GET /api/status-export show a run older than the most-recent-50 sidebar window (M-50-limit)", async () => {
-  // Gate finding M-50-limit: /api/inbox (items + program) and
+test("GET /api/inbox no longer carries the program-status payload, and GET /api/program-status serves it instead", async () => {
+  // new-Major (scan cost), regression (b): the split must be structural, not
+  // just "the extra route also exists" — /api/inbox's response body must
+  // not have a `program` key at all, and /api/program-status must be the
+  // one place that key appears.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-inbox-program-split-"));
+  const project = await createRepository(root);
+  await initializeProject(project);
+  const dbPath = path.join(devHarmonicsDirectory(project), "devharmonics.db");
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+
+  const seedLedger = new Ledger(dbPath);
+  const runId = seedLedger.createRun("Ship the reporting module", project);
+  seedLedger.setRunStatus(runId, "running");
+  seedLedger.close();
+
+  try {
+    const inboxBody = await (await fetch(`${dashboard.url}/api/inbox`)).json() as Record<string, unknown>;
+    assert.ok(Array.isArray(inboxBody.items), "GET /api/inbox still carries items");
+    assert.equal(Object.hasOwn(inboxBody, "program"), false, "GET /api/inbox no longer carries a program field");
+
+    const programResponse = await fetch(`${dashboard.url}/api/program-status`);
+    assert.equal(programResponse.status, 200);
+    const programBody = await programResponse.json() as Record<string, unknown>;
+    assert.ok(programBody.program, "GET /api/program-status carries the program field");
+    assert.equal(Object.hasOwn(programBody, "items"), false, "GET /api/program-status does not carry inbox items");
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("GET /api/inbox, GET /api/program-status, and GET /api/status-export show a run older than the most-recent-50 sidebar window (M-50-limit)", async () => {
+  // Gate finding M-50-limit: /api/inbox, /api/program-status, and
   // /api/status-export were fed from Ledger.listRuns(), which hard-limits to
   // the 50 most recent runs for the `/api/runs` sidebar. Once 51+ runs
   // exist, an old awaiting-approval plan, paused run, or delivery could fall
-  // outside that window and silently vanish from both views, contradicting
-  // "every decision ... across every run" (src/ui/index.html). This seeds
-  // the OLDEST run as awaiting plan approval, then buries it under 55 newer
-  // runs, and asserts it still surfaces.
+  // outside that window and silently vanish from all three views,
+  // contradicting "every decision ... across every run" (src/ui/index.html).
+  // This seeds the OLDEST run as awaiting plan approval, then buries it
+  // under 55 newer runs, and asserts it still surfaces.
+  //
+  // Adapted under new-Major (scan cost): /api/inbox now answers from
+  // Ledger.listRunsByStatus() (an indexed status lookup), not
+  // Ledger.listAllRuns() — this test still proves the oldest run's item
+  // surfaces, just via the query that is now complete-by-construction for
+  // items rather than a full scan. /api/program-status keeps using
+  // listAllRuns() and is asserted separately, since it now needs its own
+  // fetch.
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-50-limit-"));
   const project = await createRepository(root);
   await initializeProject(project);
@@ -1379,16 +1420,18 @@ test("GET /api/inbox and GET /api/status-export show a run older than the most-r
   try {
     const inboxResponse = await fetch(`${dashboard.url}/api/inbox`);
     assert.equal(inboxResponse.status, 200);
-    const { items, program } = (await inboxResponse.json()) as {
-      items: Array<Record<string, any>>;
-      program: { groups: Array<{ runs: Array<Record<string, any>> }> };
-    };
+    const { items } = (await inboxResponse.json()) as { items: Array<Record<string, any>> };
 
     const oldestItem = items.find((item) => item.runId === oldestRunId);
     assert.ok(oldestItem, "the oldest run's pending delivery step must still appear in the inbox despite 55 newer runs existing");
     assert.equal(oldestItem!.kind, "delivery_step_approval");
     assert.equal(oldestItem!.repositoryId, "repo:oldest");
 
+    const programStatusResponse = await fetch(`${dashboard.url}/api/program-status`);
+    assert.equal(programStatusResponse.status, 200);
+    const { program } = (await programStatusResponse.json()) as {
+      program: { groups: Array<{ runs: Array<Record<string, any>> }> };
+    };
     const programRuns = program.groups.flatMap((group) => group.runs);
     const oldestProgramEntry = programRuns.find((entry) => entry.runId === oldestRunId);
     assert.ok(oldestProgramEntry, "the oldest run must still appear in the program status view");

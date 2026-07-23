@@ -1,4 +1,15 @@
-import type { DeliveryRepositoryRecord, DeliveryRepositoryStatus, RunSummary } from "./types.js";
+import type { DeliveryRepositoryRecord, DeliveryRepositoryStatus, RunStatus, RunSummary } from "./types.js";
+
+/**
+ * new-Major (scan cost). The exact, and only, run statuses `projectInbox`
+ * below can ever turn into an `InboxItem` — kept next to the predicates
+ * themselves so the two can never silently drift apart. `GET /api/inbox`
+ * (src/server.ts) passes this list to `Ledger.listRunsByStatus()`
+ * (src/ledger.ts) instead of scanning every run the ledger has ever
+ * recorded: the query is complete for inbox items by construction, because
+ * no run outside this set can produce one.
+ */
+export const INBOX_RELEVANT_RUN_STATUSES: readonly RunStatus[] = ["awaiting_approval", "ready", "paused"];
 
 /**
  * DH-645 S1. The approval inbox is a PURE projection of existing ledger

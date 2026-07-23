@@ -92,31 +92,105 @@ function processFailureMessage(result: ProcessResult): string {
   return result.stderr.trim() || result.stdout.trim() || `exited with code ${result.exitCode}`;
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Races `promise` against a `ms` deadline. Unlike a bare
+ * `Promise.race([promise, delay(ms)])`, this cancels the losing side's
+ * timer as soon as `promise` wins — a `setTimeout` that would otherwise sit
+ * scheduled (and unreachable) for the rest of `ms` on every fast check.
+ * `promise` itself must never reject (callers wrap rejections into a
+ * plain value first) so the only two outcomes are "resolved" or
+ * "timed_out".
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | "timed_out"> {
+  return new Promise((resolve) => {
+    let done = false;
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      resolve("timed_out");
+    }, ms);
+    promise.then((value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(value);
+    });
+  });
 }
+
+/**
+ * R12: bounds how many external artifact checks (git/gh process spawns) run
+ * at once ACROSS THE WHOLE SERVER — every reconciliation, for every run,
+ * shares this one pool. Composes with (never replaces) the per-run pool in
+ * `mapWithConcurrency` below: a single run is still capped at
+ * RECONCILIATION_CONCURRENCY, and now the server-wide total across every
+ * concurrently-reconciling run is also capped, so many runs reconciling at
+ * once cannot multiply git/gh process spawns without bound.
+ */
+class Semaphore {
+  private active = 0;
+  private readonly waiters: Array<() => void> = [];
+  constructor(private readonly limit: number) {}
+
+  async acquire(): Promise<void> {
+    if (this.active < this.limit) {
+      this.active += 1;
+      return;
+    }
+    await new Promise<void>((resolve) => this.waiters.push(resolve));
+    // A released permit is handed directly to the next waiter (see
+    // `release`) without ever dropping `active` below `limit`, so no
+    // increment happens here — the permit was already counted.
+  }
+
+  release(): void {
+    const next = this.waiters.shift();
+    if (next) {
+      // Hand the permit straight to the next waiter instead of freeing it
+      // and letting a fresh `acquire()` race for it — that race would let
+      // `active` transiently dip below `limit`, allowing a second caller to
+      // grab a permit and overshoot the cap.
+      next();
+      return;
+    }
+    this.active = Math.max(0, this.active - 1);
+  }
+}
+
+const GLOBAL_RECONCILIATION_CONCURRENCY = 6;
+const globalReconciliationSlots = new Semaphore(GLOBAL_RECONCILIATION_CONCURRENCY);
 
 /**
  * Every external read goes through this. Bounded independently of whatever
  * `timeoutMs` the request itself carries — a faked test tool (or a real `gh`
  * that ignores SIGTERM) must never be able to hang the route or the server.
  *
- * M-timeout-abort: on timeout this now actually aborts the underlying call
- * (via AbortSignal, threaded to process.ts's SIGTERM→SIGKILL escalation) and
- * waits for it to settle — confirming the external process is dead — before
- * reporting "timed out". A hard ceiling (killGraceMs + a small margin, on
- * top of timeoutMs) still applies underneath so a runner that ignores the
- * abort signal outright (e.g. a test double with no process behind it) can
- * never hang the caller forever; any real process is torn down for real by
- * process.ts well within that window.
+ * M-timeout-abort / R11c: on timeout this actually aborts the underlying
+ * call (via AbortSignal, threaded to process.ts's SIGTERM→SIGKILL
+ * escalation) and waits for it to settle — confirming the external process
+ * is dead — before reporting "timed out". A hard ceiling (killGraceMs + a
+ * small margin, on top of timeoutMs) still applies underneath, but that
+ * ceiling no longer means "declare it dead regardless" — if the runner is
+ * STILL unsettled once the hard ceiling elapses, that is reported as
+ * "timed_out_unconfirmed" (never conflated with a confirmed kill), so a
+ * caller never learns "timed out" when termination was never actually
+ * observed. Any real process is torn down for real by process.ts well
+ * within the hard ceiling; only a runner that ignores the abort signal
+ * outright (e.g. a test double with no process behind it) hits the
+ * unconfirmed case.
  */
 async function boundedRun(
   runner: ProcessRunner,
   request: ProcessRequest,
   timeoutMs: number,
   killGraceMs: number,
-): Promise<ProcessResult | "timed_out"> {
+): Promise<ProcessResult | "timed_out" | "timed_out_unconfirmed"> {
   const controller = new AbortController();
+  // R12: held for the real lifetime of the runner call (released once it
+  // actually settles below), not just for however long boundedRun's own
+  // bounded wait takes — the external process keeps occupying a slot until
+  // it is truly done, timed out or not.
+  await globalReconciliationSlots.acquire();
   const runnerPromise = runner({ ...request, signal: controller.signal, killGraceMs });
   // Wrapped so a late rejection (e.g. after we've already moved on to the
   // timeout path) never becomes an unhandled rejection.
@@ -124,8 +198,9 @@ async function boundedRun(
     (result) => ({ ok: true as const, result }),
     (error) => ({ ok: false as const, error }),
   );
+  settled.finally(() => globalReconciliationSlots.release());
 
-  const primary = await Promise.race([settled, delay(timeoutMs).then(() => "timed_out" as const)]);
+  const primary = await withTimeout(settled, timeoutMs);
   if (primary !== "timed_out") {
     if (primary.ok) return primary.result;
     throw primary.error;
@@ -134,7 +209,13 @@ async function boundedRun(
   // The bound elapsed: abort so process.ts tears the real child process down
   // for real, then wait for that to be confirmed (or give up, bounded).
   controller.abort();
-  await Promise.race([settled, delay(killGraceMs + CONFIRM_KILL_MARGIN_MS)]);
+  const confirmation = await withTimeout(settled, killGraceMs + CONFIRM_KILL_MARGIN_MS);
+  if (confirmation === "timed_out") {
+    // Still unsettled after the hard cap — termination was never actually
+    // confirmed. This is NOT the same claim as a confirmed kill; callers
+    // must word it differently (see `observe` below).
+    return "timed_out_unconfirmed";
+  }
   return "timed_out";
 }
 
@@ -146,11 +227,20 @@ async function observe(
   killGraceMs: number,
   unobservedContext: string,
 ): Promise<{ ok: true; result: ProcessResult } | { ok: false; finding: { state: "unobserved"; message: string } }> {
-  let result: ProcessResult | "timed_out";
+  let result: ProcessResult | "timed_out" | "timed_out_unconfirmed";
   try {
     result = await boundedRun(runner, request, timeoutMs, killGraceMs);
   } catch (error) {
     return { ok: false, finding: { state: "unobserved", message: `Could not check ${unobservedContext}: ${errorMessage(error)}` } };
+  }
+  // R11c: a runner that never confirmed its own death even past the hard
+  // kill-grace cap is a distinct, weaker claim than a confirmed kill —
+  // worded explicitly so it is never read as "we know it's stopped now".
+  if (result === "timed_out_unconfirmed") {
+    return {
+      ok: false,
+      finding: { state: "unobserved", message: `Could not check ${unobservedContext}: the check timed out (termination unconfirmed)` },
+    };
   }
   if (result === "timed_out") {
     return { ok: false, finding: { state: "unobserved", message: `Could not check ${unobservedContext}: the check timed out` } };
@@ -434,8 +524,13 @@ async function checkTag(
     };
   }
   // M-origin: same rule as checkBranch — the recorded remote URL, never `origin`.
+  // R6-server: requesting only `refs/tags/${tag}` never returns the peeled
+  // `^{}` line for an annotated tag — `git ls-remote` only emits a ref line
+  // for a pattern that was actually asked for. Requesting both patterns is
+  // what makes the peeling logic below reliable for annotated tags; a
+  // lightweight tag simply has no second line either way.
   const context = `whether release tag '${tag}' still points at the recorded merge commit`;
-  const observed = await observe(runner, { command: "git", args: ["ls-remote", "--tags", remote, `refs/tags/${tag}`], cwd: delivery.localPath, timeoutMs }, timeoutMs, killGraceMs, context);
+  const observed = await observe(runner, { command: "git", args: ["ls-remote", "--tags", remote, `refs/tags/${tag}`, `refs/tags/${tag}^{}`], cwd: delivery.localPath, timeoutMs }, timeoutMs, killGraceMs, context);
   if (!observed.ok) return { artifact: "tag", ...observed.finding };
 
   const lines = observed.result.stdout.trim().split(/\r?\n/).filter(Boolean);

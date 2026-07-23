@@ -22,7 +22,7 @@ import { observeLocalResources } from "./resources.js";
 import { inspectLocalRepository } from "./repository-intelligence.js";
 import { DeliveryRefusal, DeliveryService, VersionMismatchRefusal, type DeliveryAction } from "./delivery.js";
 import { reconcileDelivery, type RepositoryReconciliationResult } from "./reconciliation.js";
-import { projectInbox } from "./inbox.js";
+import { INBOX_RELEVANT_RUN_STATUSES, projectInbox } from "./inbox.js";
 import { projectProgramStatus } from "./program-status.js";
 import { generateStatusExportHtml } from "./status-export.js";
 import { scanProductIntelligence } from "./product-intelligence.js";
@@ -244,25 +244,44 @@ async function route(
     return;
   }
 
-  // DH-645 S1+S2: a read-only projection of existing ledger state — no new
-  // approval state, no writes. See src/inbox.ts for `items` (decisions
-  // waiting on the owner) and src/program-status.ts for `program` (the
-  // cross-run/product program view). One endpoint serves the one Inbox
-  // view — S2 extends this route rather than adding a second GET, matching
-  // this route's own existing convention of returning everything a single
-  // view needs in one payload (e.g. /api/models already folds in health and
-  // quota-group health alongside the model list).
+  // DH-645 S1: a read-only projection of existing ledger state — no new
+  // approval state, no writes. See src/inbox.ts for the decisions waiting
+  // on the owner right now.
   //
-  // Gate finding M-50-limit: this reads `listAllRuns()`, NOT `listRuns()` —
-  // the 50-run cap that backs the `/api/runs` sidebar would silently drop
-  // an old awaiting-approval plan, paused run, or pending delivery once 51+
-  // runs exist, contradicting "every decision ... across every run"
-  // (src/ui/index.html). See Ledger.listAllRuns's doc comment for the query
-  // cost this trades for completeness.
+  // Gate finding M-50-limit; split under new-Major (scan cost). This used
+  // to read `listAllRuns()` and also carry the Program status `program`
+  // field in the same payload (DH-645 S2) — but `/api/inbox` sits on the
+  // SSE-driven cockpit refresh chain (every `refreshRuns()` in
+  // src/ui/app.js awaits `refreshInbox()`), so an all-history scan here
+  // rode every polled refresh, not just an owner opening the Inbox tab.
+  // Program status genuinely needs every run and now has its own route,
+  // GET /api/program-status below, fetched only when that view is visible.
+  //
+  // `listRunsByStatus(INBOX_RELEVANT_RUN_STATUSES)` (src/ledger.ts) is
+  // complete for inbox ITEMS by construction — see INBOX_RELEVANT_RUN_STATUSES's
+  // doc comment in src/inbox.ts for why no other run status can produce an
+  // item — and, unlike `listAllRuns()`, its cost is an indexed status
+  // lookup rather than O(lifetime run count), so it stays cheap on every
+  // poll.
   if (request.method === "GET" && url.pathname === "/api/inbox") {
+    const runs = context.ledger.listRunsByStatus(INBOX_RELEVANT_RUN_STATUSES);
+    sendJson(response, 200, { items: projectInbox(runs) });
+    return;
+  }
+
+  // DH-645 S2, split out under new-Major (scan cost) from the route above.
+  // The cross-run/product Program status view — src/program-status.ts —
+  // promises "every run the ledger knows about", so unlike /api/inbox it
+  // genuinely needs the complete, unbounded `listAllRuns()` read (see that
+  // method's doc comment in src/ledger.ts). This route is therefore fetched
+  // by src/ui/app.js only when the Inbox view is actually visible (on view
+  // entry and on refresh cycles while that view is showing), never from the
+  // generic sidebar/SSE refresh path that runs regardless of which view is
+  // open — the nav badge count keeps coming from the cheap /api/inbox above
+  // on every refresh.
+  if (request.method === "GET" && url.pathname === "/api/program-status") {
     const runs = context.ledger.listAllRuns();
     sendJson(response, 200, {
-      items: projectInbox(runs),
       program: projectProgramStatus(runs, context.ledger.listProducts(), context.ledger.listObjectives()),
     });
     return;

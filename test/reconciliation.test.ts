@@ -114,6 +114,45 @@ test("bounded timeout: a hanging tool is reported unobserved, not left to hang t
   assert.match(branch.message, /timed out/i);
 });
 
+// R11c: boundedRun must not settle while the runner is still genuinely
+// unconfirmed (still running for all we know) — a runner that ignores the
+// abort signal entirely and never settles, even past the hard kill-grace
+// cap, must be reported with explicit "termination unconfirmed" wording,
+// never the plain "timed out" phrasing that a confirmed kill gets.
+test("bounded timeout: a runner that never settles even after the abort signal and the hard kill-grace cap is reported as termination unconfirmed", async () => {
+  const delivery = fixtureDelivery();
+  const neverSettles = () => new Promise<ProcessResult>(() => {}); // ignores the AbortSignal entirely
+  const startedAt = Date.now();
+  const result = await reconcileDeliveryRepository(delivery, neverSettles, 100, 100);
+  const elapsedMs = Date.now() - startedAt;
+  assert.ok(elapsedMs < 3_000, `expected bounded resolution near timeoutMs + killGraceMs, took ${elapsedMs}ms`);
+  const branch = findingFor(result.findings, "branch")!;
+  assert.equal(branch.state, "unobserved");
+  assert.match(branch.message, /termination unconfirmed/i, "an unsettled runner past the hard cap must say termination is unconfirmed");
+});
+
+// R11c: the counterpart — a runner that DOES confirm death shortly after
+// being aborted (as process.ts's real SIGTERM->SIGKILL escalation does) must
+// get the plain "timed out" wording, not the "unconfirmed" one, since death
+// was actually observed.
+test("bounded timeout: a runner that confirms death shortly after being aborted is reported as a normal timeout, not unconfirmed", async () => {
+  const delivery = fixtureDelivery();
+  const confirmsAfterAbort = (request: ProcessRequest) =>
+    new Promise<ProcessResult>((resolve) => {
+      request.signal?.addEventListener("abort", () => {
+        setTimeout(() => resolve(fail("terminated")), 20);
+      });
+    });
+  const startedAt = Date.now();
+  const result = await reconcileDeliveryRepository(delivery, confirmsAfterAbort, 100, 300);
+  const elapsedMs = Date.now() - startedAt;
+  assert.ok(elapsedMs < 3_000, `expected bounded resolution, took ${elapsedMs}ms`);
+  const branch = findingFor(result.findings, "branch")!;
+  assert.equal(branch.state, "unobserved");
+  assert.match(branch.message, /timed out/i);
+  assert.doesNotMatch(branch.message, /unconfirmed/i, "a confirmed kill must not be reported as unconfirmed");
+});
+
 test("branch artifact: a missing branch on a MERGED pull request whose head matches the reviewed commit is not a divergence — routine cleanup", async () => {
   const delivery = fixtureDelivery({ status: "merged", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
   const runner = async (request: ProcessRequest) => {
@@ -431,13 +470,21 @@ test("tag artifact: diverges when a same-named tag points at a different commit 
   assert.equal(result.hasDivergence, true);
 });
 
+// R6-server: the real `git ls-remote` only ever returns a ^{} peeled line
+// for a pattern that actually asked for it — a fixture that hands back the
+// peeled line unconditionally would pass even if the production code never
+// requested `refs/tags/NAME^{}` at all. This double only emits it when that
+// exact pattern is present in the request, so the test actually proves the
+// production code asks for both.
 test("tag artifact: peels an annotated tag to its target commit before comparing, rather than comparing the tag object's own oid", async () => {
   const mergeCommit = "d".repeat(40);
   const tagObjectOid = "a".repeat(40); // the annotated tag object itself — NOT the commit it points at
   const delivery = fixtureDelivery({ status: "tagged", pullRequestUrl: "https://github.com/example/fixture/pull/1", releaseTag: "v1.2.3", mergeCommitOid: mergeCommit });
   const runner = async (request: ProcessRequest) => {
     if (request.args[0] === "ls-remote" && request.args.includes("--tags")) {
-      return ok(`${tagObjectOid}\trefs/tags/v1.2.3\n${mergeCommit}\trefs/tags/v1.2.3^{}\n`);
+      const lines = [`${tagObjectOid}\trefs/tags/v1.2.3\n`];
+      if (request.args.includes("refs/tags/v1.2.3^{}")) lines.push(`${mergeCommit}\trefs/tags/v1.2.3^{}\n`);
+      return ok(lines.join(""));
     }
     if (request.args[0] === "ls-remote") return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
     if (request.command === "gh") return ok(JSON.stringify({ state: "MERGED", headRefOid: delivery.headCommit, statusCheckRollup: [] }));
@@ -445,7 +492,28 @@ test("tag artifact: peels an annotated tag to its target commit before comparing
   };
   const result = await reconcileDeliveryRepository(delivery, runner);
   const tag = findingFor(result.findings, "tag")!;
-  assert.equal(tag.state, "matches", "the peeled commit target matches the recorded merge commit even though the tag object's own oid does not");
+  assert.equal(tag.state, "matches", "the peeled commit target matches the recorded merge commit even though the tag object's own oid does not — which is only possible if the ^{} pattern was actually requested");
+});
+
+// R6-server
+test("tag artifact: requests both the bare tag ref and its peeled ^{} pattern, never just refs/tags/NAME alone", async () => {
+  const mergeCommit = "d".repeat(40);
+  const delivery = fixtureDelivery({ status: "tagged", pullRequestUrl: "https://github.com/example/fixture/pull/1", releaseTag: "v9.9.9", mergeCommitOid: mergeCommit });
+  let seenTagArgs: string[] = [];
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote" && request.args.includes("--tags")) {
+      seenTagArgs = request.args;
+      const lines = [`${mergeCommit}\trefs/tags/v9.9.9\n`];
+      if (request.args.includes("refs/tags/v9.9.9^{}")) lines.push(`${mergeCommit}\trefs/tags/v9.9.9^{}\n`);
+      return ok(lines.join(""));
+    }
+    if (request.args[0] === "ls-remote") return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    if (request.command === "gh") return ok(JSON.stringify({ state: "MERGED", headRefOid: delivery.headCommit, statusCheckRollup: [] }));
+    throw new Error("unexpected call");
+  };
+  await reconcileDeliveryRepository(delivery, runner);
+  assert.ok(seenTagArgs.includes("refs/tags/v9.9.9"), "requests the bare tag ref");
+  assert.ok(seenTagArgs.includes("refs/tags/v9.9.9^{}"), "also requests the peeled ^{} pattern, so annotated tags are reliably peeled");
 });
 
 test("tag artifact: unobserved when no merge commit was recorded to compare against, even though the tag exists", async () => {
@@ -596,6 +664,79 @@ test("reconcileDelivery bounds concurrency across a run's repositories instead o
   assert.equal(results.length, 7);
   assert.ok(maxConcurrent <= 3, `expected at most 3 concurrent checks, saw ${maxConcurrent}`);
   assert.ok(maxConcurrent >= 2, "the pool should still run more than one at a time");
+});
+
+// R12: the per-run pool (RECONCILIATION_CONCURRENCY = 3) only bounds a
+// single run. Without a server-wide cap, three DIFFERENT runs reconciling at
+// once could each run their own 3-worker pool simultaneously — 9 concurrent
+// external checks. This proves a global semaphore composes with the per-run
+// pools so the server-wide total never exceeds the global cap (6).
+test("reconcileDelivery bounds concurrent external checks GLOBALLY across different runs, not just within one run", async () => {
+  const makeRun = (id: string, count: number): DeliveryHandoffRecord => ({
+    runId: id,
+    status: "branch_pushed",
+    repositories: Array.from({ length: count }, (_, index) =>
+      fixtureDelivery({ runId: id, repositoryId: `${id}:repo:${index}`, branch: `devharmonics/${id}-${index}` }),
+    ),
+  });
+  const runA = makeRun("global-fanout-a", 4);
+  const runB = makeRun("global-fanout-b", 4);
+  const runC = makeRun("global-fanout-c", 4);
+
+  let concurrent = 0;
+  let maxConcurrent = 0;
+  const runner = async (request: ProcessRequest): Promise<ProcessResult> => {
+    concurrent += 1;
+    maxConcurrent = Math.max(maxConcurrent, concurrent);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    concurrent -= 1;
+    return ok(`${"b".repeat(40)}\t${request.args[2]}\n`);
+  };
+
+  const [resultsA, resultsB, resultsC] = await Promise.all([
+    reconcileDelivery({ delivery: runA }, runner),
+    reconcileDelivery({ delivery: runB }, runner),
+    reconcileDelivery({ delivery: runC }, runner),
+  ]);
+  assert.equal(resultsA.length, 4);
+  assert.equal(resultsB.length, 4);
+  assert.equal(resultsC.length, 4);
+  assert.ok(maxConcurrent <= 6, `expected a server-wide cap of 6 concurrent checks across all runs, saw ${maxConcurrent}`);
+  assert.ok(maxConcurrent >= 4, "the global pool should still allow meaningful concurrency across different runs, not serialize everything");
+});
+
+// Minor: the timeout/grace races in boundedRun must cancel their losing
+// timer once the runner settles first — otherwise every fast (non-timed-out)
+// reconciliation leaves a live timer scheduled for the full timeoutMs. A
+// fast fake runner here resolves via microtask, well before any real
+// wall-clock time could elapse, so if the race's setTimeout is still
+// uncancelled once this call resolves, it can only be because it was never
+// cleared.
+test("boundedRun cancels its timeout race timer once the check resolves fast, instead of leaving it scheduled", async () => {
+  const originalSetTimeout = global.setTimeout;
+  const originalClearTimeout = global.clearTimeout;
+  let outstanding = 0;
+  global.setTimeout = ((handler: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+    outstanding += 1;
+    return originalSetTimeout(handler, ms, ...args);
+  }) as unknown as typeof setTimeout;
+  global.clearTimeout = ((handle: Parameters<typeof clearTimeout>[0]) => {
+    if (handle !== undefined) outstanding -= 1;
+    return originalClearTimeout(handle);
+  }) as unknown as typeof clearTimeout;
+
+  try {
+    const delivery = fixtureDelivery();
+    const fastRunner = async () => ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    // Large timeout/killGrace: if the race timer were NOT cancelled on the
+    // fast path, it would still be scheduled (and thus still counted here)
+    // long after this call has already resolved.
+    await reconcileDeliveryRepository(delivery, fastRunner, 60_000, 30_000);
+    assert.equal(outstanding, 0, `expected the timeout race's timer to be cancelled once the check resolved fast, but ${outstanding} timer(s) are still scheduled`);
+  } finally {
+    global.setTimeout = originalSetTimeout;
+    global.clearTimeout = originalClearTimeout;
+  }
 });
 
 test("reconcileDelivery reuses an in-flight reconciliation for the same run instead of stacking a second one", async () => {

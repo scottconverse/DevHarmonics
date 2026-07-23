@@ -51,7 +51,7 @@ import { quotaResetAt } from "../src/antigravity.js";
 import { expandValidatorTokens, mergeRepositoryValidators, runValidator } from "../src/validators.js";
 import { parseReviewerResponse } from "../src/review.js";
 import { DeliveryService } from "../src/delivery.js";
-import { projectInbox, type InboxItem } from "../src/inbox.js";
+import { INBOX_RELEVANT_RUN_STATUSES, projectInbox, type InboxItem } from "../src/inbox.js";
 import { projectProgramStatus, PROGRAM_QUIET_THRESHOLD_MS, type ProgramBucket } from "../src/program-status.js";
 import type { ProductRecord } from "../src/ledger.js";
 
@@ -4746,6 +4746,7 @@ test("ledger upgrades a v0.1 database transactionally and preserves a pre-migrat
           { version: 32, name: "workflow-revisions" },
           { version: 33, name: "objective-workflow-provenance" },
           { version: 34, name: "delivery-merge-commit-oid" },
+          { version: 35, name: "runs-status-index" },
         ],
       );
     } finally {
@@ -5985,6 +5986,57 @@ test("objective drafts persist without creating an execution run", async () => {
   }
 });
 
+test("Ledger.listRunsByStatus returns exactly the runs matching the given statuses, unbounded by the 50-row sidebar cap", async () => {
+  // new-Major (scan cost). Exercises the indexed WHERE-status-IN query
+  // directly: it must (a) return only runs whose status is in the given
+  // set, (b) never a run with a different status, and (c) not be capped at
+  // 50 like listRuns() — the exact property GET /api/inbox now depends on
+  // instead of Ledger.listAllRuns().
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-list-by-status-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    const awaitingId = ledger.createRun("Awaiting approval run", root);
+    ledger.savePlan(awaitingId, {
+      summary: "One task",
+      recommendedConcurrency: 1,
+      tasks: [{ id: "t1", title: "T1", description: "d", dependencies: [], preferredProvider: "codex", checks: ["diff-check"] }],
+    });
+    ledger.requestPlanApproval(awaitingId);
+
+    const pausedId = ledger.createRun("Paused run", root);
+    ledger.setRunStatus(pausedId, "running");
+    ledger.pauseRun(pausedId, "Needs a decision");
+
+    const runningId = ledger.createRun("Still running, not inbox-relevant", root);
+    ledger.setRunStatus(runningId, "running");
+
+    const failedId = ledger.createRun("Failed, not inbox-relevant", root);
+    ledger.setRunStatus(failedId, "running");
+    ledger.setRunStatus(failedId, "failed", "Failed");
+
+    // Bury the awaiting-approval run under 55 newer runs to prove this
+    // query, unlike listRuns(), is not capped at the sidebar's 50 rows.
+    await delay(5);
+    for (let i = 0; i < 55; i += 1) {
+      const fillerId = ledger.createRun(`Filler ${i}`, root);
+      ledger.setRunStatus(fillerId, "running");
+    }
+
+    const matched = ledger.listRunsByStatus(INBOX_RELEVANT_RUN_STATUSES);
+    const matchedIds = matched.map((run) => run.id);
+    assert.ok(matchedIds.includes(awaitingId), "the awaiting-approval run is returned despite 55 newer non-matching runs");
+    assert.ok(matchedIds.includes(pausedId), "the paused run is returned");
+    assert.ok(!matchedIds.includes(runningId), "a running run is excluded");
+    assert.ok(!matchedIds.includes(failedId), "a failed run is excluded");
+    assert.equal(matched.every((run) => (INBOX_RELEVANT_RUN_STATUSES as readonly string[]).includes(run.status)), true, "every returned run's status is one of the requested statuses");
+
+    assert.deepEqual(ledger.listRunsByStatus([]), [], "an empty status list returns no runs, never every run");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("workbench persistence advances the ledger schema without creating execution state", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-workbench-schema-"));
   const filename = path.join(root, "devharmonics.db");
@@ -6213,7 +6265,7 @@ test("steering directives persist with actor, target, disposition, and supersede
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-steering-ledger-"));
   const ledger = new Ledger(path.join(root, "devharmonics.db"));
   try {
-    assert.equal(LEDGER_SCHEMA_VERSION, 34, "the delivery merge-commit-oid column advances the ledger schema");
+    assert.equal(LEDGER_SCHEMA_VERSION, 35, "the runs-status-index migration advances the ledger schema");
     const runId = ledger.createRun("Steer me", root);
     ledger.savePlan(runId, {
       summary: "One task",

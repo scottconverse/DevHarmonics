@@ -1277,18 +1277,37 @@ async function refreshRuns() {
   renderSelectedRun();
   renderActivityStrip();
   await refreshInbox();
+  // new-Major (scan cost): Program status needs the ledger's full run
+  // history (see GET /api/program-status's comment in src/server.ts), so it
+  // is fetched from this generic, SSE-driven refresh path ONLY while the
+  // Inbox view is actually the one showing — never on every sidebar/event
+  // refresh regardless of which view is open. The nav badge above keeps
+  // updating from the cheap /api/inbox call unconditionally.
+  if (state.view === "inbox") await refreshProgramStatus();
 }
 
-// DH-645 S1. The inbox is a pure projection of the SAME ledger state
-// /api/runs already serves — recomputed on every refresh/event, exactly like
-// the rest of the cockpit, so an item can only disappear because its
-// underlying state genuinely resolved (never a stale client-side cache).
+// DH-645 S1, narrowed under new-Major (scan cost) to ITEMS only — the
+// Program status payload moved to refreshProgramStatus()/GET
+// /api/program-status below. The inbox is a pure projection of the SAME
+// ledger state /api/runs already serves — recomputed on every refresh/event,
+// exactly like the rest of the cockpit, so an item can only disappear
+// because its underlying state genuinely resolved (never a stale
+// client-side cache).
 async function refreshInbox() {
-  const { items, program } = await api("/api/inbox");
+  const { items } = await api("/api/inbox");
   state.inboxItems = items;
-  state.program = program || { groups: [], totals: {} };
   renderInboxBadge();
-  if (state.view === "inbox") { renderInboxList(); renderProgramStatus(); }
+  if (state.view === "inbox") renderInboxList();
+}
+
+// DH-645 S2, split under new-Major (scan cost) into its own route/fetch so
+// its lifetime-run-history cost is paid only when the Inbox view is visible
+// — on view entry and on refresh cycles while state.view === 'inbox' — never
+// from the generic sidebar/SSE refresh path when another view is active.
+async function refreshProgramStatus() {
+  const { program } = await api("/api/program-status");
+  state.program = program || { groups: [], totals: {} };
+  if (state.view === "inbox") renderProgramStatus();
 }
 
 // DH-645 S3. Read-only, on-demand: POSTs the reconciliation route for a run
@@ -1336,7 +1355,8 @@ function renderInboxList() {
 
 // DH-645 S2. Same recompute-on-every-refresh discipline as renderInboxList:
 // the program panel is never a stale client cache, only ever a render of
-// whatever /api/inbox's `program` field says right now.
+// whatever /api/program-status's `program` field said on the last fetch
+// (see refreshProgramStatus() above for when that fetch actually happens).
 function renderProgramStatus() {
   const panel = $("#program-status-list");
   const empty = $("#program-status-empty");
@@ -1966,13 +1986,19 @@ document.querySelector(".app-nav").addEventListener("click", async (event) => {
   if (button.dataset.view === "products") await refreshProducts();
   if (button.dataset.view === "workbench") await refreshWorkbench();
   if (button.dataset.view === "workflows") await refreshWorkflows();
-  if (button.dataset.view === "inbox") { await refreshInbox(); renderInboxList(); renderProgramStatus(); }
+  if (button.dataset.view === "inbox") {
+    // View entry: state.view is already "inbox" (showView() set it above),
+    // so both fetches render immediately, including the lifetime-scan
+    // Program status view — paid here because the owner just opened it, not
+    // on every polled refresh (new-Major, scan cost).
+    await refreshInbox();
+    await refreshProgramStatus();
+  }
 });
 $("#refresh-inbox").addEventListener("click", async () => {
   await withOperation($("#refresh-inbox"), "Refreshing inbox", async () => {
     await refreshInbox();
-    renderInboxList();
-    renderProgramStatus();
+    await refreshProgramStatus();
   }, { busyLabel: "Refreshing…" });
 });
 $("#inbox-list").addEventListener("click", async (event) => {

@@ -159,6 +159,17 @@ export interface StatusExportApiResponse {
   status?: number;
   body?: any;
   reason?: string;
+  /**
+   * Tag-only (R6-export): the result of the SECOND fetch needed to peel an
+   * annotated tag — GET .../git/tags/:sha, where :sha is the annotated tag
+   * object's own sha named by the first ref fetch's `body.object.sha` (only
+   * present when that first fetch's `body.object.type === "tag"`).
+   * `classifyTag` is a pure function, so both fetches are made by the caller
+   * (checkRecord, via the SAME fetchGitHub helper and its timeout) and
+   * threaded in here rather than classifyTag reaching out to the network
+   * itself.
+   */
+  tagObjectResponse?: StatusExportApiResponse;
 }
 
 export type StatusExportMergeSignal = "merged" | "not_merged" | "unobserved" | "no_pr_recorded";
@@ -255,11 +266,14 @@ export function classifyPullRequest(
     return { state: "matches", message: `pull request #${expected.number} is still open at the reviewed commit.` };
   }
   if (body.state === "closed" && body.merged_at) {
-    // Review finding M-merged-head: a merged PR only "matches" once its
-    // observed merge commit is compared against the merge commit OID
-    // DevHarmonics itself recorded when the merge completed. Missing either
-    // side of that identity is honestly unobserved, never a silent match;
-    // only a genuine mismatch is a divergence.
+    // Review finding M-merged-head (round 2, R9-export): a merged PR only
+    // "matches" once BOTH its observed merge commit equals the merge commit
+    // OID DevHarmonics recorded, AND its observed head sha equals the
+    // reviewed commit DevHarmonics actually approved — matching only the
+    // merge commit is not enough, since a different (unreviewed) head could
+    // have been merged. Missing either side of either identity is honestly
+    // unobserved, never a silent match; a genuine mismatch on either side is
+    // a divergence naming the commits involved.
     if (!expected.mergeCommitOid) {
       return { state: "unobserved", message: `pull request #${expected.number} is merged, but no merge commit was recorded to compare against.` };
     }
@@ -267,13 +281,23 @@ export function classifyPullRequest(
     if (!observedMergeSha) {
       return { state: "unobserved", message: `pull request #${expected.number} is merged, but GitHub did not report which commit was merged.` };
     }
+    const observedHeadSha = body.head?.sha;
+    if (!observedHeadSha) {
+      return { state: "unobserved", message: `pull request #${expected.number} is merged, but GitHub did not report its head commit to compare against the reviewed commit ${short(expected.reviewedCommitSha)}.` };
+    }
     if (observedMergeSha !== expected.mergeCommitOid) {
       return {
         state: "diverged",
         message: `pull request #${expected.number} is merged, but the merged commit ${short(observedMergeSha)} does not match the recorded merge commit ${short(expected.mergeCommitOid)}.`,
       };
     }
-    return { state: "matches", message: `pull request #${expected.number} is merged at the recorded merge commit ${short(observedMergeSha)}.` };
+    if (observedHeadSha !== expected.reviewedCommitSha) {
+      return {
+        state: "diverged",
+        message: `pull request #${expected.number} is merged, but its head commit ${short(observedHeadSha)} does not match the reviewed commit ${short(expected.reviewedCommitSha)} — a different commit than the one reviewed was merged.`,
+      };
+    }
+    return { state: "matches", message: `pull request #${expected.number} is merged at the recorded merge commit ${short(observedMergeSha)}, reviewed at head ${short(observedHeadSha)}.` };
   }
   return { state: "diverged", message: `pull request #${expected.number} is closed without merging.` };
 }
@@ -314,8 +338,26 @@ export function classifyChecks(
   return { state: "matches", message: "no status checks currently report a failing result." };
 }
 
+/**
+ * Review finding R6-export: presence alone (the tag ref still resolves) does
+ * not prove a force-moved tag is unchanged — a moved tag still resolves. The
+ * ref response's `body.object` names either the commit directly
+ * (`type: "commit"`, a lightweight tag) or the annotated tag object's OWN sha
+ * (`type: "tag"`), which must be peeled one more hop before it names a
+ * commit at all. `classifyTag` stays a pure, synchronous, closure-complete
+ * function (no network access of its own, for `.toString()` embedding) — the
+ * caller (checkRecord, in the shipped page's own script) performs both
+ * fetches through the SAME `fetchGitHub` helper and its timeout, threading
+ * the second result in as `response.tagObjectResponse`.
+ *
+ * Only the PEELED commit is ever compared, and only against
+ * `expected.mergeCommitOid` — tags land on the merge commit, never the
+ * reviewed head. Missing either the ledger's recorded merge commit or a
+ * resolvable peeled commit is honestly unobserved; a genuine mismatch is a
+ * divergence naming both commits.
+ */
 export function classifyTag(
-  expected: { tag: string },
+  expected: { tag: string; mergeCommitOid?: string | null },
   response: StatusExportApiResponse,
 ): StatusExportClassifyResult {
   if (!response.ok) {
@@ -324,7 +366,40 @@ export function classifyTag(
   if (response.status === 404) {
     return { state: "diverged", message: `release tag '${expected.tag}' no longer exists on GitHub.` };
   }
-  return { state: "matches", message: `release tag '${expected.tag}' is still present on GitHub.` };
+  const object = response.body?.object;
+  let peeledSha: string | undefined;
+  if (object?.type === "commit" && object.sha) {
+    // Lightweight tag: the ref already names a commit directly.
+    peeledSha = object.sha;
+  } else if (object?.type === "tag" && object.sha) {
+    // Annotated tag: the ref names the tag object's own sha — only the
+    // SECOND fetch (the peeled tag object) tells us what commit it targets.
+    const tagObjectResponse = response.tagObjectResponse;
+    if (!tagObjectResponse || !tagObjectResponse.ok) {
+      return {
+        state: "unobserved",
+        message: `release tag '${expected.tag}' is an annotated tag, but its target commit could not be read: ${tagObjectResponse?.reason ?? "no follow-up request was made"}.`,
+      };
+    }
+    const peeledObject = tagObjectResponse.body?.object;
+    if (!peeledObject?.sha) {
+      return { state: "unobserved", message: `release tag '${expected.tag}' is an annotated tag, but GitHub's response for its target object did not name a commit.` };
+    }
+    peeledSha = peeledObject.sha;
+  }
+  if (!peeledSha) {
+    return { state: "unobserved", message: `GitHub returned an unreadable response for tag '${expected.tag}'.` };
+  }
+  if (!expected.mergeCommitOid) {
+    return { state: "unobserved", message: `release tag '${expected.tag}' was read, but no merge commit was recorded to compare it against.` };
+  }
+  if (peeledSha === expected.mergeCommitOid) {
+    return { state: "matches", message: `release tag '${expected.tag}' still points at the recorded merge commit ${short(expected.mergeCommitOid)}.` };
+  }
+  return {
+    state: "diverged",
+    message: `release tag '${expected.tag}' now points at ${short(peeledSha)}, not the recorded merge commit ${short(expected.mergeCommitOid)} — the tag was moved to a different commit.`,
+  };
 }
 
 /** Single dispatch point the shipped page calls: `classify(kind, expected, response) -> state`. */
@@ -524,10 +599,18 @@ ${classifyScript}
       var prResponse = await fetchGitHub(base + "/pulls/" + record.pullRequestNumber);
       var prResult = classify("pull_request", { number: record.pullRequestNumber, reviewedCommitSha: record.reviewedCommitSha, mergeCommitOid: record.mergeCommitOid }, prResponse);
       setCheckState(index, "pull_request", prResult);
+      // R9-export: mergeSignal must be "merged" ONLY once classifyPullRequest's
+      // own full merge-identity check (merge commit AND reviewed head, both
+      // observed and equal) actually returned "matches" — not from raw
+      // state+merged_at alone. A merged-state PR whose identity could not be
+      // read is unobserved; one whose identity mismatched is not_merged, so a
+      // deleted branch is never waved off as routine cleanup on an unverified
+      // merge (classifyBranch only treats a 404 as routine cleanup when
+      // mergeSignal is exactly "merged").
       if (!prResponse.ok) {
         mergeSignal = "unobserved";
       } else if (prResponse.body && prResponse.body.state === "closed" && prResponse.body.merged_at) {
-        mergeSignal = "merged";
+        mergeSignal = prResult.state === "matches" ? "merged" : prResult.state === "unobserved" ? "unobserved" : "not_merged";
       } else {
         mergeSignal = "not_merged";
       }
@@ -542,8 +625,18 @@ ${classifyScript}
     setCheckState(index, "branch", classify("branch", { branch: record.branch, sha: record.reviewedCommitSha, mergeSignal: mergeSignal }, branchResponse));
 
     if (record.tagName) {
-      var tagResponse = await fetchGitHub(base + "/git/ref/tags/" + encodeURIComponent(record.tagName));
-      setCheckState(index, "tag", classify("tag", { tag: record.tagName }, tagResponse));
+      // R6-export: presence alone does not prove a force-moved tag is
+      // unchanged. Read the tag ref first; when it names an annotated tag
+      // object (type "tag") rather than a commit directly, peel it one more
+      // hop through the SAME fetchGitHub helper (and its timeout) before
+      // classifyTag ever compares a commit against the recorded merge
+      // commit. classifyTag itself stays pure/synchronous — both fetch
+      // results are threaded in as a single response.
+      var tagRefResponse = await fetchGitHub(base + "/git/ref/tags/" + encodeURIComponent(record.tagName));
+      if (tagRefResponse.ok && tagRefResponse.body && tagRefResponse.body.object && tagRefResponse.body.object.type === "tag" && tagRefResponse.body.object.sha) {
+        tagRefResponse.tagObjectResponse = await fetchGitHub(base + "/git/tags/" + tagRefResponse.body.object.sha);
+      }
+      setCheckState(index, "tag", classify("tag", { tag: record.tagName, mergeCommitOid: record.mergeCommitOid }, tagRefResponse));
     }
   }
 

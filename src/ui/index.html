@@ -47,7 +47,10 @@
         <section id="inbox-view" class="workspace-view hidden" aria-labelledby="inbox-title">
           <div class="view-heading">
             <div><p class="eyebrow">DECISIONS WAITING ON YOU</p><h2 id="inbox-title">Inbox</h2><p class="field-help">Every decision waiting on you, across every run — plan approvals, delivery approvals, and paused runs. Acting on an item here opens the exact same approval you'd use inside that run; nothing here is a second, separate gate.</p></div>
-            <button id="refresh-inbox" class="secondary" type="button">Refresh inbox</button>
+            <div class="inbox-header-actions">
+              <button id="refresh-inbox" class="secondary" type="button">Refresh inbox</button>
+              <button id="export-status-page" class="secondary" type="button" title="Downloads a standalone HTML page that checks your delivered branches, pull requests, and tags directly against GitHub in your browser — it works even with DevHarmonics stopped.">Export status page</button>
+            </div>
           </div>
           <div id="inbox-empty" class="panel empty-state hidden">Nothing is waiting on you. A plan approval, a delivery step, or a paused run needing your direction will appear here the moment one does.</div>
           <div id="inbox-list" class="evidence-list hidden"></div>

@@ -1327,6 +1327,99 @@ test("GET /api/inbox also serves the program status view, read-only, grouped by 
   }
 });
 
+test("GET /api/status-export downloads a standalone HTML page with owner identifiers, no agent-written text, and never mutates the ledger", async () => {
+  // DH-645 S4. Same light seeded-ledger-over-HTTP harness as the /api/inbox
+  // tests above: startDashboard first (so reconcileInterruptedRuns() runs
+  // against an empty ledger), then seed a second Ledger connection to the
+  // SAME db file, then hit the route.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-status-export-http-"));
+  const project = await createRepository(root);
+  await initializeProject(project);
+  const dbPath = path.join(devHarmonicsDirectory(project), "devharmonics.db");
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+
+  const AGENT_MARKER = "AGENT-WROTE-THIS-VERDICT-MARKER-XYZ";
+  const seedLedger = new Ledger(dbPath);
+
+  seedLedger.upsertProduct({
+    id: "prod-civic",
+    name: "CivicSuite",
+    organizationUrl: "https://github.com/example-owner",
+    description: "",
+    repositories: [{
+      id: "repo:civic",
+      name: "civiccore",
+      fullName: "example-owner/civiccore",
+      url: "https://github.com/example-owner/civiccore",
+      cloneUrl: "https://github.com/example-owner/civiccore.git",
+      defaultBranch: "main",
+      visibility: "public",
+      archived: false,
+      sizeKb: 100,
+      language: "TypeScript",
+      description: null,
+      intelligence: {},
+    }],
+  });
+
+  const runId = seedLedger.createRun("Ship the reporting service export", project);
+  seedLedger.setRunStatus(runId, "running");
+  seedLedger.createIntegrationSet({
+    runId,
+    productId: "prod-civic",
+    integrationConditions: [],
+    repositories: [{ repositoryId: "repo:civic", localPath: project, baseCommit: "a".repeat(40), integrationBranch: "devharmonics/civic", integrationWorktreePath: project }],
+  });
+  seedLedger.prepareDeliveryRepository({
+    runId,
+    repositoryId: "repo:civic",
+    localPath: project,
+    baseBranch: "main",
+    baseCommit: "a".repeat(40),
+    headCommit: "b".repeat(40),
+    branch: "devharmonics/status-export-fixture",
+  });
+  seedLedger.updateDeliveryRepository(runId, "repo:civic", {
+    status: "draft_pr_created",
+    remoteUrl: "https://github.com/example-owner/civiccore",
+    pullRequestUrl: "https://github.com/example-owner/civiccore/pull/17",
+  });
+  // An agent-written verdict this run genuinely carries — must NEVER reach the export.
+  seedLedger.setRunStatus(runId, "ready", AGENT_MARKER);
+  seedLedger.close();
+
+  try {
+    const before = await (await fetch(`${dashboard.url}/api/runs`)).json();
+
+    const response = await fetch(`${dashboard.url}/api/status-export`);
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type") ?? "", /text\/html/i);
+    const disposition = response.headers.get("content-disposition") ?? "";
+    assert.match(disposition, /attachment/i, "the route must serve the page as a download, not inline");
+    assert.match(disposition, /filename="devharmonics-status-.*\.html"/i);
+
+    const html = await response.text();
+    assert.match(html, /^<!doctype html>/i);
+
+    // Owner-held identifiers present.
+    assert.match(html, /devharmonics\/status-export-fixture/, "the branch name must appear");
+    assert.match(html, /example-owner\/civiccore/, "the repository must appear");
+    assert.match(html, /#17/, "the pull request number must appear");
+    assert.match(html, /Ship the reporting service export/, "the owner-typed run title must appear");
+    assert.match(html, /CivicSuite/, "the owner-named product must appear");
+
+    // No agent-written value anywhere in the download.
+    assert.doesNotMatch(html, new RegExp(AGENT_MARKER), "an agent-written run verdict must never appear in the exported page");
+
+    // Read-only: the route must never mutate the ledger it reads.
+    const after = await (await fetch(`${dashboard.url}/api/runs`)).json();
+    assert.deepEqual(after, before, "GET /api/status-export must not change any run or delivery state");
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("the tag prefill follows the MERGE commit's declared version once merged, not the reviewed head", async () => {
   // ROUND2-002: the tag GATE judges the merge commit, but the GET prefill used
   // to read the reviewed head. When the merge commit declares a DIFFERENT

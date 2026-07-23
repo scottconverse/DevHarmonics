@@ -2159,6 +2159,19 @@ $("#workbench-convert-form").addEventListener("submit", async (event) => {
   }, { onError: (message) => { $("#workbench-error").textContent = message; }, busyLabel: "Converting…" });
 });
 $("#refresh-evidence").addEventListener("click", refreshEvidence);
+// DH-645 S4. Same client-side download pattern as #export-evidence below:
+// a hidden <a download> click, no navigation away from the app. The
+// generated file is a standalone page (src/status-export.ts) that checks
+// GitHub directly from the owner's own browser and works with
+// DevHarmonics stopped — this button only triggers the download.
+$("#export-status-page").addEventListener("click", () => {
+  const link = document.createElement("a");
+  link.href = "/api/status-export";
+  link.download = `devharmonics-status-${new Date().toISOString().slice(0, 10)}.html`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+});
 $("#export-evidence").addEventListener("click", () => {
   const runId = state.selectedRunId || state.runs[0]?.id;
   if (!runId) return;

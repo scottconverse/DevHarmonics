@@ -24,6 +24,7 @@ import { DeliveryRefusal, DeliveryService, VersionMismatchRefusal, type Delivery
 import { reconcileDelivery, type RepositoryReconciliationResult } from "./reconciliation.js";
 import { projectInbox } from "./inbox.js";
 import { projectProgramStatus } from "./program-status.js";
+import { generateStatusExportHtml } from "./status-export.js";
 import { scanProductIntelligence } from "./product-intelligence.js";
 import { manualModelSchema, objectiveInputSchema, productRegistrationSchema, steeringDirectiveInputSchema, workbenchSessionInputSchema } from "./schemas.js";
 import type { ObjectiveInput, ProviderName, RunRequest, WorkbenchMessageRecord } from "./types.js";
@@ -257,6 +258,25 @@ async function route(
       items: projectInbox(runs),
       program: projectProgramStatus(runs, context.ledger.listProducts(), context.ledger.listObjectives()),
     });
+    return;
+  }
+
+  // DH-645 S4. The exportable standalone status page: a self-contained HTML
+  // download built ONLY from owner-held delivery identifiers (see
+  // src/status-export.ts's module doc for the structural allowlist that
+  // enforces "contains no value written by an agent"). Served as an
+  // attachment, same convention as /api/runs/:id/evidence/export above.
+  if (request.method === "GET" && url.pathname === "/api/status-export") {
+    const runs = context.ledger.listRuns();
+    const html = generateStatusExportHtml(runs, context.ledger.listProducts(), context.ledger.listObjectives());
+    const filenameDate = new Date().toISOString().slice(0, 10);
+    response.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Content-Disposition": `attachment; filename="devharmonics-status-${filenameDate}.html"`,
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    });
+    response.end(html);
     return;
   }
 

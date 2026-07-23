@@ -21,6 +21,7 @@ import { createRunEvidenceExport, createRunReport } from "./reporter.js";
 import { observeLocalResources } from "./resources.js";
 import { inspectLocalRepository } from "./repository-intelligence.js";
 import { DeliveryRefusal, DeliveryService, VersionMismatchRefusal, type DeliveryAction } from "./delivery.js";
+import { projectInbox } from "./inbox.js";
 import { scanProductIntelligence } from "./product-intelligence.js";
 import { manualModelSchema, objectiveInputSchema, productRegistrationSchema, steeringDirectiveInputSchema, workbenchSessionInputSchema } from "./schemas.js";
 import type { ObjectiveInput, ProviderName, RunRequest, WorkbenchMessageRecord } from "./types.js";
@@ -225,6 +226,14 @@ async function route(
 
   if (request.method === "GET" && url.pathname === "/api/runs") {
     sendJson(response, 200, { runs: context.ledger.listRuns() });
+    return;
+  }
+
+  // DH-645 S1: a read-only projection of existing ledger state — no new
+  // approval state, no writes. See src/inbox.ts for what this does and does
+  // not cover yet.
+  if (request.method === "GET" && url.pathname === "/api/inbox") {
+    sendJson(response, 200, { items: projectInbox(context.ledger.listRuns()) });
     return;
   }
 

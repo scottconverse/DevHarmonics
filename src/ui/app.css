@@ -31,8 +31,9 @@ button { cursor: pointer; }
 .brand span { color: var(--muted); font-size: 12px; margin-top: 2px; }
 .section-label { color: #6f7782; font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; margin: 28px 8px 10px; }
 .app-nav { display: grid; gap: 4px; margin-top: 18px; }
-.nav-link { border: 0; border-radius: 9px; padding: 10px 12px; color: var(--muted); background: transparent; text-align: left; font-weight: 650; }
+.nav-link { border: 0; border-radius: 9px; padding: 10px 12px; color: var(--muted); background: transparent; text-align: left; font-weight: 650; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .nav-link:hover, .nav-link.active { color: var(--text); background: var(--panel-2); }
+.nav-badge { display: inline-grid; place-items: center; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--lime); color: #0a0c08; font-size: 11px; font-weight: 900; }
 /* grid-auto-rows: the buttons' overflow:hidden zeroes their automatic minimum
    size, so a height-squeezed grid would compress every row to fit instead of
    scrolling — rows keep content height and the LIST scrolls. */

@@ -27,6 +27,7 @@ const state = {
   workbenchSession: null,
   workbenchMessages: [],
   steering: {},
+  inboxItems: [],
 };
 const $ = (selector) => document.querySelector(selector);
 
@@ -62,6 +63,54 @@ function renderFindingHtml(finding) {
   const rationale = escapeHtml(finding.rationale || "");
   const disposition = escapeHtml(finding.disposition || "");
   return `${severity} ${location}: ${rationale} — Status: ${disposition}`;
+}
+
+// DH-645 S1 inbox helpers. Kept here, next to escapeHtml/renderFindingHtml,
+// so renderInboxItemHtml below is a fully self-contained, independently
+// testable pure function (same pattern the app.js extraction tests rely on).
+const INBOX_KIND_LABELS = {
+  plan_approval: "Plan approval",
+  delivery_step_approval: "Delivery approval",
+  paused_run: "Paused run",
+};
+
+function formatWaitingSince(iso) {
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return "unknown";
+  const minutes = Math.floor(Math.max(0, Date.now() - then) / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${minutes % 60}m`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h`;
+}
+
+// The inbox renders a read-only projection of ledger state whose
+// title/plainSummary/evidence strings ultimately derive from run goals,
+// delivery error text, and pause reasons — free text a run or its ledger
+// events could contain almost anything in, same threat shape as
+// renderFindingHtml above. Every interpolated field goes through escapeHtml
+// before reaching innerHTML. Pulled out as a pure function, mirroring
+// renderFindingHtml, so the exact code path renderInboxList() uses is
+// regression-tested directly against a hostile-markup case.
+function renderInboxItemHtml(item) {
+  const kind = escapeHtml(String(item.kind || ""));
+  const title = escapeHtml(item.title || "");
+  const summary = escapeHtml(item.plainSummary || "");
+  const evidence = escapeHtml(item.evidence || "");
+  const runId = escapeHtml(item.runId || "");
+  const label = escapeHtml(item.actionTarget?.label || "Open");
+  const waiting = escapeHtml(formatWaitingSince(item.waitingSinceIso));
+  return `<article class="inbox-item" data-inbox-kind="${kind}">
+    <div>
+      <strong>${title}</strong>
+      <span>${INBOX_KIND_LABELS[item.kind] || kind} · waiting since ${waiting}</span>
+      <p>${summary}</p>
+      <p>${evidence}</p>
+    </div>
+    <button class="secondary small" type="button" data-inbox-run-id="${runId}">${label}</button>
+  </article>`;
 }
 
 // DH-632 visible operation feedback: one shared acknowledgement/lifecycle layer for
@@ -261,6 +310,7 @@ function providerDisplayName(provider) {
 // sentence, rendered from this single source instead of a page-title ternary
 // that used to carry different, inconsistent copy per branch.
 const VIEW_DESCRIPTIONS = {
+  inbox: { title: "Inbox", purpose: "Every decision waiting on you, across every run." },
   runs: { title: "Runs", purpose: "Define an objective, approve the team's plan, and watch the work happen." },
   workbench: { title: "Workbench", purpose: "Ask one or more models questions about a project — read-only, nothing runs, nothing changes. Turn a good discussion into an objective when you're ready." },
   products: { title: "Products", purpose: "Register the real products and repositories the team works on, and see what DevHarmonics has verified about them." },
@@ -777,6 +827,7 @@ function showView(view) {
   window.scrollTo({ top: 0, left: 0, behavior: "auto" });
   state.view = view;
   document.querySelectorAll("[data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
+  $("#inbox-view").classList.toggle("hidden", view !== "inbox");
   $("#setup-view").classList.toggle("hidden", view !== "setup");
   $("#models-view").classList.toggle("hidden", view !== "models");
   $("#evidence-view").classList.toggle("hidden", view !== "evidence");
@@ -1100,6 +1151,33 @@ async function refreshRuns() {
   renderRunList();
   renderSelectedRun();
   renderActivityStrip();
+  await refreshInbox();
+}
+
+// DH-645 S1. The inbox is a pure projection of the SAME ledger state
+// /api/runs already serves — recomputed on every refresh/event, exactly like
+// the rest of the cockpit, so an item can only disappear because its
+// underlying state genuinely resolved (never a stale client-side cache).
+async function refreshInbox() {
+  const { items } = await api("/api/inbox");
+  state.inboxItems = items;
+  renderInboxBadge();
+  if (state.view === "inbox") renderInboxList();
+}
+
+function renderInboxBadge() {
+  const badge = $("#inbox-nav-badge");
+  if (!badge) return;
+  const count = state.inboxItems.length;
+  badge.textContent = String(count);
+  badge.classList.toggle("hidden", count === 0);
+}
+
+function renderInboxList() {
+  const items = state.inboxItems;
+  $("#inbox-empty").classList.toggle("hidden", items.length > 0);
+  $("#inbox-list").classList.toggle("hidden", items.length === 0);
+  $("#inbox-list").innerHTML = items.map(renderInboxItemHtml).join("");
 }
 
 function connectEventStream() {
@@ -1704,6 +1782,22 @@ document.querySelector(".app-nav").addEventListener("click", async (event) => {
   if (button.dataset.view === "products") await refreshProducts();
   if (button.dataset.view === "workbench") await refreshWorkbench();
   if (button.dataset.view === "workflows") await refreshWorkflows();
+  if (button.dataset.view === "inbox") { await refreshInbox(); renderInboxList(); }
+});
+$("#refresh-inbox").addEventListener("click", async () => {
+  await withOperation($("#refresh-inbox"), "Refreshing inbox", async () => {
+    await refreshInbox();
+    renderInboxList();
+  }, { busyLabel: "Refreshing…" });
+});
+$("#inbox-list").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-inbox-run-id]");
+  if (!button) return;
+  state.composing = false;
+  state.selectedRunId = button.dataset.inboxRunId;
+  showView("runs");
+  renderRunList();
+  renderSelectedRun();
 });
 $("#refresh-products").addEventListener("click", refreshProducts);
 $("#register-product").addEventListener("click", () => {

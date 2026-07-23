@@ -15,6 +15,7 @@
         </div>
         <button id="new-run" class="primary full">＋ New run</button>
         <nav class="app-nav" aria-label="Application">
+          <button class="nav-link" data-view="inbox" title="Every decision waiting on you, across every run — plan approvals, delivery approvals, and paused runs.">Inbox<span id="inbox-nav-badge" class="nav-badge hidden">0</span></button>
           <button class="nav-link active" data-view="runs" title="Define an objective, approve the team's plan, and watch the work happen.">Runs</button>
           <button class="nav-link" data-view="workbench" title="Ask one or more models questions about a project — read-only, nothing runs, nothing changes.">Workbench</button>
           <button class="nav-link" data-view="products" title="Register the real products and repositories the team works on.">Products</button>
@@ -42,6 +43,15 @@
             <small class="field-help provider-status-legend">Green = signed in and ready to work. Grey = needs setup — see the Setup page to connect.</small>
           </div>
         </header>
+
+        <section id="inbox-view" class="workspace-view hidden" aria-labelledby="inbox-title">
+          <div class="view-heading">
+            <div><p class="eyebrow">DECISIONS WAITING ON YOU</p><h2 id="inbox-title">Inbox</h2><p class="field-help">Every decision waiting on you, across every run — plan approvals, delivery approvals, and paused runs. Acting on an item here opens the exact same approval you'd use inside that run; nothing here is a second, separate gate.</p></div>
+            <button id="refresh-inbox" class="secondary" type="button">Refresh inbox</button>
+          </div>
+          <div id="inbox-empty" class="panel empty-state hidden">Nothing is waiting on you. A plan approval, a delivery step, or a paused run needing your direction will appear here the moment one does.</div>
+          <div id="inbox-list" class="evidence-list hidden"></div>
+        </section>
 
         <section id="composer" class="composer panel">
           <div class="panel-heading">

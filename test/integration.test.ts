@@ -975,6 +975,112 @@ test("the delivery HTTP route serializes per repository, types its refusals, and
   }
 });
 
+test("GET /api/inbox projects pending decisions read-only and drops them the instant the ledger shows them resolved", async () => {
+  // DH-645 S1. Seeds three kinds of genuinely-waiting decision directly
+  // against the ledger, then drives the REAL HTTP endpoint. No
+  // orchestrator/CLI fixtures are needed — the inbox is a pure read of
+  // ledger state the server already owns.
+  //
+  // Seeding happens AFTER startDashboard (not before, unlike "the delivery
+  // HTTP route..." above): startDashboard() calls
+  // Ledger.reconcileInterruptedRuns() once at startup, which auto-pauses any
+  // run still 'planning'/'running'/'awaiting_approval' as an orphan of a
+  // crashed process (see src/ledger.ts). A run seeded before start would
+  // have its 'awaiting_approval' status silently reconciled to 'paused'
+  // before this test ever gets to look at it — seeding through a second
+  // Ledger connection to the same file AFTER the dashboard is up avoids
+  // that and exercises the ordinary "still live" case instead.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-inbox-http-"));
+  const project = await createRepository(root);
+  await initializeProject(project);
+  const dbPath = path.join(devHarmonicsDirectory(project), "devharmonics.db");
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+
+  const seedLedger = new Ledger(dbPath);
+
+  // (a) a run awaiting plan approval.
+  const planRunId = seedLedger.createRun("Add CSV export to the customer report", project);
+  seedLedger.savePlan(planRunId, {
+    summary: "Add CSV export",
+    recommendedConcurrency: 1,
+    revision: 1,
+    tasks: [{ id: "t1", title: "Implement export", description: "Implement CSV export", dependencies: [], preferredProvider: "codex" as const, checks: ["diff-check"] }],
+  });
+  seedLedger.requestPlanApproval(planRunId);
+
+  // (b) a READY run with one repository still needing its next delivery
+  // step approved, and one already merged (excluded — tagging is optional).
+  const deliverRunId = seedLedger.createRun("Ship the reporting service", project);
+  seedLedger.setRunStatus(deliverRunId, "running");
+  seedLedger.setRunStatus(deliverRunId, "ready", "READY");
+  seedLedger.prepareDeliveryRepository({ runId: deliverRunId, repositoryId: "repo:pending", localPath: project, baseBranch: "main", baseCommit: "a".repeat(40), headCommit: "b".repeat(40), branch: "devharmonics/inbox1" });
+  seedLedger.prepareDeliveryRepository({ runId: deliverRunId, repositoryId: "repo:done", localPath: project, baseBranch: "main", baseCommit: "c".repeat(40), headCommit: "d".repeat(40), branch: "devharmonics/inbox2" });
+  seedLedger.updateDeliveryRepository(deliverRunId, "repo:done", { status: "merged" });
+
+  // (c) a paused run awaiting owner direction.
+  const pausedRunId = seedLedger.createRun("Migrate the billing job", project);
+  seedLedger.setRunStatus(pausedRunId, "running");
+  seedLedger.pauseRun(pausedRunId, "Needs your decision before continuing");
+
+  seedLedger.close();
+
+  try {
+    const before = await (await fetch(`${dashboard.url}/api/runs`)).json();
+
+    const response = await fetch(`${dashboard.url}/api/inbox`);
+    assert.equal(response.status, 200);
+    const { items } = (await response.json()) as { items: Array<Record<string, any>> };
+
+    const byKind = (kind: string) => items.filter((item) => item.kind === kind);
+    assert.equal(byKind("plan_approval").length, 1, "the awaiting-approval run produces exactly one plan approval item");
+    assert.equal(byKind("delivery_step_approval").length, 1, "only the pending repository produces a delivery item; the merged one is excluded");
+    assert.equal(byKind("paused_run").length, 1, "the paused run produces exactly one paused-run item");
+
+    const plan = byKind("plan_approval")[0]!;
+    assert.equal(plan.runId, planRunId);
+    assert.equal(typeof plan.title, "string");
+    assert.ok(plan.title.length > 0);
+    assert.match(plan.evidence, /revision 1/i);
+    assert.deepEqual(plan.actionTarget, { view: "runs", control: "approve-run", label: "Open this run to approve the plan" });
+    assert.ok(Number.isFinite(Date.parse(plan.waitingSinceIso)), "waitingSinceIso is a real timestamp");
+
+    const delivery = byKind("delivery_step_approval")[0]!;
+    assert.equal(delivery.runId, deliverRunId);
+    assert.equal(delivery.repositoryId, "repo:pending");
+    assert.match(delivery.evidence, /Reviewed commit b{12} on branch devharmonics\/inbox1/);
+    assert.equal(delivery.actionTarget.control, "delivery-panel");
+
+    const paused = byKind("paused_run")[0]!;
+    assert.equal(paused.runId, pausedRunId);
+    assert.equal(paused.evidence, "Needs your decision before continuing");
+    assert.equal(paused.actionTarget.control, "resume-run");
+
+    // Read-only: a GET must never mutate the ledger it reads. Hit it again,
+    // then compare the FULL /api/runs payload byte-for-byte against the
+    // snapshot taken before either GET /api/inbox call.
+    await fetch(`${dashboard.url}/api/inbox`);
+    const after = await (await fetch(`${dashboard.url}/api/runs`)).json();
+    assert.deepEqual(after, before, "GET /api/inbox must not change any run or delivery state");
+
+    // Resolution honesty: approving the plan and completing the delivery
+    // step (via a second connection to the SAME ledger file, exactly as a
+    // concurrent owner action would) must make both items disappear on the
+    // very next projection.
+    const mutateLedger = new Ledger(dbPath);
+    mutateLedger.approvePlan(planRunId);
+    mutateLedger.updateDeliveryRepository(deliverRunId, "repo:pending", { status: "tagged" });
+    mutateLedger.close();
+
+    const afterResolution = (await (await fetch(`${dashboard.url}/api/inbox`)).json()) as { items: Array<Record<string, any>> };
+    assert.equal(afterResolution.items.filter((item: Record<string, any>) => item.kind === "plan_approval").length, 0, "an approved plan leaves the inbox");
+    assert.equal(afterResolution.items.filter((item: Record<string, any>) => item.kind === "delivery_step_approval").length, 0, "a tagged repository leaves the inbox");
+    assert.equal(afterResolution.items.filter((item: Record<string, any>) => item.kind === "paused_run").length, 1, "the still-paused run remains");
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("the tag prefill follows the MERGE commit's declared version once merged, not the reviewed head", async () => {
   // ROUND2-002: the tag GATE judges the merge commit, but the GET prefill used
   // to read the reviewed head. When the merge commit declares a DIFFERENT

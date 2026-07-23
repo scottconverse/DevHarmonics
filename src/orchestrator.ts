@@ -87,7 +87,7 @@ export class Orchestrator {
 
   constructor(private readonly ledger: Ledger) {}
 
-  begin(request: RunRequest, resumedFrom: string | null = null): string {
+  begin(request: RunRequest, resumedFrom: string | null = null, beforeLaunch?: (runId: string) => void): string {
     // DH810-AUD-001: an unknown workflow pin must refuse BEFORE any run
     // exists, and a valid pin must be recorded BEFORE execution launches — a
     // run may never start unpinned and acquire its pedigree afterwards.
@@ -96,6 +96,12 @@ export class Orchestrator {
     }
     const runId = this.ledger.createRun(request.goal, request.projectPath, resumedFrom, request.autonomy ?? "supervised", request.objectiveLink ?? null);
     if (request.workflowRevisionHash) this.ledger.linkRunWorkflowRevision(runId, request.workflowRevisionHash);
+    // DH-647 M2. A synchronous prelaunch step (approved-plan decision
+    // persistence) runs AFTER the run row exists but BEFORE any background
+    // execution is scheduled. If it throws, the start request fails cleanly
+    // here: no background task is ever launched, so there is no live run
+    // carrying half-persisted decisions.
+    if (beforeLaunch) beforeLaunch(runId);
     const controller = new AbortController();
     this.cancellations.set(runId, controller);
     const execution = this.execute(runId, request, controller.signal)
@@ -483,9 +489,22 @@ export class Orchestrator {
     if (!input.revision.approved || input.revision.objectiveId !== input.objective.id) {
       throw new Error("Only the exact approved plan revision can start execution");
     }
+    // DH-647 M3. A repeated start/approve request for an objective plan
+    // revision already under way returns the existing run instead of
+    // launching another — a lost 202, a double-click, or a client retry can
+    // never spawn a second run (or, via the idempotent persistence below, a
+    // second copy of the architect's decisions) for the same approved plan.
+    const existingRun = this.ledger.findRunForApprovedPlan(input.objective.id, input.revision.revision);
+    if (existingRun) return existingRun;
     const readiness = this.objectiveExecutionReadiness(input.objective, input.revision.plan);
     if (!readiness.supported) throw new Error(readiness.reason);
-    const runId = this.begin({
+    // DH-647 S2/M2: approval is the write boundary, and it lands BEFORE
+    // background execution launches. A plan preview that is never approved
+    // (proposeObjectivePlan alone) persists nothing; only reaching here turns
+    // the architect's proposed decisions[] into durable DecisionRecords, in
+    // one atomic transaction, synchronously before the run is scheduled — so a
+    // persistence failure fails this start request cleanly with no live run.
+    return this.begin({
       goal: objectivePromptText(input.objective),
       projectPath: input.objective.projectPath,
       autonomy: input.objective.autonomy,
@@ -494,46 +513,44 @@ export class Orchestrator {
       approvedPlan: input.revision.plan,
       objectiveLink: { objectiveId: input.objective.id, approvedPlanRevision: input.revision.revision },
       ...(input.objective.workflowRevisionHash ? { workflowRevisionHash: input.objective.workflowRevisionHash } : {}),
+    }, null, (runId) => {
+      this.persistPlanDecisions({
+        runId,
+        objectiveId: input.objective.id,
+        planRevision: input.revision.revision,
+        productId: input.objective.productId ?? null,
+        plan: input.revision.plan,
+      });
     });
-    // DH-647 S2: approval is the write boundary. A plan preview that is
-    // never approved (proposeObjectivePlan alone) persists nothing; only
-    // reaching HERE — after approvePlanRevision and the readiness check above
-    // — turns the architect's proposed decisions[] into durable
-    // DecisionRecords. Runs synchronously before this method returns, so the
-    // records exist before the caller ever sees the new runId.
-    this.persistApprovedPlanDecisions(input.objective, input.revision.plan, runId);
-    return runId;
   }
 
   /**
-   * DH-647 S2. Turns each plan decision the architect proposed into a durable
-   * DecisionRecord via S1's createDecisionRecord (append-only, source
-   * 'architect'). Scope follows the objective: 'product' when the objective
-   * links a product, else 'run' — a decision made for a one-off, product-less
-   * objective has no product to outlive. The plan schema (planDecisionSchema)
-   * enforces exactly-one-selected-option and a reason on every rejection
-   * before this ever runs, so createDecisionRecord's own validation is a
-   * second, cheap confirmation rather than the primary gate.
+   * DH-647 M1/M2. Every run type's approved-plan decisions flow through this
+   * one call into the centralized, idempotent ledger boundary
+   * (Ledger.persistApprovedPlanDecisions). Scope follows the product linkage:
+   * 'product' when a product is linked, else 'run' — a decision made for a
+   * one-off, product-less run has no product to outlive. Idempotent by
+   * provenance triple, so the objective path (which calls this before launch)
+   * and the ordinary/recovery path (which calls it from execute before
+   * scheduling) can both run without ever duplicating a record.
    */
-  private persistApprovedPlanDecisions(objective: ObjectiveRecord, plan: RunPlan, runId: string): void {
-    for (const decision of plan.decisions ?? []) {
-      this.ledger.createDecisionRecord({
-        subject: decision.subject,
-        question: decision.question,
-        options: decision.optionsConsidered,
-        decidingConstraint: decision.decidingConstraint,
-        // DH-647 S2 design call: the plan schema carries no separate
-        // 'evidence' field (the brief lists subject/question/optionsConsidered/
-        // decidingConstraint/acceptedCost only) — createDecisionRecord requires
-        // one, so the run that produced the decision IS the evidence pointer.
-        evidence: `Recorded from the approved architect plan for run ${runId} (plan summary: ${plan.summary}).`,
-        acceptedCost: decision.acceptedCost,
-        scope: objective.productId ? "product" : "run",
-        productId: objective.productId ?? null,
-        runId,
-        source: "architect",
-      });
-    }
+  private persistPlanDecisions(input: {
+    runId: string;
+    objectiveId: string | null;
+    planRevision: number;
+    productId: string | null;
+    plan: RunPlan;
+  }): void {
+    if (!input.plan.decisions?.length) return;
+    this.ledger.persistApprovedPlanDecisions({
+      runId: input.runId,
+      objectiveId: input.objectiveId,
+      planRevision: input.planRevision,
+      productId: input.productId,
+      scope: input.productId ? "product" : "run",
+      planSummary: input.plan.summary,
+      decisions: input.plan.decisions,
+    });
   }
 
   async run(request: RunRequest): Promise<string> {
@@ -729,6 +746,22 @@ export class Orchestrator {
       });
       if (signal.aborted) return;
     }
+
+    // DH-647 M1. The approval boundary the ordinary begin()/requirePlanApproval
+    // path and every recovery run pass through: the plan is now approved for
+    // execution (whether by an exact objective revision, an owner approval, or
+    // an autonomy that needs none), and its architect decisions become durable
+    // records BEFORE any task is scheduled. Idempotent by provenance triple, so
+    // the objective path (which already persisted these before launch) is
+    // skipped here, and a recovery run that re-planned the same objective
+    // revision never duplicates the original's records.
+    this.persistPlanDecisions({
+      runId,
+      objectiveId: request.objectiveLink?.objectiveId ?? null,
+      planRevision: request.objectiveLink?.approvedPlanRevision ?? plan.revision ?? 1,
+      productId: approvedObjective?.productId ?? null,
+      plan,
+    });
 
     const requestedAgents = request.agents ??
       (config.application.concurrency.mode === "auto" ? "auto" : config.application.concurrency.agents);
@@ -2550,7 +2583,15 @@ export class Orchestrator {
   private priorDecisionMatches(objective: Pick<ObjectiveRecord, "outcome" | "productId">, cap = DECISION_CONTEXT_CAP): { records: DecisionRecord[]; totalMatched: number } {
     const matches = this.ledger
       .searchDecisionRecords(objective.outcome)
-      .filter((record) => (objective.productId ? record.productId === objective.productId : false) || record.scope === "machine");
+      // DH-647 M6. Only PRODUCT-scoped records of this objective's product,
+      // plus MACHINE-scoped records, feed planning context. A run-scoped
+      // record never leaks into another run's planning context even when it
+      // happens to carry a product id — a decision that "only mattered for the
+      // run that made it" must not silently become a standing constraint on
+      // every future objective for that product.
+      .filter((record) =>
+        (objective.productId ? record.scope === "product" && record.productId === objective.productId : false)
+        || record.scope === "machine");
     return { records: matches.slice(0, cap), totalMatched: matches.length };
   }
 

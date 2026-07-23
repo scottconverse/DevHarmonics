@@ -2481,6 +2481,24 @@ test("objective planning context injects prior decisions scoped to the objective
       scope: "machine",
       source: "owner",
     });
+    // DH-647 M6. A RUN-scoped record that happens to carry THIS product's id
+    // must NOT leak into another run's planning context — "only mattered for
+    // the run that made it" cannot silently become a standing product
+    // constraint. It matches the search by subject, so only the scope filter
+    // keeps it out.
+    const leakRunId = seedLedger.createRun("A prior run that made a run-local call", project);
+    const runScopedWithProduct = seedLedger.createDecisionRecord({
+      subject: "container runtime",
+      question: "RUN-SCOPED-LEAK-CANARY: which runtime did that one run use?",
+      options: [{ option: "gVisor", disposition: "selected", reason: null }],
+      decidingConstraint: "A one-off call for a single run only",
+      evidence: "Run-local fixture",
+      acceptedCost: "N/A",
+      scope: "run",
+      productId: "decisions-product",
+      runId: leakRunId,
+      source: "owner",
+    });
 
     const secondObjective = await fetch(`${dashboard.url}/api/objectives`, {
       method: "POST",
@@ -2497,6 +2515,7 @@ test("objective planning context injects prior decisions scoped to the objective
     const matchedIds = secondBody.preview.priorDecisions.records.map((record) => record.id).sort();
     assert.deepEqual(matchedIds, [machineScoped.id, productScoped.id].sort(), "exactly the product-scoped and machine-scoped matches, no others");
     assert.equal(secondBody.preview.priorDecisions.totalMatched, 2);
+    assert.ok(!matchedIds.includes(runScopedWithProduct.id), "a run-scoped record carrying this product's id must not be retrieved into planning context");
 
     const secondPrompt = await readFile(captured, "utf8");
     assert.match(secondPrompt, /PRIOR DECISIONS/);
@@ -2505,6 +2524,7 @@ test("objective planning context injects prior decisions scoped to the objective
     assert.match(secondPrompt, /Subject: editor choice/, "the machine-scoped record must also be injected");
     assert.doesNotMatch(secondPrompt, /containerd/, "a different product's decision record must not leak into this objective's context");
     assert.doesNotMatch(secondPrompt, /logging pipeline/, "a non-matching machine-scoped record must not be injected just because it is machine-scoped");
+    assert.doesNotMatch(secondPrompt, /RUN-SCOPED-LEAK-CANARY/, "a run-scoped record must never leak into another run's planning context");
   } finally {
     seedLedger.close();
     delete process.env.DH_CAPTURE_ARCHITECT_PROMPT;
@@ -2650,6 +2670,145 @@ test("plan decisions[] are persisted as durable DecisionRecords only on approval
     const rejected = record.options.find((option) => option.disposition === "rejected");
     assert.equal(rejected?.option, "Docker Desktop");
     assert.equal(rejected?.reason, "Requires a paid license at this org's seat count");
+
+    const getRun = () => fetch(`${dashboard.url}/api/runs/${runId}`).then((response) => response.json() as Promise<{ status: string }>);
+    await poll(getRun, (value) => ["ready", "not_ready", "failed"].includes(value.status), 30_000);
+  } finally {
+    seedLedger.close();
+    await dashboard.close();
+    if (runId) {
+      const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
+      for (const worktree of [path.join(runRoot, "tasks", "one"), path.join(runRoot, "integration")]) {
+        await runProcess({ command: "git", args: ["worktree", "remove", "--force", worktree], cwd: project, timeoutMs: 30_000 });
+      }
+      await rm(runRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    }
+    await rm(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+  }
+});
+
+// DH-647 M1. The ordinary begin()/requirePlanApproval path — not just the
+// objective path — persists an approved plan's architect decisions. Before
+// this fix, decisions on an ordinary run's plan were silently dropped.
+test("M1: an ordinary approved run persists its architect plan decisions on approval", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-ordinary-decision-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  config.runPolicy.requirePlanApproval = true;
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  const seedLedger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  let runId = "";
+  try {
+    const started = await fetch(`${dashboard.url}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ goal: "Decision fixture: create the exact approved result", projectPath: project, agents: 1 }),
+    });
+    assert.equal(started.status, 202, await started.clone().text());
+    runId = ((await started.json()) as { runId: string }).runId;
+
+    const getRun = () => fetch(`${dashboard.url}/api/runs/${runId}`).then((response) => response.json() as Promise<{ status: string }>);
+    await poll(getRun, (value) => value.status === "awaiting_approval", 30_000);
+
+    // Before approval, nothing is persisted (the plan preview boundary holds
+    // for ordinary runs too).
+    assert.deepEqual(seedLedger.listDecisionRecords({ scope: "run" }), [], "an unapproved ordinary plan persists no decision");
+
+    const approved = await fetch(`${dashboard.url}/api/runs/${runId}/approve`, { method: "POST", headers: { "content-type": "application/json" } });
+    assert.equal(approved.status, 200, await approved.clone().text());
+
+    // Approval is the write boundary for the ordinary path as well.
+    const persisted = await poll(
+      async () => seedLedger.listDecisionRecords({ scope: "run" }),
+      (records) => records.length === 1,
+      30_000,
+    );
+    const record = persisted[0]!;
+    assert.equal(record.subject, "container runtime");
+    assert.equal(record.source, "architect", "an ordinary run's plan decision is recorded as an architect decision");
+    assert.equal(record.runId, runId, "the decision links to the run that produced it");
+
+    await poll(getRun, (value) => ["ready", "not_ready", "failed"].includes(value.status), 30_000);
+  } finally {
+    seedLedger.close();
+    await dashboard.close();
+    if (runId) {
+      const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
+      for (const worktree of [path.join(runRoot, "tasks", "one"), path.join(runRoot, "integration")]) {
+        await runProcess({ command: "git", args: ["worktree", "remove", "--force", worktree], cwd: project, timeoutMs: 30_000 });
+      }
+      await rm(runRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    }
+    await rm(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+  }
+});
+
+// DH-647 M3. A repeated start for an already-started objective plan revision
+// returns the existing run and never launches a second one or duplicates the
+// architect's decisions (idempotent by provenance triple).
+test("M3: a duplicate objective start returns the existing run and persists decisions exactly once", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-duplicate-start-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  const seedLedger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  let runId = "";
+  try {
+    const objectiveResponse = await fetch(`${dashboard.url}/api/objectives`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        outcome: "Decision fixture: create the exact approved result",
+        acceptanceCriteria: ["Create result.txt"],
+        constraints: [],
+        projectPath: project,
+        repositoryIds: [],
+        risk: "medium",
+        autonomy: "supervised",
+        priority: "normal",
+        policyNotes: [],
+      }),
+    }).then((response) => response.json() as Promise<{ objective: { id: string } }>);
+
+    await fetch(`${dashboard.url}/api/objectives/${objectiveResponse.objective.id}/plans`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabledProviders: ["codex", "claude", "gemini"] }),
+    }).then((response) => response.clone().text());
+
+    const startBody = JSON.stringify({ agents: 1, enabledProviders: ["codex", "claude", "gemini"] });
+    const first = await fetch(`${dashboard.url}/api/objectives/${objectiveResponse.objective.id}/plans/1/start`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: startBody,
+    });
+    assert.equal(first.status, 202, await first.clone().text());
+    runId = ((await first.json()) as { runId: string }).runId;
+
+    const second = await fetch(`${dashboard.url}/api/objectives/${objectiveResponse.objective.id}/plans/1/start`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: startBody,
+    });
+    assert.equal(second.status, 202, await second.clone().text());
+    const secondRunId = ((await second.json()) as { runId: string }).runId;
+
+    assert.equal(secondRunId, runId, "a repeated start returns the existing run rather than launching a second");
+    const runs = await fetch(`${dashboard.url}/api/runs`).then((response) => response.json() as Promise<{ runs: Array<{ id: string }> }>);
+    assert.equal(runs.runs.filter((run) => run.id === runId).length, 1, "exactly one run exists for the approved plan revision");
+    assert.equal(seedLedger.listDecisionRecords({ scope: "run" }).length, 1, "the architect decision is persisted exactly once despite two starts");
 
     const getRun = () => fetch(`${dashboard.url}/api/runs/${runId}`).then((response) => response.json() as Promise<{ status: string }>);
     await poll(getRun, (value) => ["ready", "not_ready", "failed"].includes(value.status), 30_000);

@@ -140,6 +140,8 @@ For a `READY` run: push the exact reviewed SHA, open a draft pull request, merge
 
 An **Inbox** view collects every plan approval, delivery approval, and paused run waiting on you across every run in one list — the same approvals as inside each run, never a second gate — alongside a **Program status** panel showing every run's state at a glance.
 
+Durable **decision records** capture what a run considered, what it rejected and why, and what it accepted the cost of — append-only, superseded rather than edited when the constraint that decided one no longer holds, surfaced to the architect and to you before a plan with a matching or uncompared consequential choice is approved, and carried into that run's evidence export.
+
 ---
 
 ## The part most orchestrators skip: verifying the verification
@@ -396,8 +398,8 @@ What that judgement rests on, in both directions:
 
 | Signal | Reading |
 |---|---|
-| Automated suite | 296 tests across configuration, credential stripping, provider parsing, plan validation, cancellation, SQLite receipts, local-model qualification and chunked review, review-lens quorums and the claims/diff divergence gate, workflow parsing/provenance/promotion guards, cockpit delivery gates, workspace-isolation guards, the inbox/program-status projections, delivered-vs-observed reconciliation, the standalone status export, the dashboard server, and full fake-provider orchestration through real Git worktrees |
-| Schema handling | Ordered transactional migrations to ledger schema 35, automatic pre-upgrade backups, integrity + foreign-key validation, rollback on failure, and refusal to open a newer schema |
+| Automated suite | 339 tests across configuration, credential stripping, provider parsing, plan validation, cancellation, SQLite receipts, local-model qualification and chunked review, review-lens quorums and the claims/diff divergence gate, workflow parsing/provenance/promotion guards, cockpit delivery gates, workspace-isolation guards, the inbox/program-status projections, delivered-vs-observed reconciliation, the standalone status export, decision records and their retrieval, the dashboard server, and full fake-provider orchestration through real Git worktrees |
+| Schema handling | Ordered transactional migrations to ledger schema 37, automatic pre-upgrade backups, integrity + foreign-key validation, rollback on failure, and refusal to open a newer schema |
 | Continuous integration | **None in this repository.** The merge gate is the local suite plus independent review — nothing automated catches a regression on push |
 | Distribution | Source checkout only. No installer, no published package |
 | Operational tooling | Temporary worktrees are retained for inspection until explicit cleanup is added; an interrupted integration set is not reconstructed after restart |

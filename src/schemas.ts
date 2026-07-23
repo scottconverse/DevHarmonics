@@ -158,16 +158,49 @@ const decisionRecordFieldsSchema = z.object({
   runId: z.string().trim().min(1).max(200).nullable().default(null),
 });
 
-export const decisionRecordCreateSchema = decisionRecordFieldsSchema.superRefine((decision, context) => {
-  const selected = decision.options.filter((option) => option.disposition === "selected");
+// DH-647 M6. Cross-validate scope against its association, so a malformed
+// scope is refused with a 400 naming the field before the ledger ever sees it
+// (the ledger re-checks this same contract as defense in depth). A product
+// decision must name a product, a run decision must name a run, and a machine
+// decision — a standing choice for the box, independent of any product or run
+// — must name neither. This is the schema half of the same rule
+// Ledger.createDecisionRecord enforces.
+function refineDecisionScopeAssociation(
+  decision: { scope: "run" | "product" | "machine"; productId: string | null; runId: string | null },
+  context: z.RefinementCtx,
+): void {
+  if (decision.scope === "product" && !decision.productId) {
+    context.addIssue({ code: "custom", path: ["productId"], message: "A product-scoped decision must name the product it applies to" });
+  }
+  if (decision.scope === "run" && !decision.runId) {
+    context.addIssue({ code: "custom", path: ["runId"], message: "A run-scoped decision must name the run it applies to" });
+  }
+  if (decision.scope === "machine" && decision.productId) {
+    context.addIssue({ code: "custom", path: ["productId"], message: "A machine-scoped decision is independent of any product and must not name one" });
+  }
+  if (decision.scope === "machine" && decision.runId) {
+    context.addIssue({ code: "custom", path: ["runId"], message: "A machine-scoped decision is independent of any run and must not name one" });
+  }
+}
+
+function refineDecisionOptions(
+  options: Array<{ option: string; disposition: "selected" | "rejected"; reason: string | null }>,
+  context: z.RefinementCtx,
+): void {
+  const selected = options.filter((option) => option.disposition === "selected");
   if (selected.length !== 1) {
     context.addIssue({ code: "custom", path: ["options"], message: `A decision record must select exactly one option (found ${selected.length})` });
   }
-  for (const [index, option] of decision.options.entries()) {
+  for (const [index, option] of options.entries()) {
     if (option.disposition === "rejected" && !option.reason) {
       context.addIssue({ code: "custom", path: ["options", index, "reason"], message: `Rejected option '${option.option}' requires a reason` });
     }
   }
+}
+
+export const decisionRecordCreateSchema = decisionRecordFieldsSchema.superRefine((decision, context) => {
+  refineDecisionOptions(decision.options, context);
+  refineDecisionScopeAssociation(decision, context);
 });
 
 // The supersede route's schema is the same fields plus a required
@@ -178,15 +211,8 @@ export const decisionRecordCreateSchema = decisionRecordFieldsSchema.superRefine
 export const decisionRecordSupersedeSchema = decisionRecordFieldsSchema
   .extend({ whatChanged: z.string().trim().min(1).max(2_000) })
   .superRefine((decision, context) => {
-    const selected = decision.options.filter((option) => option.disposition === "selected");
-    if (selected.length !== 1) {
-      context.addIssue({ code: "custom", path: ["options"], message: `A decision record must select exactly one option (found ${selected.length})` });
-    }
-    for (const [index, option] of decision.options.entries()) {
-      if (option.disposition === "rejected" && !option.reason) {
-        context.addIssue({ code: "custom", path: ["options", index, "reason"], message: `Rejected option '${option.option}' requires a reason` });
-      }
-    }
+    refineDecisionOptions(decision.options, context);
+    refineDecisionScopeAssociation(decision, context);
   });
 
 export const objectiveInputSchema = z.object({

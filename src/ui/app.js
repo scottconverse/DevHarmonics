@@ -229,8 +229,18 @@ function consequentialChoiceFlagHtml(task, decisions) {
   if (!task.consequentialChoice) return "";
   const matched = (decisions || []).find((decision) => subjectsOverlap(decision.subject, task.consequentialChoice));
   if (matched) {
-    const selected = (matched.optionsConsidered || []).find((option) => option.disposition === "selected");
-    const rejectedCount = (matched.optionsConsidered || []).filter((option) => option.disposition === "rejected").length;
+    const options = matched.optionsConsidered || [];
+    const rejectedCount = options.filter((option) => option.disposition === "rejected").length;
+    // M7 gate finding: a single-option plan decision (zero rejected
+    // alternatives) is legal data — the schema allows it — but it is never
+    // a comparison. Render it with the SAME uncompared styling/wording
+    // family as a task with no matching decision at all, so the honest
+    // uncompared-consequential-choice warning cannot be defeated by
+    // recording exactly one option.
+    if (rejectedCount === 0) {
+      return `<p class="consequential-choice uncompared">One option was recorded but no alternatives were weighed — ask for the comparison if it matters.</p>`;
+    }
+    const selected = options.find((option) => option.disposition === "selected");
     return `<p class="consequential-choice compared">Compared choice — "${escapeHtml(task.consequentialChoice)}": selected ${escapeHtml(selected ? selected.option : "unknown")} (${rejectedCount} rejected).</p>`;
   }
   return `<p class="consequential-choice uncompared">This choice was proposed without recorded alternatives — ask for the comparison before approving if it matters.</p>`;
@@ -342,10 +352,15 @@ function renderReconciliationHtml(result) {
 function renderDecisionOptionsHtml(options) {
   const selected = (options || []).find((option) => option.disposition === "selected");
   const rejected = (options || []).filter((option) => option.disposition === "rejected");
+  // minor-1 gate finding: the selected option's own reason is a real,
+  // form-accepted field (the "Podman | selected | Rootless by default"
+  // placeholder in src/ui/index.html) that previously never rendered
+  // anywhere. Render it whenever non-null, escaped like every other field.
+  const selectedReasonMarkup = selected && selected.reason ? ` — ${escapeHtml(selected.reason)}` : "";
   const rejectedMarkup = rejected.length
     ? `<ul class="decision-rejected">${rejected.map((option) => `<li><strong>${escapeHtml(option.option)}</strong> — ${escapeHtml(option.reason || "no reason recorded")}</li>`).join("")}</ul>`
     : '<p class="muted">No options were rejected.</p>';
-  return `<span>Selected: ${escapeHtml(selected ? selected.option : "unknown")}</span>${rejectedMarkup}`;
+  return `<span>Selected: ${escapeHtml(selected ? selected.option : "unknown")}${selectedReasonMarkup}</span>${rejectedMarkup}`;
 }
 
 // Renders the whole supersession trail oldest-first as one history (locked
@@ -380,10 +395,28 @@ function renderDecisionCardHtml(record, chain) {
     <div class="decision-head"><div><span class="connection-kind">Decision${isSuperseded ? ' <span class="decision-superseded-label">Superseded</span>' : ""}</span><h3>${subject}</h3><p>${question}</p></div><div class="decision-actions">${supersedeButton}${historyButton}</div></div>
     ${renderDecisionOptionsHtml(record.options)}
     <span>Deciding constraint: ${escapeHtml(record.decidingConstraint || "")}</span>
+    <span>Evidence: ${escapeHtml(record.evidence || "")}</span>
     <span>Accepted cost: ${escapeHtml(record.acceptedCost || "")}</span>
     <span class="muted">Scope: ${scope} · ${source} · ${date}</span>
     ${renderDecisionChainHtml(chain, record.id)}
   </article>`;
+}
+
+// minor-1 gate finding. The pure line-formatting seam prefillDecisionFormForSupersede
+// uses to build the "Options considered" textarea value for a superseded
+// record: the grammar it writes ("Name | selected" / "Name | rejected |
+// reason") is exactly what decisionOptionsFrom below parses back out, and
+// that grammar has always accepted a reason on a selected option too (see
+// the "Podman | selected | Rootless by default" placeholder in
+// src/ui/index.html) — the prefill previously always wrote a bare "Name |
+// selected" line, silently discarding the selected option's own recorded
+// reason on every supersede. Extracted as a pure, state-free function so the
+// exact line-building logic is regression-tested directly.
+function decisionOptionPrefillLine(option) {
+  if (option.disposition === "rejected") {
+    return `${option.option} | rejected | ${option.reason || ""}`;
+  }
+  return option.reason ? `${option.option} | selected | ${option.reason}` : `${option.option} | selected`;
 }
 
 // DH-632 visible operation feedback: one shared acknowledgement/lifecycle layer for
@@ -793,7 +826,7 @@ function prefillDecisionFormForSupersede(record) {
   $("#decision-subject").value = record.subject;
   $("#decision-question").value = record.question;
   $("#decision-options").value = (record.options || [])
-    .map((option) => option.disposition === "rejected" ? `${option.option} | rejected | ${option.reason || ""}` : `${option.option} | selected`)
+    .map(decisionOptionPrefillLine)
     .join("\n");
   $("#decision-constraint").value = record.decidingConstraint;
   $("#decision-evidence").value = record.evidence;
@@ -2393,6 +2426,17 @@ $("#decision-form").addEventListener("submit", async (event) => {
   const form = event.currentTarget;
   $("#decision-form-error").textContent = "";
   const supersedes = $("#decision-supersedes").value.trim();
+  // DH-647 M6. This owner form offers only product and machine scope — there
+  // is no run context here, so "This run only" was removed. A product-scoped
+  // decision must name a product (the server enforces the same rule); a
+  // machine-scoped decision must name none.
+  const scope = $("#decision-scope").value;
+  const productId = $("#decision-product").value || null;
+  if (scope === "product" && !productId) {
+    $("#decision-form-error").textContent = "Choose a product for a product-scoped decision, or set the scope to This machine.";
+    $("#decision-product").focus();
+    return;
+  }
   await withOperation(form.querySelector('button[type="submit"]'), supersedes ? "Recording the superseding decision" : "Recording the decision", async () => {
     const body = {
       subject: $("#decision-subject").value.trim(),
@@ -2401,8 +2445,8 @@ $("#decision-form").addEventListener("submit", async (event) => {
       decidingConstraint: $("#decision-constraint").value.trim(),
       evidence: $("#decision-evidence").value.trim(),
       acceptedCost: $("#decision-cost").value.trim(),
-      scope: $("#decision-scope").value,
-      productId: $("#decision-product").value || null,
+      scope,
+      productId: scope === "machine" ? null : productId,
     };
     const url = supersedes ? `/api/decisions/${encodeURIComponent(supersedes)}/supersede` : "/api/decisions";
     if (supersedes) body.whatChanged = $("#decision-what-changed").value.trim();

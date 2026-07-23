@@ -2,6 +2,46 @@ import { z } from "zod";
 
 const providerSchema = z.enum(["codex", "claude", "gemini"]);
 
+// DH-647 S2. Same shape and validation rules as S1's createDecisionRecord
+// (Ledger.createDecisionRecord in src/ledger.ts): exactly one selected
+// option, and every rejected option requires a reason. A plan decision is
+// not yet a durable DecisionRecord — it becomes one only on plan approval —
+// but it must satisfy the same honesty rules before it can be shown to the
+// owner as a comparison at all.
+const planDecisionSchema = z
+  .object({
+    subject: z.string().trim().min(1).max(300),
+    question: z.string().trim().min(1).max(2_000),
+    optionsConsidered: z
+      .array(
+        z.object({
+          option: z.string().trim().min(1).max(300),
+          disposition: z.enum(["selected", "rejected"]),
+          reason: z.string().trim().min(1).max(2_000).nullable().default(null),
+        }),
+      )
+      .min(1),
+    decidingConstraint: z.string().trim().min(1).max(2_000),
+    acceptedCost: z.string().trim().min(1).max(2_000),
+  })
+  .superRefine((decision, context) => {
+    const selected = decision.optionsConsidered.filter((option) => option.disposition === "selected");
+    if (selected.length !== 1) {
+      context.addIssue({
+        code: "custom",
+        message: `Decision '${decision.subject}' must select exactly one option (found ${selected.length})`,
+      });
+    }
+    for (const option of decision.optionsConsidered) {
+      if (option.disposition === "rejected" && !option.reason) {
+        context.addIssue({
+          code: "custom",
+          message: `Decision '${decision.subject}' rejected option '${option.option}' requires a reason`,
+        });
+      }
+    }
+  });
+
 export const runPlanSchema = z
   .object({
     summary: z.string().min(1),
@@ -25,6 +65,10 @@ export const runPlanSchema = z
           capabilityNeeds: z.array(z.string().min(1)).default(["code"]),
           acceptanceCriteria: z.array(z.string().min(1)).default([]),
           expectedArtifacts: z.array(z.string().min(1)).default([]),
+          // DH-647 S2: null (not omitted) when this task is not a consequential
+          // choice, matching the nullable-not-omitted convention preferredProvider
+          // already uses on this same object.
+          consequentialChoice: z.string().trim().min(1).max(300).nullable().default(null),
         }),
       )
       .min(1),
@@ -34,6 +78,9 @@ export const runPlanSchema = z
       rationale: z.string().trim().min(1).max(2_000),
     })).max(500).optional(),
     integrationConditions: z.array(z.string().trim().min(1).max(2_000)).max(200).default([]),
+    // DH-647 S2: optional, defaults to an empty array — an architect that names
+    // no consequential choices for this plan writes no scaffolding.
+    decisions: z.array(planDecisionSchema).max(200).default([]),
   })
   .superRefine((plan, context) => {
     const ids = new Set(plan.tasks.map((task) => task.id));

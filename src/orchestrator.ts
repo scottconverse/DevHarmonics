@@ -21,6 +21,7 @@ import {
   formatFailures,
   localReviewerContextHeader,
   objectivePromptText,
+  priorDecisionsPromptSection,
   reviewerPrompt,
   workbenchConsultationPrompt,
   workerPrompt,
@@ -30,6 +31,7 @@ import { describeUnverifiableCitations, verifyReportCitations } from "./citation
 import {
   PROVIDERS,
   type CheckResult,
+  type DecisionRecord,
   type PlannedTask,
   type ProviderName,
   type DevHarmonicsConfig,
@@ -71,6 +73,12 @@ export interface WorkbenchConsultationResult {
   costUsd: number | null;
   paidSpendReservationId: string | null;
 }
+
+// DH-647 S2. Injected into the architect's planning context AND surfaced in
+// the plan-approval preview as "Prior decisions on this subject" — capped so
+// a subject with a long history does not drown the prompt; the header names
+// the cap when more matched than were included (see priorDecisionsPromptSection).
+const DECISION_CONTEXT_CAP = 8;
 
 export class Orchestrator {
   private readonly backgroundRuns = new Map<string, Promise<void>>();
@@ -159,6 +167,9 @@ export class Orchestrator {
       capacity: ReturnType<CapacityBroker["decide"]>;
       assignments: Array<{ taskId: string; provider: string; modelId: string | null; tier: string; factors: string[] }>;
       execution: { supported: boolean; reason: string };
+      // DH-647 S2: the exact retrieval injected into the architect's planning
+      // context, reused for the "Prior decisions on this subject" preview list.
+      priorDecisions: { records: DecisionRecord[]; totalMatched: number };
     };
   }> {
     const projectPath = path.resolve(input.objective.projectPath);
@@ -219,6 +230,12 @@ export class Orchestrator {
       ? (this.ledger.getProduct(input.objective.productId!)?.repositories ?? []).filter((repository) => repositoryContext.requiredImpactIds.includes(repository.id))
       : [];
     const architectValidators = architectValidatorNames(config.repository.validators, impactedRepositories);
+    // DH-647 S2: computed once per proposal (not per architect candidate) so
+    // every retry sees the exact same retrieval, and the same object feeds
+    // both the injected prompt section and the preview's "Prior decisions on
+    // this subject" list below — the owner sees exactly what the architect saw.
+    const priorDecisions = this.priorDecisionMatches(input.objective);
+    const priorDecisionsContext = priorDecisionsPromptSection(priorDecisions.records, priorDecisions.totalMatched);
     let plan: RunPlan | null = null;
     let lastArchitectError: Error | null = null;
     for (let candidateIndex = 0; candidateIndex < architectCandidates.length; candidateIndex++) {
@@ -244,6 +261,7 @@ export class Orchestrator {
             selectedRepositoryIds: input.objective.repositoryIds,
             previousPlan: input.previous?.plan ?? null,
             ...(input.revisionFeedback ? { revisionFeedback: input.revisionFeedback } : {}),
+            ...(priorDecisionsContext ? { priorDecisionsContext } : {}),
           }),
           cwd: projectPath,
           permission: "read_only",
@@ -291,7 +309,7 @@ export class Orchestrator {
       userCeiling: config.application.concurrency.ceiling,
       resources: await observeLocalResources(),
     });
-    return { plan, preview: { capacity, assignments, execution: this.objectiveExecutionReadiness(input.objective, plan) } };
+    return { plan, preview: { capacity, assignments, execution: this.objectiveExecutionReadiness(input.objective, plan), priorDecisions } };
   }
 
   objectiveExecutionReadiness(objective: ObjectiveRecord, plan: RunPlan): { supported: boolean; reason: string } {
@@ -467,7 +485,7 @@ export class Orchestrator {
     }
     const readiness = this.objectiveExecutionReadiness(input.objective, input.revision.plan);
     if (!readiness.supported) throw new Error(readiness.reason);
-    return this.begin({
+    const runId = this.begin({
       goal: objectivePromptText(input.objective),
       projectPath: input.objective.projectPath,
       autonomy: input.objective.autonomy,
@@ -477,6 +495,45 @@ export class Orchestrator {
       objectiveLink: { objectiveId: input.objective.id, approvedPlanRevision: input.revision.revision },
       ...(input.objective.workflowRevisionHash ? { workflowRevisionHash: input.objective.workflowRevisionHash } : {}),
     });
+    // DH-647 S2: approval is the write boundary. A plan preview that is
+    // never approved (proposeObjectivePlan alone) persists nothing; only
+    // reaching HERE — after approvePlanRevision and the readiness check above
+    // — turns the architect's proposed decisions[] into durable
+    // DecisionRecords. Runs synchronously before this method returns, so the
+    // records exist before the caller ever sees the new runId.
+    this.persistApprovedPlanDecisions(input.objective, input.revision.plan, runId);
+    return runId;
+  }
+
+  /**
+   * DH-647 S2. Turns each plan decision the architect proposed into a durable
+   * DecisionRecord via S1's createDecisionRecord (append-only, source
+   * 'architect'). Scope follows the objective: 'product' when the objective
+   * links a product, else 'run' — a decision made for a one-off, product-less
+   * objective has no product to outlive. The plan schema (planDecisionSchema)
+   * enforces exactly-one-selected-option and a reason on every rejection
+   * before this ever runs, so createDecisionRecord's own validation is a
+   * second, cheap confirmation rather than the primary gate.
+   */
+  private persistApprovedPlanDecisions(objective: ObjectiveRecord, plan: RunPlan, runId: string): void {
+    for (const decision of plan.decisions ?? []) {
+      this.ledger.createDecisionRecord({
+        subject: decision.subject,
+        question: decision.question,
+        options: decision.optionsConsidered,
+        decidingConstraint: decision.decidingConstraint,
+        // DH-647 S2 design call: the plan schema carries no separate
+        // 'evidence' field (the brief lists subject/question/optionsConsidered/
+        // decidingConstraint/acceptedCost only) — createDecisionRecord requires
+        // one, so the run that produced the decision IS the evidence pointer.
+        evidence: `Recorded from the approved architect plan for run ${runId} (plan summary: ${plan.summary}).`,
+        acceptedCost: decision.acceptedCost,
+        scope: objective.productId ? "product" : "run",
+        productId: objective.productId ?? null,
+        runId,
+        source: "architect",
+      });
+    }
   }
 
   async run(request: RunRequest): Promise<string> {
@@ -2472,6 +2529,29 @@ export class Orchestrator {
       (name, index, values) =>
         values.indexOf(name) === index && config.connections[name].enabled && (!allowed || allowed.has(name)),
     );
+  }
+
+  /**
+   * DH-647 S2. Retrieval for planning-context injection AND the plan-approval
+   * preview's "Prior decisions on this subject" list — the SAME retrieval
+   * feeds both, so the owner sees exactly what the architect saw. Query is
+   * the objective's own goal text (token overlap, S1's deterministic
+   * keyword match — no embeddings, no network). Scope: records tied to the
+   * objective's product (any scope — run-scoped records can still name a
+   * product, since a decision outlives the run that produced it) PLUS
+   * machine-scoped records regardless of product, since a machine-scoped
+   * decision (e.g. which container runtime this box uses) is relevant to
+   * every product planned on it. With no product on the objective, only
+   * machine-scoped matches qualify — there is no product to scope to.
+   * Ranking (subject hits before question hits, ties newest-first) comes
+   * from Ledger.searchDecisionRecords and is preserved through the filter;
+   * the cap keeps only the top N of that order.
+   */
+  private priorDecisionMatches(objective: Pick<ObjectiveRecord, "outcome" | "productId">, cap = DECISION_CONTEXT_CAP): { records: DecisionRecord[]; totalMatched: number } {
+    const matches = this.ledger
+      .searchDecisionRecords(objective.outcome)
+      .filter((record) => (objective.productId ? record.productId === objective.productId : false) || record.scope === "machine");
+    return { records: matches.slice(0, cap), totalMatched: matches.length };
   }
 
   private objectiveRepositoryContext(objective: ObjectiveRecord): { text: string; requiredImpactIds: string[] } | null {

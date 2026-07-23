@@ -92,7 +92,58 @@ if (process.argv.includes("--version")) {
           {id:"docs",title:"Document the product change",description:"Update the documentation repository",dependencies:["core"],preferredProvider:"codex",checks:["diff-check"],repositoryIds:["repo:docs"]}
         ]
       }
-    : {summary:"fixture plan",recommendedConcurrency:1,tasks:[task]};
+    // DH-647 S2 fixtures. "Decision context fixture" is for a PRODUCT-linked
+    // objective (repo:decisions is a real repository selection, so the plan
+    // must declare repositoryImpact/task.repositoryIds for it, same
+    // obligation as any other product-linked plan) — used only to exercise
+    // planning-context retrieval scoping, no decisions[] of its own.
+    // "Decision fixture" returns a schema-valid plan carrying decisions[]
+    // plus a matching per-task consequentialChoice, for a product-less
+    // objective, so the approval-persists / preview-does-not-persist
+    // boundary is testable end-to-end without repository-impact plumbing.
+    // "Invalid decision fixture" violates S1's own rules (a rejected option
+    // with no reason) so plan-schema refusal is testable through the real
+    // HTTP route, not just the schema in isolation.
+    : input.includes("Decision context fixture")
+      ? {
+          summary:"decision context fixture plan",
+          recommendedConcurrency:1,
+          repositoryImpact:[{repositoryId:"repo:decisions",disposition:"affected",rationale:"The selected repository is where this objective's work happens."}],
+          tasks:[{id:"one",title:"Create local result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"],repositoryIds:["repo:decisions"]}]
+        }
+      : input.includes("Decision fixture")
+      ? {
+          summary:"decision fixture plan",
+          recommendedConcurrency:1,
+          decisions:[{
+            subject:"container runtime",
+            question:"Which container runtime should this box use?",
+            optionsConsidered:[
+              {option:"Podman",disposition:"selected"},
+              {option:"Docker Desktop",disposition:"rejected",reason:"Requires a paid license at this org's seat count"}
+            ],
+            decidingConstraint:"No paid licensing budget for container tooling",
+            acceptedCost:"Some Docker-only tutorials do not apply directly"
+          }],
+          tasks:[{id:"one",title:"Create local result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"],consequentialChoice:"container runtime"}]
+        }
+      : input.includes("Invalid decision fixture")
+        ? {
+            summary:"invalid decision fixture plan",
+            recommendedConcurrency:1,
+            decisions:[{
+              subject:"container runtime",
+              question:"Which container runtime should this box use?",
+              optionsConsidered:[
+                {option:"Podman",disposition:"selected"},
+                {option:"Docker Desktop",disposition:"rejected"}
+              ],
+              decidingConstraint:"No paid licensing budget for container tooling",
+              acceptedCost:"Some Docker-only tutorials do not apply directly"
+            }],
+            tasks:[{id:"one",title:"Create local result",description:"Create result.txt",dependencies:[],preferredProvider:"codex",checks:["diff-check"]}]
+          }
+        : {summary:"fixture plan",recommendedConcurrency:1,tasks:[task]};
   console.log(JSON.stringify({result:JSON.stringify(plan)}));
 } else if (input.includes("You are the claims-lens reviewer")) {
   const manifest = JSON.stringify({findings:[],claimedChanges:[{path:"result.txt",kind:"created",taskId:"one"}]});
@@ -2300,6 +2351,371 @@ test("objective preview creates no run and exact approved revision executes with
       await rm(runRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
     await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("objective planning context injects prior decisions scoped to the objective's product plus machine-scoped records, excludes other products and non-matches, and injects nothing when nothing matched", async () => {
+  // DH-647 S2. Same light seeded-ledger-over-HTTP harness as the DH-645
+  // status-export tests: startDashboard first, then a SECOND Ledger
+  // connection to the same db file to seed decision records directly —
+  // exercising the real retrieval (Ledger.searchDecisionRecords) the way S1
+  // actually wrote it, not a test double.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-decision-context-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+  const captured = path.join(root, "architect-prompt.txt");
+  process.env.DH_CAPTURE_ARCHITECT_PROMPT = captured;
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  const seedLedger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  try {
+    seedLedger.upsertProduct({
+      id: "decisions-product",
+      name: "Decisions product",
+      organizationUrl: "https://github.com/decisions-product",
+      description: "",
+      repositories: [{
+        id: "repo:decisions",
+        name: "core",
+        fullName: "decisions-product/core",
+        url: "https://github.com/decisions-product/core",
+        cloneUrl: "https://github.com/decisions-product/core.git",
+        defaultBranch: "main",
+        visibility: "public",
+        archived: false,
+        sizeKb: 10,
+        language: "TypeScript",
+        description: null,
+        intelligence: {},
+      }],
+    });
+
+    const objectiveBody = {
+      outcome: "Decision context fixture: standardize the container runtime and editor choice for local development",
+      acceptanceCriteria: ["Create result.txt"],
+      constraints: [],
+      projectPath: project,
+      productId: "decisions-product",
+      repositoryIds: ["repo:decisions"],
+      risk: "medium",
+      autonomy: "supervised",
+      priority: "normal",
+      policyNotes: [],
+    };
+
+    // Round 1: no decision records exist yet. Nothing must be injected — no
+    // empty "PRIOR DECISIONS" scaffolding for a query that matched nothing.
+    const firstObjective = await fetch(`${dashboard.url}/api/objectives`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(objectiveBody),
+    }).then((response) => response.json() as Promise<{ objective: { id: string } }>);
+    const firstProposal = await fetch(`${dashboard.url}/api/objectives/${firstObjective.objective.id}/plans`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabledProviders: ["codex", "claude", "gemini"] }),
+    });
+    assert.equal(firstProposal.status, 201, await firstProposal.clone().text());
+    const firstBody = await firstProposal.json() as { preview: { priorDecisions: { records: unknown[]; totalMatched: number } } };
+    assert.deepEqual(firstBody.preview.priorDecisions, { records: [], totalMatched: 0 }, "the preview must show no prior decisions when none matched");
+    const firstPrompt = await readFile(captured, "utf8");
+    assert.doesNotMatch(firstPrompt, /PRIOR DECISIONS/, "no prior decisions matched must inject no PRIOR DECISIONS section at all");
+
+    // Now seed: a product-scoped record on THIS product, a machine-scoped
+    // record (no product), a product-scoped record on a DIFFERENT product
+    // (must be excluded), and a machine-scoped record whose subject shares no
+    // token with the goal text (must be excluded — scope alone is not enough,
+    // it must also match).
+    const productScoped = seedLedger.createDecisionRecord({
+      subject: "container runtime",
+      question: "Which container runtime should this product's dev environment use?",
+      options: [
+        { option: "Podman", disposition: "selected", reason: "Rootless by default" },
+        { option: "Docker Desktop", disposition: "rejected", reason: "Requires a paid license at this org's seat count" },
+      ],
+      decidingConstraint: "No paid licensing budget",
+      evidence: "Podman verified working on this product's dev machines",
+      acceptedCost: "Some Docker-only tooling is unavailable",
+      scope: "product",
+      productId: "decisions-product",
+      source: "owner",
+    });
+    const machineScoped = seedLedger.createDecisionRecord({
+      subject: "editor choice",
+      question: "Which editor should local development standardize on?",
+      options: [
+        { option: "VS Code", disposition: "selected", reason: "Already the team default" },
+        { option: "Vim", disposition: "rejected", reason: "Steeper onboarding cost for this team" },
+      ],
+      decidingConstraint: "Team onboarding speed",
+      evidence: "Survey of current team tooling",
+      acceptedCost: "Loses some terminal-native workflows some contributors preferred",
+      scope: "machine",
+      source: "owner",
+    });
+    seedLedger.createDecisionRecord({
+      subject: "container runtime",
+      question: "Which container runtime should THIS OTHER product use?",
+      options: [{ option: "containerd", disposition: "selected", reason: null }],
+      decidingConstraint: "Different org, different constraint",
+      evidence: "Not relevant to decisions-product",
+      acceptedCost: "N/A",
+      scope: "product",
+      productId: "some-other-product",
+      source: "owner",
+    });
+    seedLedger.createDecisionRecord({
+      subject: "logging pipeline",
+      question: "How should logs be shipped?",
+      options: [{ option: "syslog", disposition: "selected", reason: null }],
+      decidingConstraint: "Nothing to do with container runtimes or editors",
+      evidence: "Unrelated fixture",
+      acceptedCost: "N/A",
+      scope: "machine",
+      source: "owner",
+    });
+
+    const secondObjective = await fetch(`${dashboard.url}/api/objectives`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(objectiveBody),
+    }).then((response) => response.json() as Promise<{ objective: { id: string } }>);
+    const secondProposal = await fetch(`${dashboard.url}/api/objectives/${secondObjective.objective.id}/plans`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabledProviders: ["codex", "claude", "gemini"] }),
+    });
+    assert.equal(secondProposal.status, 201, await secondProposal.clone().text());
+    const secondBody = await secondProposal.json() as { preview: { priorDecisions: { records: Array<{ id: string; subject: string }>; totalMatched: number } } };
+    const matchedIds = secondBody.preview.priorDecisions.records.map((record) => record.id).sort();
+    assert.deepEqual(matchedIds, [machineScoped.id, productScoped.id].sort(), "exactly the product-scoped and machine-scoped matches, no others");
+    assert.equal(secondBody.preview.priorDecisions.totalMatched, 2);
+
+    const secondPrompt = await readFile(captured, "utf8");
+    assert.match(secondPrompt, /PRIOR DECISIONS/);
+    assert.match(secondPrompt, /Subject: container runtime/);
+    assert.match(secondPrompt, /Docker Desktop.*Requires a paid license at this org's seat count/s, "the rejected option's reason must appear verbatim in the prompt");
+    assert.match(secondPrompt, /Subject: editor choice/, "the machine-scoped record must also be injected");
+    assert.doesNotMatch(secondPrompt, /containerd/, "a different product's decision record must not leak into this objective's context");
+    assert.doesNotMatch(secondPrompt, /logging pipeline/, "a non-matching machine-scoped record must not be injected just because it is machine-scoped");
+  } finally {
+    seedLedger.close();
+    delete process.env.DH_CAPTURE_ARCHITECT_PROMPT;
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+  }
+});
+
+test("objective planning context caps prior decisions at 8 and the header names the total matched", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-decision-cap-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+  const captured = path.join(root, "architect-prompt.txt");
+  process.env.DH_CAPTURE_ARCHITECT_PROMPT = captured;
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  const seedLedger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  try {
+    for (let index = 0; index < 9; index++) {
+      seedLedger.createDecisionRecord({
+        subject: `container runtime option ${index}`,
+        question: "Which container runtime should this machine use?",
+        options: [{ option: `Option ${index}`, disposition: "selected", reason: null }],
+        decidingConstraint: "Fixture constraint",
+        evidence: "Fixture evidence",
+        acceptedCost: "Fixture cost",
+        scope: "machine",
+        source: "owner",
+      });
+    }
+
+    const objectiveResponse = await fetch(`${dashboard.url}/api/objectives`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        outcome: "Decision fixture: choose the container runtime for local development",
+        acceptanceCriteria: ["Create result.txt"],
+        constraints: [],
+        projectPath: project,
+        repositoryIds: [],
+        risk: "medium",
+        autonomy: "supervised",
+        priority: "normal",
+        policyNotes: [],
+      }),
+    }).then((response) => response.json() as Promise<{ objective: { id: string } }>);
+    const proposed = await fetch(`${dashboard.url}/api/objectives/${objectiveResponse.objective.id}/plans`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabledProviders: ["codex", "claude", "gemini"] }),
+    });
+    assert.equal(proposed.status, 201, await proposed.clone().text());
+    const body = await proposed.json() as { preview: { priorDecisions: { records: unknown[]; totalMatched: number } } };
+    assert.equal(body.preview.priorDecisions.records.length, 8, "the injected/preview set is capped at 8");
+    assert.equal(body.preview.priorDecisions.totalMatched, 9, "the total matched count is the real, uncapped number");
+
+    const prompt = await readFile(captured, "utf8");
+    assert.match(prompt, /top 8 of 9 matched/i, "the header must say when the cap trimmed the set");
+  } finally {
+    seedLedger.close();
+    delete process.env.DH_CAPTURE_ARCHITECT_PROMPT;
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+  }
+});
+
+test("plan decisions[] are persisted as durable DecisionRecords only on approval — a proposed-but-unapproved preview writes nothing", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-decision-approval-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  config.runPolicy.requirePlanApproval = true;
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  const seedLedger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  let runId = "";
+  try {
+    const objectiveResponse = await fetch(`${dashboard.url}/api/objectives`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        outcome: "Decision fixture: create the exact approved result",
+        acceptanceCriteria: ["Create result.txt"],
+        constraints: [],
+        projectPath: project,
+        repositoryIds: [],
+        risk: "medium",
+        autonomy: "supervised",
+        priority: "normal",
+        policyNotes: [],
+      }),
+    }).then((response) => response.json() as Promise<{ objective: { id: string } }>);
+
+    const proposed = await fetch(`${dashboard.url}/api/objectives/${objectiveResponse.objective.id}/plans`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabledProviders: ["codex", "claude", "gemini"] }),
+    });
+    assert.equal(proposed.status, 201, await proposed.clone().text());
+    const proposal = await proposed.json() as { revision: { plan: { decisions?: Array<{ subject: string }>; tasks: Array<{ consequentialChoice?: string | null }> } } };
+    assert.equal(proposal.revision.plan.decisions?.[0]?.subject, "container runtime", "the proposed plan carries the architect's decision");
+    assert.equal(proposal.revision.plan.tasks[0]?.consequentialChoice, "container runtime");
+
+    // A plan preview that is never approved persists nothing (locked design
+    // decision 4 / honesty constraint): proposing alone must not create any
+    // DecisionRecord.
+    assert.deepEqual(seedLedger.listDecisionRecords({ scope: "run" }), [], "proposing a plan must not persist any decision record");
+    assert.deepEqual(seedLedger.searchDecisionRecords("container runtime"), [], "no decision record exists to be found before approval");
+
+    const started = await fetch(`${dashboard.url}/api/objectives/${objectiveResponse.objective.id}/plans/1/start`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agents: 1, enabledProviders: ["codex", "claude", "gemini"] }),
+    });
+    assert.equal(started.status, 202, await started.clone().text());
+    runId = ((await started.json()) as { runId: string }).runId;
+
+    // Approval is the write boundary: exactly one durable DecisionRecord now
+    // exists, sourced from the architect, linked to the run that produced it,
+    // scoped 'run' (this objective links no product), with the rejected
+    // option and its reason intact.
+    const persisted = seedLedger.listDecisionRecords({ scope: "run" });
+    assert.equal(persisted.length, 1, "approval must persist exactly the one plan decision");
+    const record = persisted[0]!;
+    assert.equal(record.subject, "container runtime");
+    assert.equal(record.source, "architect");
+    assert.equal(record.runId, runId);
+    assert.equal(record.productId, null, "an objective with no product links the decision to the run, not a product");
+    assert.equal(record.options.find((option) => option.disposition === "selected")?.option, "Podman");
+    const rejected = record.options.find((option) => option.disposition === "rejected");
+    assert.equal(rejected?.option, "Docker Desktop");
+    assert.equal(rejected?.reason, "Requires a paid license at this org's seat count");
+
+    const getRun = () => fetch(`${dashboard.url}/api/runs/${runId}`).then((response) => response.json() as Promise<{ status: string }>);
+    await poll(getRun, (value) => ["ready", "not_ready", "failed"].includes(value.status), 30_000);
+  } finally {
+    seedLedger.close();
+    await dashboard.close();
+    if (runId) {
+      const runRoot = path.join(os.tmpdir(), "devharmonics", runId);
+      for (const worktree of [path.join(runRoot, "tasks", "one"), path.join(runRoot, "integration")]) {
+        await runProcess({ command: "git", args: ["worktree", "remove", "--force", worktree], cwd: project, timeoutMs: 30_000 });
+      }
+      await rm(runRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    }
+    await rm(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+  }
+});
+
+test("an architect plan decision missing a rejection reason is refused by plan-schema validation before it ever reaches approval", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-decision-invalid-"));
+  const project = await createRepository(root);
+  const command = await createFakeCli(root);
+  await initializeProject(project);
+  const config = await loadConfig(project);
+  config.product.architect = "claude";
+  config.product.reviewer = "gemini";
+  config.product.workers = ["codex"];
+  config.routing.allowFallback = false;
+  for (const provider of ["codex", "claude", "gemini"] as const) config.connections[provider].command = command;
+  await writeFile(path.join(devHarmonicsDirectory(project), "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+  const seedLedger = new Ledger(path.join(devHarmonicsDirectory(project), "devharmonics.db"));
+  try {
+    const objectiveResponse = await fetch(`${dashboard.url}/api/objectives`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        outcome: "Invalid decision fixture: create the exact approved result",
+        acceptanceCriteria: ["Create result.txt"],
+        constraints: [],
+        projectPath: project,
+        repositoryIds: [],
+        risk: "medium",
+        autonomy: "supervised",
+        priority: "normal",
+        policyNotes: [],
+      }),
+    }).then((response) => response.json() as Promise<{ objective: { id: string } }>);
+
+    const proposed = await fetch(`${dashboard.url}/api/objectives/${objectiveResponse.objective.id}/plans`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabledProviders: ["codex", "claude", "gemini"] }),
+    });
+    assert.equal(proposed.status, 500, await proposed.clone().text());
+    const body = await proposed.json() as { error: string };
+    assert.match(body.error, /requires a reason/i, "the schema refusal reason must surface to the caller");
+
+    // Nothing was ever approved, so nothing was ever persisted — same
+    // honesty constraint as the valid-decision approval test, just reached
+    // by a different route (the plan never became valid enough to approve).
+    assert.deepEqual(seedLedger.listDecisionRecords({ scope: "run" }), []);
+  } finally {
+    seedLedger.close();
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
   }
 });
 

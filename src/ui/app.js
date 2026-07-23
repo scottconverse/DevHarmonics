@@ -145,6 +145,90 @@ function renderInboxItemHtml(item) {
   </article>`;
 }
 
+// DH-647 S2. Deterministic keyword-overlap match, mirroring the server's
+// normalizeDecisionSearchTokens (src/ledger.ts): lowercase, split on
+// non-alphanumerics, drop tokens under 3 characters. Reimplemented here
+// rather than shared because app.js ships to the browser standalone — this
+// keeps the "subjects token-overlap" collision/comparison rule client-side
+// and independently testable, matching the server's own definition of the
+// same rule (both sides are exercised by their own test suites).
+function decisionSubjectTokens(text) {
+  return String(text || "").toLowerCase().split(/[^a-z0-9]+/).filter((token) => token.length >= 3);
+}
+function subjectsOverlap(a, b) {
+  const tokensA = new Set(decisionSubjectTokens(a));
+  return decisionSubjectTokens(b).some((token) => tokensA.has(token));
+}
+
+// DH-647 S2 render seams. Same threat shape and same discipline as
+// renderFindingHtml/renderInboxItemHtml above: subject/question/option/reason/
+// decidingConstraint/acceptedCost are free text ultimately sourced from a
+// decision record or an architect's plan output, concatenated straight into
+// innerHTML by renderPlanPreview(). Every interpolated field goes through
+// escapeHtml. Pulled out as pure, state-free functions so a hostile-markup
+// case is regression-tested directly against the exact code path
+// renderPlanPreview() uses.
+function renderPriorDecisionHtml(record) {
+  const subject = escapeHtml(record.subject || "");
+  const selected = (record.options || []).find((option) => option.disposition === "selected");
+  const rejected = (record.options || []).filter((option) => option.disposition === "rejected");
+  const selectedText = escapeHtml(selected ? selected.option : "unknown");
+  const rejectedText = rejected.length
+    ? rejected.map((option) => `${escapeHtml(option.option)} — ${escapeHtml(option.reason || "no reason recorded")}`).join("; ")
+    : "none recorded";
+  return `<article class="prior-decision">
+    <strong>${subject}</strong>
+    <span>Selected: ${selectedText}</span>
+    <span>Rejected: ${rejectedText}</span>
+    <span>Deciding constraint: ${escapeHtml(record.decidingConstraint || "")}</span>
+    <span>Accepted cost: ${escapeHtml(record.acceptedCost || "")}</span>
+  </article>`;
+}
+
+// DH-647 S2 honesty constraint: this never claims a comparison exists when
+// there is nothing to show it against — collisionMarkup is empty unless a
+// PRIOR record's subject token-overlaps this plan decision's own subject.
+function renderPlanDecisionHtml(decision, priorRecords) {
+  const subject = escapeHtml(decision.subject || "");
+  const options = decision.optionsConsidered || [];
+  const selected = options.find((option) => option.disposition === "selected");
+  const rejected = options.filter((option) => option.disposition === "rejected");
+  const colliding = (priorRecords || []).filter((record) => subjectsOverlap(record.subject, decision.subject));
+  const collisionMarkup = colliding
+    .map((record) => {
+      const priorRejected = (record.options || []).filter((option) => option.disposition === "rejected");
+      if (!priorRejected.length) return "";
+      const list = priorRejected.map((option) => `${escapeHtml(option.option)} — ${escapeHtml(option.reason || "no reason recorded")}`).join("; ");
+      return `<p class="plan-decision-collision">Prior decision on "${escapeHtml(record.subject)}" rejected: ${list}</p>`;
+    })
+    .join("");
+  return `<article class="plan-decision">
+    <strong>${subject}</strong>
+    <p>${escapeHtml(decision.question || "")}</p>
+    <span>Selected: ${escapeHtml(selected ? selected.option : "unknown")}</span>
+    <span>Rejected: ${rejected.length ? rejected.map((option) => `${escapeHtml(option.option)} — ${escapeHtml(option.reason || "no reason recorded")}`).join("; ") : "none"}</span>
+    <span>Deciding constraint: ${escapeHtml(decision.decidingConstraint || "")}</span>
+    <span>Accepted cost: ${escapeHtml(decision.acceptedCost || "")}</span>
+    ${collisionMarkup}
+  </article>`;
+}
+
+// DH-647 S2. A task's consequentialChoice is compared when SOME plan decision's
+// subject token-overlaps it — never auto-blocked either way, just distinguishable
+// at a glance (locked design decision 4). Returns "" for a task that is not a
+// consequential choice at all (consequentialChoice null/absent) — no flag,
+// compared or otherwise, on a routine task.
+function consequentialChoiceFlagHtml(task, decisions) {
+  if (!task.consequentialChoice) return "";
+  const matched = (decisions || []).find((decision) => subjectsOverlap(decision.subject, task.consequentialChoice));
+  if (matched) {
+    const selected = (matched.optionsConsidered || []).find((option) => option.disposition === "selected");
+    const rejectedCount = (matched.optionsConsidered || []).filter((option) => option.disposition === "rejected").length;
+    return `<p class="consequential-choice compared">Compared choice — "${escapeHtml(task.consequentialChoice)}": selected ${escapeHtml(selected ? selected.option : "unknown")} (${rejectedCount} rejected).</p>`;
+  }
+  return `<p class="consequential-choice uncompared">This choice was proposed without recorded alternatives — ask for the comparison before approving if it matters.</p>`;
+}
+
 // DH-645 S2 program-status helpers, kept next to the inbox helpers above
 // for the same reason: a fully self-contained, independently testable pure
 // function. goalSummary and reason ultimately derive from run goals and
@@ -1898,11 +1982,29 @@ function renderPlanPreview() {
   const affectedRepositories = impacts.filter((impact) => impact.disposition === "affected").length;
   $("#plan-metrics").innerHTML = `<div class="metric"><span>Tasks</span><strong>${plan.tasks.length}</strong></div><div class="metric"><span>Affected repositories</span><strong>${affectedRepositories}</strong></div><div class="metric"><span>Tasks that change files</span><strong>${writeTasks}</strong></div><div class="metric"><span>High risk</span><strong>${highRisk}</strong></div><div class="metric"><span>AI workers planned</span><strong>${state.planPreview.capacity.effectiveConcurrency}</strong></div>`;
   $("#plan-repository-impact").innerHTML = impacts.map((impact) => `<article class="repository-impact ${escapeHtml(impact.disposition)}"><strong>${escapeHtml(impact.repositoryId)} · ${escapeHtml(impact.disposition)}</strong><span>${escapeHtml(impact.rationale)}</span></article>`).join("");
+  // DH-647 S2: "Prior decisions on this subject" — the SAME retrieval the
+  // architect's planning context was built from (state.planPreview.priorDecisions),
+  // so the owner sees rejected-approach collisions before approving. No empty
+  // scaffolding: the section stays empty when nothing matched.
+  const priorDecisions = state.planPreview.priorDecisions || { records: [], totalMatched: 0 };
+  const priorDecisionsNote = priorDecisions.records.length && priorDecisions.totalMatched > priorDecisions.records.length
+    ? `<p class="field-help">Showing ${priorDecisions.records.length} of ${priorDecisions.totalMatched} matching prior decisions.</p>`
+    : "";
+  $("#plan-prior-decisions").innerHTML = priorDecisions.records.length
+    ? `<h3>Prior decisions on this subject</h3>${priorDecisionsNote}${priorDecisions.records.map(renderPriorDecisionHtml).join("")}`
+    : "";
+  // DH-647 S2: the plan's own consequential decisions[] — never claims a
+  // comparison exists when the architect recorded none (decisions[] empty
+  // renders nothing here, not an empty "Decisions" heading).
+  const planDecisions = plan.decisions || [];
+  $("#plan-decisions-list").innerHTML = planDecisions.length
+    ? `<h3>Decisions this plan is making</h3>${planDecisions.map((decision) => renderPlanDecisionHtml(decision, priorDecisions.records)).join("")}`
+    : "";
   $("#plan-task-list").innerHTML = plan.tasks.map((task) => {
     const assignment = state.planPreview.assignments.find((item) => item.taskId === task.id);
     const dependencyText = task.dependencies.length ? `After ${task.dependencies.join(", ")}` : "No dependencies";
     const identity = recordedModelIdentity(assignment?.provider || "unassigned", assignment?.modelId, assignment?.modelId ? "requested_unverified" : "provider_default_unresolved", assignment?.connectionId);
-    return `<article class="plan-task"><h3>${escapeHtml(task.title)}</h3><div class="plan-task-meta"><span>${escapeHtml(permissionLabel(task.permission))}</span><span>${escapeHtml(task.risk)} risk</span><span title="The quality/cost tier of AI model assigned — higher tiers cost more and are used for harder tasks.">${escapeHtml(assignment?.tier || "unassigned")}</span></div><p>${escapeHtml(task.description)}</p><details><summary>${escapeHtml(dependencyText)} · ${escapeHtml(identity)} · ${task.checks.length} checks</summary><p>Repositories: ${(task.repositoryIds || []).map(escapeHtml).join(", ") || "Current workspace"}<br>Exactly what it can touch: ${task.repositoryScope.map(escapeHtml).join(", ")}<br>Acceptance: ${task.acceptanceCriteria.map(escapeHtml).join("; ") || "Not supplied"}<br>What the AI needs to be able to do: ${task.capabilityNeeds.map(escapeHtml).join(", ") || "Nothing beyond a normal file edit"}</p></details></article>`;
+    return `<article class="plan-task"><h3>${escapeHtml(task.title)}</h3><div class="plan-task-meta"><span>${escapeHtml(permissionLabel(task.permission))}</span><span>${escapeHtml(task.risk)} risk</span><span title="The quality/cost tier of AI model assigned — higher tiers cost more and are used for harder tasks.">${escapeHtml(assignment?.tier || "unassigned")}</span></div><p>${escapeHtml(task.description)}</p>${consequentialChoiceFlagHtml(task, planDecisions)}<details><summary>${escapeHtml(dependencyText)} · ${escapeHtml(identity)} · ${task.checks.length} checks</summary><p>Repositories: ${(task.repositoryIds || []).map(escapeHtml).join(", ") || "Current workspace"}<br>Exactly what it can touch: ${task.repositoryScope.map(escapeHtml).join(", ")}<br>Acceptance: ${task.acceptanceCriteria.map(escapeHtml).join("; ") || "Not supplied"}<br>What the AI needs to be able to do: ${task.capabilityNeeds.map(escapeHtml).join(", ") || "Nothing beyond a normal file edit"}</p></details></article>`;
   }).join("");
   const execution = state.planPreview.execution || { supported: true, reason: "Single workspace execution is available." };
   $("#plan-execution-note").textContent = execution.supported ? `Execution available: ${execution.reason}` : `Planning only: ${execution.reason}`;

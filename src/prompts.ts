@@ -1,4 +1,4 @@
-import type { CheckResult, ObjectiveRecord, PlannedTask, ProviderName, RunAutonomy, RunPlan } from "./types.js";
+import type { CheckResult, DecisionRecord, ObjectiveRecord, PlannedTask, ProviderName, RunAutonomy, RunPlan } from "./types.js";
 import type { ReviewLens } from "./review.js";
 
 const NARRATION_WITHHELD =
@@ -19,6 +19,35 @@ export function objectivePromptText(objective: Pick<ObjectiveRecord,
   return lines.join("\n\n");
 }
 
+/**
+ * DH-647 S2. Renders matching DecisionRecords into the architect's planning
+ * context, verbatim — no summarization, so nothing can drift from what the
+ * record actually says. Returns null when there is nothing to inject (honesty
+ * constraint: no empty PRIOR DECISIONS scaffolding when nothing matched).
+ * `totalMatched` may exceed `records.length` when the retrieval cap trimmed
+ * the set; the header says so rather than silently showing a partial list as
+ * if it were complete.
+ */
+export function priorDecisionsPromptSection(records: DecisionRecord[], totalMatched: number): string | null {
+  if (!records.length) return null;
+  const header = totalMatched > records.length
+    ? `PRIOR DECISIONS ON RELATED SUBJECTS (top ${records.length} of ${totalMatched} matched; shown verbatim from the decision record — do not summarize or paraphrase)`
+    : `PRIOR DECISIONS ON RELATED SUBJECTS (shown verbatim from the decision record — do not summarize or paraphrase)`;
+  const entries = records.map((record) => {
+    const selected = record.options.find((option) => option.disposition === "selected");
+    const rejected = record.options.filter((option) => option.disposition === "rejected");
+    return [
+      `- Subject: ${record.subject}`,
+      `  Question: ${record.question}`,
+      `  Selected: ${selected ? selected.option : "unknown"}`,
+      `  Deciding constraint: ${record.decidingConstraint}`,
+      `  Accepted cost (what this choice gave up): ${record.acceptedCost}`,
+      `  Rejected options: ${rejected.length ? rejected.map((option) => `${option.option} — ${option.reason ?? "no reason recorded"}`).join("; ") : "none recorded"}`,
+    ].join("\n");
+  });
+  return `${header}\n${entries.join("\n")}\nIf a task here proposes an approach a prior decision above rejected, that is not forbidden, but state why the constraint that rejected it no longer applies, or record a new decision explaining the change.`;
+}
+
 export function architectPrompt(input: {
   goal: string;
   constitution: string;
@@ -30,6 +59,8 @@ export function architectPrompt(input: {
   selectedRepositoryIds?: string[];
   previousPlan?: RunPlan | null;
   revisionFeedback?: string;
+  /** DH-647 S2: rendered by priorDecisionsPromptSection, or omitted when nothing matched. */
+  priorDecisionsContext?: string;
 }): string {
   const observe = input.autonomy === "observe";
   const taskInstructions = observe
@@ -57,10 +88,14 @@ ${input.repositoryContext}
 For every repository listed as requiring an impact decision, include exactly one repositoryImpact entry with an affected or excluded disposition and concrete rationale. Every affected repository must have at least one task whose repositoryIds includes it. Do not silently expand the selected scope. When shared-platform work can affect modules, or documentation, installer, version, or release-truth work may be required, represent that impact explicitly rather than burying it in another task. Multi-repository plans must list their cross-repository integration conditions.
 ` : ""}
 
+${input.priorDecisionsContext ? `${input.priorDecisionsContext}\n` : ""}
+
 Available worker providers: ${input.providers.join(", ")}
 Allowlisted validators: ${input.validators.length ? input.validators.join(", ") : "none"}
 
 Inspect the repository but do not modify it while planning. ${taskInstructions} Every check name must come from the allowlisted validators above, and for a repository-scoped task it must be one the repository context lists for THAT repository — a validator registered elsewhere does not exist there. Never invent a shell command. Dependencies must form a directed acyclic graph.
+
+When a task introduces a new dependency, selects a runtime or transport, or picks between architectures, that is a consequential choice: record it as an entry in "decisions" (every option you weighed, the constraint that decided it, every rejected option WITH the reason it was rejected, and what the selected option gives up), AND set that task's "consequentialChoice" to the same short subject phrase used in the decision's "subject", so the owner sees the comparison next to the task it belongs to before approving. A task that is not a consequential choice leaves "consequentialChoice" null. Do not invent a decisions entry for a routine task — this is for choices that would be expensive to re-litigate or hard to reverse.
 
 Return only a JSON object with this exact shape:
 {
@@ -72,6 +107,17 @@ Return only a JSON object with this exact shape:
     { "repositoryId": "registered-repository-id", "disposition": "affected" | "excluded", "rationale": "why this repository is or is not part of the change" }
   ],
   "integrationConditions": ["condition required before the affected repositories are ready together"],
+  "decisions": [
+    {
+      "subject": "short noun phrase, e.g. 'container runtime'",
+      "question": "the question this choice answers",
+      "optionsConsidered": [
+        { "option": "the option considered", "disposition": "selected" | "rejected", "reason": "required when rejected; may be null for the selected option" }
+      ],
+      "decidingConstraint": "the constraint that decided it",
+      "acceptedCost": "what the selected option gives up"
+    }
+  ],
   "tasks": [
     {
       "id": "short-lowercase-id",
@@ -87,7 +133,8 @@ Return only a JSON object with this exact shape:
       "risk": ${example.risk},
       "capabilityNeeds": ["${example.capabilities}"],
       "acceptanceCriteria": ["observable condition that must be true"],
-      "expectedArtifacts": ["${example.artifacts}"]
+      "expectedArtifacts": ["${example.artifacts}"],
+      "consequentialChoice": "matching decisions[].subject, or null when this task is not a consequential choice"
     }
   ]
 }`;

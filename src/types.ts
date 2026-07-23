@@ -112,12 +112,38 @@ export interface PlannedTask {
   capabilityNeeds?: string[];
   acceptanceCriteria?: string[];
   expectedArtifacts?: string[];
+  /**
+   * DH-647 S2. Set by the architect when this task introduces a new
+   * dependency, selects a runtime/transport, or picks between architectures —
+   * a short subject phrase, the same vocabulary as a DecisionRecord/PlanDecision
+   * subject. Matched against RunPlan.decisions[] by subject token overlap at
+   * preview time to decide whether the choice is shown as compared or
+   * flagged as proposed without recorded alternatives. Null when the task is
+   * not a consequential choice.
+   */
+  consequentialChoice?: string | null;
 }
 
 export interface RepositoryImpact {
   repositoryId: string;
   disposition: "affected" | "excluded";
   rationale: string;
+}
+
+/**
+ * DH-647 S2. A consequential choice the architect is making AS PART OF THIS
+ * PLAN — same shape and validation rules as S1's DecisionRecordInput.options
+ * (exactly one selected option, a reason on every rejected option), but not
+ * yet a durable DecisionRecord: it becomes one only on plan approval, via
+ * createDecisionRecord (source 'architect'). A plan preview that is never
+ * approved persists nothing.
+ */
+export interface PlanDecision {
+  subject: string;
+  question: string;
+  optionsConsidered: DecisionOption[];
+  decidingConstraint: string;
+  acceptedCost: string;
 }
 
 export interface RunPlan {
@@ -128,6 +154,8 @@ export interface RunPlan {
   repositoryImpact?: RepositoryImpact[];
   integrationConditions?: string[];
   tasks: PlannedTask[];
+  /** DH-647 S2. Optional: consequential choices weighed while building this plan. */
+  decisions?: PlanDecision[];
 }
 
 export interface ProviderRequest {

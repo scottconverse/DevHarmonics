@@ -43,7 +43,7 @@ import { chunkDiffFiles, classifyVerdict, runContextOnlyReview } from "../src/lo
 import { classifyWorkload, inferModelProfile, profileMetadata, SUBSCRIPTION_COMPATIBILITY_MODELS } from "../src/model-intelligence.js";
 import { parseCurrentClaudeModels } from "../src/catalog.js";
 import { estimateInvocationCost, estimateQualificationCost, isExactOpenRouterModelId, OpenRouterAdapter, OpenRouterService } from "../src/openrouter.js";
-import { architectPrompt, localReviewerContextHeader, reviewerPrompt, workerPrompt } from "../src/prompts.js";
+import { architectPrompt, localReviewerContextHeader, priorDecisionsPromptSection, reviewerPrompt, workerPrompt } from "../src/prompts.js";
 import { QUALIFICATION_FINGERPRINT_FIXTURE, ensureReviewerCandidateQualified, hasQualifiableCandidate, ensureSchedulerCandidateQualified, ensureSchedulerProviderCandidateQualified, hasCurrentOperationalQualification, qualifyRuntimeModel, trackedFamilyQualificationRole } from "../src/qualification.js";
 import { modelQualificationFingerprint } from "../src/model-fingerprint.js";
 import { aggregateModelPerformance } from "../src/model-performance.js";
@@ -255,6 +255,52 @@ test("observe run prompts require diagnostic evidence without repository changes
     assert.match(prompt, /supports? the conclusion/i, `${variant} still carries the support duty`);
   }
   assert.match(localReviewerContextHeader({ goal: "Audit release truth", constitution: "Evidence first", plan, checkSummary: "test: PASS", taskReports: reports, autonomy: "observe" }), /package\.json says 1\.0\.4/);
+});
+
+// DH-647 S2. priorDecisionsPromptSection is the pure seam that turns matched
+// DecisionRecords into the "PRIOR DECISIONS" block injected into the
+// architect's planning context — verbatim, per the honesty constraint that
+// nothing here may summarize or paraphrase in a way that could drift from
+// what the record actually says.
+function fixtureDecisionRecord(overrides: Partial<DecisionRecord> = {}): DecisionRecord {
+  return {
+    id: "decision-fixture",
+    subject: "container runtime",
+    question: "Which container runtime should this machine standardize on?",
+    options: [
+      { option: "Podman", disposition: "selected", reason: null },
+      { option: "Docker Desktop", disposition: "rejected", reason: "Requires a paid license at this org's seat count" },
+    ],
+    decidingConstraint: "No paid licensing budget",
+    evidence: "Podman installed and verified rootless 2026-07-14",
+    acceptedCost: "Some Docker-only tutorials do not apply directly",
+    scope: "machine",
+    productId: null,
+    runId: null,
+    source: "owner",
+    supersedes: null,
+    supersededBy: null,
+    whatChanged: null,
+    createdAt: "2026-07-14T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+test("priorDecisionsPromptSection renders verbatim, injects nothing when nothing matched, and names the cap when trimmed", () => {
+  assert.equal(priorDecisionsPromptSection([], 0), null, "no matches must inject no empty scaffolding");
+
+  const record = fixtureDecisionRecord();
+  const untrimmed = priorDecisionsPromptSection([record], 1);
+  assert.match(untrimmed!, /PRIOR DECISIONS/);
+  assert.match(untrimmed!, /Subject: container runtime/);
+  assert.match(untrimmed!, /Selected: Podman/);
+  assert.match(untrimmed!, /Docker Desktop.*Requires a paid license at this org's seat count/s, "the rejected option's exact reason must appear verbatim");
+  assert.match(untrimmed!, /No paid licensing budget/, "the deciding constraint must appear verbatim");
+  assert.match(untrimmed!, /Some Docker-only tutorials do not apply directly/, "the accepted cost must appear verbatim");
+  assert.doesNotMatch(untrimmed!, /top \d+ of \d+ matched/, "no trimming note when nothing was trimmed");
+
+  const trimmed = priorDecisionsPromptSection([record], 5);
+  assert.match(trimmed!, /top 1 of 5 matched/i, "the header must say when the retrieval cap trimmed the set");
 });
 
 test("diagnostic result validation rejects deferrals and missing path-line evidence", () => {
@@ -561,6 +607,100 @@ test("plan schema defaults and validates the cross-repository contract", () => {
     }],
   });
   assert.equal(missingAffectedImpact.success, false);
+});
+
+// DH-647 S2. planDecisionSchema mirrors S1's createDecisionRecord rules
+// (Ledger.createDecisionRecord: exactly one selected option, a reason on
+// every rejected option) — a plan decision that violates those rules must
+// never survive to a plan-approval preview, let alone be persisted.
+function baseDecisionTask(overrides: Partial<PlannedTask> = {}): PlannedTask {
+  return {
+    id: "one",
+    title: "One",
+    description: "Do one",
+    dependencies: [],
+    preferredProvider: null,
+    checks: ["diff-check"],
+    ...overrides,
+  };
+}
+
+test("plan schema validates decisions[] with S1's exactly-one-selected and reasons-on-rejection rules", () => {
+  const validDecision = {
+    subject: "container runtime",
+    question: "Which container runtime should this box use?",
+    optionsConsidered: [
+      { option: "Podman", disposition: "selected" as const },
+      { option: "Docker Desktop", disposition: "rejected" as const, reason: "Requires a paid license at this org's seat count" },
+    ],
+    decidingConstraint: "No paid licensing budget",
+    acceptedCost: "Some Docker-only tutorials do not apply directly",
+  };
+  const valid = runPlanSchema.safeParse({
+    summary: "plan with a recorded decision",
+    recommendedConcurrency: 1,
+    decisions: [validDecision],
+    tasks: [baseDecisionTask({ consequentialChoice: "container runtime" })],
+  });
+  assert.equal(valid.success, true, valid.success ? "" : JSON.stringify((valid as { error: unknown }).error));
+  if (valid.success) {
+    assert.equal(valid.data.decisions?.[0]?.subject, "container runtime");
+    assert.equal(valid.data.decisions?.[0]?.optionsConsidered[0]?.reason, null, "reason defaults to null, not omitted, for the selected option");
+    assert.equal(valid.data.tasks[0]?.consequentialChoice, "container runtime");
+  }
+
+  // A plan that names no decisions writes no scaffolding: decisions defaults
+  // to an empty array, and a task with no consequentialChoice defaults to
+  // null (not omitted) — the same nullable-not-omitted convention as
+  // preferredProvider on this exact schema.
+  const noDecisions = runPlanSchema.parse({
+    summary: "plan with no decisions",
+    recommendedConcurrency: 1,
+    tasks: [baseDecisionTask()],
+  });
+  assert.deepEqual(noDecisions.decisions, []);
+  assert.equal(noDecisions.tasks[0]?.consequentialChoice, null);
+
+  const twoSelected = runPlanSchema.safeParse({
+    summary: "invalid: two selected",
+    recommendedConcurrency: 1,
+    decisions: [{
+      ...validDecision,
+      optionsConsidered: [
+        { option: "Podman", disposition: "selected" as const },
+        { option: "Docker Desktop", disposition: "selected" as const },
+      ],
+    }],
+    tasks: [baseDecisionTask()],
+  });
+  assert.equal(twoSelected.success, false, "a decision with two selected options must be refused");
+  assert.match(JSON.stringify(twoSelected.success ? {} : twoSelected.error.issues), /must select exactly one option/);
+
+  const zeroSelected = runPlanSchema.safeParse({
+    summary: "invalid: zero selected",
+    recommendedConcurrency: 1,
+    decisions: [{
+      ...validDecision,
+      optionsConsidered: [{ option: "Podman", disposition: "rejected" as const, reason: "No reason to reject the only option, but this is a fixture" }],
+    }],
+    tasks: [baseDecisionTask()],
+  });
+  assert.equal(zeroSelected.success, false, "a decision with zero selected options must be refused");
+
+  const rejectedWithoutReason = runPlanSchema.safeParse({
+    summary: "invalid: rejected option has no reason",
+    recommendedConcurrency: 1,
+    decisions: [{
+      ...validDecision,
+      optionsConsidered: [
+        { option: "Podman", disposition: "selected" as const },
+        { option: "Docker Desktop", disposition: "rejected" as const },
+      ],
+    }],
+    tasks: [baseDecisionTask()],
+  });
+  assert.equal(rejectedWithoutReason.success, false, "a rejected option without a reason must be refused");
+  assert.match(JSON.stringify(rejectedWithoutReason.success ? {} : rejectedWithoutReason.error.issues), /requires a reason/);
 });
 
 test("Claude official catalog watcher selects the newest exact model in each tracked family", () => {
@@ -3546,6 +3686,121 @@ test("the inbox item HTML seam (src/ui/app.js) escapes every interpolated field"
   assert.match(html, /&quot;&gt;&lt;svg onload=alert\(2\)&gt;/, "plainSummary is escaped, not dropped");
   assert.match(html, /&lt;iframe src=javascript:alert\(3\)&gt;/, "evidence is escaped, not dropped");
   assert.match(html, /&lt;img src=x onerror=alert\(4\)&gt;/, "the action label is escaped, not dropped");
+});
+
+// DH-647 S2. The plan-approval preview's decision-comparison render seams:
+// subjectsOverlap (the token-overlap match rule), renderPriorDecisionHtml
+// (the "Prior decisions on this subject" list), renderPlanDecisionHtml (this
+// plan's own decisions[], with the prior-rejection collision markup), and
+// consequentialChoiceFlagHtml (the per-task compared/uncompared flag). Same
+// extraction discipline and same threat shape as the inbox/finding seams
+// above — every interpolated field is free text ultimately sourced from a
+// decision record or an architect's plan output.
+function extractDecisionPreviewSeams(): {
+  escapeHtml: (value?: string) => string;
+  subjectsOverlap: (a: string, b: string) => boolean;
+  renderPriorDecisionHtml: (record: Record<string, unknown>) => string;
+  renderPlanDecisionHtml: (decision: Record<string, unknown>, priorRecords: Array<Record<string, unknown>>) => string;
+  consequentialChoiceFlagHtml: (task: Record<string, unknown>, decisions: Array<Record<string, unknown>>) => string;
+} {
+  const appSource = readFileSync(path.join(process.cwd(), "src", "ui", "app.js"), "utf8");
+  const start = appSource.indexOf('function escapeHtml(value = "")');
+  const end = appSource.indexOf("\n// DH-632 visible operation feedback");
+  assert.ok(start >= 0 && end > start, "escapeHtml and the DH-647 decision-preview seams must be extractable from app.js");
+  return new Function(
+    `${appSource.slice(start, end)}; return { escapeHtml, subjectsOverlap, renderPriorDecisionHtml, renderPlanDecisionHtml, consequentialChoiceFlagHtml };`,
+  )() as ReturnType<typeof extractDecisionPreviewSeams>;
+}
+
+test("subjectsOverlap matches on shared normalized tokens, mirroring the server's own token-overlap rule", () => {
+  const { subjectsOverlap } = extractDecisionPreviewSeams();
+  assert.equal(subjectsOverlap("container runtime", "Container Runtime choice"), true, "case and extra words must not prevent a match");
+  assert.equal(subjectsOverlap("container runtime", "editor choice"), false, "no shared token must not match");
+  assert.equal(subjectsOverlap("container runtime", "to it or a"), false, "tokens under 3 characters must not count toward a match");
+});
+
+test("the prior-decision HTML seam (src/ui/app.js) escapes every field and renders the rejection verbatim", () => {
+  const { renderPriorDecisionHtml } = extractDecisionPreviewSeams();
+  const hostileRecord = {
+    subject: 'container runtime</strong><script>alert(1)</script>',
+    options: [
+      { option: "Podman", disposition: "selected" },
+      { option: '<img src=x onerror=alert(2)>', disposition: "rejected", reason: '"><svg onload=alert(3)>' },
+    ],
+    decidingConstraint: "No paid licensing budget",
+    acceptedCost: "Some Docker-only tutorials do not apply directly",
+  };
+  const html = renderPriorDecisionHtml(hostileRecord);
+  assert.doesNotMatch(html, /<script/i, "a <script> tag in the subject must never reach innerHTML unescaped");
+  assert.doesNotMatch(html, /<img/i, "an <img> tag in a rejected option must never reach innerHTML unescaped");
+  assert.doesNotMatch(html, /<svg/i, "an <svg onload> payload in a reason must never reach innerHTML unescaped");
+  assert.match(html, /Requires a paid license|Podman/, "unrelated content is not a match — sanity check the fixture is actually rendered"); // guard against a vacuous true
+});
+
+test("renderPlanDecisionHtml never claims a comparison exists and lists the prior rejection only when subjects token-overlap", () => {
+  const { renderPlanDecisionHtml } = extractDecisionPreviewSeams();
+  const planDecision = {
+    subject: "container runtime",
+    question: "Which container runtime should this box use?",
+    optionsConsidered: [
+      { option: "Docker Desktop", disposition: "selected" },
+    ],
+    decidingConstraint: "Team already knows Docker",
+    acceptedCost: "Paid license required",
+  };
+  const priorRejectingRecord = {
+    subject: "container runtime standard",
+    options: [
+      { option: "Podman", disposition: "selected" },
+      { option: "Docker Desktop", disposition: "rejected", reason: "Requires a paid license at this org's seat count" },
+    ],
+  };
+  const unrelatedRecord = { subject: "editor choice", options: [{ option: "VS Code", disposition: "selected" }] };
+
+  // Collision: subjects token-overlap ("container runtime" vs "container
+  // runtime standard") and the prior record rejected an option — the
+  // rejection must appear directly beneath the plan decision (locked design
+  // decision 4). Architect proposing a previously-rejected option is not
+  // auto-blocked, just visible.
+  const withCollision = renderPlanDecisionHtml(planDecision, [priorRejectingRecord, unrelatedRecord]);
+  assert.match(withCollision, /Prior decision on "container runtime standard" rejected/, "a token-overlapping prior rejection must be listed beneath the plan decision");
+  assert.match(withCollision, /Docker Desktop.*Requires a paid license/s);
+  assert.doesNotMatch(withCollision, /editor choice/, "a non-overlapping prior record must not be listed as a collision");
+
+  // No prior records at all: never claim a comparison exists.
+  const withNoPriorRecords = renderPlanDecisionHtml(planDecision, []);
+  assert.doesNotMatch(withNoPriorRecords, /Prior decision on/, "no prior records means no collision claim");
+});
+
+test("consequentialChoiceFlagHtml distinguishes a compared choice from one proposed without recorded alternatives, and stays silent on a routine task", () => {
+  const { consequentialChoiceFlagHtml } = extractDecisionPreviewSeams();
+  const decisions = [{
+    subject: "container runtime",
+    optionsConsidered: [
+      { option: "Podman", disposition: "selected" },
+      { option: "Docker Desktop", disposition: "rejected", reason: "Requires a paid license" },
+    ],
+  }];
+
+  const routineTask = { consequentialChoice: null };
+  assert.equal(consequentialChoiceFlagHtml(routineTask, decisions), "", "a task that is not a consequential choice gets no flag at all");
+
+  const comparedTask = { consequentialChoice: "container runtime choice" };
+  const comparedHtml = consequentialChoiceFlagHtml(comparedTask, decisions);
+  assert.match(comparedHtml, /compared/i);
+  assert.match(comparedHtml, /Podman/, "the compared summary names the selected option");
+  assert.doesNotMatch(comparedHtml, /without recorded alternatives/i);
+
+  // Honesty constraint: an uncompared choice is flagged in plain language,
+  // and it is NEVER auto-blocked — this is a render seam, no disabling here.
+  const uncomparedTask = { consequentialChoice: "database engine" };
+  const uncomparedHtml = consequentialChoiceFlagHtml(uncomparedTask, decisions);
+  assert.match(uncomparedHtml, /proposed without recorded alternatives/i);
+  assert.match(uncomparedHtml, /ask for the comparison before approving/i);
+
+  // Same rule with zero recorded decisions at all: still just a flag, never
+  // a false claim that a comparison exists.
+  assert.match(consequentialChoiceFlagHtml(uncomparedTask, []), /proposed without recorded alternatives/i);
 });
 
 test("the program run HTML seam (src/ui/app.js) escapes every interpolated field", () => {

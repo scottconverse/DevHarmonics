@@ -1941,6 +1941,22 @@ export class Ledger {
         ...task,
         title: redactText(task.title),
         description: redactText(task.description),
+        ...(task.consequentialChoice ? { consequentialChoice: redactText(task.consequentialChoice) } : {}),
+      })),
+      // DH-647 S2: the running plan is a separate copy from plan_revisions
+      // (the objective-approval trail) — decisions[] must survive into it too,
+      // or a run's own stored plan would silently disagree with the exact
+      // revision that was approved for it.
+      decisions: (plan.decisions ?? []).map((decision) => ({
+        subject: redactText(decision.subject),
+        question: redactText(decision.question),
+        optionsConsidered: decision.optionsConsidered.map((option) => ({
+          option: redactText(option.option),
+          disposition: option.disposition,
+          reason: option.reason ? redactText(option.reason) : null,
+        })),
+        decidingConstraint: redactText(decision.decidingConstraint),
+        acceptedCost: redactText(decision.acceptedCost),
       })),
     };
     if (currentStatus === "running") {

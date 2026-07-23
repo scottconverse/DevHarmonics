@@ -114,7 +114,34 @@ For every attached local repository, configure **Key documents to track** (the f
 
 The scan is read-only and creates an immutable snapshot. It records each repository's exact HEAD, every source content hash, whether the source is uncommitted, explicit version/release/status/maturity claims, missing or unsafe sources, and subject-aware contradictions with `repository:path:line` citations. Different repositories may legitimately have different package versions; DevHarmonics flags a conflict only when sources disagree about the same named subject. Git tags are never used as maturity evidence. The newest snapshot is supplied to future product-aware planning, while older snapshots remain in the local ledger.
 
-## 5. Start a run in the dashboard
+## 5. Decision records
+
+A decision record captures a question the team faced, every option it weighed, which option was chosen, and — just as important — every option that was rejected and why. Recording a rejection once means a killed approach is never re-proposed and re-argued from scratch as if it were fresh analysis. Decision records live in the **Decisions** panel on the **Products** view, below the registered product list.
+
+Two things are true of every decision record, by design:
+
+- **Append-only.** Nothing is ever edited after it is created. A changed mind is recorded by superseding it — creating a new record that replaces it — never by editing the original. Superseding preserves the original exactly as recorded, so a rejected approach and the reason it was rejected read the same way to every future reader.
+- **Search is keyword, not semantic.** Searching (and the automatic retrieval described in [§6](#6-start-a-run-in-the-dashboard) below) matches on words shared between your query and a record's subject or question — lowercased, split on punctuation, words under three letters dropped. It is not an AI judgment about whether two decisions are "related," and it will not find a decision worded very differently even if it covers the same ground.
+
+### Record a decision
+
+1. Open **Products** and find the **Decisions** panel below the product list.
+2. Click **Record a decision**.
+3. Enter a **Subject** — short noun phrase — this is what people will search for later, e.g. "container runtime" — and, optionally, the **Product** it belongs to.
+4. Choose a **Scope**: **This run only**, **This product**, or **This machine** (a standing choice for this computer, independent of any one product).
+5. Enter the **Question**, and **Options considered** — one option per line, written as `Option name | selected` or `Option name | rejected | reason it was rejected`. Exactly one option must be marked `selected`, and every `rejected` option needs a reason — that reason is the whole point of the record.
+6. Enter the **Deciding constraint**, the **Evidence relied on**, and the **Accepted cost** — what the choice gave up, not just what it chose.
+7. Click **Save decision**.
+
+### Search and browse
+
+Use the search box (placeholder: *Search by subject or question, e.g. "container runtime"*) and the product picker to look for prior decisions before reopening a question the team already settled. Search always returns current records only — a record that has since been superseded will not appear, because search is answering "has this been decided before," and the current answer is the one that matters. To browse the full history instead, clear the search box and tick **Include superseded records** — that checkbox only applies when the search box is empty; it has no effect on a search query.
+
+### Supersede a decision
+
+A decision record is never edited once made. When the constraint that decided it no longer holds, click **Supersede** on that record's card. The form pre-fills with the original's content and adds a required **What changed since the record being superseded** field; submitting it (**Save superseding decision**) creates a brand-new record that replaces the original — superseding preserves the original exactly as recorded. The original is now labeled **Superseded** wherever it appears, and search and the automatic retrieval described in [§6](#6-start-a-run-in-the-dashboard) stop returning it, though it stays visible in the record list. Click **View history** on a record with a supersession trail to see the whole chain, oldest first, with every earlier entry marked **Superseded** and the note explaining what changed at each step.
+
+## 6. Start a run in the dashboard
 
 1. Confirm the **Project folder** points to the intended Git repository.
 2. Optionally choose a registered product and select one or more **Repositories this run touches**. Selecting a single local repository also aligns the project folder with that checkout.
@@ -129,6 +156,17 @@ The scan is read-only and creates an immutable snapshot. It records each reposit
 8. Click **Build plan preview**. This saves a durable objective draft but starts no run.
 9. Review every proposed task and dependency plus the affected/excluded repository impact map, repository rationale, integration conditions, permissions, checks, model assignments, and capacity estimate. For a multi-repository run, every task must name exactly one affected repository.
 10. Enter requested changes and click **Revise plan**, or click **Approve this plan & start the run**. DevHarmonics retains every revision and its rationale, and execution uses the exact revision you approved without asking the architect to silently produce another plan.
+
+### Prior decisions and consequential choices
+
+When you build a plan preview, DevHarmonics searches decision records related to the goal you described — the same keyword matching described in [§5](#5-decision-records) — scoped to the run's product (any scope) plus any machine-scoped record regardless of product. This is the exact retrieval given to the architect model as planning context, so when anything matches, the plan preview shows a **Prior decisions on this subject** list before you approve: the same prior decisions the architect saw, not a separate summary of them.
+
+Separately, the architect can flag a task as a consequential choice — one that introduces a new dependency, selects a runtime or transport, or picks between architectures — and record its own comparison of options under **Decisions this plan is making**. Each consequential task then shows one of two notes:
+
+- A **Compared choice** note, when a plan decision's subject matches the task, naming what was selected and how many options were rejected.
+- **This choice was proposed without recorded alternatives — ask for the comparison before approving if it matters.**
+
+That note only flags visibility, not a block: DevHarmonics never refuses to let you approve a plan because a consequential choice lacks a comparison. It only makes sure you can see, at a glance, which choices were compared and which weren't, so you can ask for the comparison yourself if it matters to you before approving. Approving the plan is also the moment its own decisions become durable, ledger-recorded decision records — scoped to the run's product if it has one, otherwise to the run itself. A plan preview you never approve records nothing.
 
 Multi-repository execution is available through DH-720. Every affected repository must have a compatible registered local checkout, every task must target exactly one affected repository, and the plan must retain explicit integration conditions. DevHarmonics then creates a separate integration branch/worktree per repository at an exact base commit, gives each task a repository-local branch/worktree, and runs repository-local validators. Work in different repositories can proceed concurrently; merges into the same repository are serialized. Final review receives aggregate, repository-prefixed diff evidence without write access and must satisfy the configured reviewer count, distinct-provider, and implementor-independence rules. A blocking finding must use a repository-prefixed location such as `repo:core/src/service.ts:7`; an unscoped or ambiguous finding fails closed. Scoped findings become automatic fixer tasks only in the affected repository worktrees. DevHarmonics revalidates those branches, invalidates the old review receipts while retaining them in the ledger, and requires a fresh independent quorum before reporting `READY`. The run's **Repositories being changed together** card and evidence export retain every repository's base and integration HEAD commit, branch, worktree, status, error, and the integration conditions. The primary checkouts remain untouched.
 
@@ -164,7 +202,7 @@ If the **Workflows** list is ever empty, the two built-in workflows failed to lo
 
 The run permanently records which workflow revision it executed. Editing a workflow never changes what a past run did — an edit is a new revision beside the old one — and a revision recorded as a promotion of an earlier pilot is refused if it tries to widen the pilot's permissions (turning on external writes, escalating autonomy, or dropping an approval point). To record a new workflow or revision, POST its document to `/api/workflows`.
 
-## 6. Understand the run board
+## 7. Understand the run board
 
 - **Queued**: tasks waiting for dependencies or an available worker.
 - **Working**: an agent is editing, or a failed task is retrying.
@@ -192,7 +230,7 @@ The **Steer this run** panel lets you redirect live work without opening an agen
 
 Steering guides work inside the plan you approved. It cannot change a task's permissions, risk, acceptance criteria, or repository scope, and it cannot enable external writes or paid API use — those remain plan and policy decisions. Every steering request is recorded with who made it, what it targeted, and whether it was applied, rejected, or superseded by a later request, so a run's history explains every redirection after the fact.
 
-## 7. See everything waiting on you: Inbox and Program status
+## 8. See everything waiting on you: Inbox and Program status
 
 **Inbox** is the first item in the navigation. It lists every decision waiting on you across every run, so you don't have to open each run to find out whether it needs you:
 
@@ -235,7 +273,7 @@ A branch that no longer exists is only reported as a divergence when the check c
 
 Opening the file makes it fetch each repository's current branch, pull request, checks, and tag state live from `api.github.com`, from your own browser, and classify each the same three ways described above (matches / diverged / could not check). These calls are unauthenticated, so GitHub allows only 60 per hour per network address; opening the file several times in a short window, or checking many deliveries at once, can exhaust that limit and turn every check into could-not-check until the hour resets — that outcome means try again later, not that anything is wrong. It also only works for public repositories: a private one will come back could-not-check, since there is no signed-in session to authorize the request.
 
-## 8. Cancel a run
+## 9. Cancel a run
 
 Select an active run and click **Cancel run**, then confirm the dialog. DevHarmonics stops scheduling new tasks, aborts active provider processes, and marks live tasks and the run as cancelled. Already-created branches, worktrees, commits, and ledger receipts remain available for inspection.
 
@@ -243,7 +281,7 @@ Closing the DevHarmonics server terminal also stops the local server. Prefer **C
 
 Refreshing or reconnecting the browser preserves ledger evidence, but DH-720 does not yet reconstruct and resume an interrupted multi-repository integration set after a server or machine restart or clean retained worktrees automatically. Cancel active work before a planned restart and inspect the retained branches/worktrees afterward.
 
-## 9. Review the result
+## 10. Review the result
 
 Passing task commits are merged into a run-specific integration branch. A standalone or single-repository run uses:
 
@@ -267,7 +305,9 @@ A **Do everything at once** control (labeled "push, open PR, merge — and tag i
 
 A multi-repository run creates a separate integration branch and worktree for every affected repository. Use the **Repositories being changed together** card or exported evidence to copy the precise branch name and base-to-HEAD commit range for each repository. The earlier v0.5.1 release does not push those branches or open pull requests; v0.6 performs the separately approved delivery flow above. No version merges them into a primary checkout automatically.
 
-Once something has been delivered, the same card offers **Check against GitHub** to confirm what actually landed on the remote, and the Inbox offers **Export status page** to check it later from a standalone file — see [§7](#7-see-everything-waiting-on-you-inbox-and-program-status).
+Once something has been delivered, the same card offers **Check against GitHub** to confirm what actually landed on the remote, and the Inbox offers **Export status page** to check it later from a standalone file — see [§8](#8-see-everything-waiting-on-you-inbox-and-program-status).
+
+The **Evidence** view's **Export JSON** downloads a run's complete, permanent record — every attempt, review, and tool decision. That export also includes every decision record linked to the run, current and superseded alike, so it stays a complete account of what was decided along the way, not just today's answer to a question that has since changed — see [§5](#5-decision-records).
 
 Useful commands:
 
@@ -277,7 +317,7 @@ git log --oneline --decorate --graph --all
 git diff main...devharmonics/<run-prefix>
 ```
 
-## 10. Project files and configuration
+## 11. Project files and configuration
 
 DevHarmonics creates the following inside each target project:
 
@@ -337,7 +377,7 @@ Open a task and review **Why this model** to see the exact selected model, class
 
 DevHarmonics sends one exact `model` identifier and disables OpenRouter provider fallback. If spending or key limits cannot be verified, paid routing stops. Actual provider, resolved model, tokens, cost, and fallback reason are retained in the run ledger.
 
-## 11. Command reference
+## 12. Command reference
 
 ```text
 devharmonics serve [--project PATH] [--port 4317] [--open false]
@@ -369,7 +409,7 @@ While the dashboard is running, `GET /api/connections` and `GET /api/models` exp
 }
 ```
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 ### A provider says Sign-in required
 
@@ -437,7 +477,7 @@ Without it, a Docker-dependent test typically *skips* rather than fails — whic
 
 The token expands to the repository's primary root on whatever machine the run happens to be on. An absolute path breaks on every other machine; a bare `python` runs whatever interpreter is first on PATH, which is usually not the repository's own environment.
 
-## 13. Security and privacy
+## 14. Security and privacy
 
 - The dashboard listens only on the local loopback interface.
 - Authentication remains inside official provider tools.
@@ -450,7 +490,7 @@ The token expands to the repository's primary root on whatever machine the run h
 
 Report security issues using the private process in [SECURITY.md](https://github.com/scottconverse/DevHarmonics/blob/main/SECURITY.md), not a public issue or Discussion.
 
-## 14. Uninstall
+## 15. Uninstall
 
 If globally linked, remove the link:
 

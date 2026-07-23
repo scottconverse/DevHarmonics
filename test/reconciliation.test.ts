@@ -1,0 +1,1191 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { reconcileDeliveryRepository, reconcileDelivery, type ReconciliationFinding } from "../src/reconciliation.js";
+import type { DeliveryRepositoryRecord, DeliveryRepositoryStatus, DeliveryHandoffRecord } from "../src/types.js";
+import { runProcess } from "../src/process.js";
+import type { ProcessRequest, ProcessResult } from "../src/process.js";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { spawnSync, type ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
+import os from "node:os";
+import path from "node:path";
+
+function fixtureDelivery(overrides: Partial<DeliveryRepositoryRecord> = {}): DeliveryRepositoryRecord {
+  return {
+    runId: "run-1",
+    repositoryId: "repo:fixture",
+    localPath: "/tmp/fixture",
+    baseBranch: "main",
+    baseCommit: "a".repeat(40),
+    headCommit: "b".repeat(40),
+    branch: "devharmonics/recon1",
+    remoteUrl: "https://github.com/example/fixture",
+    status: "branch_pushed",
+    pullRequestUrl: null,
+    approvalId: "approval-1",
+    releaseTag: null,
+    mergeCommitOid: null,
+    error: null,
+    createdAt: "2026-07-22T00:00:00.000Z",
+    updatedAt: "2026-07-22T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function ok(stdout: string): ProcessResult {
+  return { stdout, stderr: "", exitCode: 0, durationMs: 1, timedOut: false, treeKillUnconfirmed: false };
+}
+
+function fail(stderr: string): ProcessResult {
+  return { stdout: "", stderr, exitCode: 1, durationMs: 1, timedOut: false, treeKillUnconfirmed: false };
+}
+
+function findingFor(findings: ReconciliationFinding[], artifact: ReconciliationFinding["artifact"]): ReconciliationFinding | undefined {
+  return findings.find((finding) => finding.artifact === artifact);
+}
+
+test("branch artifact: matches when the remote head equals the reviewed commit", async () => {
+  const delivery = fixtureDelivery();
+  const runner = async (request: ProcessRequest): Promise<ProcessResult> => {
+    if (request.command === "git" && request.args[0] === "ls-remote") {
+      return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    }
+    throw new Error(`unexpected call: ${request.command} ${request.args.join(" ")}`);
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const branch = findingFor(result.findings, "branch")!;
+  assert.equal(branch.state, "matches");
+  assert.match(branch.message, /still at the reviewed commit/i);
+  assert.equal(result.hasDivergence, false);
+  assert.equal(result.hasUnobserved, false);
+});
+
+test("branch artifact: diverges when the branch was deleted on the remote", async () => {
+  const delivery = fixtureDelivery();
+  const runner = async () => ok(""); // empty ls-remote output: branch gone
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const branch = findingFor(result.findings, "branch")!;
+  assert.equal(branch.state, "diverged");
+  // Plain-English finding naming ledger claim vs observed reality.
+  assert.match(branch.message, new RegExp(delivery.branch));
+  assert.match(branch.message, /no longer has that branch/i);
+  assert.equal(result.hasDivergence, true);
+});
+
+test("branch artifact: diverges when the branch head moved off the reviewed commit", async () => {
+  const delivery = fixtureDelivery();
+  const movedOid = "c".repeat(40);
+  const runner = async () => ok(`${movedOid}\trefs/heads/${delivery.branch}\n`);
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const branch = findingFor(result.findings, "branch")!;
+  assert.equal(branch.state, "diverged");
+  assert.match(branch.message, /new commits landed after review/i);
+});
+
+test("branch artifact: unobserved when git ls-remote fails (network/auth), never reported as a confirmation", async () => {
+  const delivery = fixtureDelivery();
+  const runner = async () => fail("fatal: could not read from remote repository.");
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const branch = findingFor(result.findings, "branch")!;
+  assert.equal(branch.state, "unobserved");
+  assert.match(branch.message, /could not check/i);
+  assert.equal(result.hasDivergence, false, "an unobserved artifact is never counted as a divergence");
+  assert.equal(result.hasUnobserved, true);
+});
+
+test("branch artifact: unobserved when the runner itself throws (e.g. git is not installed)", async () => {
+  const delivery = fixtureDelivery();
+  const runner = async () => { throw new Error("spawn git ENOENT"); };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const branch = findingFor(result.findings, "branch")!;
+  assert.equal(branch.state, "unobserved");
+  assert.match(branch.message, /ENOENT/);
+});
+
+test("bounded timeout: a hanging tool is reported unobserved, not left to hang the caller forever", async () => {
+  const delivery = fixtureDelivery();
+  const hangingRunner = () => new Promise<ProcessResult>(() => {}); // never resolves
+  const startedAt = Date.now();
+  const result = await reconcileDeliveryRepository(delivery, hangingRunner, 200);
+  const elapsedMs = Date.now() - startedAt;
+  assert.ok(elapsedMs < 5_000, `reconciliation must resolve near the bounded timeout, took ${elapsedMs}ms`);
+  const branch = findingFor(result.findings, "branch")!;
+  assert.equal(branch.state, "unobserved");
+  assert.match(branch.message, /timed out/i);
+});
+
+// R11c: boundedRun must not settle while the runner is still genuinely
+// unconfirmed (still running for all we know) — a runner that ignores the
+// abort signal entirely and never settles, even past the hard kill-grace
+// cap, must be reported with explicit "termination unconfirmed" wording,
+// never the plain "timed out" phrasing that a confirmed kill gets.
+test("bounded timeout: a runner that never settles even after the abort signal and the hard kill-grace cap is reported as termination unconfirmed", async () => {
+  const delivery = fixtureDelivery();
+  const neverSettles = () => new Promise<ProcessResult>(() => {}); // ignores the AbortSignal entirely
+  const startedAt = Date.now();
+  const result = await reconcileDeliveryRepository(delivery, neverSettles, 100, 100);
+  const elapsedMs = Date.now() - startedAt;
+  assert.ok(elapsedMs < 3_000, `expected bounded resolution near timeoutMs + killGraceMs, took ${elapsedMs}ms`);
+  const branch = findingFor(result.findings, "branch")!;
+  assert.equal(branch.state, "unobserved");
+  assert.match(branch.message, /termination unconfirmed/i, "an unsettled runner past the hard cap must say termination is unconfirmed");
+});
+
+// R11c: the counterpart — a runner that DOES confirm death shortly after
+// being aborted (as process.ts's real SIGTERM->SIGKILL escalation does) must
+// get the plain "timed out" wording, not the "unconfirmed" one, since death
+// was actually observed.
+test("bounded timeout: a runner that confirms death shortly after being aborted is reported as a normal timeout, not unconfirmed", async () => {
+  const delivery = fixtureDelivery();
+  const confirmsAfterAbort = (request: ProcessRequest) =>
+    new Promise<ProcessResult>((resolve) => {
+      request.signal?.addEventListener("abort", () => {
+        setTimeout(() => resolve(fail("terminated")), 20);
+      });
+    });
+  const startedAt = Date.now();
+  const result = await reconcileDeliveryRepository(delivery, confirmsAfterAbort, 100, 300);
+  const elapsedMs = Date.now() - startedAt;
+  assert.ok(elapsedMs < 3_000, `expected bounded resolution, took ${elapsedMs}ms`);
+  const branch = findingFor(result.findings, "branch")!;
+  assert.equal(branch.state, "unobserved");
+  assert.match(branch.message, /timed out/i);
+  assert.doesNotMatch(branch.message, /unconfirmed/i, "a confirmed kill must not be reported as unconfirmed");
+});
+
+test("branch artifact: a missing branch on a MERGED pull request whose head matches the reviewed commit is not a divergence — routine cleanup", async () => {
+  const delivery = fixtureDelivery({ status: "merged", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(""); // branch deleted after merge
+    if (request.command === "gh") return ok(JSON.stringify({ state: "MERGED", headRefOid: delivery.headCommit, statusCheckRollup: [] }));
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const branch = findingFor(result.findings, "branch")!;
+  assert.equal(branch.state, "matches");
+  assert.match(branch.message, /routine cleanup/i);
+  assert.equal(result.hasDivergence, false);
+});
+
+// M-merged-head: "routine cleanup" now composes with the head-match rule — a
+// merged PR whose head does not match (or was not reported) the reviewed
+// commit can no longer be assumed a clean merge, so a missing branch under
+// it must not be waved away either.
+test("branch artifact: a missing branch on a MERGED pull request whose head does NOT match the reviewed commit is a real divergence, not routine cleanup", async () => {
+  const delivery = fixtureDelivery({ status: "merged", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
+  const differentHead = "e".repeat(40);
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(""); // branch missing
+    if (request.command === "gh") return ok(JSON.stringify({ state: "MERGED", headRefOid: differentHead, statusCheckRollup: [] }));
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const branch = findingFor(result.findings, "branch")!;
+  assert.equal(branch.state, "diverged");
+  assert.match(branch.message, /no longer has that branch/i);
+});
+
+test("branch artifact: a missing branch on a MERGED pull request whose head commit was not reported stays unobserved, not routine cleanup", async () => {
+  const delivery = fixtureDelivery({ status: "merged", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(""); // branch missing
+    if (request.command === "gh") return ok(JSON.stringify({ state: "MERGED", statusCheckRollup: [] })); // no headRefOid
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const branch = findingFor(result.findings, "branch")!;
+  assert.equal(branch.state, "unobserved");
+  assert.equal(result.hasDivergence, false);
+  assert.equal(result.hasUnobserved, true);
+});
+
+test("branch artifact: a missing branch on a NON-merged (open) pull request still diverges", async () => {
+  const delivery = fixtureDelivery({ status: "draft_pr_created", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(""); // branch missing, PR never merged
+    if (request.command === "gh") return ok(JSON.stringify({ state: "OPEN", headRefOid: delivery.headCommit, statusCheckRollup: [] }));
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const branch = findingFor(result.findings, "branch")!;
+  assert.equal(branch.state, "diverged");
+  assert.match(branch.message, /no longer has that branch/i);
+});
+
+test("branch artifact: a missing branch is unobserved (never matches, never diverged) when the PR state itself could not be checked", async () => {
+  const delivery = fixtureDelivery({ status: "merged", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(""); // branch missing
+    if (request.command === "gh") return fail("gh: not logged in to any GitHub hosts. Run gh auth login");
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const branch = findingFor(result.findings, "branch")!;
+  assert.equal(branch.state, "unobserved");
+  assert.match(branch.message, /could not check/i);
+  assert.equal(result.hasDivergence, false);
+  assert.equal(result.hasUnobserved, true);
+});
+
+test("branch artifact: a branch that exists but moved to a different commit still diverges even when the pull request is merged", async () => {
+  const delivery = fixtureDelivery({ status: "merged", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
+  const movedOid = "c".repeat(40);
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(`${movedOid}\trefs/heads/${delivery.branch}\n`);
+    if (request.command === "gh") return ok(JSON.stringify({ state: "MERGED", statusCheckRollup: [] }));
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const branch = findingFor(result.findings, "branch")!;
+  assert.equal(branch.state, "diverged");
+  assert.match(branch.message, /new commits landed after review/i);
+});
+
+test("pull_request artifact: an open draft PR at the reviewed head matches", async () => {
+  const delivery = fixtureDelivery({ status: "draft_pr_created", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    if (request.command === "gh" && request.args[1] === "view") {
+      return ok(JSON.stringify({ state: "OPEN", headRefOid: delivery.headCommit, statusCheckRollup: [] }));
+    }
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const pr = findingFor(result.findings, "pull_request")!;
+  assert.equal(pr.state, "matches");
+});
+
+test("pull_request artifact: diverges when a draft PR was closed without merge", async () => {
+  const delivery = fixtureDelivery({ status: "draft_pr_created", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    if (request.command === "gh") return ok(JSON.stringify({ state: "CLOSED", headRefOid: delivery.headCommit, statusCheckRollup: [] }));
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const pr = findingFor(result.findings, "pull_request")!;
+  assert.equal(pr.state, "diverged");
+  assert.match(pr.message, /closed without merging/i);
+});
+
+test("pull_request artifact: a merged delivery whose PR is still MERGED on GitHub matches", async () => {
+  const delivery = fixtureDelivery({ status: "merged", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    if (request.command === "gh") return ok(JSON.stringify({ state: "MERGED", headRefOid: delivery.headCommit, statusCheckRollup: [{ status: "COMPLETED", conclusion: "SUCCESS" }] }));
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  assert.equal(findingFor(result.findings, "pull_request")!.state, "matches");
+  assert.equal(findingFor(result.findings, "checks")!.state, "matches");
+});
+
+test("pull_request artifact: diverges when a merged delivery's PR is no longer MERGED on GitHub", async () => {
+  const delivery = fixtureDelivery({ status: "merged", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    if (request.command === "gh") return ok(JSON.stringify({ state: "CLOSED", statusCheckRollup: [] }));
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const pr = findingFor(result.findings, "pull_request")!;
+  assert.equal(pr.state, "diverged");
+  assert.match(pr.message, /records this pull request as merged/i);
+});
+
+// M-merged-head
+test("pull_request artifact: a merged delivery whose merged head does not match the reviewed commit diverges, naming both commits", async () => {
+  const delivery = fixtureDelivery({ status: "merged", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
+  const differentHead = "e".repeat(40);
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    if (request.command === "gh") return ok(JSON.stringify({ state: "MERGED", headRefOid: differentHead, statusCheckRollup: [] }));
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const pr = findingFor(result.findings, "pull_request")!;
+  assert.equal(pr.state, "diverged");
+  assert.match(pr.message, new RegExp(delivery.headCommit.slice(0, 12)), "names the ledger's recorded commit");
+  assert.match(pr.message, new RegExp(differentHead.slice(0, 12)), "names the actually-merged commit");
+});
+
+test("pull_request artifact: a merged delivery whose response omits the merged head commit is unobserved, never a match", async () => {
+  const delivery = fixtureDelivery({ status: "merged", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    if (request.command === "gh") return ok(JSON.stringify({ state: "MERGED", statusCheckRollup: [] })); // no headRefOid
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const pr = findingFor(result.findings, "pull_request")!;
+  assert.equal(pr.state, "unobserved");
+  assert.match(pr.message, /could not check/i);
+});
+
+// minor-open-pr-head
+test("pull_request artifact: an open pull request with no reported head commit is unobserved, never a match", async () => {
+  const delivery = fixtureDelivery({ status: "draft_pr_created", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    if (request.command === "gh") return ok(JSON.stringify({ state: "OPEN", statusCheckRollup: [] })); // no headRefOid
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const pr = findingFor(result.findings, "pull_request")!;
+  assert.equal(pr.state, "unobserved");
+  assert.match(pr.message, /could not check/i);
+});
+
+// M-checks-pending
+test("checks artifact: unobserved when no checks have been reported yet (empty rollup)", async () => {
+  const delivery = fixtureDelivery({ status: "merged", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    if (request.command === "gh") return ok(JSON.stringify({ state: "MERGED", headRefOid: delivery.headCommit, statusCheckRollup: [] }));
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const checks = findingFor(result.findings, "checks")!;
+  assert.equal(checks.state, "unobserved");
+  assert.match(checks.message, /still running or not reported/i);
+  assert.equal(result.hasDivergence, false);
+  assert.equal(result.hasUnobserved, true);
+});
+
+test("checks artifact: unobserved when a check is still running (non-completed status)", async () => {
+  const delivery = fixtureDelivery({ status: "merged", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    if (request.command === "gh") return ok(JSON.stringify({ state: "MERGED", headRefOid: delivery.headCommit, statusCheckRollup: [{ status: "IN_PROGRESS", conclusion: null }] }));
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const checks = findingFor(result.findings, "checks")!;
+  assert.equal(checks.state, "unobserved");
+});
+
+test("checks artifact: unobserved when a completed check has a null conclusion", async () => {
+  const delivery = fixtureDelivery({ status: "merged", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    if (request.command === "gh") return ok(JSON.stringify({ state: "MERGED", headRefOid: delivery.headCommit, statusCheckRollup: [{ status: "COMPLETED", conclusion: null }] }));
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const checks = findingFor(result.findings, "checks")!;
+  assert.equal(checks.state, "unobserved");
+});
+
+test("checks artifact: a positively observed failure still diverges even while another check is still pending", async () => {
+  const delivery = fixtureDelivery({ status: "merged", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    if (request.command === "gh") {
+      return ok(JSON.stringify({
+        state: "MERGED",
+        headRefOid: delivery.headCommit,
+        statusCheckRollup: [{ status: "COMPLETED", conclusion: "FAILURE" }, { status: "IN_PROGRESS", conclusion: null }],
+      }));
+    }
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const checks = findingFor(result.findings, "checks")!;
+  assert.equal(checks.state, "diverged");
+});
+
+test("checks artifact: diverges when a check now reports a failing conclusion", async () => {
+  const delivery = fixtureDelivery({ status: "merged", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    if (request.command === "gh") return ok(JSON.stringify({ state: "MERGED", statusCheckRollup: [{ status: "COMPLETED", conclusion: "FAILURE" }] }));
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const checks = findingFor(result.findings, "checks")!;
+  assert.equal(checks.state, "diverged");
+  assert.match(checks.message, /failing result/i);
+  assert.equal(result.hasDivergence, true);
+});
+
+test("pull_request and checks artifacts: a single failed gh read reports BOTH as unobserved, never one confirming the other", async () => {
+  const delivery = fixtureDelivery({ status: "merged", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    if (request.command === "gh") return fail("gh: not logged in to any GitHub hosts. Run gh auth login");
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  assert.equal(findingFor(result.findings, "pull_request")!.state, "unobserved");
+  assert.equal(findingFor(result.findings, "checks")!.state, "unobserved");
+  assert.equal(result.hasDivergence, false);
+  assert.equal(result.hasUnobserved, true);
+});
+
+test("tag artifact: matches when the release tag is still present on the remote and points at the recorded merge commit", async () => {
+  const mergeCommit = "d".repeat(40);
+  const delivery = fixtureDelivery({ status: "tagged", pullRequestUrl: "https://github.com/example/fixture/pull/1", releaseTag: "v1.2.3", mergeCommitOid: mergeCommit });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote" && request.args.includes("--tags")) return ok(`${mergeCommit}\trefs/tags/v1.2.3\n`);
+    if (request.args[0] === "ls-remote") return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    if (request.command === "gh") return ok(JSON.stringify({ state: "MERGED", headRefOid: delivery.headCommit, statusCheckRollup: [] }));
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const tag = findingFor(result.findings, "tag")!;
+  assert.equal(tag.state, "matches");
+});
+
+test("tag artifact: diverges when the release tag is missing on the remote", async () => {
+  const mergeCommit = "d".repeat(40);
+  const delivery = fixtureDelivery({ status: "tagged", pullRequestUrl: "https://github.com/example/fixture/pull/1", releaseTag: "v1.2.3", mergeCommitOid: mergeCommit });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote" && request.args.includes("--tags")) return ok("");
+    if (request.args[0] === "ls-remote") return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    if (request.command === "gh") return ok(JSON.stringify({ state: "MERGED", headRefOid: delivery.headCommit, statusCheckRollup: [] }));
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const tag = findingFor(result.findings, "tag")!;
+  assert.equal(tag.state, "diverged");
+  assert.match(tag.message, /no longer has that tag/i);
+});
+
+// M-tag-oid
+test("tag artifact: diverges when a same-named tag points at a different commit than the recorded merge commit, naming both", async () => {
+  const mergeCommit = "d".repeat(40);
+  const movedTagOid = "f".repeat(40);
+  const delivery = fixtureDelivery({ status: "tagged", pullRequestUrl: "https://github.com/example/fixture/pull/1", releaseTag: "v1.2.3", mergeCommitOid: mergeCommit });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote" && request.args.includes("--tags")) return ok(`${movedTagOid}\trefs/tags/v1.2.3\n`);
+    if (request.args[0] === "ls-remote") return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    if (request.command === "gh") return ok(JSON.stringify({ state: "MERGED", headRefOid: delivery.headCommit, statusCheckRollup: [] }));
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const tag = findingFor(result.findings, "tag")!;
+  assert.equal(tag.state, "diverged");
+  assert.match(tag.message, new RegExp(mergeCommit.slice(0, 12)), "names the recorded merge commit");
+  assert.match(tag.message, new RegExp(movedTagOid.slice(0, 12)), "names where the tag actually points");
+  assert.equal(result.hasDivergence, true);
+});
+
+// R6-server: the real `git ls-remote` only ever returns a ^{} peeled line
+// for a pattern that actually asked for it — a fixture that hands back the
+// peeled line unconditionally would pass even if the production code never
+// requested `refs/tags/NAME^{}` at all. This double only emits it when that
+// exact pattern is present in the request, so the test actually proves the
+// production code asks for both.
+test("tag artifact: peels an annotated tag to its target commit before comparing, rather than comparing the tag object's own oid", async () => {
+  const mergeCommit = "d".repeat(40);
+  const tagObjectOid = "a".repeat(40); // the annotated tag object itself — NOT the commit it points at
+  const delivery = fixtureDelivery({ status: "tagged", pullRequestUrl: "https://github.com/example/fixture/pull/1", releaseTag: "v1.2.3", mergeCommitOid: mergeCommit });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote" && request.args.includes("--tags")) {
+      const lines = [`${tagObjectOid}\trefs/tags/v1.2.3\n`];
+      if (request.args.includes("refs/tags/v1.2.3^{}")) lines.push(`${mergeCommit}\trefs/tags/v1.2.3^{}\n`);
+      return ok(lines.join(""));
+    }
+    if (request.args[0] === "ls-remote") return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    if (request.command === "gh") return ok(JSON.stringify({ state: "MERGED", headRefOid: delivery.headCommit, statusCheckRollup: [] }));
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const tag = findingFor(result.findings, "tag")!;
+  assert.equal(tag.state, "matches", "the peeled commit target matches the recorded merge commit even though the tag object's own oid does not — which is only possible if the ^{} pattern was actually requested");
+});
+
+// R6-server
+test("tag artifact: requests both the bare tag ref and its peeled ^{} pattern, never just refs/tags/NAME alone", async () => {
+  const mergeCommit = "d".repeat(40);
+  const delivery = fixtureDelivery({ status: "tagged", pullRequestUrl: "https://github.com/example/fixture/pull/1", releaseTag: "v9.9.9", mergeCommitOid: mergeCommit });
+  let seenTagArgs: string[] = [];
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote" && request.args.includes("--tags")) {
+      seenTagArgs = request.args;
+      const lines = [`${mergeCommit}\trefs/tags/v9.9.9\n`];
+      if (request.args.includes("refs/tags/v9.9.9^{}")) lines.push(`${mergeCommit}\trefs/tags/v9.9.9^{}\n`);
+      return ok(lines.join(""));
+    }
+    if (request.args[0] === "ls-remote") return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    if (request.command === "gh") return ok(JSON.stringify({ state: "MERGED", headRefOid: delivery.headCommit, statusCheckRollup: [] }));
+    throw new Error("unexpected call");
+  };
+  await reconcileDeliveryRepository(delivery, runner);
+  assert.ok(seenTagArgs.includes("refs/tags/v9.9.9"), "requests the bare tag ref");
+  assert.ok(seenTagArgs.includes("refs/tags/v9.9.9^{}"), "also requests the peeled ^{} pattern, so annotated tags are reliably peeled");
+});
+
+test("tag artifact: unobserved when no merge commit was recorded to compare against, even though the tag exists", async () => {
+  const delivery = fixtureDelivery({ status: "tagged", pullRequestUrl: "https://github.com/example/fixture/pull/1", releaseTag: "v1.2.3", mergeCommitOid: null });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote" && request.args.includes("--tags")) return ok(`${"d".repeat(40)}\trefs/tags/v1.2.3\n`);
+    if (request.args[0] === "ls-remote") return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    // gh response also omits mergeCommit, so there is no live fallback either.
+    if (request.command === "gh") return ok(JSON.stringify({ state: "MERGED", headRefOid: delivery.headCommit, statusCheckRollup: [] }));
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const tag = findingFor(result.findings, "tag")!;
+  assert.equal(tag.state, "unobserved");
+  assert.equal(result.hasDivergence, false);
+  assert.equal(result.hasUnobserved, true);
+});
+
+test("tag artifact: falls back to the merge commit observed live from the pull request when the ledger's cached merge commit is missing", async () => {
+  const liveMergeCommit = "d".repeat(40);
+  const delivery = fixtureDelivery({ status: "tagged", pullRequestUrl: "https://github.com/example/fixture/pull/1", releaseTag: "v1.2.3", mergeCommitOid: null });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote" && request.args.includes("--tags")) return ok(`${liveMergeCommit}\trefs/tags/v1.2.3\n`);
+    if (request.args[0] === "ls-remote") return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    if (request.command === "gh") return ok(JSON.stringify({ state: "MERGED", headRefOid: delivery.headCommit, statusCheckRollup: [], mergeCommit: { oid: liveMergeCommit } }));
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const tag = findingFor(result.findings, "tag")!;
+  assert.equal(tag.state, "matches");
+});
+
+// M-origin
+test("branch artifact: queries the recorded remote URL directly, never the checkout's mutable 'origin'", async () => {
+  const delivery = fixtureDelivery({ remoteUrl: "https://github.com/example/fixture-real" });
+  let seenArgs: string[] = [];
+  const runner = async (request: ProcessRequest) => {
+    seenArgs = request.args;
+    return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+  };
+  await reconcileDeliveryRepository(delivery, runner);
+  assert.ok(seenArgs.includes(delivery.remoteUrl!), "the recorded remote URL is the query target");
+  assert.ok(!seenArgs.includes("origin"), "the mutable checkout remote name is never used");
+});
+
+test("branch artifact: unobserved when no remote URL was recorded for this delivery", async () => {
+  const delivery = fixtureDelivery({ remoteUrl: null });
+  const runner = async () => { throw new Error("must not call any external tool with no remote URL to query"); };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const branch = findingFor(result.findings, "branch")!;
+  assert.equal(branch.state, "unobserved");
+  assert.match(branch.message, /no remote url was recorded/i);
+});
+
+test("tag artifact: queries the recorded remote URL directly, never 'origin'", async () => {
+  const mergeCommit = "d".repeat(40);
+  const delivery = fixtureDelivery({
+    status: "tagged", pullRequestUrl: "https://github.com/example/fixture/pull/1", releaseTag: "v1.2.3",
+    mergeCommitOid: mergeCommit, remoteUrl: "https://github.com/example/fixture-real",
+  });
+  let seenTagArgs: string[] = [];
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote" && request.args.includes("--tags")) {
+      seenTagArgs = request.args;
+      return ok(`${mergeCommit}\trefs/tags/v1.2.3\n`);
+    }
+    if (request.args[0] === "ls-remote") return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    if (request.command === "gh") return ok(JSON.stringify({ state: "MERGED", headRefOid: delivery.headCommit, statusCheckRollup: [] }));
+    throw new Error("unexpected call");
+  };
+  await reconcileDeliveryRepository(delivery, runner);
+  assert.ok(seenTagArgs.includes(delivery.remoteUrl!), "the recorded remote URL is the query target");
+  assert.ok(!seenTagArgs.includes("origin"), "the mutable checkout remote name is never used");
+});
+
+test("a 'prepared' delivery record has nothing delivered yet: reconciliation returns no findings, invents nothing", async () => {
+  const delivery = fixtureDelivery({ status: "prepared" });
+  const runner = async () => { throw new Error("must not call any external tool for a record with nothing delivered"); };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  assert.deepEqual(result.findings, []);
+  assert.equal(result.hasDivergence, false);
+  assert.equal(result.hasUnobserved, false);
+});
+
+// minor-failed-push: a 'failed' record's branch state is unknown, not
+// absent — the push_branch step reported failure, but it may have reached
+// the remote before that failure was reported (a lost acknowledgement), so
+// reconciliation still observes the branch, worded to make the failed
+// attempt explicit either way. There is never a pull request or tag to
+// check for a genuinely 'failed' record (see OBSERVABLE_BRANCH_STATUSES).
+test("a 'failed' delivery record: branch absent on the remote is consistent with the reported failure", async () => {
+  const delivery = fixtureDelivery({ status: "failed", pullRequestUrl: null, releaseTag: null });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(""); // nothing on the remote
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  assert.equal(result.findings.length, 1, "only the branch is ever checked for a failed record");
+  const branch = findingFor(result.findings, "branch")!;
+  assert.equal(branch.state, "matches");
+  assert.match(branch.message, /recorded this push as failed/i);
+  assert.match(branch.message, /does not exist/i);
+  assert.equal(result.hasDivergence, false);
+});
+
+test("a 'failed' delivery record: branch present at the expected commit is reported as a possible actual success despite the recorded failure", async () => {
+  const delivery = fixtureDelivery({ status: "failed", pullRequestUrl: null, releaseTag: null });
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const branch = findingFor(result.findings, "branch")!;
+  assert.equal(branch.state, "diverged");
+  assert.match(branch.message, /recorded this push as failed/i);
+  assert.match(branch.message, /may have actually succeeded/i);
+  assert.equal(result.hasDivergence, true);
+});
+
+test("a 'failed' delivery record: branch present at an unexpected commit is reported diverged, wording the failed attempt", async () => {
+  const delivery = fixtureDelivery({ status: "failed", pullRequestUrl: null, releaseTag: null });
+  const otherOid = "c".repeat(40);
+  const runner = async (request: ProcessRequest) => {
+    if (request.args[0] === "ls-remote") return ok(`${otherOid}\trefs/heads/${delivery.branch}\n`);
+    throw new Error("unexpected call");
+  };
+  const result = await reconcileDeliveryRepository(delivery, runner);
+  const branch = findingFor(result.findings, "branch")!;
+  assert.equal(branch.state, "diverged");
+  assert.match(branch.message, /recorded this push as failed/i);
+  assert.match(branch.message, new RegExp(otherOid.slice(0, 12)));
+});
+
+// M-fanout
+test("reconcileDelivery bounds concurrency across a run's repositories instead of starting all of them at once", async () => {
+  const repositories = Array.from({ length: 7 }, (_, index) => fixtureDelivery({ repositoryId: `repo:${index}`, branch: `devharmonics/recon-${index}` }));
+  const run: DeliveryHandoffRecord = { runId: "fanout-run-1", status: "branch_pushed", repositories };
+  let concurrent = 0;
+  let maxConcurrent = 0;
+  const runner = async (request: ProcessRequest): Promise<ProcessResult> => {
+    concurrent += 1;
+    maxConcurrent = Math.max(maxConcurrent, concurrent);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    concurrent -= 1;
+    return ok(`${repositories[0]!.headCommit}\t${request.args[2]}\n`);
+  };
+  const results = await reconcileDelivery({ delivery: run }, runner);
+  assert.equal(results.length, 7);
+  assert.ok(maxConcurrent <= 3, `expected at most 3 concurrent checks, saw ${maxConcurrent}`);
+  assert.ok(maxConcurrent >= 2, "the pool should still run more than one at a time");
+});
+
+// R12: the per-run pool (RECONCILIATION_CONCURRENCY = 3) only bounds a
+// single run. Without a server-wide cap, three DIFFERENT runs reconciling at
+// once could each run their own 3-worker pool simultaneously — 9 concurrent
+// external checks. This proves a global semaphore composes with the per-run
+// pools so the server-wide total never exceeds the global cap (6).
+test("reconcileDelivery bounds concurrent external checks GLOBALLY across different runs, not just within one run", async () => {
+  const makeRun = (id: string, count: number): DeliveryHandoffRecord => ({
+    runId: id,
+    status: "branch_pushed",
+    repositories: Array.from({ length: count }, (_, index) =>
+      fixtureDelivery({ runId: id, repositoryId: `${id}:repo:${index}`, branch: `devharmonics/${id}-${index}` }),
+    ),
+  });
+  const runA = makeRun("global-fanout-a", 4);
+  const runB = makeRun("global-fanout-b", 4);
+  const runC = makeRun("global-fanout-c", 4);
+
+  let concurrent = 0;
+  let maxConcurrent = 0;
+  const runner = async (request: ProcessRequest): Promise<ProcessResult> => {
+    concurrent += 1;
+    maxConcurrent = Math.max(maxConcurrent, concurrent);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    concurrent -= 1;
+    return ok(`${"b".repeat(40)}\t${request.args[2]}\n`);
+  };
+
+  const [resultsA, resultsB, resultsC] = await Promise.all([
+    reconcileDelivery({ delivery: runA }, runner),
+    reconcileDelivery({ delivery: runB }, runner),
+    reconcileDelivery({ delivery: runC }, runner),
+  ]);
+  assert.equal(resultsA.length, 4);
+  assert.equal(resultsB.length, 4);
+  assert.equal(resultsC.length, 4);
+  assert.ok(maxConcurrent <= 6, `expected a server-wide cap of 6 concurrent checks across all runs, saw ${maxConcurrent}`);
+  assert.ok(maxConcurrent >= 4, "the global pool should still allow meaningful concurrency across different runs, not serialize everything");
+});
+
+// round3 Major "six unconfirmed runners can permanently starve all
+// reconciliation": six runners that never settle (and never confirm their
+// own termination, even past boundedRun's hard cap) used to hold all six
+// global permits FOREVER, since a slot was only ever released when the
+// underlying runner actually settled. A later call would then wait
+// unboundedly in acquire() — before its own primary timeout even started.
+// Proves both halves of the fix: (a) a 7th call gives up within its OWN
+// budget instead of hanging, and never starts external work while busy;
+// (b) once the six starvers hit their hard cap and give up, their permits
+// are released, so an 8th call afterward gets a permit and actually runs.
+test("global semaphore: six permanently-unsettled runners cannot starve reconciliation forever", async () => {
+  const neverSettles = () => new Promise<ProcessResult>(() => {}); // ignores the AbortSignal entirely, never resolves
+  const starverPromises = Array.from({ length: 6 }, (_, index) =>
+    reconcileDeliveryRepository(fixtureDelivery({ repositoryId: `repo:starve-${index}` }), neverSettles, 100, 50),
+  );
+
+  // Give the six starvers a moment to actually acquire their permits before
+  // the 7th call is issued, so it is genuinely queued behind a full pool.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  let seventhRunnerCalled = false;
+  const seventhRunner = async (): Promise<ProcessResult> => {
+    seventhRunnerCalled = true;
+    return ok("");
+  };
+  const seventhStartedAt = Date.now();
+  const seventhResult = await reconcileDeliveryRepository(fixtureDelivery({ repositoryId: "repo:seventh" }), seventhRunner, 200, 50);
+  const seventhElapsedMs = Date.now() - seventhStartedAt;
+
+  assert.ok(seventhElapsedMs < 1_000, `expected the 7th call to give up near its own budget instead of hanging, took ${seventhElapsedMs}ms`);
+  assert.equal(seventhRunnerCalled, false, "the 7th call must never start external work while every global slot is held");
+  const seventhBranch = findingFor(seventhResult.findings, "branch")!;
+  assert.equal(seventhBranch.state, "unobserved");
+  assert.match(seventhBranch.message, /busy/i);
+
+  // Once the six starvers each hit their hard cap (timeoutMs + killGraceMs +
+  // the confirmation margin) and give up, their permits are released even
+  // though the starver runners themselves never actually settled.
+  await Promise.all(starverPromises);
+
+  let eighthRunnerCalled = false;
+  const eighthDelivery = fixtureDelivery({ repositoryId: "repo:eighth" });
+  const eighthRunner = async (): Promise<ProcessResult> => {
+    eighthRunnerCalled = true;
+    return ok(`${eighthDelivery.headCommit}\trefs/heads/${eighthDelivery.branch}\n`);
+  };
+  const eighthResult = await reconcileDeliveryRepository(eighthDelivery, eighthRunner, 200, 50);
+  assert.equal(eighthRunnerCalled, true, "capacity should have recovered once the starvers gave up at their hard cap");
+  assert.equal(findingFor(eighthResult.findings, "branch")!.state, "matches");
+});
+
+// round3 Major (fix path, no-double-release): boundedRun's hard-cap giveup
+// releases a starver's permit EARLY, before the underlying runner has
+// actually settled. If that later, real settlement released the SAME
+// permit a second time, the semaphore would hand out a phantom extra slot —
+// letting more than GLOBAL_RECONCILIATION_CONCURRENCY (6) callers hold a
+// permit at once. This proves it does not: six starvers give up their
+// permits at the hard cap; six "occupier" callers immediately take all six
+// recovered permits and hold them open; only THEN do the starvers' real
+// runner promises actually resolve. A "prober" queued behind the occupiers
+// must stay queued (busy) through all of this — a phantom permit would let
+// it in early.
+test("global semaphore: a starver's real, late settlement never double-releases its already-freed permit", async () => {
+  let releaseStarvers: () => void = () => {};
+  const starverGate = new Promise<void>((resolve) => {
+    releaseStarvers = resolve;
+  });
+  const starverRunner = (): Promise<ProcessResult> =>
+    new Promise((resolve) => {
+      // Ignores the AbortSignal (never confirms termination on its own,
+      // like a real hung external process) until the test manually lets it
+      // go via `releaseStarvers()`.
+      starverGate.then(() => resolve(ok("")));
+    });
+  const starverPromises = Array.from({ length: 6 }, (_, index) =>
+    reconcileDeliveryRepository(fixtureDelivery({ repositoryId: `repo:dbl-starve-${index}` }), starverRunner, 60, 60),
+  );
+  // Each starver's OUTER reconcileDeliveryRepository call settles once it
+  // hits its hard cap — proving all six permits have been released — even
+  // though the starverRunner promises themselves are still pending on
+  // starverGate.
+  await Promise.all(starverPromises);
+
+  let releaseOccupiers: () => void = () => {};
+  const occupierGate = new Promise<void>((resolve) => {
+    releaseOccupiers = resolve;
+  });
+  const occupierRunner = async (): Promise<ProcessResult> => {
+    await occupierGate;
+    return ok("");
+  };
+  const occupierPromises = Array.from({ length: 6 }, (_, index) =>
+    reconcileDeliveryRepository(fixtureDelivery({ repositoryId: `repo:dbl-occupy-${index}` }), occupierRunner, 5_000, 5_000),
+  );
+  // Give the six occupiers a moment to actually acquire the six permits
+  // just recovered from the starvers' hard-cap giveup.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  let proberRunnerCalled = false;
+  const proberRunner = async (): Promise<ProcessResult> => {
+    proberRunnerCalled = true;
+    return ok("");
+  };
+  const proberPromise = reconcileDeliveryRepository(fixtureDelivery({ repositoryId: "repo:dbl-prober" }), proberRunner, 2_000, 100);
+
+  // Now let the starvers' real (abandoned) runner promises actually
+  // resolve, well after their permits were already released. A buggy
+  // double-release here would hand the queued prober a phantom permit even
+  // though all six real occupiers still legitimately hold theirs.
+  releaseStarvers();
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(proberRunnerCalled, false, "a starver's late settlement must not double-release its permit and let the prober in early");
+
+  // Legitimately free capacity: the occupiers release for real.
+  releaseOccupiers();
+  await Promise.all(occupierPromises);
+  await proberPromise;
+  assert.equal(proberRunnerCalled, true, "the prober should acquire a permit once the occupiers legitimately release theirs");
+});
+
+// Minor: the timeout/grace races in boundedRun must cancel their losing
+// timer once the runner settles first — otherwise every fast (non-timed-out)
+// reconciliation leaves a live timer scheduled for the full timeoutMs. A
+// fast fake runner here resolves via microtask, well before any real
+// wall-clock time could elapse, so if the race's setTimeout is still
+// uncancelled once this call resolves, it can only be because it was never
+// cleared.
+test("boundedRun cancels its timeout race timer once the check resolves fast, instead of leaving it scheduled", async () => {
+  const originalSetTimeout = global.setTimeout;
+  const originalClearTimeout = global.clearTimeout;
+  let outstanding = 0;
+  global.setTimeout = ((handler: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+    outstanding += 1;
+    return originalSetTimeout(handler, ms, ...args);
+  }) as unknown as typeof setTimeout;
+  global.clearTimeout = ((handle: Parameters<typeof clearTimeout>[0]) => {
+    if (handle !== undefined) outstanding -= 1;
+    return originalClearTimeout(handle);
+  }) as unknown as typeof clearTimeout;
+
+  try {
+    const delivery = fixtureDelivery();
+    const fastRunner = async () => ok(`${delivery.headCommit}\trefs/heads/${delivery.branch}\n`);
+    // Large timeout/killGrace: if the race timer were NOT cancelled on the
+    // fast path, it would still be scheduled (and thus still counted here)
+    // long after this call has already resolved.
+    await reconcileDeliveryRepository(delivery, fastRunner, 60_000, 30_000);
+    assert.equal(outstanding, 0, `expected the timeout race's timer to be cancelled once the check resolved fast, but ${outstanding} timer(s) are still scheduled`);
+  } finally {
+    global.setTimeout = originalSetTimeout;
+    global.clearTimeout = originalClearTimeout;
+  }
+});
+
+test("reconcileDelivery reuses an in-flight reconciliation for the same run instead of stacking a second one", async () => {
+  const repositories = [fixtureDelivery({ repositoryId: "repo:dedupe" })];
+  const run: DeliveryHandoffRecord = { runId: "fanout-run-dedupe", status: "branch_pushed", repositories };
+  let callCount = 0;
+  const runner = async (request: ProcessRequest): Promise<ProcessResult> => {
+    callCount += 1;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return ok(`${repositories[0]!.headCommit}\trefs/heads/${repositories[0]!.branch}\n`);
+  };
+  const first = reconcileDelivery({ delivery: run }, runner);
+  const second = reconcileDelivery({ delivery: run }, runner);
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+  assert.equal(callCount, 1, "the second call reused the first's in-flight reconciliation instead of starting a new one");
+  assert.deepEqual(firstResult, secondResult);
+
+  // Once settled, a later call starts a fresh reconciliation (never stuck forever) —
+  // a genuinely new run, so only its non-timestamp shape is compared.
+  const third = await reconcileDelivery({ delivery: run }, runner);
+  assert.equal(callCount, 2);
+  assert.equal(third.length, firstResult.length);
+  assert.deepEqual(third[0]!.findings, firstResult[0]!.findings);
+});
+
+// M-timeout-abort: exercises the REAL runProcess (not a fake), proving the
+// timeout / abort path actually terminates a genuinely long-running child
+// process and only resolves once it is confirmed dead — a spawned process
+// that sleeps 60s must not make this test wait anywhere near that long.
+test("runProcess terminates a still-running process on timeout and resolves once it is confirmed dead", async () => {
+  const startedAt = Date.now();
+  const result = await runProcess({
+    command: process.execPath,
+    args: ["-e", "setTimeout(() => {}, 60000)"],
+    cwd: process.cwd(),
+    timeoutMs: 300,
+    killGraceMs: 300,
+  });
+  const elapsedMs = Date.now() - startedAt;
+  assert.equal(result.timedOut, true);
+  assert.ok(elapsedMs < 5_000, `expected the process to be confirmed dead well before 60s, took ${elapsedMs}ms`);
+});
+
+test("runProcess honors an external AbortSignal: terminates the process and resolves once confirmed dead", async () => {
+  const controller = new AbortController();
+  const startedAt = Date.now();
+  const resultPromise = runProcess({
+    command: process.execPath,
+    args: ["-e", "setTimeout(() => {}, 60000)"],
+    cwd: process.cwd(),
+    timeoutMs: 60_000,
+    killGraceMs: 300,
+    signal: controller.signal,
+  });
+  setTimeout(() => controller.abort(), 100);
+  const result = await resultPromise;
+  const elapsedMs = Date.now() - startedAt;
+  assert.equal(result.timedOut, true);
+  assert.ok(elapsedMs < 5_000, `expected the process to be confirmed dead shortly after abort, took ${elapsedMs}ms`);
+});
+
+// Windows-only regression: provider CLIs on Windows are cmd/shim processes
+// whose real work happens in a GRANDCHILD that inherits the stdio pipes.
+// child.kill() only kills the direct child (the .cmd's cmd.exe host); the
+// orphaned grandchild keeps the inherited stdout/stderr pipe handles open,
+// so 'close' never fires and runProcess never settles. This fixture is a
+// .cmd wrapper that runs node directly (not backgrounded), inheriting
+// stdio, so node.exe is a true grandchild of this test process — exactly
+// the shape a real Windows provider CLI shim produces. Skipped on POSIX,
+// where there is no cmd/shim indirection to reproduce.
+if (process.platform === "win32") {
+  test("runProcess on Windows kills the whole process tree, not just the direct .cmd child", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-tree-kill-"));
+    try {
+      const pidfile = path.join(root, "grandchild.pid");
+      const wrapper = path.join(root, "hanging-tree.cmd");
+      // No `start /b`: cmd.exe runs node in the foreground as its own child,
+      // inheriting cmd.exe's stdio (the pipes runProcess set up). That makes
+      // node.exe a grandchild relative to runProcess's own child (cmd.exe).
+      await writeFile(
+        wrapper,
+        `@echo off\r\n"${process.execPath}" -e "require('fs').writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => {}, 60000);" "${pidfile}"\r\n`,
+        "utf8",
+      );
+
+      const startedAt = Date.now();
+      const result = await runProcess({
+        command: wrapper,
+        args: [],
+        cwd: root,
+        timeoutMs: 2_000,
+        killGraceMs: 300,
+      });
+      const elapsedMs = Date.now() - startedAt;
+
+      assert.equal(result.timedOut, true);
+      assert.ok(elapsedMs < 15_000, `expected runProcess to settle well under 15s, took ${elapsedMs}ms`);
+
+      assert.ok(existsSync(pidfile), "the grandchild node process should have written its pidfile before the 2s timeout");
+      const grandchildPid = Number((await readFile(pidfile, "utf8")).trim());
+      assert.ok(Number.isInteger(grandchildPid) && grandchildPid > 0, `expected a valid pid in the pidfile, got ${grandchildPid}`);
+
+      const isAlive = (pid: number): boolean => {
+        const check = spawnSync("tasklist", ["/fi", `PID eq ${pid}`, "/nh"], { encoding: "utf8" });
+        return check.stdout.includes(String(pid));
+      };
+
+      // Give the tree-kill (and its drain-timer backstop) a little room to
+      // finish reaping the grandchild beyond runProcess's own settlement.
+      const deadline = Date.now() + 8_000;
+      let alive = isAlive(grandchildPid);
+      while (alive && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        alive = isAlive(grandchildPid);
+      }
+      assert.equal(alive, false, `expected the orphaned grandchild (pid ${grandchildPid}) to be dead, but it is still running`);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
+// round3 "Windows taskkill failure path NOT RESOLVED": the real `taskkill`
+// binary cannot be forced to fail or hang portably/deterministically (a live
+// pid we own is always killable, and hanging a real Microsoft binary isn't
+// reproducible). `windowsTaskkillSpawn` is a narrow test-only seam (see
+// src/process.ts) that substitutes how the helper is spawned so these
+// exact failure/retry/deadline/fallback branches in terminate() can be
+// exercised for real, against a REAL long-running direct child, without
+// faking anything else.
+if (process.platform === "win32") {
+  test("runProcess retries a failing taskkill once, then falls back to killing the direct child and flags treeKillUnconfirmed", async () => {
+    let taskkillCalls = 0;
+    const fakeTaskkillSpawn = (): ChildProcess => {
+      taskkillCalls += 1;
+      const fake = new EventEmitter() as unknown as ChildProcess;
+      queueMicrotask(() => fake.emit("exit", 1)); // always reports failure, never actually kills anything
+      return fake;
+    };
+    const startedAt = Date.now();
+    const result = await runProcess({
+      command: process.execPath,
+      args: ["-e", "setTimeout(() => {}, 60000)"],
+      cwd: process.cwd(),
+      timeoutMs: 200,
+      killGraceMs: 200,
+      windowsTaskkillSpawn: fakeTaskkillSpawn,
+    });
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(taskkillCalls, 2, "expected exactly one retry after the first taskkill attempt failed");
+    assert.equal(result.timedOut, true);
+    assert.equal(result.treeKillUnconfirmed, true, "falling back to a direct-child-only kill must flag tree-kill as unconfirmed, never a silent normal timeout");
+    assert.ok(elapsedMs < 5_000, `expected the retry+fallback path to settle quickly, took ${elapsedMs}ms`);
+  });
+
+  test("runProcess treats a hung taskkill helper (neither error nor exit) as failed once its own deadline elapses, and still retries once before falling back", async () => {
+    let taskkillCalls = 0;
+    const fakeTaskkillSpawn = (): ChildProcess => {
+      taskkillCalls += 1;
+      return new EventEmitter() as unknown as ChildProcess; // never emits 'error' or 'exit' at all
+    };
+    const startedAt = Date.now();
+    const result = await runProcess({
+      command: process.execPath,
+      args: ["-e", "setTimeout(() => {}, 60000)"],
+      cwd: process.cwd(),
+      timeoutMs: 200,
+      killGraceMs: 200,
+      windowsTaskkillSpawn: fakeTaskkillSpawn,
+      windowsTaskkillDeadlineMs: 150,
+    });
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(taskkillCalls, 2, "a taskkill that never confirms must still be retried once before falling back");
+    assert.equal(result.timedOut, true);
+    assert.equal(result.treeKillUnconfirmed, true, "a hung taskkill that forced a direct-child-only fallback must flag tree-kill as unconfirmed");
+    assert.ok(elapsedMs < 5_000, `expected the deadline+retry+fallback path to settle well under 5s, took ${elapsedMs}ms`);
+  });
+
+  test("runProcess trusts a taskkill that reports success on the first attempt: no retry, treeKillUnconfirmed stays false", async () => {
+    let taskkillCalls = 0;
+    const fakeTaskkillSpawn = (targetPid: number): ChildProcess => {
+      taskkillCalls += 1;
+      const fake = new EventEmitter() as unknown as ChildProcess;
+      queueMicrotask(() => {
+        // Emulate what a real successful `taskkill /T /F` does: the target
+        // actually dies. Otherwise nothing would ever kill the real child
+        // this test spawned, and runProcess would hang waiting for 'close'.
+        try {
+          process.kill(targetPid, "SIGKILL");
+        } catch {
+          // already gone
+        }
+        fake.emit("exit", 0);
+      });
+      return fake;
+    };
+    const result = await runProcess({
+      command: process.execPath,
+      args: ["-e", "setTimeout(() => {}, 60000)"],
+      cwd: process.cwd(),
+      timeoutMs: 200,
+      killGraceMs: 200,
+      windowsTaskkillSpawn: fakeTaskkillSpawn,
+    });
+    assert.equal(taskkillCalls, 1, "a successful first attempt must not be retried");
+    assert.equal(result.timedOut, true);
+    assert.equal(result.treeKillUnconfirmed, false, "a confirmed successful tree-kill must not be flagged unconfirmed");
+  });
+
+  // round4 finding 1: the direct child's 'close' event can fire
+  // independently of — and BEFORE — the taskkill state machine reaching a
+  // terminal state. Here the real direct child exits on its own (a short
+  // self-terminating script, standing in for "the Windows parent exits
+  // before taskkill reports it could not enumerate the already-dead
+  // parent"), while the faked taskkill's failure response only arrives
+  // ~200ms later (via one retry, then the fallback). Against the pre-fix
+  // code, 'close' resolves the promise immediately using
+  // treeKillUnconfirmed's not-yet-final value (false) — false confidence.
+  // The fix must make 'close' wait for the taskkill state machine to reach
+  // its terminal (fallback) state before resolving.
+  test("runProcess does not publish treeKillUnconfirmed: false when the direct child exits before the taskkill state machine concludes", async () => {
+    let taskkillCalls = 0;
+    const fakeTaskkillSpawn = (): ChildProcess => {
+      taskkillCalls += 1;
+      const fake = new EventEmitter() as unknown as ChildProcess;
+      // Each attempt's nonzero exit lands ~100ms after being spawned (two
+      // attempts ~200ms total: first attempt, then the single retry), well
+      // after the direct child below has already exited on its own.
+      setTimeout(() => fake.emit("exit", 1), 100);
+      return fake;
+    };
+    const startedAt = Date.now();
+    const result = await runProcess({
+      // Exits on its own shortly after start — independent of termination —
+      // standing in for a Windows parent that is already dead by the time
+      // taskkill tries (and fails) to enumerate it.
+      command: process.execPath,
+      args: ["-e", "setTimeout(() => {}, 30)"],
+      cwd: process.cwd(),
+      // Fires terminate() almost immediately, well before the child's own
+      // ~30ms natural exit, and well before either fake taskkill attempt's
+      // ~100ms response.
+      timeoutMs: 5,
+      killGraceMs: 5_000,
+      windowsTaskkillSpawn: fakeTaskkillSpawn,
+    });
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(taskkillCalls, 2, "expected exactly one retry after the first taskkill attempt failed");
+    assert.equal(result.timedOut, true);
+    assert.equal(
+      result.treeKillUnconfirmed,
+      true,
+      "the direct child exiting before taskkill's fallback concluded must still be reported as tree-kill unconfirmed, never a false-confidence confirmed timeout",
+    );
+    assert.ok(elapsedMs < 5_000, `expected the close-vs-taskkill race to resolve well under 5s, took ${elapsedMs}ms`);
+  });
+}
+
+// round3 "Confirmed process-tree shutdown NOT RESOLVED" (POSIX half): a
+// SIGTERM-cooperative direct child that exits BEFORE the scheduled group
+// SIGKILL fires must not let a SIGTERM-ignoring grandchild in the same
+// process group survive — 'close' used to just cancel the pending group
+// SIGKILL. This spawns a direct child that exits almost immediately on
+// SIGTERM while it has already forked a detached SIGTERM-ignoring
+// grandchild sharing its process group, and proves the grandchild is
+// swept anyway. POSIX-only: Windows has no process groups (its tree-kill
+// goes through taskkill, covered above) and process.kill(-pid, ...) does
+// not carry the same meaning there.
+if (process.platform !== "win32") {
+  test("runProcess sweeps a SIGTERM-ignoring grandchild even when the direct child exits on SIGTERM before the group SIGKILL grace elapses", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-posix-sweep-"));
+    try {
+      const pidfile = path.join(root, "grandchild.pid");
+      const script = path.join(root, "cooperative-parent.js");
+      // The direct child: forks a detached grandchild (same process group,
+      // since the direct child itself is the group leader per process.ts's
+      // `detached: true`) that ignores SIGTERM, writes its own pid, then
+      // exits promptly and cooperatively on SIGTERM — well before
+      // killGraceMs elapses.
+      await writeFile(
+        script,
+        `
+        const { spawn } = require("node:child_process");
+        const fs = require("node:fs");
+        const pidfile = process.argv[2];
+        const grandchild = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setTimeout(() => {}, 60000);"], { stdio: "ignore" });
+        fs.writeFileSync(pidfile, String(grandchild.pid));
+        process.on("SIGTERM", () => process.exit(0));
+        setTimeout(() => {}, 60000);
+        `,
+        "utf8",
+      );
+
+      const startedAt = Date.now();
+      const result = await runProcess({
+        command: process.execPath,
+        args: [script, pidfile],
+        cwd: root,
+        timeoutMs: 2_000,
+        killGraceMs: 2_000, // deliberately long: proves the sweep fires on 'exit', not the killTimer
+      });
+      const elapsedMs = Date.now() - startedAt;
+
+      assert.equal(result.timedOut, true);
+      assert.ok(elapsedMs < 3_000, `expected the direct child's prompt SIGTERM exit to settle runProcess well before the 2s group-kill grace, took ${elapsedMs}ms`);
+
+      assert.ok(existsSync(pidfile), "the grandchild should have written its pidfile before the 2s timeout");
+      const grandchildPid = Number((await readFile(pidfile, "utf8")).trim());
+      assert.ok(Number.isInteger(grandchildPid) && grandchildPid > 0, `expected a valid pid in the pidfile, got ${grandchildPid}`);
+
+      const isAlive = (pid: number): boolean => {
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
+      const deadline = Date.now() + 3_000;
+      let alive = isAlive(grandchildPid);
+      while (alive && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        alive = isAlive(grandchildPid);
+      }
+      assert.equal(alive, false, `expected the SIGTERM-ignoring grandchild (pid ${grandchildPid}) to be swept immediately, but it is still running`);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}

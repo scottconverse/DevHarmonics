@@ -10,7 +10,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { defaultConfig, devHarmonicsDirectory, initializeProject, loadConfig, resolveProviderCommand } from "../src/config.js";
 import { projectLegacyProvider } from "../src/compatibility.js";
-import { assertRunTransition, assertTaskTransition, domainId } from "../src/domain.js";
+import { assertRunTransition, assertTaskTransition, domainId, type RunEvent } from "../src/domain.js";
 import { LEDGER_SCHEMA_VERSION, Ledger } from "../src/ledger.js";
 import { architectValidatorNames, assignReviewFindings, describeReviewerUnavailability, buildRepositoryContext, canRoute, createReviewEvidenceBinding, Orchestrator, workerClassProbe, parseFirstJsonObject, planSteeredAdmission, repositoryTaskIds, reviewEvidenceBindingSha256, settleActiveAttemptsIfAborted, taskAttemptTimeoutMs } from "../src/orchestrator.js";
 import { extractCitations, verifyReportCitations } from "../src/citations.js";
@@ -28,7 +28,7 @@ import {
   isAbortError,
   type InvocationEvent,
 } from "../src/runtime.js";
-import type { DevHarmonicsConfig, PlannedTask, RunPlan, SteeringDirectiveRecord } from "../src/types.js";
+import type { DeliveryRepositoryRecord, DeliveryRepositoryStatus, DevHarmonicsConfig, ObjectiveRecord, PlannedTask, RunPlan, RunSummary, SteeringDirectiveRecord } from "../src/types.js";
 import { devHarmonicsConfigSchema, manualModelSchema, objectiveInputSchema, runPlanSchema, steeringPayloadSchema } from "../src/schemas.js";
 import { runProcess, subscriptionEnvironment } from "../src/process.js";
 import { REDACTED, redactText } from "../src/redaction.js";
@@ -51,6 +51,9 @@ import { quotaResetAt } from "../src/antigravity.js";
 import { expandValidatorTokens, mergeRepositoryValidators, runValidator } from "../src/validators.js";
 import { parseReviewerResponse } from "../src/review.js";
 import { DeliveryService } from "../src/delivery.js";
+import { INBOX_RELEVANT_RUN_STATUSES, projectInbox, type InboxItem } from "../src/inbox.js";
+import { projectProgramStatus, PROGRAM_QUIET_THRESHOLD_MS, type ProgramBucket } from "../src/program-status.js";
+import type { ProductRecord } from "../src/ledger.js";
 
 test("provider output parsers extract each CLI's final response", () => {
   const codex = [
@@ -3062,6 +3065,638 @@ test("review finding fields are HTML-escaped before they reach innerHTML (M1 sec
   assert.match(html, /&quot;&gt;&lt;svg onload=alert\(2\)&gt;/, "disposition is escaped, not dropped");
 });
 
+// DH-645 S1 fixtures. RunSummary is the exact shape Ledger.listRuns()/getRun()
+// already serve — these are hand-built (no DB) because projectInbox is a PURE
+// function of that shape, matching the reporter.ts pure-seam test pattern
+// above (createRunReport/createRunEvidenceExport fixtures).
+function inboxFixtureRun(overrides: Partial<RunSummary> = {}): RunSummary {
+  return {
+    id: "run-fixture",
+    goal: "Ship the CSV export",
+    goalSummary: "Ship the CSV export",
+    projectPath: "/tmp/project",
+    autonomy: "supervised",
+    status: "planning",
+    createdAt: "2026-07-20T10:00:00.000Z",
+    updatedAt: "2026-07-20T10:00:00.000Z",
+    finalReview: null,
+    resumedFrom: null,
+    objectiveId: null,
+    approvedPlanRevision: null,
+    workflowRevisionHash: null,
+    plan: null,
+    integrationSet: null,
+    delivery: null,
+    tasks: [],
+    events: [],
+    ...overrides,
+  };
+}
+
+function inboxFixtureEvent(overrides: Partial<RunEvent> = {}): RunEvent {
+  return {
+    id: 1,
+    cursor: 1,
+    runId: "run-fixture",
+    kind: "run.created",
+    message: "Run created",
+    data: {},
+    createdAt: "2026-07-20T10:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function inboxFixtureRepository(overrides: Partial<DeliveryRepositoryRecord> = {}): DeliveryRepositoryRecord {
+  return {
+    runId: "run-fixture",
+    repositoryId: "repo:one",
+    localPath: "/tmp/project",
+    baseBranch: "main",
+    baseCommit: "a".repeat(40),
+    headCommit: "b".repeat(40),
+    branch: "devharmonics/fixture",
+    remoteUrl: null,
+    status: "prepared",
+    pullRequestUrl: null,
+    approvalId: null,
+    releaseTag: null,
+    mergeCommitOid: null,
+    error: null,
+    createdAt: "2026-07-20T10:00:00.000Z",
+    updatedAt: "2026-07-20T10:05:00.000Z",
+    ...overrides,
+  };
+}
+
+test("projectInbox covers plan approval, pending delivery steps, and paused runs from ledger-shaped state", () => {
+  // (a) a run awaiting plan approval.
+  const awaitingPlan = inboxFixtureRun({
+    id: "run-plan",
+    status: "awaiting_approval",
+    updatedAt: "2026-07-20T09:00:00.000Z",
+    plan: { summary: "Add CSV export", recommendedConcurrency: 2, revision: 3, tasks: [
+      { id: "t1", title: "Implement export", description: "d", dependencies: [], preferredProvider: null, checks: [] },
+      { id: "t2", title: "Cover with tests", description: "d", dependencies: [], preferredProvider: null, checks: [] },
+    ] },
+  });
+
+  // (b) a READY run with three delivery repositories in different states:
+  // one still needs its next step pushed, one failed its push and needs
+  // retrying, and one is already merged (and therefore NOT pending — tagging
+  // is optional).
+  const readyRun = inboxFixtureRun({
+    id: "run-deliver",
+    status: "ready",
+    updatedAt: "2026-07-20T08:00:00.000Z",
+    delivery: {
+      runId: "run-deliver",
+      status: "branch_pushed",
+      repositories: [
+        inboxFixtureRepository({ runId: "run-deliver", repositoryId: "repo:pending", status: "prepared", updatedAt: "2026-07-20T07:00:00.000Z" }),
+        inboxFixtureRepository({ runId: "run-deliver", repositoryId: "repo:failed", status: "failed", error: "Git branch push failed", updatedAt: "2026-07-20T07:30:00.000Z" }),
+        inboxFixtureRepository({ runId: "run-deliver", repositoryId: "repo:done", status: "merged", updatedAt: "2026-07-20T06:00:00.000Z" }),
+      ],
+    },
+  });
+
+  // (c) a paused run, with its ledger-recorded pause reason as the most
+  // recent event (Ledger.getRun orders events DESC, so events[0] is newest).
+  const pausedRun = inboxFixtureRun({
+    id: "run-paused",
+    status: "paused",
+    updatedAt: "2026-07-20T05:00:00.000Z",
+    events: [
+      inboxFixtureEvent({ id: 9, cursor: 9, runId: "run-paused", kind: "run.paused", message: "Run paused by user", createdAt: "2026-07-20T05:00:00.000Z" }),
+      inboxFixtureEvent({ id: 8, cursor: 8, runId: "run-paused", kind: "task.started", message: "worker started", createdAt: "2026-07-20T04:00:00.000Z" }),
+    ],
+  });
+
+  // (d) a run with no pending decision at all — must contribute nothing.
+  const runningRun = inboxFixtureRun({ id: "run-running", status: "running" });
+
+  const items = projectInbox([awaitingPlan, readyRun, pausedRun, runningRun]);
+
+  const byKind = (kind: InboxItem["kind"]) => items.filter((item) => item.kind === kind);
+  assert.equal(byKind("plan_approval").length, 1, "exactly the awaiting-approval run produces a plan approval item");
+  assert.equal(byKind("delivery_step_approval").length, 2, "the merged repository is excluded; prepared and failed are included");
+  assert.equal(byKind("paused_run").length, 1, "exactly the paused run produces a paused-run item");
+  assert.equal(items.length, 4, "the running run contributes nothing");
+
+  const plan = byKind("plan_approval")[0]!;
+  assert.equal(plan.runId, "run-plan");
+  assert.equal(plan.waitingSinceIso, "2026-07-20T09:00:00.000Z");
+  assert.match(plan.evidence, /revision 3/i);
+  assert.match(plan.evidence, /2 tasks/i);
+  assert.deepEqual(plan.actionTarget, { view: "runs", control: "approve-run", label: "Open this run to approve the plan" });
+
+  const deliveryItems = byKind("delivery_step_approval");
+  const pending = deliveryItems.find((item) => item.repositoryId === "repo:pending")!;
+  assert.match(pending.plainSummary, /push the reviewed branch/i);
+  assert.match(pending.evidence, /Reviewed commit b{12}/);
+  assert.equal(pending.actionTarget.control, "delivery-panel");
+  const failed = deliveryItems.find((item) => item.repositoryId === "repo:failed")!;
+  assert.match(failed.plainSummary, /failed/i);
+  assert.match(failed.plainSummary, /Git branch push failed/);
+  assert.ok(!deliveryItems.some((item) => item.repositoryId === "repo:done"), "a merged repository is not a pending decision");
+
+  const paused = byKind("paused_run")[0]!;
+  assert.equal(paused.evidence, "Run paused by user", "the projection uses the CURRENT (most recent) pause reason, not an older event");
+  assert.equal(paused.actionTarget.control, "resume-run");
+
+  // Oldest-waiting-first ordering across kinds.
+  assert.deepEqual(items.map((item) => item.runId + (item.repositoryId ? `:${item.repositoryId}` : "")), [
+    "run-paused",
+    "run-deliver:repo:pending",
+    "run-deliver:repo:failed",
+    "run-plan",
+  ]);
+});
+
+function programFixtureTask(overrides: Partial<RunSummary["tasks"][number]> = {}): RunSummary["tasks"][number] {
+  return {
+    id: "t1",
+    title: "Implement export",
+    description: "d",
+    kind: "implementation",
+    repositoryIds: [],
+    repositoryScope: ["."],
+    permission: "workspace_write",
+    risk: "medium",
+    acceptanceCriteria: [],
+    expectedArtifacts: [],
+    status: "working",
+    provider: null,
+    assignment: null,
+    attemptCount: 1,
+    checks: [],
+    ...overrides,
+  };
+}
+
+function programFixtureProduct(overrides: Partial<ProductRecord> = {}): ProductRecord {
+  return {
+    id: "product-1",
+    name: "CivicSuite",
+    organizationUrl: "https://github.com/example",
+    description: "",
+    repositories: [],
+    createdAt: "2026-07-01T00:00:00.000Z",
+    updatedAt: "2026-07-01T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+test("projectProgramStatus puts every run in exactly one bucket, owner-actionable states winning by precedence", () => {
+  const now = Date.parse("2026-07-22T12:00:00.000Z");
+
+  // waiting_on_you wins over retrying: a paused run (inbox item) whose task
+  // is ALSO stuck in 'retry' — the owner decision must win, not the retry.
+  const pausedWithRetry = inboxFixtureRun({
+    id: "run-paused-retry",
+    status: "paused",
+    updatedAt: "2026-07-22T11:00:00.000Z",
+    tasks: [programFixtureTask({ id: "t1", status: "retry", attemptCount: 2 })],
+    events: [inboxFixtureEvent({ id: 1, cursor: 1, runId: "run-paused-retry", kind: "run.paused", message: "Needs a decision", createdAt: "2026-07-22T11:00:00.000Z" })],
+  });
+
+  // retrying wins over stalled: running, quiet for 30 minutes, but a task
+  // is currently retrying — that is a live loop, not silence.
+  const retryingQuiet = inboxFixtureRun({
+    id: "run-retrying",
+    status: "running",
+    updatedAt: "2026-07-22T11:30:00.000Z",
+    tasks: [programFixtureTask({ id: "t1", status: "retry", attemptCount: 3 })],
+    events: [inboxFixtureEvent({ id: 2, cursor: 2, runId: "run-retrying", kind: "task.retry", message: "retrying", createdAt: "2026-07-22T11:30:00.000Z" })],
+  });
+
+  // stalled: running, quiet for exactly the threshold (boundary is inclusive).
+  const stalledBoundary = inboxFixtureRun({
+    id: "run-stalled",
+    status: "running",
+    updatedAt: "2026-07-22T11:00:00.000Z",
+    tasks: [programFixtureTask({ id: "t1", status: "working" })],
+    events: [inboxFixtureEvent({ id: 3, cursor: 3, runId: "run-stalled", kind: "task.started", message: "started", createdAt: new Date(now - PROGRAM_QUIET_THRESHOLD_MS).toISOString() })],
+  });
+
+  // moving: running, quiet for one millisecond LESS than the threshold.
+  const movingBoundary = inboxFixtureRun({
+    id: "run-moving",
+    status: "running",
+    updatedAt: "2026-07-22T11:59:00.000Z",
+    tasks: [
+      programFixtureTask({ id: "t1", status: "passed" }),
+      programFixtureTask({ id: "t2", status: "working" }),
+    ],
+    events: [inboxFixtureEvent({ id: 4, cursor: 4, runId: "run-moving", kind: "task.started", message: "started", createdAt: new Date(now - PROGRAM_QUIET_THRESHOLD_MS + 1).toISOString() })],
+  });
+
+  // finished: ready with nothing pending.
+  const finishedReady = inboxFixtureRun({ id: "run-finished", status: "ready", tasks: [programFixtureTask({ id: "t1", status: "passed" })] });
+  const finishedFailed = inboxFixtureRun({ id: "run-failed", status: "failed" });
+  const finishedCancelled = inboxFixtureRun({ id: "run-cancelled", status: "cancelled" });
+  const finishedNotReady = inboxFixtureRun({ id: "run-not-ready", status: "not_ready" });
+
+  const runs = [pausedWithRetry, retryingQuiet, stalledBoundary, movingBoundary, finishedReady, finishedFailed, finishedCancelled, finishedNotReady];
+  const program = projectProgramStatus(runs, [], [], now);
+
+  assert.equal(program.totals.waiting_on_you + program.totals.retrying + program.totals.stalled + program.totals.moving + program.totals.finished, runs.length, "every run lands in exactly one bucket");
+
+  const bucketOf = (runId: string): ProgramBucket => {
+    const entry = program.groups.flatMap((group) => group.runs).find((run) => run.runId === runId);
+    assert.ok(entry, `${runId} must appear exactly once in the projection`);
+    return entry!.bucket;
+  };
+
+  assert.equal(bucketOf("run-paused-retry"), "waiting_on_you", "an owner decision wins over a concurrent retry");
+  assert.equal(bucketOf("run-retrying"), "retrying", "a live retry wins over quiet time");
+  assert.equal(bucketOf("run-stalled"), "stalled", "quiet AT the threshold counts as stalled (inclusive boundary)");
+  assert.equal(bucketOf("run-moving"), "moving", "quiet one millisecond under the threshold is still moving");
+  assert.equal(bucketOf("run-finished"), "finished");
+  assert.equal(bucketOf("run-failed"), "finished");
+  assert.equal(bucketOf("run-cancelled"), "finished");
+  assert.equal(bucketOf("run-not-ready"), "finished");
+
+  assert.match(program.groups.flatMap((group) => group.runs).find((run) => run.runId === "run-stalled")!.reason, /quiet for 5m/);
+  assert.equal(program.groups.flatMap((group) => group.runs).find((run) => run.runId === "run-moving")!.reason, "1 of 2 tasks done");
+  assert.equal(program.groups.flatMap((group) => group.runs).find((run) => run.runId === "run-finished")!.reason, "1 of 1 task done");
+
+  // No run appears twice anywhere in the projection.
+  const allRunIds = program.groups.flatMap((group) => group.runs.map((run) => run.runId));
+  assert.equal(new Set(allRunIds).size, allRunIds.length, "a run must never appear in more than one bucket/group entry");
+});
+
+test("projectProgramStatus classifies a terminal run with a lingering 'retry' task as finished, never retrying (M-terminal-retry)", () => {
+  // The orchestrator's failure path (src/orchestrator.ts) can leave a task at
+  // TaskStatus 'retry' on a run that has already reached a terminal
+  // RunStatus (src/domain.ts's runTransitions permit 'failed'/'cancelled'
+  // from 'running' regardless of task state) — there is no live worker loop
+  // left to observe once the run itself is terminal, so classifying it as
+  // "actively retrying" would be an unobserved claim, not a recorded fact.
+  const failedWithRetry = inboxFixtureRun({
+    id: "run-failed-retry",
+    status: "failed",
+    tasks: [programFixtureTask({ id: "t1", status: "retry", attemptCount: 4 })],
+  });
+  const cancelledWithRetry = inboxFixtureRun({
+    id: "run-cancelled-retry",
+    status: "cancelled",
+    tasks: [programFixtureTask({ id: "t1", status: "retry", attemptCount: 2 })],
+  });
+  const readyWithRetry = inboxFixtureRun({
+    id: "run-ready-retry",
+    status: "ready",
+    tasks: [programFixtureTask({ id: "t1", status: "retry", attemptCount: 1 })],
+    delivery: null,
+  });
+  // Control: the SAME task shape on a live 'running' run must still land in
+  // 'retrying' — this test is about the run's terminal status, not the task.
+  const runningWithRetry = inboxFixtureRun({
+    id: "run-running-retry",
+    status: "running",
+    tasks: [programFixtureTask({ id: "t1", status: "retry", attemptCount: 1 })],
+  });
+
+  const runs = [failedWithRetry, cancelledWithRetry, readyWithRetry, runningWithRetry];
+  const program = projectProgramStatus(runs, [], [], Date.parse("2026-07-22T12:00:00.000Z"));
+
+  const bucketOf = (runId: string): ProgramBucket => {
+    const entry = program.groups.flatMap((group) => group.runs).find((run) => run.runId === runId);
+    assert.ok(entry, `${runId} must appear exactly once in the projection`);
+    return entry!.bucket;
+  };
+
+  assert.equal(bucketOf("run-failed-retry"), "finished", "a terminal failed run is finished even with a retry task on record");
+  assert.equal(bucketOf("run-cancelled-retry"), "finished", "a terminal cancelled run is finished even with a retry task on record");
+  assert.equal(bucketOf("run-ready-retry"), "finished", "a terminal ready run is finished even with a retry task on record");
+  assert.equal(bucketOf("run-running-retry"), "retrying", "control: a LIVE run with the same retry task is still 'retrying'");
+});
+
+function programFixtureObjective(overrides: Partial<ObjectiveRecord> = {}): ObjectiveRecord {
+  return {
+    id: "objective-1",
+    outcome: "Ship it",
+    acceptanceCriteria: [],
+    constraints: [],
+    projectPath: "/tmp/project",
+    productId: undefined,
+    repositoryIds: [],
+    risk: "medium",
+    autonomy: "supervised",
+    priority: "normal",
+    policyNotes: [],
+    workflowRevisionHash: null,
+    revision: 1,
+    createdAt: "2026-07-22T09:00:00.000Z",
+    updatedAt: "2026-07-22T09:00:00.000Z",
+    ...overrides,
+  };
+}
+
+test("projectProgramStatus groups by product — via the objective link (single-repo) or the integration set (multi-repo) — otherwise by repository path", () => {
+  const product = programFixtureProduct({ id: "prod-civic", name: "CivicSuite" });
+
+  // Multi-repository run: the ONLY case that gets a real IntegrationSetRecord
+  // (Orchestrator.executeMultiRepository, src/orchestrator.ts, requires a
+  // registered product and creates the set from it).
+  const multiRepoRun = inboxFixtureRun({
+    id: "run-multi-repo",
+    status: "running",
+    projectPath: "/tmp/should-not-be-used",
+    integrationSet: {
+      id: "iset-1",
+      runId: "run-multi-repo",
+      productId: "prod-civic",
+      status: "running",
+      integrationConditions: [],
+      repositories: [],
+      createdAt: "2026-07-22T10:00:00.000Z",
+      updatedAt: "2026-07-22T10:00:00.000Z",
+    },
+    events: [inboxFixtureEvent({ id: 1, cursor: 1, runId: "run-multi-repo", kind: "run.created", createdAt: "2026-07-22T11:59:59.000Z" })],
+  });
+
+  // Single-repository run started from a product-linked objective: NO
+  // integration set exists (single-repo execution never creates one), so the
+  // objective's productId is the ONLY signal this run belongs to CivicSuite.
+  const singleRepoObjective = programFixtureObjective({ id: "obj-single", productId: "prod-civic" });
+  const singleRepoRun = inboxFixtureRun({
+    id: "run-single-repo",
+    status: "running",
+    projectPath: "/tmp/should-not-be-used-either",
+    objectiveId: "obj-single",
+    integrationSet: null,
+    events: [inboxFixtureEvent({ id: 2, cursor: 2, runId: "run-single-repo", kind: "run.created", createdAt: "2026-07-22T11:59:59.000Z" })],
+  });
+
+  const unlinkedRun = inboxFixtureRun({
+    id: "run-unlinked",
+    status: "running",
+    projectPath: "/repos/standalone-tool",
+    events: [inboxFixtureEvent({ id: 3, cursor: 3, runId: "run-unlinked", kind: "run.created", createdAt: "2026-07-22T11:59:59.000Z" })],
+  });
+
+  const program = projectProgramStatus(
+    [multiRepoRun, singleRepoRun, unlinkedRun],
+    [product],
+    [singleRepoObjective],
+    Date.parse("2026-07-22T12:00:00.000Z"),
+  );
+
+  const groupOf = (runId: string) => program.groups.find((group) => group.runs.some((run) => run.runId === runId));
+
+  const civicGroupViaIntegrationSet = groupOf("run-multi-repo");
+  assert.equal(civicGroupViaIntegrationSet?.label, "CivicSuite", "a multi-repo run groups under the product's NAME via its integration set");
+
+  const civicGroupViaObjective = groupOf("run-single-repo");
+  assert.equal(civicGroupViaObjective?.label, "CivicSuite", "a single-repo run with NO integration set still groups under the product's NAME via its objective's productId");
+  assert.equal(civicGroupViaObjective?.key, civicGroupViaIntegrationSet?.key, "both paths to the same product land in the SAME group");
+
+  const pathGroup = groupOf("run-unlinked");
+  assert.equal(pathGroup?.label, "/repos/standalone-tool", "a run with no product link groups under its own repository path");
+  assert.notEqual(civicGroupViaIntegrationSet?.key, pathGroup?.key);
+});
+
+test("projectInbox drops a plan approval the instant the ledger shows it resolved", () => {
+  // "Resolution honesty": the projection is recomputed from CURRENT ledger
+  // state on every call, never cached — approving the plan (awaiting_approval
+  // -> running, exactly what Ledger.approvePlan does) must make the item
+  // disappear on the very next projection, with no separate "dismiss" step.
+  const awaiting = inboxFixtureRun({ id: "run-r", status: "awaiting_approval" });
+  assert.equal(projectInbox([awaiting]).length, 1, "starts as a pending decision");
+
+  const resolved: RunSummary = { ...awaiting, status: "running" };
+  assert.equal(projectInbox([resolved]).length, 0, "the same run, now running, contributes no item");
+});
+
+test("projectInbox reflects a delivery step's CURRENT state, not a stale earlier snapshot", () => {
+  // Superseded/expired requests must read as their CURRENT pending state
+  // (DH-645 acceptance), never a frozen first-seen state. Advance the same
+  // repository from 'prepared' to 'branch_pushed' (still pending, but a
+  // DIFFERENT next action and a later 'waiting since') and confirm the
+  // projection reports the new state, not the old one.
+  const early = inboxFixtureRun({
+    id: "run-r2",
+    status: "ready",
+    delivery: {
+      runId: "run-r2",
+      status: "prepared",
+      repositories: [inboxFixtureRepository({ runId: "run-r2", status: "prepared", updatedAt: "2026-07-20T07:00:00.000Z" })],
+    },
+  });
+  const advanced: RunSummary = {
+    ...early,
+    delivery: {
+      runId: "run-r2",
+      status: "branch_pushed",
+      repositories: [inboxFixtureRepository({ runId: "run-r2", status: "branch_pushed", updatedAt: "2026-07-20T09:00:00.000Z" })],
+    },
+  };
+
+  const earlyItem = projectInbox([early])[0]!;
+  assert.match(earlyItem.plainSummary, /push the reviewed branch/i);
+  assert.equal(earlyItem.waitingSinceIso, "2026-07-20T07:00:00.000Z");
+
+  const advancedItem = projectInbox([advanced])[0]!;
+  assert.match(advancedItem.plainSummary, /open a draft pull request/i);
+  assert.doesNotMatch(advancedItem.plainSummary, /push the reviewed branch/i, "the stale 'push' step must not survive the advance");
+  assert.equal(advancedItem.waitingSinceIso, "2026-07-20T09:00:00.000Z", "waiting-since tracks the CURRENT step, not the original preparation");
+
+  // And once merged, the same repository leaves the projection entirely.
+  const merged: RunSummary = {
+    ...early,
+    delivery: {
+      runId: "run-r2",
+      status: "merged",
+      repositories: [inboxFixtureRepository({ runId: "run-r2", status: "merged", updatedAt: "2026-07-20T10:00:00.000Z" })],
+    },
+  };
+  assert.equal(projectInbox([merged]).length, 0, "once merged, the same repository's CURRENT state is no longer pending");
+});
+
+test("the inbox item HTML seam (src/ui/app.js) escapes every interpolated field", () => {
+  // Same threat shape as renderFindingHtml above: title/plainSummary/evidence
+  // ultimately derive from run goals, delivery error text, and pause reasons
+  // — free text a run or its ledger events could contain almost anything in.
+  // Drive the REAL shipped renderInboxItemHtml pure seam extracted from
+  // src/ui/app.js, so a future refactor that drops the escaping fails HERE.
+  const appSource = readFileSync(path.join(process.cwd(), "src", "ui", "app.js"), "utf8");
+  const start = appSource.indexOf('function escapeHtml(value = "")');
+  const end = appSource.indexOf("\n// DH-632 visible operation feedback");
+  assert.ok(start >= 0 && end > start, "escapeHtml/renderInboxItemHtml must be extractable from app.js");
+  const { renderInboxItemHtml } = new Function(
+    `${appSource.slice(start, end)}; return { escapeHtml, renderInboxItemHtml };`,
+  )() as { renderInboxItemHtml: (item: Record<string, unknown>) => string };
+
+  const hostileItem = {
+    kind: "delivery_step_approval",
+    runId: '"><img src=x onerror=alert(1)>',
+    title: "Ship it </strong><script>alert(document.cookie)</script>",
+    plainSummary: '"><svg onload=alert(2)>',
+    evidence: "Reviewed commit </p><iframe src=javascript:alert(3)>",
+    actionTarget: { view: "runs", control: "delivery-panel", label: '<img src=x onerror=alert(4)>' },
+  };
+  const html = renderInboxItemHtml(hostileItem);
+
+  assert.doesNotMatch(html, /<img/i, "an <img> tag must never reach innerHTML unescaped");
+  assert.doesNotMatch(html, /<script/i, "a <script> tag must never reach innerHTML unescaped");
+  assert.doesNotMatch(html, /<svg/i, "an <svg onload> payload must never reach innerHTML unescaped");
+  assert.doesNotMatch(html, /<iframe/i, "an <iframe> payload must never reach innerHTML unescaped");
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/, "runId is escaped, not dropped");
+  assert.match(html, /&lt;script&gt;alert\(document\.cookie\)&lt;\/script&gt;/, "title is escaped, not dropped");
+  assert.match(html, /&quot;&gt;&lt;svg onload=alert\(2\)&gt;/, "plainSummary is escaped, not dropped");
+  assert.match(html, /&lt;iframe src=javascript:alert\(3\)&gt;/, "evidence is escaped, not dropped");
+  assert.match(html, /&lt;img src=x onerror=alert\(4\)&gt;/, "the action label is escaped, not dropped");
+});
+
+test("the program run HTML seam (src/ui/app.js) escapes every interpolated field", () => {
+  // DH-645 S2. Same threat shape as renderInboxItemHtml above: goalSummary
+  // and reason ultimately derive from run goals and free-text ledger
+  // evidence. Drive the REAL shipped renderProgramRunHtml pure seam
+  // extracted from src/ui/app.js so a future refactor that drops the
+  // escaping fails HERE.
+  const appSource = readFileSync(path.join(process.cwd(), "src", "ui", "app.js"), "utf8");
+  const start = appSource.indexOf('function escapeHtml(value = "")');
+  const end = appSource.indexOf("\n// DH-632 visible operation feedback");
+  assert.ok(start >= 0 && end > start, "escapeHtml/renderProgramRunHtml must be extractable from app.js");
+  const { renderProgramRunHtml } = new Function(
+    `${appSource.slice(start, end)}; return { escapeHtml, renderProgramRunHtml };`,
+  )() as { renderProgramRunHtml: (entry: Record<string, unknown>) => string };
+
+  const hostileEntry = {
+    runId: '"><img src=x onerror=alert(1)>',
+    bucket: "stalled",
+    goalSummary: "Ship it </strong><script>alert(document.cookie)</script>",
+    reason: '"><svg onload=alert(2)>quiet for </p><iframe src=javascript:alert(3)>',
+  };
+  const html = renderProgramRunHtml(hostileEntry);
+
+  assert.doesNotMatch(html, /<img/i, "an <img> tag must never reach innerHTML unescaped");
+  assert.doesNotMatch(html, /<script/i, "a <script> tag must never reach innerHTML unescaped");
+  assert.doesNotMatch(html, /<svg/i, "an <svg onload> payload must never reach innerHTML unescaped");
+  assert.doesNotMatch(html, /<iframe/i, "an <iframe> payload must never reach innerHTML unescaped");
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/, "runId is escaped, not dropped");
+  assert.match(html, /&lt;script&gt;alert\(document\.cookie\)&lt;\/script&gt;/, "goalSummary is escaped, not dropped");
+  assert.match(html, /&quot;&gt;&lt;svg onload=alert\(2\)&gt;/, "reason is escaped, not dropped");
+  assert.match(html, /&lt;iframe src=javascript:alert\(3\)&gt;/, "reason is escaped in full, not dropped");
+});
+
+test("the program run HTML seam renders a client-side-only divergence marker only when told to, and never otherwise", () => {
+  // DH-645 S3 item 4. A run's divergence marker reflects only this page
+  // session's own last reconciliation (never persisted); the pure render
+  // function takes that as a plain `divergent` boolean so it stays testable
+  // without any server or DOM state.
+  const appSource = readFileSync(path.join(process.cwd(), "src", "ui", "app.js"), "utf8");
+  const start = appSource.indexOf('function escapeHtml(value = "")');
+  const end = appSource.indexOf("\n// DH-632 visible operation feedback");
+  const { renderProgramRunHtml } = new Function(
+    `${appSource.slice(start, end)}; return { escapeHtml, renderProgramRunHtml };`,
+  )() as { renderProgramRunHtml: (entry: Record<string, unknown>) => string };
+
+  const clean = renderProgramRunHtml({ runId: "run-1", bucket: "moving", goalSummary: "Ship it", reason: "1 of 2 tasks done" });
+  assert.doesNotMatch(clean, /program-run-diverged/, "no marker class when divergent is unset");
+  assert.doesNotMatch(clean, /GitHub check found a divergence/i, "no marker text when divergent is unset");
+
+  const diverged = renderProgramRunHtml({ runId: "run-1", bucket: "moving", goalSummary: "Ship it", reason: "1 of 2 tasks done", divergent: true });
+  assert.match(diverged, /program-run-diverged/, "the diverged class is present when divergent is set");
+  assert.match(diverged, /role="alert"/, "the marker is announced as an alert");
+  assert.match(diverged, /GitHub check found a divergence/i);
+});
+
+test("the reconciliation results HTML seam (src/ui/app.js) escapes findings and gives matches/diverged/unobserved three visually distinct treatments", () => {
+  // DH-645 S3. Drive the REAL shipped renderReconciliationHtml pure seam
+  // extracted from src/ui/app.js. finding.message ultimately echoes branch
+  // names and GitHub's own PR/check text — same threat shape as
+  // renderFindingHtml/renderInboxItemHtml above.
+  const appSource = readFileSync(path.join(process.cwd(), "src", "ui", "app.js"), "utf8");
+  const start = appSource.indexOf('function escapeHtml(value = "")');
+  const end = appSource.indexOf("\n// DH-632 visible operation feedback");
+  assert.ok(start >= 0 && end > start, "escapeHtml/renderReconciliationHtml must be extractable from app.js");
+  const { renderReconciliationHtml } = new Function(
+    `${appSource.slice(start, end)}; return { escapeHtml, renderReconciliationHtml };`,
+  )() as { renderReconciliationHtml: (result: Record<string, unknown>) => string };
+
+  // Nothing delivered yet: an explicit, honest "nothing to check" state, not
+  // a blank panel and not a false confirmation.
+  const nothing = renderReconciliationHtml({ findings: [] });
+  assert.match(nothing, /nothing to check/i);
+  assert.equal(/reconcile-matches/.test(nothing), false, "an empty result must never render as a match");
+
+  const hostileMessage = 'The ledger records branch </strong><script>alert(document.cookie)</script> — <img src=x onerror=alert(1)>';
+  const hostileMatchMessage = 'Branch <script>alert("m")</script> is still at the reviewed commit, as the ledger records.';
+  const result = {
+    checkedAt: new Date(Date.now() - 60_000).toISOString(),
+    findings: [
+      { artifact: "branch", state: "matches", message: hostileMatchMessage },
+      { artifact: "pull_request", state: "diverged", message: hostileMessage },
+      { artifact: "checks", state: "unobserved", message: 'Could not check: <iframe src=javascript:alert(2)>"><svg onload=alert(3)>' },
+    ],
+  };
+  const html = renderReconciliationHtml(result);
+
+  // Three visually distinct treatments.
+  assert.match(html, /reconcile-matches/, "a match gets its own quiet treatment");
+  assert.match(html, /reconcile-diverged/, "a divergence gets its own prominent treatment");
+  assert.match(html, /reconcile-unobserved/, "an unobserved artifact gets its own treatment");
+  assert.match(html, /role="alert"/, "a divergence is announced as an alert; nothing else needs to be");
+
+  // M-checks-pending (render half): a match renders the backend's own
+  // factual, escaped message — never a blanket "confirmed on GitHub,
+  // matches the ledger" stand-in that could misdescribe what this specific
+  // artifact check actually observed.
+  assert.match(html, /is still at the reviewed commit, as the ledger records/, "the match shows the backend's own per-artifact message");
+  assert.doesNotMatch(html, /confirmed on GitHub, matches the ledger/i, "no blanket confirmation text stands in for the real observation");
+  // Unobserved is stated plainly as "could not check", never as silence or
+  // as a confirmation.
+  assert.match(html, /could not check/i);
+
+  // Every hostile field is escaped, never dropped, never executed — including the match's own message.
+  assert.doesNotMatch(html, /<script/i);
+  assert.doesNotMatch(html, /<img/i);
+  assert.doesNotMatch(html, /<iframe/i);
+  assert.doesNotMatch(html, /<svg/i);
+  assert.match(html, /&lt;script&gt;alert\(&quot;m&quot;\)&lt;\/script&gt;/, "the match message is escaped, not dropped");
+  assert.match(html, /&lt;script&gt;alert\(document\.cookie\)&lt;\/script&gt;/);
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.match(html, /&lt;iframe src=javascript:alert\(2\)&gt;/);
+  assert.match(html, /&quot;&gt;&lt;svg onload=alert\(3\)&gt;/);
+});
+
+test("the inbox item HTML seam offers a 'Check against GitHub' button, escaped, only for delivery items that name a repository", () => {
+  // DH-645 S3. Extends the S1 escaping-seam test above: the reconcile button
+  // and its (initially empty) results container must escape repositoryId
+  // exactly like every other free-text-derived field, and must never appear
+  // for a kind/record that has nothing to check.
+  const appSource = readFileSync(path.join(process.cwd(), "src", "ui", "app.js"), "utf8");
+  const start = appSource.indexOf('function escapeHtml(value = "")');
+  const end = appSource.indexOf("\n// DH-632 visible operation feedback");
+  const { renderInboxItemHtml } = new Function(
+    `${appSource.slice(start, end)}; return { escapeHtml, renderInboxItemHtml };`,
+  )() as { renderInboxItemHtml: (item: Record<string, unknown>) => string };
+
+  const planItem = { kind: "plan_approval", runId: "run-1", title: "Ship it", plainSummary: "s", evidence: "e", actionTarget: { label: "Open" } };
+  assert.doesNotMatch(renderInboxItemHtml(planItem), /Check against GitHub/, "a non-delivery item offers no reconcile button — there is nothing to check");
+
+  const noRepo = { kind: "delivery_step_approval", runId: "run-1", title: "Ship it", plainSummary: "s", evidence: "e", actionTarget: { label: "Open" } };
+  assert.doesNotMatch(renderInboxItemHtml(noRepo), /Check against GitHub/, "a delivery item with no repositoryId offers no reconcile button");
+
+  const hostileItem = {
+    kind: "delivery_step_approval",
+    runId: '"><img src=x onerror=alert(9)>',
+    repositoryId: '"><script>alert(document.cookie)</script>',
+    title: "Ship it",
+    plainSummary: "s",
+    evidence: "e",
+    actionTarget: { label: "Open" },
+  };
+  const html = renderInboxItemHtml(hostileItem);
+  assert.match(html, /Check against GitHub/);
+  assert.doesNotMatch(html, /<script/i, "a <script> tag in repositoryId must never reach innerHTML unescaped");
+  assert.doesNotMatch(html, /<img/i);
+  assert.match(html, /data-reconcile-run-id="[^"]*&lt;img[^"]*"/);
+  assert.match(html, /data-reconcile-repository-id="[^"]*&lt;script&gt;/);
+  assert.match(html, /data-reconcile-results-for="[^"]*&lt;img[^"]*:[^"]*&lt;script&gt;[^"]*"/, "the results container key is composed from the SAME escaped values");
+});
+
 test("migration 30's delivery-table rebuild preserves row data from a physical schema-29 database", async () => {
   // Gate finding ENG-3 (2026-07-22): the CHECK-widening RENAME/rebuild in
   // migration 30 had no test proving a delivery row's VALUES survive it.
@@ -4111,6 +4746,7 @@ test("ledger upgrades a v0.1 database transactionally and preserves a pre-migrat
           { version: 32, name: "workflow-revisions" },
           { version: 33, name: "objective-workflow-provenance" },
           { version: 34, name: "delivery-merge-commit-oid" },
+          { version: 35, name: "runs-status-index" },
         ],
       );
     } finally {
@@ -5350,6 +5986,57 @@ test("objective drafts persist without creating an execution run", async () => {
   }
 });
 
+test("Ledger.listRunsByStatus returns exactly the runs matching the given statuses, unbounded by the 50-row sidebar cap", async () => {
+  // new-Major (scan cost). Exercises the indexed WHERE-status-IN query
+  // directly: it must (a) return only runs whose status is in the given
+  // set, (b) never a run with a different status, and (c) not be capped at
+  // 50 like listRuns() — the exact property GET /api/inbox now depends on
+  // instead of Ledger.listAllRuns().
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-list-by-status-"));
+  const ledger = new Ledger(path.join(root, "devharmonics.db"));
+  try {
+    const awaitingId = ledger.createRun("Awaiting approval run", root);
+    ledger.savePlan(awaitingId, {
+      summary: "One task",
+      recommendedConcurrency: 1,
+      tasks: [{ id: "t1", title: "T1", description: "d", dependencies: [], preferredProvider: "codex", checks: ["diff-check"] }],
+    });
+    ledger.requestPlanApproval(awaitingId);
+
+    const pausedId = ledger.createRun("Paused run", root);
+    ledger.setRunStatus(pausedId, "running");
+    ledger.pauseRun(pausedId, "Needs a decision");
+
+    const runningId = ledger.createRun("Still running, not inbox-relevant", root);
+    ledger.setRunStatus(runningId, "running");
+
+    const failedId = ledger.createRun("Failed, not inbox-relevant", root);
+    ledger.setRunStatus(failedId, "running");
+    ledger.setRunStatus(failedId, "failed", "Failed");
+
+    // Bury the awaiting-approval run under 55 newer runs to prove this
+    // query, unlike listRuns(), is not capped at the sidebar's 50 rows.
+    await delay(5);
+    for (let i = 0; i < 55; i += 1) {
+      const fillerId = ledger.createRun(`Filler ${i}`, root);
+      ledger.setRunStatus(fillerId, "running");
+    }
+
+    const matched = ledger.listRunsByStatus(INBOX_RELEVANT_RUN_STATUSES);
+    const matchedIds = matched.map((run) => run.id);
+    assert.ok(matchedIds.includes(awaitingId), "the awaiting-approval run is returned despite 55 newer non-matching runs");
+    assert.ok(matchedIds.includes(pausedId), "the paused run is returned");
+    assert.ok(!matchedIds.includes(runningId), "a running run is excluded");
+    assert.ok(!matchedIds.includes(failedId), "a failed run is excluded");
+    assert.equal(matched.every((run) => (INBOX_RELEVANT_RUN_STATUSES as readonly string[]).includes(run.status)), true, "every returned run's status is one of the requested statuses");
+
+    assert.deepEqual(ledger.listRunsByStatus([]), [], "an empty status list returns no runs, never every run");
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("workbench persistence advances the ledger schema without creating execution state", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-workbench-schema-"));
   const filename = path.join(root, "devharmonics.db");
@@ -5578,7 +6265,7 @@ test("steering directives persist with actor, target, disposition, and supersede
   const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-steering-ledger-"));
   const ledger = new Ledger(path.join(root, "devharmonics.db"));
   try {
-    assert.equal(LEDGER_SCHEMA_VERSION, 34, "the delivery merge-commit-oid column advances the ledger schema");
+    assert.equal(LEDGER_SCHEMA_VERSION, 35, "the runs-status-index migration advances the ledger schema");
     const runId = ledger.createRun("Steer me", root);
     ledger.savePlan(runId, {
       summary: "One task",

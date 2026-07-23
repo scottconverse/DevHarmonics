@@ -975,6 +975,585 @@ test("the delivery HTTP route serializes per repository, types its refusals, and
   }
 });
 
+test("POST /api/runs/:id/reconcile-delivery observes the remote read-only and reports the matches/diverged/unobserved trichotomy per artifact", async () => {
+  // DH-645 S3. Seeds a run whose delivery record spans three repositories —
+  // one pushed-and-merged (matching remote), one with a closed-without-merge
+  // draft PR (diverged), and one whose gh reads are refused (unobserved) —
+  // directly against the ledger, AFTER startDashboard() (S1's lesson:
+  // reconcileInterruptedRuns() runs once at startup and would otherwise
+  // reconcile a seeded-before-start run's status out from under this test).
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-reconcile-http-"));
+  const project = await createRepository(root);
+  await initializeProject(project);
+
+  const runner = async (request: { command: string; args: string[] }) => {
+    const joined = request.args.join(" ");
+    if (request.command === "git" && request.args[0] === "ls-remote" && request.args.includes("--tags")) {
+      return { stdout: "", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "git" && request.args[0] === "ls-remote" && joined.includes("recon-matches")) {
+      return { stdout: `${"b".repeat(40)}\trefs/heads/devharmonics/recon-matches\n`, stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "git" && request.args[0] === "ls-remote" && joined.includes("recon-diverged")) {
+      return { stdout: `${"e".repeat(40)}\trefs/heads/devharmonics/recon-diverged\n`, stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "git" && request.args[0] === "ls-remote" && joined.includes("recon-unobserved")) {
+      return { stdout: `${"e".repeat(40)}\trefs/heads/devharmonics/recon-unobserved\n`, stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    return { stdout: "", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+  };
+
+  // Route pull requests by their URL (each repository gets a distinct PR
+  // number) rather than cwd, since every repository fixture shares one local
+  // checkout in this test.
+  const routedRunner = async (request: { command: string; args: string[]; cwd: string }) => {
+    if (request.command === "gh" && request.args[1] === "view") {
+      const pullRequestUrl = request.args[2] ?? "";
+      if (pullRequestUrl.endsWith("/pull/1")) {
+        return { stdout: JSON.stringify({ state: "MERGED", headRefOid: "b".repeat(40), statusCheckRollup: [{ status: "COMPLETED", conclusion: "SUCCESS" }] }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+      }
+      if (pullRequestUrl.endsWith("/pull/2")) {
+        return { stdout: JSON.stringify({ state: "CLOSED", headRefOid: "e".repeat(40), statusCheckRollup: [] }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+      }
+      if (pullRequestUrl.endsWith("/pull/3")) {
+        return { stdout: "", stderr: "gh: not logged in to any GitHub hosts. Run gh auth login", exitCode: 1, durationMs: 1, timedOut: false };
+      }
+    }
+    return runner(request);
+  };
+
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false, deliveryRunner: routedRunner as never });
+  const dbPath = path.join(devHarmonicsDirectory(project), "devharmonics.db");
+  const seedLedger = new Ledger(dbPath);
+  const runId = seedLedger.createRun("Reconcile three repositories", project);
+  seedLedger.setRunStatus(runId, "running");
+  seedLedger.setRunStatus(runId, "ready", "READY");
+  seedLedger.prepareDeliveryRepository({ runId, repositoryId: "repo:matches", localPath: project, baseBranch: "main", baseCommit: "a".repeat(40), headCommit: "b".repeat(40), branch: "devharmonics/recon-matches" });
+  seedLedger.updateDeliveryRepository(runId, "repo:matches", { status: "merged", pullRequestUrl: "https://github.com/example/fixture/pull/1", remoteUrl: "https://github.com/example/fixture.git" });
+  seedLedger.prepareDeliveryRepository({ runId, repositoryId: "repo:diverged", localPath: project, baseBranch: "main", baseCommit: "a".repeat(40), headCommit: "e".repeat(40), branch: "devharmonics/recon-diverged" });
+  seedLedger.updateDeliveryRepository(runId, "repo:diverged", { status: "draft_pr_created", pullRequestUrl: "https://github.com/example/fixture/pull/2", remoteUrl: "https://github.com/example/fixture.git" });
+  seedLedger.prepareDeliveryRepository({ runId, repositoryId: "repo:unobserved", localPath: project, baseBranch: "main", baseCommit: "a".repeat(40), headCommit: "e".repeat(40), branch: "devharmonics/recon-unobserved" });
+  seedLedger.updateDeliveryRepository(runId, "repo:unobserved", { status: "draft_pr_created", pullRequestUrl: "https://github.com/example/fixture/pull/3", remoteUrl: "https://github.com/example/fixture.git" });
+  seedLedger.close();
+
+  try {
+    const missing = await fetch(`${dashboard.url}/api/runs/${"0".repeat(8)}-0000-0000-0000-${"0".repeat(12)}/reconcile-delivery`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+    assert.equal(missing.status, 404, "an unknown run is a 404, not a server fault");
+
+    const response = await fetch(`${dashboard.url}/api/runs/${runId}/reconcile-delivery`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+    assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+    const { repositories } = (await response.json()) as { repositories: Array<{ repositoryId: string; findings: Array<{ artifact: string; state: string; message: string }>; hasDivergence: boolean; hasUnobserved: boolean }> };
+    assert.equal(repositories.length, 3, "one reconciliation result per delivered repository");
+
+    const byRepo = (id: string) => repositories.find((repo) => repo.repositoryId === id)!;
+
+    const matches = byRepo("repo:matches");
+    assert.equal(matches.hasDivergence, false);
+    assert.equal(matches.hasUnobserved, false);
+    assert.ok(matches.findings.every((finding) => finding.state === "matches"), "every observed artifact for the untouched repository matches");
+    assert.ok(matches.findings.some((finding) => finding.artifact === "branch"));
+    assert.ok(matches.findings.some((finding) => finding.artifact === "pull_request"));
+    assert.ok(matches.findings.some((finding) => finding.artifact === "checks"));
+
+    const diverged = byRepo("repo:diverged");
+    assert.equal(diverged.hasDivergence, true);
+    const prFinding = diverged.findings.find((finding) => finding.artifact === "pull_request")!;
+    assert.equal(prFinding.state, "diverged");
+    assert.match(prFinding.message, /closed without merging/i, "the finding names the ledger's claim vs. observed reality in plain English");
+
+    const unobserved = byRepo("repo:unobserved");
+    assert.equal(unobserved.hasUnobserved, true);
+    assert.equal(unobserved.hasDivergence, false, "an unobserved artifact must never be counted as, or presented as, a divergence");
+    const prUnobserved = unobserved.findings.find((finding) => finding.artifact === "pull_request")!;
+    assert.equal(prUnobserved.state, "unobserved");
+    assert.match(prUnobserved.message, /could not check/i, "unobserved is reported as 'could not check', never dropped and never a silent confirmation");
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("POST /api/runs/:id/reconcile-delivery is bounded by a timeout so a hanging tool cannot hang the route", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-reconcile-timeout-"));
+  const project = await createRepository(root);
+  await initializeProject(project);
+
+  const hangingRunner = () => new Promise<never>(() => {}); // never resolves — simulates a hung git/gh process
+  const dashboard = await startDashboard({
+    projectPath: project,
+    port: 0,
+    open: false,
+    deliveryRunner: hangingRunner as never,
+    reconciliationTimeoutMs: 300,
+  });
+  const dbPath = path.join(devHarmonicsDirectory(project), "devharmonics.db");
+  const seedLedger = new Ledger(dbPath);
+  const runId = seedLedger.createRun("Reconcile against a hanging tool", project);
+  seedLedger.setRunStatus(runId, "running");
+  seedLedger.setRunStatus(runId, "ready", "READY");
+  seedLedger.prepareDeliveryRepository({ runId, repositoryId: "repo:hang", localPath: project, baseBranch: "main", baseCommit: "a".repeat(40), headCommit: "b".repeat(40), branch: "devharmonics/recon-hang" });
+  seedLedger.updateDeliveryRepository(runId, "repo:hang", { status: "branch_pushed" });
+  seedLedger.close();
+
+  try {
+    const startedAt = Date.now();
+    const response = await fetch(`${dashboard.url}/api/runs/${runId}/reconcile-delivery`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(response.status, 200);
+    assert.ok(elapsedMs < 5_000, `the route must not hang on a stuck tool, took ${elapsedMs}ms`);
+    const { repositories } = (await response.json()) as { repositories: Array<{ findings: Array<{ artifact: string; state: string }> }> };
+    const branch = repositories[0]!.findings.find((finding) => finding.artifact === "branch")!;
+    assert.equal(branch.state, "unobserved");
+
+    // The server itself must still be responsive after a hung reconciliation
+    // call settled — the shared HTTP server was never blocked.
+    const stillAlive = await fetch(`${dashboard.url}/api/runs`);
+    assert.equal(stillAlive.status, 200);
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("GET /api/inbox projects pending decisions read-only and drops them the instant the ledger shows them resolved", async () => {
+  // DH-645 S1. Seeds three kinds of genuinely-waiting decision directly
+  // against the ledger, then drives the REAL HTTP endpoint. No
+  // orchestrator/CLI fixtures are needed — the inbox is a pure read of
+  // ledger state the server already owns.
+  //
+  // Seeding happens AFTER startDashboard (not before, unlike "the delivery
+  // HTTP route..." above): startDashboard() calls
+  // Ledger.reconcileInterruptedRuns() once at startup, which auto-pauses any
+  // run still 'planning'/'running'/'awaiting_approval' as an orphan of a
+  // crashed process (see src/ledger.ts). A run seeded before start would
+  // have its 'awaiting_approval' status silently reconciled to 'paused'
+  // before this test ever gets to look at it — seeding through a second
+  // Ledger connection to the same file AFTER the dashboard is up avoids
+  // that and exercises the ordinary "still live" case instead.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-inbox-http-"));
+  const project = await createRepository(root);
+  await initializeProject(project);
+  const dbPath = path.join(devHarmonicsDirectory(project), "devharmonics.db");
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+
+  const seedLedger = new Ledger(dbPath);
+
+  // (a) a run awaiting plan approval.
+  const planRunId = seedLedger.createRun("Add CSV export to the customer report", project);
+  seedLedger.savePlan(planRunId, {
+    summary: "Add CSV export",
+    recommendedConcurrency: 1,
+    revision: 1,
+    tasks: [{ id: "t1", title: "Implement export", description: "Implement CSV export", dependencies: [], preferredProvider: "codex" as const, checks: ["diff-check"] }],
+  });
+  seedLedger.requestPlanApproval(planRunId);
+
+  // (b) a READY run with one repository still needing its next delivery
+  // step approved, and one already merged (excluded — tagging is optional).
+  const deliverRunId = seedLedger.createRun("Ship the reporting service", project);
+  seedLedger.setRunStatus(deliverRunId, "running");
+  seedLedger.setRunStatus(deliverRunId, "ready", "READY");
+  seedLedger.prepareDeliveryRepository({ runId: deliverRunId, repositoryId: "repo:pending", localPath: project, baseBranch: "main", baseCommit: "a".repeat(40), headCommit: "b".repeat(40), branch: "devharmonics/inbox1" });
+  seedLedger.prepareDeliveryRepository({ runId: deliverRunId, repositoryId: "repo:done", localPath: project, baseBranch: "main", baseCommit: "c".repeat(40), headCommit: "d".repeat(40), branch: "devharmonics/inbox2" });
+  seedLedger.updateDeliveryRepository(deliverRunId, "repo:done", { status: "merged" });
+
+  // (c) a paused run awaiting owner direction.
+  const pausedRunId = seedLedger.createRun("Migrate the billing job", project);
+  seedLedger.setRunStatus(pausedRunId, "running");
+  seedLedger.pauseRun(pausedRunId, "Needs your decision before continuing");
+
+  seedLedger.close();
+
+  try {
+    const before = await (await fetch(`${dashboard.url}/api/runs`)).json();
+
+    const response = await fetch(`${dashboard.url}/api/inbox`);
+    assert.equal(response.status, 200);
+    const { items } = (await response.json()) as { items: Array<Record<string, any>> };
+
+    const byKind = (kind: string) => items.filter((item) => item.kind === kind);
+    assert.equal(byKind("plan_approval").length, 1, "the awaiting-approval run produces exactly one plan approval item");
+    assert.equal(byKind("delivery_step_approval").length, 1, "only the pending repository produces a delivery item; the merged one is excluded");
+    assert.equal(byKind("paused_run").length, 1, "the paused run produces exactly one paused-run item");
+
+    const plan = byKind("plan_approval")[0]!;
+    assert.equal(plan.runId, planRunId);
+    assert.equal(typeof plan.title, "string");
+    assert.ok(plan.title.length > 0);
+    assert.match(plan.evidence, /revision 1/i);
+    assert.deepEqual(plan.actionTarget, { view: "runs", control: "approve-run", label: "Open this run to approve the plan" });
+    assert.ok(Number.isFinite(Date.parse(plan.waitingSinceIso)), "waitingSinceIso is a real timestamp");
+
+    const delivery = byKind("delivery_step_approval")[0]!;
+    assert.equal(delivery.runId, deliverRunId);
+    assert.equal(delivery.repositoryId, "repo:pending");
+    assert.match(delivery.evidence, /Reviewed commit b{12} on branch devharmonics\/inbox1/);
+    assert.equal(delivery.actionTarget.control, "delivery-panel");
+
+    const paused = byKind("paused_run")[0]!;
+    assert.equal(paused.runId, pausedRunId);
+    assert.equal(paused.evidence, "Needs your decision before continuing");
+    assert.equal(paused.actionTarget.control, "resume-run");
+
+    // Read-only: a GET must never mutate the ledger it reads. Hit it again,
+    // then compare the FULL /api/runs payload byte-for-byte against the
+    // snapshot taken before either GET /api/inbox call.
+    await fetch(`${dashboard.url}/api/inbox`);
+    const after = await (await fetch(`${dashboard.url}/api/runs`)).json();
+    assert.deepEqual(after, before, "GET /api/inbox must not change any run or delivery state");
+
+    // Resolution honesty: approving the plan and completing the delivery
+    // step (via a second connection to the SAME ledger file, exactly as a
+    // concurrent owner action would) must make both items disappear on the
+    // very next projection.
+    const mutateLedger = new Ledger(dbPath);
+    mutateLedger.approvePlan(planRunId);
+    mutateLedger.updateDeliveryRepository(deliverRunId, "repo:pending", { status: "tagged" });
+    mutateLedger.close();
+
+    const afterResolution = (await (await fetch(`${dashboard.url}/api/inbox`)).json()) as { items: Array<Record<string, any>> };
+    assert.equal(afterResolution.items.filter((item: Record<string, any>) => item.kind === "plan_approval").length, 0, "an approved plan leaves the inbox");
+    assert.equal(afterResolution.items.filter((item: Record<string, any>) => item.kind === "delivery_step_approval").length, 0, "a tagged repository leaves the inbox");
+    assert.equal(afterResolution.items.filter((item: Record<string, any>) => item.kind === "paused_run").length, 1, "the still-paused run remains");
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("GET /api/program-status serves the program status view, read-only, grouped by product and by repository path", async () => {
+  // DH-645 S2, split under new-Major (scan cost) onto its own route: the
+  // Program status view's lifetime-run-history scan (Ledger.listAllRuns())
+  // no longer rides GET /api/inbox's SSE-driven cockpit refresh path — see
+  // GET /api/program-status's comment in src/server.ts. Seeded AFTER
+  // startDashboard for the same reason as the S1 inbox test above:
+  // reconcileInterruptedRuns() would otherwise auto-pause a freshly seeded
+  // 'running' run.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-program-status-http-"));
+  const project = await createRepository(root);
+  await initializeProject(project);
+  const dbPath = path.join(devHarmonicsDirectory(project), "devharmonics.db");
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+
+  const seedLedger = new Ledger(dbPath);
+
+  seedLedger.upsertProduct({
+    id: "prod-civic",
+    name: "CivicSuite",
+    organizationUrl: "https://github.com/example/civicsuite",
+    description: "",
+    repositories: [{
+      id: "repo:civic",
+      name: "civiccore",
+      fullName: "example/civiccore",
+      url: "https://github.com/example/civiccore",
+      cloneUrl: "https://github.com/example/civiccore.git",
+      defaultBranch: "main",
+      visibility: "public",
+      archived: false,
+      sizeKb: 100,
+      language: "TypeScript",
+      description: null,
+      intelligence: {},
+    }],
+  });
+
+  // (a) a run linked to a registered product via its integration set — must
+  // group under the product's NAME.
+  const linkedRunId = seedLedger.createRun("Ship the reporting module", project);
+  seedLedger.setRunStatus(linkedRunId, "running");
+  seedLedger.createIntegrationSet({
+    runId: linkedRunId,
+    productId: "prod-civic",
+    integrationConditions: [],
+    repositories: [{ repositoryId: "repo:civic", localPath: project, baseCommit: "a".repeat(40), integrationBranch: "devharmonics/civic", integrationWorktreePath: project }],
+  });
+
+  // (b) a run with a task currently retrying — must land in 'retrying',
+  // never 'stalled' or 'moving', regardless of how long it has been quiet.
+  const retryRunId = seedLedger.createRun("Fix the flaky check", project);
+  seedLedger.setRunStatus(retryRunId, "running");
+  seedLedger.addTask(retryRunId, { id: "t1", title: "Fix it", description: "d", dependencies: [], preferredProvider: null, checks: [] });
+  seedLedger.setTaskStatus(retryRunId, "t1", "working");
+  seedLedger.setTaskStatus(retryRunId, "t1", "retry");
+
+  // (c) a run with no product link — must group under its own project path.
+  const unlinkedRunId = seedLedger.createRun("Tidy up the standalone tool", project);
+  seedLedger.setRunStatus(unlinkedRunId, "running");
+
+  seedLedger.close();
+
+  try {
+    const response = await fetch(`${dashboard.url}/api/program-status`);
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { program: { groups: Array<{ key: string; label: string; counts: Record<string, number>; runs: Array<Record<string, any>> }>; totals: Record<string, number> } };
+
+    assert.ok(body.program, "the response carries a program field");
+
+    const allRuns = body.program.groups.flatMap((group) => group.runs);
+    const linked = allRuns.find((run) => run.runId === linkedRunId)!;
+    const retrying = allRuns.find((run) => run.runId === retryRunId)!;
+    const unlinked = allRuns.find((run) => run.runId === unlinkedRunId)!;
+
+    assert.ok(linked, "the product-linked run appears in the program view");
+    assert.ok(retrying, "the retrying run appears in the program view");
+    assert.ok(unlinked, "the unlinked run appears in the program view");
+
+    assert.equal(retrying.bucket, "retrying");
+
+    const civicGroup = body.program.groups.find((group) => group.runs.some((run) => run.runId === linkedRunId));
+    assert.equal(civicGroup?.label, "CivicSuite", "the linked run groups under the registered product's NAME");
+
+    const pathGroup = body.program.groups.find((group) => group.runs.some((run) => run.runId === unlinkedRunId));
+    assert.equal(pathGroup?.label, project, "the unlinked run groups under its own repository path");
+    assert.notEqual(civicGroup?.key, pathGroup?.key);
+
+    // Read-only: a GET must never mutate the ledger it reads.
+    const before = await (await fetch(`${dashboard.url}/api/runs`)).json();
+    await fetch(`${dashboard.url}/api/program-status`);
+    const after = await (await fetch(`${dashboard.url}/api/runs`)).json();
+    assert.deepEqual(after, before, "GET /api/program-status must not change any run, task, or integration-set state");
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("GET /api/inbox no longer carries the program-status payload, and GET /api/program-status serves it instead", async () => {
+  // new-Major (scan cost), regression (b): the split must be structural, not
+  // just "the extra route also exists" — /api/inbox's response body must
+  // not have a `program` key at all, and /api/program-status must be the
+  // one place that key appears.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-inbox-program-split-"));
+  const project = await createRepository(root);
+  await initializeProject(project);
+  const dbPath = path.join(devHarmonicsDirectory(project), "devharmonics.db");
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+
+  const seedLedger = new Ledger(dbPath);
+  const runId = seedLedger.createRun("Ship the reporting module", project);
+  seedLedger.setRunStatus(runId, "running");
+  seedLedger.close();
+
+  try {
+    const inboxBody = await (await fetch(`${dashboard.url}/api/inbox`)).json() as Record<string, unknown>;
+    assert.ok(Array.isArray(inboxBody.items), "GET /api/inbox still carries items");
+    assert.equal(Object.hasOwn(inboxBody, "program"), false, "GET /api/inbox no longer carries a program field");
+
+    const programResponse = await fetch(`${dashboard.url}/api/program-status`);
+    assert.equal(programResponse.status, 200);
+    const programBody = await programResponse.json() as Record<string, unknown>;
+    assert.ok(programBody.program, "GET /api/program-status carries the program field");
+    assert.equal(Object.hasOwn(programBody, "items"), false, "GET /api/program-status does not carry inbox items");
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("GET /api/inbox, GET /api/program-status, and GET /api/status-export show a run older than the most-recent-50 sidebar window (M-50-limit)", async () => {
+  // Gate finding M-50-limit: /api/inbox, /api/program-status, and
+  // /api/status-export were fed from Ledger.listRuns(), which hard-limits to
+  // the 50 most recent runs for the `/api/runs` sidebar. Once 51+ runs
+  // exist, an old awaiting-approval plan, paused run, or delivery could fall
+  // outside that window and silently vanish from all three views,
+  // contradicting "every decision ... across every run" (src/ui/index.html).
+  // This seeds the OLDEST run as awaiting plan approval, then buries it
+  // under 55 newer runs, and asserts it still surfaces.
+  //
+  // Adapted under new-Major (scan cost): /api/inbox now answers from
+  // Ledger.listRunsByStatus() (an indexed status lookup), not
+  // Ledger.listAllRuns() — this test still proves the oldest run's item
+  // surfaces, just via the query that is now complete-by-construction for
+  // items rather than a full scan. /api/program-status keeps using
+  // listAllRuns() and is asserted separately, since it now needs its own
+  // fetch.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-50-limit-"));
+  const project = await createRepository(root);
+  await initializeProject(project);
+  const dbPath = path.join(devHarmonicsDirectory(project), "devharmonics.db");
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+
+  const seedLedger = new Ledger(dbPath);
+
+  // The oldest run carries BOTH a pending delivery step (an inbox item) and
+  // a delivered (pushed) repository (a status-export record), so one run
+  // exercises both routes' use of the same underlying query.
+  const oldestRunId = seedLedger.createRun("Ship the very first migration", project);
+  seedLedger.setRunStatus(oldestRunId, "running");
+  seedLedger.setRunStatus(oldestRunId, "ready", "READY");
+  seedLedger.prepareDeliveryRepository({
+    runId: oldestRunId,
+    repositoryId: "repo:oldest",
+    localPath: project,
+    baseBranch: "main",
+    baseCommit: "a".repeat(40),
+    headCommit: "b".repeat(40),
+    branch: "devharmonics/oldest-fixture",
+  });
+  seedLedger.updateDeliveryRepository(oldestRunId, "repo:oldest", {
+    status: "branch_pushed",
+    remoteUrl: "https://github.com/example-owner/oldest-repo",
+  });
+
+  // Force a strictly later created_at (millisecond ISO resolution) on every
+  // filler run so the oldest run is unambiguously oldest, not merely tied.
+  await delay(5);
+
+  const FILLER_COUNT = 55;
+  for (let i = 0; i < FILLER_COUNT; i += 1) {
+    const fillerId = seedLedger.createRun(`Filler run ${i}`, project);
+    seedLedger.setRunStatus(fillerId, "running");
+    seedLedger.setRunStatus(fillerId, "ready", "READY");
+  }
+  seedLedger.close();
+
+  try {
+    const inboxResponse = await fetch(`${dashboard.url}/api/inbox`);
+    assert.equal(inboxResponse.status, 200);
+    const { items } = (await inboxResponse.json()) as { items: Array<Record<string, any>> };
+
+    const oldestItem = items.find((item) => item.runId === oldestRunId);
+    assert.ok(oldestItem, "the oldest run's pending delivery step must still appear in the inbox despite 55 newer runs existing");
+    assert.equal(oldestItem!.kind, "delivery_step_approval");
+    assert.equal(oldestItem!.repositoryId, "repo:oldest");
+
+    const programStatusResponse = await fetch(`${dashboard.url}/api/program-status`);
+    assert.equal(programStatusResponse.status, 200);
+    const { program } = (await programStatusResponse.json()) as {
+      program: { groups: Array<{ runs: Array<Record<string, any>> }> };
+    };
+    const programRuns = program.groups.flatMap((group) => group.runs);
+    const oldestProgramEntry = programRuns.find((entry) => entry.runId === oldestRunId);
+    assert.ok(oldestProgramEntry, "the oldest run must still appear in the program status view");
+    assert.equal(oldestProgramEntry!.bucket, "waiting_on_you");
+
+    // The sidebar's own /api/runs query is UNCHANGED — it may still cap at
+    // 50 most-recent runs. This finding is scoped to the inbox/program/
+    // status-export projections, not the sidebar.
+    const sidebar = (await (await fetch(`${dashboard.url}/api/runs`)).json()) as { runs: unknown[] };
+    assert.equal(sidebar.runs.length, 50, "the /api/runs sidebar keeps its existing 50-run cap, unaffected by this fix");
+
+    const exportResponse = await fetch(`${dashboard.url}/api/status-export`);
+    assert.equal(exportResponse.status, 200);
+    const html = await exportResponse.text();
+    assert.match(html, /devharmonics\/oldest-fixture/, "the oldest run's delivered branch must still appear in the status export despite 55 newer runs existing");
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("GET /api/status-export downloads a standalone HTML page with owner identifiers, no agent-written text, and never mutates the ledger", async () => {
+  // DH-645 S4. Same light seeded-ledger-over-HTTP harness as the /api/inbox
+  // tests above: startDashboard first (so reconcileInterruptedRuns() runs
+  // against an empty ledger), then seed a second Ledger connection to the
+  // SAME db file, then hit the route.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-status-export-http-"));
+  const project = await createRepository(root);
+  await initializeProject(project);
+  const dbPath = path.join(devHarmonicsDirectory(project), "devharmonics.db");
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+
+  const AGENT_MARKER = "AGENT-WROTE-THIS-VERDICT-MARKER-XYZ";
+  const seedLedger = new Ledger(dbPath);
+
+  seedLedger.upsertProduct({
+    id: "prod-civic",
+    name: "CivicSuite",
+    organizationUrl: "https://github.com/example-owner",
+    description: "",
+    repositories: [{
+      id: "repo:civic",
+      name: "civiccore",
+      fullName: "example-owner/civiccore",
+      url: "https://github.com/example-owner/civiccore",
+      cloneUrl: "https://github.com/example-owner/civiccore.git",
+      defaultBranch: "main",
+      visibility: "public",
+      archived: false,
+      sizeKb: 100,
+      language: "TypeScript",
+      description: null,
+      intelligence: {},
+    }],
+  });
+
+  const runId = seedLedger.createRun("Ship the reporting service export", project);
+  seedLedger.setRunStatus(runId, "running");
+  seedLedger.createIntegrationSet({
+    runId,
+    productId: "prod-civic",
+    integrationConditions: [],
+    repositories: [{ repositoryId: "repo:civic", localPath: project, baseCommit: "a".repeat(40), integrationBranch: "devharmonics/civic", integrationWorktreePath: project }],
+  });
+  seedLedger.prepareDeliveryRepository({
+    runId,
+    repositoryId: "repo:civic",
+    localPath: project,
+    baseBranch: "main",
+    baseCommit: "a".repeat(40),
+    headCommit: "b".repeat(40),
+    branch: "devharmonics/status-export-fixture",
+  });
+  seedLedger.updateDeliveryRepository(runId, "repo:civic", {
+    status: "draft_pr_created",
+    remoteUrl: "https://github.com/example-owner/civiccore",
+    pullRequestUrl: "https://github.com/example-owner/civiccore/pull/17",
+  });
+  // An agent-written verdict this run genuinely carries — must NEVER reach the export.
+  seedLedger.setRunStatus(runId, "ready", AGENT_MARKER);
+  seedLedger.close();
+
+  try {
+    const before = await (await fetch(`${dashboard.url}/api/runs`)).json();
+
+    const response = await fetch(`${dashboard.url}/api/status-export`);
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type") ?? "", /text\/html/i);
+    const disposition = response.headers.get("content-disposition") ?? "";
+    assert.match(disposition, /attachment/i, "the route must serve the page as a download, not inline");
+    assert.match(disposition, /filename="devharmonics-status-.*\.html"/i);
+
+    const html = await response.text();
+    assert.match(html, /^<!doctype html>/i);
+
+    // Owner-held identifiers present.
+    assert.match(html, /devharmonics\/status-export-fixture/, "the branch name must appear");
+    assert.match(html, /example-owner\/civiccore/, "the repository must appear");
+    assert.match(html, /#17/, "the pull request number must appear");
+    assert.match(html, /repo:civic/, "the card must be headed by the repository id");
+
+    // No free text reaches the export — not even OWNER-typed text (review
+    // finding C1: a Workbench-converted objective's run.goal, or a
+    // product's name, can itself be model-authored, so status-export.ts
+    // never reads either field regardless of provenance; see its module
+    // doc and test/status-export.test.ts for the same guarantee unit-tested
+    // directly against buildStatusExportRecords/generateStatusExportHtml).
+    assert.doesNotMatch(html, /Ship the reporting service export/, "the owner-typed run goal must never appear in the export (C1)");
+    assert.doesNotMatch(html, /CivicSuite/, "the owner-named product must never appear in the export (C1)");
+
+    // No agent-written value anywhere in the download.
+    assert.doesNotMatch(html, new RegExp(AGENT_MARKER), "an agent-written run verdict must never appear in the exported page");
+
+    // Read-only: the route must never mutate the ledger it reads.
+    const after = await (await fetch(`${dashboard.url}/api/runs`)).json();
+    assert.deepEqual(after, before, "GET /api/status-export must not change any run or delivery state");
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("the tag prefill follows the MERGE commit's declared version once merged, not the reviewed head", async () => {
   // ROUND2-002: the tag GATE judges the merge commit, but the GET prefill used
   // to read the reviewed head. When the merge commit declares a DIFFERENT

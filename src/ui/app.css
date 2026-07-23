@@ -31,8 +31,9 @@ button { cursor: pointer; }
 .brand span { color: var(--muted); font-size: 12px; margin-top: 2px; }
 .section-label { color: #6f7782; font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; margin: 28px 8px 10px; }
 .app-nav { display: grid; gap: 4px; margin-top: 18px; }
-.nav-link { border: 0; border-radius: 9px; padding: 10px 12px; color: var(--muted); background: transparent; text-align: left; font-weight: 650; }
+.nav-link { border: 0; border-radius: 9px; padding: 10px 12px; color: var(--muted); background: transparent; text-align: left; font-weight: 650; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .nav-link:hover, .nav-link.active { color: var(--text); background: var(--panel-2); }
+.nav-badge { display: inline-grid; place-items: center; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--lime); color: #0a0c08; font-size: 11px; font-weight: 900; }
 /* grid-auto-rows: the buttons' overflow:hidden zeroes their automatic minimum
    size, so a height-squeezed grid would compress every row to fit instead of
    scrolling — rows keep content height and the LIST scrolls. */
@@ -50,6 +51,7 @@ button { cursor: pointer; }
 .security-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--lime); margin-right: 7px; box-shadow: 0 0 12px rgba(200,245,96,.55); }
 .workspace-view { padding-bottom: 48px; }
 .view-heading { display: flex; align-items: end; justify-content: space-between; gap: 18px; margin: 12px 0 22px; }
+.inbox-header-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .view-heading h2 { margin: 3px 0 0; font-size: clamp(24px, 3vw, 38px); letter-spacing: -.04em; }
 .connection-grid, .model-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
 .connection-card, .model-card { border: 1px solid var(--border); background: var(--panel); border-radius: var(--radius); padding: 18px; min-width: 0; }
@@ -441,3 +443,31 @@ pre { margin: 0; padding: 12px; overflow: auto; max-height: 280px; background: #
 .steering-queue { display: grid; gap: 6px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
 .steering-queue .joined { display: flex; gap: 8px; }
 .steering-queue .joined .input { flex: 1; min-width: 0; }
+
+/* DH-645 S2 program status panel. */
+.program-status-heading { margin-top: 26px; }
+.program-status-legend { list-style: none; margin: 0 0 16px; padding: 0; display: grid; gap: 4px; }
+.program-status-groups { display: grid; gap: 16px; }
+.program-group { border: 1px solid var(--border); border-radius: 10px; padding: 13px; background: #0d1014; }
+.program-group h3 { margin: 0 0 8px; font-size: 13px; display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.program-group-counts { color: var(--muted); font-weight: 400; font-size: 11px; }
+.program-run { display: grid; gap: 4px; width: 100%; padding: 9px 0; border: none; border-top: 1px solid var(--border); border-radius: 0; background: none; color: inherit; text-align: left; font: inherit; cursor: pointer; }
+.program-run:first-of-type { border-top: none; }
+.program-run:hover { background: var(--panel-2); }
+.program-run-bucket { color: var(--lime); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; font-weight: 700; }
+.program-run[data-program-bucket="stalled"] .program-run-bucket { color: var(--amber); }
+.program-run[data-program-bucket="waiting_on_you"] .program-run-bucket { color: var(--blue); }
+.program-run[data-program-bucket="finished"] .program-run-bucket { color: var(--muted); }
+.program-run-reason { color: var(--muted); font-size: 12px; }
+
+/* DH-645 S3 reconciliation: three honestly-distinct treatments, plus the
+   client-side-only program-view divergence marker (never persisted). */
+.delivery-reconcile-row { margin-top: 10px; }
+.reconcile-results { margin-top: 8px; display: grid; gap: 6px; }
+.reconcile-finding { margin: 0; font-size: 12px; line-height: 1.45; padding: 2px 0; }
+.reconcile-matches { color: var(--muted); }
+.reconcile-diverged { color: var(--red); font-weight: 650; background: rgba(255, 107, 107, .08); border: 1px solid var(--red); border-radius: 8px; padding: 8px 10px; }
+.reconcile-unobserved { color: var(--amber); font-style: italic; }
+.reconcile-checked-at { margin-top: 2px; }
+.program-run-diverged { border-left: 3px solid var(--red); padding-left: 8px; }
+.program-run-divergence-marker { color: var(--red); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }

@@ -172,7 +172,7 @@ interface CheckRow {
   duration_ms: number;
 }
 
-export const LEDGER_SCHEMA_VERSION = 34;
+export const LEDGER_SCHEMA_VERSION = 35;
 
 export const REPOSITORY_ROLES = [
   "umbrella",
@@ -1341,6 +1341,31 @@ const MIGRATIONS: readonly LedgerMigration[] = [
         (database.prepare("SELECT name FROM pragma_table_info('delivery_repositories')").all() as unknown as Array<{ name: string }>).map((column) => column.name),
       );
       if (!columns.has("merge_commit_oid")) database.exec("ALTER TABLE delivery_repositories ADD COLUMN merge_commit_oid TEXT;");
+    },
+  },
+  {
+    version: 35,
+    name: "runs-status-index",
+    apply(database) {
+      // new-Major (scan cost): backs Ledger.listRunsByStatus() with a real
+      // index rather than a sequential scan, so the Inbox items route
+      // (GET /api/inbox) stays cheap on every polled cockpit refresh — see
+      // listRunsByStatus's doc comment for the full reasoning.
+      //
+      // Column-existence guard (same defensive style as every other
+      // ALTER-based migration above): every genuine upgrade path already has
+      // `runs.status` from the version-1 baseline schema, so this is a
+      // no-op in practice. It matters only for a `runs` table so malformed
+      // it never got that column in the first place — without the guard,
+      // `CREATE INDEX ... ON runs(status)` would throw SQLite's raw
+      // "no such column: status" mid-migration instead of letting the
+      // existing, clearer `assertSchemaShape()` check after the migration
+      // loop report "table 'runs' is missing columns" the way every other
+      // structurally-broken `runs` table already does.
+      const columns = new Set(
+        (database.prepare("SELECT name FROM pragma_table_info('runs')").all() as unknown as Array<{ name: string }>).map((column) => column.name),
+      );
+      if (columns.has("status")) database.exec("CREATE INDEX IF NOT EXISTS runs_status ON runs(status);");
     },
   },
 ];
@@ -2527,6 +2552,91 @@ export class Ledger {
     const rows = this.database
       .prepare("SELECT id FROM runs ORDER BY created_at DESC LIMIT 50")
       .all() as unknown as Array<{ id: string }>;
+    return rows.map((row) => this.getRun(row.id)).filter((run): run is RunSummary => run !== null);
+  }
+
+  /**
+   * Gate finding M-50-limit; revisited under new-Major (scan cost).
+   * Projection-specific complete read: EVERY run the ledger has ever
+   * recorded, not just the 50 most recent `listRuns()` serves to the
+   * `/api/runs` sidebar (left unchanged — that endpoint is deliberately a
+   * recent-activity list, polled frequently by the cockpit heartbeat, and
+   * was never the thing making a completeness promise).
+   *
+   * REAL CURRENT CALLERS (verify against src/server.ts before trusting this
+   * comment — it is honest only as long as it matches the routes):
+   *  - `GET /api/program-status` — the cross-run Program status view, which
+   *    promises "every run the ledger knows about" and genuinely needs
+   *    every bucket (including `finished`), not just the actionable subset.
+   *  - `GET /api/status-export` — the owner-initiated standalone HTML
+   *    download; an export that silently omitted older runs would be a
+   *    worse failure mode than a slow download, since the owner shares this
+   *    file expecting it to be complete. This route deliberately KEEPS
+   *    `listAllRuns()` — it is an explicit, infrequent owner action, off
+   *    the polled cockpit path, not the sidebar/SSE refresh chain below.
+   *
+   * NOT a caller: `GET /api/inbox`. That route used to call this method
+   * too, but every SSE-driven `refreshRuns()` in src/ui/app.js awaits
+   * `refreshInbox()`, so a lifetime-unbounded scan on that path meant every
+   * polled cockpit refresh cost grew with the full run history — the exact
+   * "polled sidebar or cockpit heartbeat" this comment used to (incorrectly)
+   * claim was never paying this cost. Inbox ITEMS are cheap by construction
+   * — `projectInbox` (src/inbox.ts) only ever produces an item from a run
+   * whose status is `awaiting_approval`, `paused`, or `ready` — so
+   * `/api/inbox` now uses `listRunsByStatus()` below instead: complete for
+   * items by construction, and cheap (an indexed status lookup) on every
+   * poll, never an all-history scan.
+   *
+   * Choice + cost, so the tradeoff is explicit rather than assumed for the
+   * callers that remain: an unlimited scan (no targeted "non-terminal OR
+   * has a delivery" filter) was chosen over a targeted query because the
+   * Program status view's own promised text is "every run the ledger knows
+   * about" — a targeted filter would still under-report an old terminal
+   * run's `finished` bucket membership once it ages out, quietly
+   * reintroducing the same class of gap this method exists to close. Cost:
+   * one indexed `SELECT id` plus one `getRun()` per run — each `getRun()`
+   * is itself 3 further indexed queries (tasks, checks, and an events page
+   * capped at 200) — so this is O(N) in the LIFETIME run count for one
+   * project's ledger, not O(1) like the sidebar's capped query. That is
+   * acceptable for its two remaining callers because both are deliberately
+   * infrequent, owner-initiated actions (opening Program status,
+   * downloading a status export), so the added latency is paid only when an
+   * owner actually opens one of those views, not on every refresh tick.
+   */
+  listAllRuns(): RunSummary[] {
+    const rows = this.database
+      .prepare("SELECT id FROM runs ORDER BY created_at DESC")
+      .all() as unknown as Array<{ id: string }>;
+    return rows.map((row) => this.getRun(row.id)).filter((run): run is RunSummary => run !== null);
+  }
+
+  /**
+   * new-Major (scan cost). Complete-by-construction, cheap-on-every-poll
+   * read for the Inbox ITEMS projection: every run whose `status` is one of
+   * the given statuses, at a cost independent of the ledger's lifetime run
+   * count. Backed by the `runs_status` index (migration 35,
+   * "runs-status-index") — `WHERE status IN (...)` with no `LIMIT`, so it
+   * is complete for any status set without the 50-row sidebar cap, and
+   * indexed so its cost tracks the matching subset, not the full history
+   * `listAllRuns()` scans.
+   *
+   * Why this is honestly "complete for items": `projectInbox` (src/inbox.ts)
+   * only ever emits an `InboxItem` from a run whose `status` is
+   * `awaiting_approval`, `paused`, or `ready` (a `ready` run additionally
+   * needs a pending `delivery` repository, filtered client-side in
+   * `projectInbox` itself). No other run status can produce an inbox item.
+   * So `GET /api/inbox` calling `listRunsByStatus(["awaiting_approval",
+   * "paused", "ready"])` and feeding the result straight to `projectInbox`
+   * is exactly as complete as calling `listAllRuns()` would have been, at a
+   * fraction of the cost on every SSE-driven cockpit refresh (see
+   * `listAllRuns`'s doc comment above for that path's cost history).
+   */
+  listRunsByStatus(statuses: readonly RunStatus[]): RunSummary[] {
+    if (statuses.length === 0) return [];
+    const placeholders = statuses.map(() => "?").join(", ");
+    const rows = this.database
+      .prepare(`SELECT id FROM runs WHERE status IN (${placeholders}) ORDER BY created_at DESC`)
+      .all(...statuses) as unknown as Array<{ id: string }>;
     return rows.map((row) => this.getRun(row.id)).filter((run): run is RunSummary => run !== null);
   }
 

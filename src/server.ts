@@ -21,6 +21,10 @@ import { createRunEvidenceExport, createRunReport } from "./reporter.js";
 import { observeLocalResources } from "./resources.js";
 import { inspectLocalRepository } from "./repository-intelligence.js";
 import { DeliveryRefusal, DeliveryService, VersionMismatchRefusal, type DeliveryAction } from "./delivery.js";
+import { reconcileDelivery, type RepositoryReconciliationResult } from "./reconciliation.js";
+import { INBOX_RELEVANT_RUN_STATUSES, projectInbox } from "./inbox.js";
+import { projectProgramStatus } from "./program-status.js";
+import { generateStatusExportHtml } from "./status-export.js";
 import { scanProductIntelligence } from "./product-intelligence.js";
 import { manualModelSchema, objectiveInputSchema, productRegistrationSchema, steeringDirectiveInputSchema, workbenchSessionInputSchema } from "./schemas.js";
 import type { ObjectiveInput, ProviderName, RunRequest, WorkbenchMessageRecord } from "./types.js";
@@ -82,6 +86,14 @@ export async function startDashboard(options: {
   open?: boolean;
   /** Test seam: substitute the process runner behind delivery git/gh calls. Never set in production paths. */
   deliveryRunner?: ConstructorParameters<typeof DeliveryService>[1];
+  /**
+   * Test seam: how long a single reconciliation artifact check may run before
+   * it is reported unobserved (DH-645 S3). Reuses `deliveryRunner`'s same
+   * git/gh injection for the observing calls themselves — this only shortens
+   * the bound so a faked hanging tool doesn't slow down the test suite. Never
+   * set in production paths.
+   */
+  reconciliationTimeoutMs?: number;
 }): Promise<{ url: string; close: () => Promise<void> }> {
   const defaultProject = path.resolve(options.projectPath);
   await initializeProject(defaultProject);
@@ -92,6 +104,8 @@ export async function startDashboard(options: {
   const catalog = new ModelCatalogCoordinator(ledger, defaultProject);
   const openRouter = new OpenRouterService(ledger);
   const delivery = new DeliveryService(ledger, options.deliveryRunner);
+  const reconciliationRunner = options.deliveryRunner;
+  const reconciliationTimeoutMs = options.reconciliationTimeoutMs;
   const eventStreams = new Set<ServerResponse>();
 
   await catalog.refresh(true, "application_launch");
@@ -99,7 +113,7 @@ export async function startDashboard(options: {
 
   const server = createServer(async (request, response) => {
     try {
-      await route(request, response, { defaultProject, ledger, orchestrator, catalog, openRouter, delivery, eventStreams });
+      await route(request, response, { defaultProject, ledger, orchestrator, catalog, openRouter, delivery, reconciliationRunner, reconciliationTimeoutMs, eventStreams });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       sendJson(response, error instanceof ClientRequestError ? 400 : 500, { error: redactText(message) });
@@ -139,6 +153,8 @@ async function route(
     catalog: ModelCatalogCoordinator;
     openRouter: OpenRouterService;
     delivery: DeliveryService;
+    reconciliationRunner: ConstructorParameters<typeof DeliveryService>[1];
+    reconciliationTimeoutMs: number | undefined;
     eventStreams: Set<ServerResponse>;
   },
 ): Promise<void> {
@@ -225,6 +241,74 @@ async function route(
 
   if (request.method === "GET" && url.pathname === "/api/runs") {
     sendJson(response, 200, { runs: context.ledger.listRuns() });
+    return;
+  }
+
+  // DH-645 S1: a read-only projection of existing ledger state — no new
+  // approval state, no writes. See src/inbox.ts for the decisions waiting
+  // on the owner right now.
+  //
+  // Gate finding M-50-limit; split under new-Major (scan cost). This used
+  // to read `listAllRuns()` and also carry the Program status `program`
+  // field in the same payload (DH-645 S2) — but `/api/inbox` sits on the
+  // SSE-driven cockpit refresh chain (every `refreshRuns()` in
+  // src/ui/app.js awaits `refreshInbox()`), so an all-history scan here
+  // rode every polled refresh, not just an owner opening the Inbox tab.
+  // Program status genuinely needs every run and now has its own route,
+  // GET /api/program-status below, fetched only when that view is visible.
+  //
+  // `listRunsByStatus(INBOX_RELEVANT_RUN_STATUSES)` (src/ledger.ts) is
+  // complete for inbox ITEMS by construction — see INBOX_RELEVANT_RUN_STATUSES's
+  // doc comment in src/inbox.ts for why no other run status can produce an
+  // item — and, unlike `listAllRuns()`, its cost is an indexed status
+  // lookup rather than O(lifetime run count), so it stays cheap on every
+  // poll.
+  if (request.method === "GET" && url.pathname === "/api/inbox") {
+    const runs = context.ledger.listRunsByStatus(INBOX_RELEVANT_RUN_STATUSES);
+    sendJson(response, 200, { items: projectInbox(runs) });
+    return;
+  }
+
+  // DH-645 S2, split out under new-Major (scan cost) from the route above.
+  // The cross-run/product Program status view — src/program-status.ts —
+  // promises "every run the ledger knows about", so unlike /api/inbox it
+  // genuinely needs the complete, unbounded `listAllRuns()` read (see that
+  // method's doc comment in src/ledger.ts). This route is therefore fetched
+  // by src/ui/app.js only when the Inbox view is actually visible (on view
+  // entry and on refresh cycles while that view is showing), never from the
+  // generic sidebar/SSE refresh path that runs regardless of which view is
+  // open — the nav badge count keeps coming from the cheap /api/inbox above
+  // on every refresh.
+  if (request.method === "GET" && url.pathname === "/api/program-status") {
+    const runs = context.ledger.listAllRuns();
+    sendJson(response, 200, {
+      program: projectProgramStatus(runs, context.ledger.listProducts(), context.ledger.listObjectives()),
+    });
+    return;
+  }
+
+  // DH-645 S4. The exportable standalone status page: a self-contained HTML
+  // download built ONLY from owner-held delivery identifiers (see
+  // src/status-export.ts's module doc for the structural allowlist that
+  // enforces "contains no value written by an agent"). Served as an
+  // attachment, same convention as /api/runs/:id/evidence/export above.
+  //
+  // Gate finding M-50-limit: reads `listAllRuns()` (see its doc comment in
+  // src/ledger.ts), not the 50-run-capped `listRuns()` the sidebar uses —
+  // an exported status page that silently omitted older runs would be a
+  // worse failure mode than a slow download, since the owner shares this
+  // file expecting it to be complete.
+  if (request.method === "GET" && url.pathname === "/api/status-export") {
+    const runs = context.ledger.listAllRuns();
+    const html = generateStatusExportHtml(runs, context.ledger.listProducts(), context.ledger.listObjectives());
+    const filenameDate = new Date().toISOString().slice(0, 10);
+    response.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Content-Disposition": `attachment; filename="devharmonics-status-${filenameDate}.html"`,
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    });
+    response.end(html);
     return;
   }
 
@@ -1090,6 +1174,34 @@ async function route(
     } finally {
       deliveryOperationsInFlight.delete(inFlightKey);
     }
+  }
+
+  // DH-645 S3: delivered-vs-observed reconciliation. POST (not GET) because it
+  // triggers external reads over the network and can take seconds — same
+  // convention the delivery-execution route already uses for anything that
+  // shells out. STRICT read-only: reconcileDelivery only ever runs `git
+  // ls-remote` / `gh pr view` (see src/reconciliation.ts); it never writes to
+  // the ledger, the local repository, or the remote, and nothing here is
+  // persisted (locked decision 1) — the response IS the result.
+  const reconcileMatch = url.pathname.match(/^\/api\/runs\/([a-f0-9-]+)\/reconcile-delivery$/i);
+  if (request.method === "POST" && reconcileMatch?.[1]) {
+    // No body fields are read (there is nothing to configure per call); this
+    // matches /api/catalog/refresh's convention of a body-less POST that
+    // still enforces the same content-type/origin discipline as every other
+    // mutating-shaped route here.
+    requireJsonRequest(request);
+    const run = context.ledger.getRun(reconcileMatch[1]);
+    if (!run) {
+      sendJson(response, 404, { error: "Run not found" });
+      return;
+    }
+    const results: RepositoryReconciliationResult[] = await reconcileDelivery(
+      run,
+      context.reconciliationRunner,
+      context.reconciliationTimeoutMs,
+    );
+    sendJson(response, 200, { repositories: results });
+    return;
   }
 
   const steeringMatch = url.pathname.match(/^\/api\/runs\/([a-f0-9-]+)\/steering$/i);

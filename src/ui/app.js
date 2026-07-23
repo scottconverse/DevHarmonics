@@ -33,6 +33,13 @@ const state = {
   // persisted) — reconciliation is computed on request and lives only for
   // this page session. Keyed by `${runId}:${repositoryId}`.
   reconciliationByRepo: {},
+  // DH-647 S3. Decisions panel (Products view) state. `decisions` holds the
+  // current list/search result from GET /api/decisions. `decisionChains` is
+  // a client-side-only cache of fetched supersession trails (GET
+  // /api/decisions/:id/chain), keyed by record id — a trail is fetched on
+  // demand ("View history") rather than eagerly for every listed record.
+  decisions: [],
+  decisionChains: {},
 };
 
 function reconciliationKey(runId, repositoryId) {
@@ -145,6 +152,100 @@ function renderInboxItemHtml(item) {
   </article>`;
 }
 
+// DH-647 S2. Deterministic keyword-overlap match, mirroring the server's
+// normalizeDecisionSearchTokens (src/ledger.ts): lowercase, split on
+// non-alphanumerics, drop tokens under 3 characters. Reimplemented here
+// rather than shared because app.js ships to the browser standalone — this
+// keeps the "subjects token-overlap" collision/comparison rule client-side
+// and independently testable, matching the server's own definition of the
+// same rule (both sides are exercised by their own test suites).
+function decisionSubjectTokens(text) {
+  return String(text || "").toLowerCase().split(/[^a-z0-9]+/).filter((token) => token.length >= 3);
+}
+function subjectsOverlap(a, b) {
+  const tokensA = new Set(decisionSubjectTokens(a));
+  return decisionSubjectTokens(b).some((token) => tokensA.has(token));
+}
+
+// DH-647 S2 render seams. Same threat shape and same discipline as
+// renderFindingHtml/renderInboxItemHtml above: subject/question/option/reason/
+// decidingConstraint/acceptedCost are free text ultimately sourced from a
+// decision record or an architect's plan output, concatenated straight into
+// innerHTML by renderPlanPreview(). Every interpolated field goes through
+// escapeHtml. Pulled out as pure, state-free functions so a hostile-markup
+// case is regression-tested directly against the exact code path
+// renderPlanPreview() uses.
+function renderPriorDecisionHtml(record) {
+  const subject = escapeHtml(record.subject || "");
+  const selected = (record.options || []).find((option) => option.disposition === "selected");
+  const rejected = (record.options || []).filter((option) => option.disposition === "rejected");
+  const selectedText = escapeHtml(selected ? selected.option : "unknown");
+  const rejectedText = rejected.length
+    ? rejected.map((option) => `${escapeHtml(option.option)} — ${escapeHtml(option.reason || "no reason recorded")}`).join("; ")
+    : "none recorded";
+  return `<article class="prior-decision">
+    <strong>${subject}</strong>
+    <span>Selected: ${selectedText}</span>
+    <span>Rejected: ${rejectedText}</span>
+    <span>Deciding constraint: ${escapeHtml(record.decidingConstraint || "")}</span>
+    <span>Accepted cost: ${escapeHtml(record.acceptedCost || "")}</span>
+  </article>`;
+}
+
+// DH-647 S2 honesty constraint: this never claims a comparison exists when
+// there is nothing to show it against — collisionMarkup is empty unless a
+// PRIOR record's subject token-overlaps this plan decision's own subject.
+function renderPlanDecisionHtml(decision, priorRecords) {
+  const subject = escapeHtml(decision.subject || "");
+  const options = decision.optionsConsidered || [];
+  const selected = options.find((option) => option.disposition === "selected");
+  const rejected = options.filter((option) => option.disposition === "rejected");
+  const colliding = (priorRecords || []).filter((record) => subjectsOverlap(record.subject, decision.subject));
+  const collisionMarkup = colliding
+    .map((record) => {
+      const priorRejected = (record.options || []).filter((option) => option.disposition === "rejected");
+      if (!priorRejected.length) return "";
+      const list = priorRejected.map((option) => `${escapeHtml(option.option)} — ${escapeHtml(option.reason || "no reason recorded")}`).join("; ");
+      return `<p class="plan-decision-collision">Prior decision on "${escapeHtml(record.subject)}" rejected: ${list}</p>`;
+    })
+    .join("");
+  return `<article class="plan-decision">
+    <strong>${subject}</strong>
+    <p>${escapeHtml(decision.question || "")}</p>
+    <span>Selected: ${escapeHtml(selected ? selected.option : "unknown")}</span>
+    <span>Rejected: ${rejected.length ? rejected.map((option) => `${escapeHtml(option.option)} — ${escapeHtml(option.reason || "no reason recorded")}`).join("; ") : "none"}</span>
+    <span>Deciding constraint: ${escapeHtml(decision.decidingConstraint || "")}</span>
+    <span>Accepted cost: ${escapeHtml(decision.acceptedCost || "")}</span>
+    ${collisionMarkup}
+  </article>`;
+}
+
+// DH-647 S2. A task's consequentialChoice is compared when SOME plan decision's
+// subject token-overlaps it — never auto-blocked either way, just distinguishable
+// at a glance (locked design decision 4). Returns "" for a task that is not a
+// consequential choice at all (consequentialChoice null/absent) — no flag,
+// compared or otherwise, on a routine task.
+function consequentialChoiceFlagHtml(task, decisions) {
+  if (!task.consequentialChoice) return "";
+  const matched = (decisions || []).find((decision) => subjectsOverlap(decision.subject, task.consequentialChoice));
+  if (matched) {
+    const options = matched.optionsConsidered || [];
+    const rejectedCount = options.filter((option) => option.disposition === "rejected").length;
+    // M7 gate finding: a single-option plan decision (zero rejected
+    // alternatives) is legal data — the schema allows it — but it is never
+    // a comparison. Render it with the SAME uncompared styling/wording
+    // family as a task with no matching decision at all, so the honest
+    // uncompared-consequential-choice warning cannot be defeated by
+    // recording exactly one option.
+    if (rejectedCount === 0) {
+      return `<p class="consequential-choice uncompared">One option was recorded but no alternatives were weighed — ask for the comparison if it matters.</p>`;
+    }
+    const selected = options.find((option) => option.disposition === "selected");
+    return `<p class="consequential-choice compared">Compared choice — "${escapeHtml(task.consequentialChoice)}": selected ${escapeHtml(selected ? selected.option : "unknown")} (${rejectedCount} rejected).</p>`;
+  }
+  return `<p class="consequential-choice uncompared">This choice was proposed without recorded alternatives — ask for the comparison before approving if it matters.</p>`;
+}
+
 // DH-645 S2 program-status helpers, kept next to the inbox helpers above
 // for the same reason: a fully self-contained, independently testable pure
 // function. goalSummary and reason ultimately derive from run goals and
@@ -236,6 +337,86 @@ function renderReconciliationHtml(result) {
     ${result.findings.map(renderReconciliationFindingHtml).join("")}
     <p class="field-help reconcile-checked-at">Checked against GitHub ${checkedAt} ago.</p>
   </div>`;
+}
+
+// DH-647 S3. The Decisions panel's render seams (Products view): subject,
+// question, option labels, rejection reasons, decidingConstraint,
+// acceptedCost, and whatChanged are all free text ultimately sourced from an
+// owner- or architect-authored decision record (src/ledger.ts's
+// DecisionRecord) — same threat shape as renderPriorDecisionHtml/
+// renderPlanDecisionHtml above. Every interpolated field goes through
+// escapeHtml. Pulled out as pure, state-free functions, following
+// renderInboxItemHtml's extraction-testable pattern, so a hostile-markup
+// case and the chain-ordering/superseded-label behavior are regression-
+// tested directly against the exact code path renderDecisions() uses.
+function renderDecisionOptionsHtml(options) {
+  const selected = (options || []).find((option) => option.disposition === "selected");
+  const rejected = (options || []).filter((option) => option.disposition === "rejected");
+  // minor-1 gate finding: the selected option's own reason is a real,
+  // form-accepted field (the "Podman | selected | Rootless by default"
+  // placeholder in src/ui/index.html) that previously never rendered
+  // anywhere. Render it whenever non-null, escaped like every other field.
+  const selectedReasonMarkup = selected && selected.reason ? ` — ${escapeHtml(selected.reason)}` : "";
+  const rejectedMarkup = rejected.length
+    ? `<ul class="decision-rejected">${rejected.map((option) => `<li><strong>${escapeHtml(option.option)}</strong> — ${escapeHtml(option.reason || "no reason recorded")}</li>`).join("")}</ul>`
+    : '<p class="muted">No options were rejected.</p>';
+  return `<span>Selected: ${escapeHtml(selected ? selected.option : "unknown")}${selectedReasonMarkup}</span>${rejectedMarkup}`;
+}
+
+// Renders the whole supersession trail oldest-first as one history (locked
+// design decision 5), never a series of contradicting notes: each entry
+// after the first shows the whatChanged note that explains why the mind
+// changed, and every entry except the chain's current head is labeled
+// Superseded. Renders nothing for a chain shorter than 2 (no supersession
+// at all, or the chain has not been fetched yet) — never a false claim of
+// history where there is none.
+function renderDecisionChainHtml(chain, currentId) {
+  if (!Array.isArray(chain) || chain.length < 2) return "";
+  return `<ol class="decision-chain">${chain.map((entry) => {
+    const entrySelected = (entry.options || []).find((option) => option.disposition === "selected");
+    const isSuperseded = Boolean(entry.supersededBy);
+    const classes = `decision-chain-entry${entry.id === currentId ? " current" : ""}${isSuperseded ? " superseded" : ""}`;
+    const when = escapeHtml(entry.createdAt ? new Date(entry.createdAt).toLocaleString() : "unknown date");
+    return `<li class="${classes}"><strong>${escapeHtml(entrySelected ? entrySelected.option : "unknown")}</strong>${isSuperseded ? ' <span class="decision-superseded-label">Superseded</span>' : ""} — ${when}${entry.whatChanged ? `<span class="decision-what-changed">What changed: ${escapeHtml(entry.whatChanged)}</span>` : ""}</li>`;
+  }).join("")}</ol>`;
+}
+
+function renderDecisionCardHtml(record, chain) {
+  const subject = escapeHtml(record.subject || "");
+  const question = escapeHtml(record.question || "");
+  const isSuperseded = Boolean(record.supersededBy);
+  const source = escapeHtml(record.source === "architect" ? "Recorded by the planning agent" : "Recorded by the owner");
+  const date = escapeHtml(record.createdAt ? new Date(record.createdAt).toLocaleString() : "unknown date");
+  const scope = escapeHtml(record.scope || "");
+  const hasHistory = Boolean(record.supersedes || record.supersededBy);
+  const supersedeButton = !isSuperseded ? `<button class="secondary small" type="button" data-supersede-decision="${escapeHtml(record.id)}">Supersede</button>` : "";
+  const historyButton = hasHistory ? `<button class="secondary small" type="button" data-decision-history="${escapeHtml(record.id)}">${chain ? "Hide history" : "View history"}</button>` : "";
+  return `<article class="panel decision-card${isSuperseded ? " superseded" : ""}" data-decision-id="${escapeHtml(record.id)}">
+    <div class="decision-head"><div><span class="connection-kind">Decision${isSuperseded ? ' <span class="decision-superseded-label">Superseded</span>' : ""}</span><h3>${subject}</h3><p>${question}</p></div><div class="decision-actions">${supersedeButton}${historyButton}</div></div>
+    ${renderDecisionOptionsHtml(record.options)}
+    <span>Deciding constraint: ${escapeHtml(record.decidingConstraint || "")}</span>
+    <span>Evidence: ${escapeHtml(record.evidence || "")}</span>
+    <span>Accepted cost: ${escapeHtml(record.acceptedCost || "")}</span>
+    <span class="muted">Scope: ${scope} · ${source} · ${date}</span>
+    ${renderDecisionChainHtml(chain, record.id)}
+  </article>`;
+}
+
+// minor-1 gate finding. The pure line-formatting seam prefillDecisionFormForSupersede
+// uses to build the "Options considered" textarea value for a superseded
+// record: the grammar it writes ("Name | selected" / "Name | rejected |
+// reason") is exactly what decisionOptionsFrom below parses back out, and
+// that grammar has always accepted a reason on a selected option too (see
+// the "Podman | selected | Rootless by default" placeholder in
+// src/ui/index.html) — the prefill previously always wrote a bare "Name |
+// selected" line, silently discarding the selected option's own recorded
+// reason on every supersede. Extracted as a pure, state-free function so the
+// exact line-building logic is regression-tested directly.
+function decisionOptionPrefillLine(option) {
+  if (option.disposition === "rejected") {
+    return `${option.option} | rejected | ${option.reason || ""}`;
+  }
+  return option.reason ? `${option.option} | selected | ${option.reason}` : `${option.option} | selected`;
 }
 
 // DH-632 visible operation feedback: one shared acknowledgement/lifecycle layer for
@@ -504,6 +685,7 @@ async function initialize() {
   await refreshFleet();
   renderSettings();
   await refreshProducts();
+  await refreshDecisions();
   await refreshRuns();
   connectEventStream();
 }
@@ -541,6 +723,16 @@ async function refreshProducts() {
   })));
   const repositories = state.products.flatMap((product) => product.repositories);
   $("#repository-product").innerHTML = state.products.map((product) => `<option value="${escapeHtml(product.id)}">${escapeHtml(product.name)}</option>`).join("");
+  // DH-647 S3: the Decisions panel's own product pickers — one for scoping a
+  // new/superseding record, one for filtering the search below. Selection is
+  // preserved by id across the repopulate the same way objective-product is
+  // below (renderObjectiveRepositoryPicker).
+  const currentDecisionProduct = $("#decision-product").value;
+  $("#decision-product").innerHTML = ['<option value="">Not tied to a specific product</option>', ...state.products.map((product) => `<option value="${escapeHtml(product.id)}">${escapeHtml(product.name)}</option>`)].join("");
+  if (state.products.some((product) => product.id === currentDecisionProduct)) $("#decision-product").value = currentDecisionProduct;
+  const currentDecisionFilter = $("#decision-search-product").value;
+  $("#decision-search-product").innerHTML = ['<option value="">All products</option>', ...state.products.map((product) => `<option value="${escapeHtml(product.id)}">${escapeHtml(product.name)}</option>`)].join("");
+  if (state.products.some((product) => product.id === currentDecisionFilter)) $("#decision-search-product").value = currentDecisionFilter;
   const noProducts = state.products.length === 0;
   $("#add-local-repository").disabled = noProducts;
   $("#add-local-repository-help").classList.toggle("hidden", !noProducts);
@@ -568,6 +760,86 @@ async function refreshProducts() {
   </article>`;
   }).join("");
   renderObjectiveRepositoryPicker();
+}
+
+// DH-647 S3. GET /api/decisions: a query means "has this been decided
+// before?" (search, current records only — see src/ledger.ts's
+// searchDecisionRecords doc comment); no query is a plain browse, honoring
+// includeSuperseded. The checkbox is honored only in the browse path — see
+// the field-help text next to it in index.html.
+async function refreshDecisions() {
+  const params = new URLSearchParams();
+  const productId = $("#decision-search-product").value;
+  const query = $("#decision-search").value.trim();
+  if (productId) params.set("productId", productId);
+  if (query) params.set("query", query);
+  if ($("#decision-include-superseded").checked) params.set("includeSuperseded", "true");
+  const result = await api(`/api/decisions?${params.toString()}`);
+  state.decisions = result.decisions;
+  renderDecisions();
+}
+
+function renderDecisions() {
+  $("#decisions-empty").classList.toggle("hidden", state.decisions.length > 0);
+  $("#decision-list").innerHTML = state.decisions.map((record) => renderDecisionCardHtml(record, state.decisionChains[record.id])).join("");
+}
+
+// Parses the "Options considered" textarea, one option per line:
+// "Option name | selected" or "Option name | rejected | reason". Mirrors the
+// existing "name = command" line-DSL convention (namedCommandsFrom above)
+// rather than inventing a different shape. Throws a plain, actionable error
+// on a malformed line — surfaced through decision-form-error the same way
+// namedCommandsFrom's throw already is for the repository-validators field.
+function decisionOptionsFrom(selector) {
+  return linesFrom(selector).map((line) => {
+    const separator = line.indexOf("|");
+    if (separator < 1) throw new Error(`Option must use "Name | selected" or "Name | rejected | reason": ${line}`);
+    const option = line.slice(0, separator).trim();
+    const rest = line.slice(separator + 1).split("|");
+    const disposition = (rest[0] || "").trim();
+    if (disposition !== "selected" && disposition !== "rejected") {
+      throw new Error(`Option disposition must be "selected" or "rejected": ${line}`);
+    }
+    const reason = rest.slice(1).join("|").trim() || null;
+    return { option, disposition, reason };
+  });
+}
+
+function resetDecisionForm() {
+  $("#decision-form").reset();
+  $("#decision-supersedes").value = "";
+  $("#decision-form-title").textContent = "Record a decision";
+  $("#decision-form-subtitle").textContent = "Options considered, the constraint that decided it, and what the choice gave up.";
+  $("#decision-what-changed-field").classList.add("hidden");
+  $("#decision-what-changed").required = false;
+  $("#decision-form-submit").textContent = "Save decision";
+  $("#decision-form-error").textContent = "";
+  $("#decision-scope").value = "product";
+}
+
+// "Supersede" pre-scopes the same form with the current record's own
+// content plus a required whatChanged field — the original stays exactly as
+// recorded (append-only, locked design decision 1); this only prepares a
+// NEW record to submit against POST /api/decisions/:id/supersede.
+function prefillDecisionFormForSupersede(record) {
+  $("#decision-supersedes").value = record.id;
+  $("#decision-subject").value = record.subject;
+  $("#decision-question").value = record.question;
+  $("#decision-options").value = (record.options || [])
+    .map(decisionOptionPrefillLine)
+    .join("\n");
+  $("#decision-constraint").value = record.decidingConstraint;
+  $("#decision-evidence").value = record.evidence;
+  $("#decision-cost").value = record.acceptedCost;
+  $("#decision-scope").value = record.scope;
+  $("#decision-product").value = record.productId || "";
+  $("#decision-what-changed").value = "";
+  $("#decision-what-changed-field").classList.remove("hidden");
+  $("#decision-what-changed").required = true;
+  $("#decision-form-title").textContent = `Supersede: ${record.subject}`;
+  $("#decision-form-subtitle").textContent = "This creates a new record that replaces the one above — the original stays exactly as recorded.";
+  $("#decision-form-submit").textContent = "Save superseding decision";
+  $("#decision-form-error").textContent = "";
 }
 
 function renderObjectiveRepositoryPicker() {
@@ -1898,11 +2170,29 @@ function renderPlanPreview() {
   const affectedRepositories = impacts.filter((impact) => impact.disposition === "affected").length;
   $("#plan-metrics").innerHTML = `<div class="metric"><span>Tasks</span><strong>${plan.tasks.length}</strong></div><div class="metric"><span>Affected repositories</span><strong>${affectedRepositories}</strong></div><div class="metric"><span>Tasks that change files</span><strong>${writeTasks}</strong></div><div class="metric"><span>High risk</span><strong>${highRisk}</strong></div><div class="metric"><span>AI workers planned</span><strong>${state.planPreview.capacity.effectiveConcurrency}</strong></div>`;
   $("#plan-repository-impact").innerHTML = impacts.map((impact) => `<article class="repository-impact ${escapeHtml(impact.disposition)}"><strong>${escapeHtml(impact.repositoryId)} · ${escapeHtml(impact.disposition)}</strong><span>${escapeHtml(impact.rationale)}</span></article>`).join("");
+  // DH-647 S2: "Prior decisions on this subject" — the SAME retrieval the
+  // architect's planning context was built from (state.planPreview.priorDecisions),
+  // so the owner sees rejected-approach collisions before approving. No empty
+  // scaffolding: the section stays empty when nothing matched.
+  const priorDecisions = state.planPreview.priorDecisions || { records: [], totalMatched: 0 };
+  const priorDecisionsNote = priorDecisions.records.length && priorDecisions.totalMatched > priorDecisions.records.length
+    ? `<p class="field-help">Showing ${priorDecisions.records.length} of ${priorDecisions.totalMatched} matching prior decisions.</p>`
+    : "";
+  $("#plan-prior-decisions").innerHTML = priorDecisions.records.length
+    ? `<h3>Prior decisions on this subject</h3>${priorDecisionsNote}${priorDecisions.records.map(renderPriorDecisionHtml).join("")}`
+    : "";
+  // DH-647 S2: the plan's own consequential decisions[] — never claims a
+  // comparison exists when the architect recorded none (decisions[] empty
+  // renders nothing here, not an empty "Decisions" heading).
+  const planDecisions = plan.decisions || [];
+  $("#plan-decisions-list").innerHTML = planDecisions.length
+    ? `<h3>Decisions this plan is making</h3>${planDecisions.map((decision) => renderPlanDecisionHtml(decision, priorDecisions.records)).join("")}`
+    : "";
   $("#plan-task-list").innerHTML = plan.tasks.map((task) => {
     const assignment = state.planPreview.assignments.find((item) => item.taskId === task.id);
     const dependencyText = task.dependencies.length ? `After ${task.dependencies.join(", ")}` : "No dependencies";
     const identity = recordedModelIdentity(assignment?.provider || "unassigned", assignment?.modelId, assignment?.modelId ? "requested_unverified" : "provider_default_unresolved", assignment?.connectionId);
-    return `<article class="plan-task"><h3>${escapeHtml(task.title)}</h3><div class="plan-task-meta"><span>${escapeHtml(permissionLabel(task.permission))}</span><span>${escapeHtml(task.risk)} risk</span><span title="The quality/cost tier of AI model assigned — higher tiers cost more and are used for harder tasks.">${escapeHtml(assignment?.tier || "unassigned")}</span></div><p>${escapeHtml(task.description)}</p><details><summary>${escapeHtml(dependencyText)} · ${escapeHtml(identity)} · ${task.checks.length} checks</summary><p>Repositories: ${(task.repositoryIds || []).map(escapeHtml).join(", ") || "Current workspace"}<br>Exactly what it can touch: ${task.repositoryScope.map(escapeHtml).join(", ")}<br>Acceptance: ${task.acceptanceCriteria.map(escapeHtml).join("; ") || "Not supplied"}<br>What the AI needs to be able to do: ${task.capabilityNeeds.map(escapeHtml).join(", ") || "Nothing beyond a normal file edit"}</p></details></article>`;
+    return `<article class="plan-task"><h3>${escapeHtml(task.title)}</h3><div class="plan-task-meta"><span>${escapeHtml(permissionLabel(task.permission))}</span><span>${escapeHtml(task.risk)} risk</span><span title="The quality/cost tier of AI model assigned — higher tiers cost more and are used for harder tasks.">${escapeHtml(assignment?.tier || "unassigned")}</span></div><p>${escapeHtml(task.description)}</p>${consequentialChoiceFlagHtml(task, planDecisions)}<details><summary>${escapeHtml(dependencyText)} · ${escapeHtml(identity)} · ${task.checks.length} checks</summary><p>Repositories: ${(task.repositoryIds || []).map(escapeHtml).join(", ") || "Current workspace"}<br>Exactly what it can touch: ${task.repositoryScope.map(escapeHtml).join(", ")}<br>Acceptance: ${task.acceptanceCriteria.map(escapeHtml).join("; ") || "Not supplied"}<br>What the AI needs to be able to do: ${task.capabilityNeeds.map(escapeHtml).join(", ") || "Nothing beyond a normal file edit"}</p></details></article>`;
   }).join("");
   const execution = state.planPreview.execution || { supported: true, reason: "Single workspace execution is available." };
   $("#plan-execution-note").textContent = execution.supported ? `Execution available: ${execution.reason}` : `Planning only: ${execution.reason}`;
@@ -1983,7 +2273,7 @@ document.querySelector(".app-nav").addEventListener("click", async (event) => {
   showView(button.dataset.view);
   if (button.dataset.view === "setup" || button.dataset.view === "models") await refreshFleet();
   if (button.dataset.view === "evidence") await refreshEvidence();
-  if (button.dataset.view === "products") await refreshProducts();
+  if (button.dataset.view === "products") { await refreshProducts(); await refreshDecisions(); }
   if (button.dataset.view === "workbench") await refreshWorkbench();
   if (button.dataset.view === "workflows") await refreshWorkflows();
   if (button.dataset.view === "inbox") {
@@ -2114,6 +2404,84 @@ $("#product-list").addEventListener("click", async (event) => {
     await refreshProducts();
   }, { onError: registryError, busyLabel: "Inspecting…" });
 });
+
+// DH-647 S3. The Decisions panel (Products view).
+$("#refresh-decisions").addEventListener("click", refreshDecisions);
+$("#decision-search-button").addEventListener("click", refreshDecisions);
+$("#decision-search-product").addEventListener("change", refreshDecisions);
+$("#decision-include-superseded").addEventListener("change", refreshDecisions);
+$("#decision-search").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    refreshDecisions();
+  }
+});
+$("#record-decision").addEventListener("click", () => {
+  resetDecisionForm();
+  $("#decision-form").classList.toggle("hidden");
+  if (!$("#decision-form").classList.contains("hidden")) $("#decision-subject").focus();
+});
+$("#decision-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  $("#decision-form-error").textContent = "";
+  const supersedes = $("#decision-supersedes").value.trim();
+  // DH-647 M6. This owner form offers only product and machine scope — there
+  // is no run context here, so "This run only" was removed. A product-scoped
+  // decision must name a product (the server enforces the same rule); a
+  // machine-scoped decision must name none.
+  const scope = $("#decision-scope").value;
+  const productId = $("#decision-product").value || null;
+  if (scope === "product" && !productId) {
+    $("#decision-form-error").textContent = "Choose a product for a product-scoped decision, or set the scope to This machine.";
+    $("#decision-product").focus();
+    return;
+  }
+  await withOperation(form.querySelector('button[type="submit"]'), supersedes ? "Recording the superseding decision" : "Recording the decision", async () => {
+    const body = {
+      subject: $("#decision-subject").value.trim(),
+      question: $("#decision-question").value.trim(),
+      options: decisionOptionsFrom("#decision-options"),
+      decidingConstraint: $("#decision-constraint").value.trim(),
+      evidence: $("#decision-evidence").value.trim(),
+      acceptedCost: $("#decision-cost").value.trim(),
+      scope,
+      productId: scope === "machine" ? null : productId,
+    };
+    const url = supersedes ? `/api/decisions/${encodeURIComponent(supersedes)}/supersede` : "/api/decisions";
+    if (supersedes) body.whatChanged = $("#decision-what-changed").value.trim();
+    await api(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    if (supersedes) delete state.decisionChains[supersedes];
+    resetDecisionForm();
+    form.classList.add("hidden");
+    await refreshDecisions();
+  }, { onError: (message) => { $("#decision-form-error").textContent = message; }, busyLabel: "Saving…" });
+});
+$("#decision-list").addEventListener("click", async (event) => {
+  const supersedeButton = event.target.closest("[data-supersede-decision]");
+  if (supersedeButton) {
+    const record = state.decisions.find((item) => item.id === supersedeButton.dataset.supersedeDecision);
+    if (!record) return;
+    prefillDecisionFormForSupersede(record);
+    $("#decision-form").classList.remove("hidden");
+    $("#decision-subject").focus();
+    return;
+  }
+  const historyButton = event.target.closest("[data-decision-history]");
+  if (!historyButton) return;
+  const id = historyButton.dataset.decisionHistory;
+  if (state.decisionChains[id]) {
+    delete state.decisionChains[id];
+    renderDecisions();
+    return;
+  }
+  await withOperation(historyButton, "Loading the decision history", async () => {
+    const result = await api(`/api/decisions/${encodeURIComponent(id)}/chain`);
+    state.decisionChains[id] = result.chain;
+    renderDecisions();
+  }, { onError: showError, busyLabel: "Loading…" });
+});
+
 $("#new-workbench").addEventListener("click", () => {
   $("#workbench-project").value = state.bootstrap.defaultProject;
   $("#workbench-title-input").value = "";

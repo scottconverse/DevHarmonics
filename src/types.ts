@@ -112,12 +112,38 @@ export interface PlannedTask {
   capabilityNeeds?: string[];
   acceptanceCriteria?: string[];
   expectedArtifacts?: string[];
+  /**
+   * DH-647 S2. Set by the architect when this task introduces a new
+   * dependency, selects a runtime/transport, or picks between architectures —
+   * a short subject phrase, the same vocabulary as a DecisionRecord/PlanDecision
+   * subject. Matched against RunPlan.decisions[] by subject token overlap at
+   * preview time to decide whether the choice is shown as compared or
+   * flagged as proposed without recorded alternatives. Null when the task is
+   * not a consequential choice.
+   */
+  consequentialChoice?: string | null;
 }
 
 export interface RepositoryImpact {
   repositoryId: string;
   disposition: "affected" | "excluded";
   rationale: string;
+}
+
+/**
+ * DH-647 S2. A consequential choice the architect is making AS PART OF THIS
+ * PLAN — same shape and validation rules as S1's DecisionRecordInput.options
+ * (exactly one selected option, a reason on every rejected option), but not
+ * yet a durable DecisionRecord: it becomes one only on plan approval, via
+ * createDecisionRecord (source 'architect'). A plan preview that is never
+ * approved persists nothing.
+ */
+export interface PlanDecision {
+  subject: string;
+  question: string;
+  optionsConsidered: DecisionOption[];
+  decidingConstraint: string;
+  acceptedCost: string;
 }
 
 export interface RunPlan {
@@ -128,6 +154,8 @@ export interface RunPlan {
   repositoryImpact?: RepositoryImpact[];
   integrationConditions?: string[];
   tasks: PlannedTask[];
+  /** DH-647 S2. Optional: consequential choices weighed while building this plan. */
+  decisions?: PlanDecision[];
 }
 
 export interface ProviderRequest {
@@ -406,4 +434,63 @@ export interface SteeringDirectiveRecord {
   appliedAttemptId: number | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * DH-647. A decision an owner or architect made deliberately, kept so a
+ * rejected approach is never re-proposed from scratch as if it were fresh
+ * analysis. Append-only: nothing here is ever edited after creation — a
+ * changed mind is a NEW record that supersedes this one, never a mutation of
+ * it, so the original reasoning stays readable verbatim.
+ */
+export type DecisionOptionDisposition = "selected" | "rejected";
+
+export interface DecisionOption {
+  /** Short label for the option considered, e.g. "Podman" or "Docker Desktop". */
+  option: string;
+  disposition: DecisionOptionDisposition;
+  /** Required when disposition is 'rejected'; optional for the selected option. */
+  reason: string | null;
+}
+
+export type DecisionScope = "run" | "product" | "machine";
+export type DecisionSource = "owner" | "architect";
+
+export interface DecisionRecordInput {
+  /** Short noun phrase — the retrieval key readers search by. */
+  subject: string;
+  question: string;
+  options: DecisionOption[];
+  decidingConstraint: string;
+  evidence: string;
+  /** What the choice gave up, not only what it chose. */
+  acceptedCost: string;
+  scope: DecisionScope;
+  productId?: string | null;
+  /** The run that originated the decision, if any. */
+  runId?: string | null;
+  source: DecisionSource;
+  /** The id of the decision record this one replaces, if any. */
+  supersedes?: string | null;
+  /** Required iff supersedes is set. */
+  whatChanged?: string | null;
+}
+
+export interface DecisionRecord {
+  id: string;
+  subject: string;
+  question: string;
+  options: DecisionOption[];
+  decidingConstraint: string;
+  evidence: string;
+  acceptedCost: string;
+  scope: DecisionScope;
+  productId: string | null;
+  runId: string | null;
+  source: DecisionSource;
+  supersedes: string | null;
+  /** The id of the record that superseded this one, if any — derived, not stored. */
+  supersededBy: string | null;
+  whatChanged: string | null;
+  createdAt: string;
 }

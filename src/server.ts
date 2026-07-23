@@ -26,7 +26,7 @@ import { INBOX_RELEVANT_RUN_STATUSES, projectInbox } from "./inbox.js";
 import { projectProgramStatus } from "./program-status.js";
 import { generateStatusExportHtml } from "./status-export.js";
 import { scanProductIntelligence } from "./product-intelligence.js";
-import { manualModelSchema, objectiveInputSchema, productRegistrationSchema, steeringDirectiveInputSchema, workbenchSessionInputSchema } from "./schemas.js";
+import { decisionRecordCreateSchema, decisionRecordSupersedeSchema, manualModelSchema, objectiveInputSchema, productRegistrationSchema, steeringDirectiveInputSchema, workbenchSessionInputSchema } from "./schemas.js";
 import type { ObjectiveInput, ProviderName, RunRequest, WorkbenchMessageRecord } from "./types.js";
 import { inferModelProfile } from "./model-intelligence.js";
 import type { ModelRecord } from "./registry.js";
@@ -328,6 +328,82 @@ async function route(
       return;
     }
     sendJson(response, 201, { product: context.ledger.upsertProduct(parsed.data) });
+    return;
+  }
+
+  // DH-647 S3. The Decisions panel (Products view, src/ui/app.js): list/search
+  // via S1's own methods (Ledger.listDecisionRecords/searchDecisionRecords,
+  // src/ledger.ts) — a query string means "has this been decided before?"
+  // (search, current records only, per S1's locked design), no query means a
+  // plain browse (list, honoring includeSuperseded).
+  if (request.method === "GET" && url.pathname === "/api/decisions") {
+    const productId = url.searchParams.get("productId") || "";
+    const query = url.searchParams.get("query") || "";
+    const includeSuperseded = url.searchParams.get("includeSuperseded") === "true";
+    const decisions = query.trim()
+      ? context.ledger.searchDecisionRecords(query, { ...(productId ? { productId } : {}) })
+      : context.ledger.listDecisionRecords({ ...(productId ? { productId } : {}), includeSuperseded });
+    sendJson(response, 200, { decisions });
+    return;
+  }
+
+  // Owner-authored record: source is always 'owner' here regardless of what
+  // the caller sends, and this is never a supersede — supersedes/whatChanged
+  // are not fields this schema accepts (see POST .../:id/supersede below for
+  // that). No receipts machinery beyond the ledger write itself, matching
+  // how /api/products above handles an owner write.
+  if (request.method === "POST" && url.pathname === "/api/decisions") {
+    requireJsonRequest(request);
+    const parsed = decisionRecordCreateSchema.safeParse(await readJson(request));
+    if (!parsed.success) {
+      sendJson(response, 400, {
+        error: "Invalid decision record",
+        issues: parsed.error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message })),
+      });
+      return;
+    }
+    try {
+      const record = context.ledger.createDecisionRecord({ ...parsed.data, source: "owner", supersedes: null, whatChanged: null });
+      sendJson(response, 201, { record });
+    } catch (error) {
+      // A business-rule refusal from the ledger transaction (not a schema
+      // shape problem) is a state conflict, same 409 convention the steering
+      // directive route above uses for the same kind of ledger-thrown error.
+      sendJson(response, 409, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  const decisionChainMatch = url.pathname.match(/^\/api\/decisions\/([a-f0-9-]+)\/chain$/i);
+  if (request.method === "GET" && decisionChainMatch?.[1]) {
+    try {
+      sendJson(response, 200, { chain: context.ledger.getDecisionChain(decisionChainMatch[1]) });
+    } catch (error) {
+      sendJson(response, 404, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  const decisionSupersedeMatch = url.pathname.match(/^\/api\/decisions\/([a-f0-9-]+)\/supersede$/i);
+  if (request.method === "POST" && decisionSupersedeMatch?.[1]) {
+    requireJsonRequest(request);
+    const parsed = decisionRecordSupersedeSchema.safeParse(await readJson(request));
+    if (!parsed.success) {
+      sendJson(response, 400, {
+        error: "Invalid decision record",
+        issues: parsed.error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message })),
+      });
+      return;
+    }
+    try {
+      const record = context.ledger.createDecisionRecord({ ...parsed.data, source: "owner", supersedes: decisionSupersedeMatch[1] });
+      sendJson(response, 201, { record });
+    } catch (error) {
+      // Covers both an unknown supersede target and supersede-of-superseded
+      // (the ledger names the current head in that message) — either way a
+      // clear 4xx, never a 500, same convention as the create route above.
+      sendJson(response, 409, { error: error instanceof Error ? error.message : String(error) });
+    }
     return;
   }
 

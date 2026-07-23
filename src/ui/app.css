@@ -263,6 +263,35 @@ textarea { resize: vertical; min-height: 122px; line-height: 1.55; }
 .plan-task details { grid-column: 1 / -1; color: var(--muted); font-size: 11px; }
 .plan-task details summary { color: var(--amber); cursor: pointer; }
 .plan-actions { margin-top: 18px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+/* DH-647 S2: prior decisions + this plan's own decisions, shown in the plan-approval preview. */
+.plan-prior-decisions, .plan-decisions-list { margin: 16px 0; }
+.plan-prior-decisions h3, .plan-decisions-list h3 { margin: 0 0 8px; font-size: 13px; }
+.prior-decision, .plan-decision { padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: #0d1014; margin-bottom: 8px; }
+.prior-decision strong, .plan-decision strong { display: block; margin-bottom: 4px; }
+.prior-decision span, .plan-decision span, .plan-decision p { display: block; color: var(--muted); font-size: 11px; margin-top: 4px; line-height: 1.45; }
+.plan-decision-collision { color: var(--amber) !important; }
+.consequential-choice { grid-column: 1 / -1; margin: 6px 0 0; font-size: 11px; }
+.consequential-choice.uncompared { color: var(--amber); }
+.consequential-choice.compared { color: var(--muted); }
+/* DH-647 S3: the Decisions panel (Products view) — record cards, per-option
+   detail, the superseded label, and the supersession trail. */
+.decision-list { display: grid; gap: 16px; margin-top: 16px; }
+.decision-card { padding: 22px; }
+.decision-card.superseded { opacity: .72; }
+.decision-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; flex-wrap: wrap; }
+.decision-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.decision-card span, .decision-card > p { display: block; color: var(--muted); font-size: 12px; margin-top: 6px; line-height: 1.5; }
+.decision-rejected { margin: 4px 0 0; padding-left: 18px; }
+.decision-rejected li { color: var(--muted); font-size: 12px; line-height: 1.5; margin-top: 2px; }
+.decision-rejected strong { color: var(--red); }
+.decision-superseded-label { display: inline-block; border: 1px solid var(--red); color: var(--red); border-radius: 999px; padding: 1px 8px; font-size: 9px; text-transform: uppercase; margin-left: 6px; vertical-align: middle; }
+.decision-chain { margin: 12px 0 0; padding-left: 18px; border-top: 1px solid var(--border); padding-top: 10px; }
+.decision-chain-entry { color: var(--muted); font-size: 11px; margin-top: 6px; }
+.decision-chain-entry strong { color: inherit; }
+.decision-chain-entry.current strong { color: var(--lime); }
+.decision-what-changed { display: block; margin-top: 2px; }
+.decision-include-superseded { display: flex; align-items: center; gap: 8px; margin: 10px 0 16px; font-size: 12px; color: var(--muted); }
+.decision-include-superseded .field-help { margin: 0; }
 .plan-actions p { margin: 0 auto 0 0; }
 .primary { border: 0; border-radius: 10px; color: #10130a; background: var(--lime); padding: 12px 16px; font-weight: 800; box-shadow: 0 8px 30px rgba(200,245,96,.1); }
 .primary:hover { filter: brightness(1.07); transform: translateY(-1px); }

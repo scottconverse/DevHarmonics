@@ -33,6 +33,8 @@ export interface RunEvidenceExport {
     reviews: readonly unknown[];
     integrationSet: unknown;
     delivery: unknown;
+    /** DH-647 S3: every decision record linked to this run (see RunEvidencePackage.decisions). */
+    decisions: readonly unknown[];
   }>;
 }
 
@@ -178,6 +180,7 @@ export function createRunEvidenceExport(evidence: RunEvidencePackage | Record<st
     reviews: Array.isArray(evidence.reviews) ? evidence.reviews : [],
     integrationSet: evidence.integrationSet ?? null,
     delivery: evidence.delivery ?? null,
+    decisions: Array.isArray(evidence.decisions) ? evidence.decisions : [],
   });
   return deepFreeze({
     version: 1 as const,

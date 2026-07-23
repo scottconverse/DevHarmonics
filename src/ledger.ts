@@ -40,6 +40,12 @@ import {
 } from "./registry.js";
 import type {
   CheckResult,
+  DecisionOption,
+  DecisionRecord,
+  DecisionRecordInput,
+  DecisionScope,
+  DecisionSource,
+  PlanDecision,
   DeliveryHandoffRecord,
   DeliveryRepositoryRecord,
   DeliveryRepositoryStatus,
@@ -172,7 +178,7 @@ interface CheckRow {
   duration_ms: number;
 }
 
-export const LEDGER_SCHEMA_VERSION = 35;
+export const LEDGER_SCHEMA_VERSION = 37;
 
 export const REPOSITORY_ROLES = [
   "umbrella",
@@ -490,7 +496,7 @@ export interface ReviewEvidenceBinding {
 }
 
 export interface RunEvidencePackage {
-  version: 5;
+  version: 6;
   generatedAt: string;
   run: RunSummary;
   attempts: Array<Record<string, unknown>>;
@@ -499,6 +505,13 @@ export interface RunEvidencePackage {
   reviews: ReviewReceiptRecord[];
   integrationSet: IntegrationSetRecord | null;
   delivery: DeliveryHandoffRecord | null;
+  /**
+   * DH-647 S3. Every decision record linked to this run (run_id match),
+   * current and superseded alike — evidence must not silently drop a
+   * record's history just because a later record superseded it. See
+   * Ledger.listDecisionRecords's `runId` filter below.
+   */
+  decisions: DecisionRecord[];
   integritySha256: string;
 }
 
@@ -1368,6 +1381,95 @@ const MIGRATIONS: readonly LedgerMigration[] = [
       if (columns.has("status")) database.exec("CREATE INDEX IF NOT EXISTS runs_status ON runs(status);");
     },
   },
+  {
+    version: 36,
+    name: "decision-records",
+    apply(database) {
+      // DH-647: a durable, append-only record of what was decided and what
+      // was rejected, so a killed approach is never re-proposed from scratch
+      // as if it were fresh analysis. `supersedes` self-references this same
+      // table (no ON DELETE CASCADE — a superseded record must keep existing
+      // even if something downstream ever removed its successor) and
+      // `product_id`/`run_id` are deliberately plain, unconstrained columns,
+      // matching `objectives.product_id`: a decision record must OUTLIVE the
+      // run that produced it, so it cannot be pinned to that run's lifetime
+      // by a cascading foreign key.
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS decision_records (
+          id TEXT PRIMARY KEY,
+          subject TEXT NOT NULL,
+          question TEXT NOT NULL,
+          options_json TEXT NOT NULL,
+          deciding_constraint TEXT NOT NULL,
+          evidence TEXT NOT NULL,
+          accepted_cost TEXT NOT NULL,
+          scope TEXT NOT NULL CHECK(scope IN ('run', 'product', 'machine')),
+          product_id TEXT,
+          run_id TEXT,
+          source TEXT NOT NULL CHECK(source IN ('owner', 'architect')),
+          supersedes TEXT REFERENCES decision_records(id),
+          what_changed TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS decision_records_subject ON decision_records(subject);
+        CREATE INDEX IF NOT EXISTS decision_records_product ON decision_records(product_id);
+      `);
+    },
+  },
+  {
+    version: 37,
+    name: "decision-provenance-and-append-only-invariants",
+    apply(database) {
+      // DH-647 M1/M2/M3 + minor-2. Two storage invariants the application
+      // layer previously only enforced by convention become physical here:
+      //
+      // 1. Approval-persistence idempotency (M1/M3). Three nullable
+      //    provenance columns identify the exact plan-decision a record was
+      //    minted from — (objective_id, plan_revision, decision_ordinal) — and
+      //    a PARTIAL unique index over the non-null triple makes re-approval,
+      //    duplicate start clicks, and recovery-run replanning physically
+      //    unable to persist the same decision twice. For a run with no
+      //    objective, `objective_id` carries the RUN id (documented on
+      //    persistApprovedPlanDecisions): a product-less objective has no
+      //    product to outlive, so the run itself is the provenance anchor and
+      //    the triple stays unique across runs. Owner-authored records leave
+      //    all three NULL, so the partial index never constrains them.
+      //
+      // 2. Append-only + single-successor as STORAGE invariants (minor-2).
+      //    Aborting BEFORE UPDATE / BEFORE DELETE triggers make a decision
+      //    record's content immutable at the engine level — a future raw-SQL
+      //    path or migration can no longer silently rewrite a rejected
+      //    approach or the reason it was rejected. A partial unique index on
+      //    non-null `supersedes` makes a forked chain (two successors to one
+      //    record) impossible at the storage layer, backing the BEGIN
+      //    IMMEDIATE head-check in createDecisionRecord rather than relying on
+      //    it alone.
+      //
+      // Column-existence guard in the same defensive style as migrations 34/35
+      // above: a genuine v36 upgrade always has the base decision_records
+      // columns, so the ALTERs are the only additions and re-running is inert.
+      const columns = new Set(
+        (database.prepare("SELECT name FROM pragma_table_info('decision_records')").all() as unknown as Array<{ name: string }>).map((column) => column.name),
+      );
+      if (!columns.has("objective_id")) database.exec("ALTER TABLE decision_records ADD COLUMN objective_id TEXT;");
+      if (!columns.has("plan_revision")) database.exec("ALTER TABLE decision_records ADD COLUMN plan_revision INTEGER;");
+      if (!columns.has("decision_ordinal")) database.exec("ALTER TABLE decision_records ADD COLUMN decision_ordinal INTEGER;");
+      database.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS decision_records_provenance
+          ON decision_records(objective_id, plan_revision, decision_ordinal)
+          WHERE objective_id IS NOT NULL AND plan_revision IS NOT NULL AND decision_ordinal IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS decision_records_single_successor
+          ON decision_records(supersedes)
+          WHERE supersedes IS NOT NULL;
+        CREATE TRIGGER IF NOT EXISTS decision_records_no_update
+          BEFORE UPDATE ON decision_records
+          BEGIN SELECT RAISE(ABORT, 'decision_records is append-only: a changed mind is a new record that supersedes the old one, never a mutation'); END;
+        CREATE TRIGGER IF NOT EXISTS decision_records_no_delete
+          BEFORE DELETE ON decision_records
+          BEGIN SELECT RAISE(ABORT, 'decision_records is append-only: a superseded record must keep existing, never be deleted'); END;
+      `);
+    },
+  },
 ];
 
 function summarizeGoal(goal: string, maxLength = 180): string {
@@ -1503,6 +1605,7 @@ const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
   product_intelligence_snapshots: ["id", "product_id", "status", "snapshot_json", "created_at"],
   model_performance_policies: ["model_id", "ignored_before", "excluded", "updated_at"],
   steering_directives: ["id", "run_id", "kind", "target_task_id", "actor", "payload_json", "disposition", "disposition_reason", "applied_attempt_id", "created_at", "updated_at"],
+  decision_records: ["id", "subject", "question", "options_json", "deciding_constraint", "evidence", "accepted_cost", "scope", "product_id", "run_id", "source", "supersedes", "what_changed", "created_at", "objective_id", "plan_revision", "decision_ordinal"],
   schema_migrations: ["version", "name", "applied_at"],
 };
 
@@ -1530,6 +1633,39 @@ function toSteeringDirectiveRecord(row: Record<string, unknown>): SteeringDirect
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
+}
+
+function toDecisionRecord(row: Record<string, unknown>, supersededBy: string | null): DecisionRecord {
+  return {
+    id: String(row.id),
+    subject: String(row.subject),
+    question: String(row.question),
+    options: JSON.parse(String(row.options_json)) as DecisionOption[],
+    decidingConstraint: String(row.deciding_constraint),
+    evidence: String(row.evidence),
+    acceptedCost: String(row.accepted_cost),
+    scope: String(row.scope) as DecisionScope,
+    productId: row.product_id == null ? null : String(row.product_id),
+    runId: row.run_id == null ? null : String(row.run_id),
+    source: String(row.source) as DecisionSource,
+    supersedes: row.supersedes == null ? null : String(row.supersedes),
+    supersededBy,
+    whatChanged: row.what_changed == null ? null : String(row.what_changed),
+    createdAt: String(row.created_at),
+  };
+}
+
+/**
+ * DH-647 retrieval normalization: lowercase, split on non-alphanumerics,
+ * drop tokens under 3 characters. Deterministic keyword matching only — no
+ * embeddings, no network — so "has this been decided before?" answers the
+ * same way on every machine, forever.
+ */
+function normalizeDecisionSearchTokens(query: string): string[] {
+  return query
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 3);
 }
 
 export interface ModelPerformancePolicyRecord {
@@ -1843,6 +1979,61 @@ export class Ledger {
     return id;
   }
 
+  /**
+   * DH-647 M2 / NEW-1. Create a run, pin its workflow revision (when the
+   * request carries one), and run the caller's approved-plan persistence step
+   * as ONE atomic ledger transaction. A throw anywhere inside — an invalid
+   * decision rejected at persist time, a pin failure — rolls back the whole
+   * unit, so a decision-persistence failure leaves NO run row, NO run.created
+   * event, and NO decision rows rather than a stranded 'planning' run with no
+   * execution scheduled.
+   *
+   * writeAtomically is reentrant (see the openWriteTransactions depth counter):
+   * persistApprovedPlanDecisions, called from inside `persist`, sees the open
+   * transaction and participates in it instead of opening and committing its
+   * own. That reentrancy is exactly what binds run creation and decision
+   * persistence into a single all-or-nothing commit — neither double-opens a
+   * transaction, and a failure cannot leave one committed without the other.
+   *
+   * Because a failed persist commits nothing, findRunForApprovedPlan can only
+   * ever observe a durably-created run: an abandoned prelaunch record is
+   * impossible, so the sticky duplicate-start retry path is closed. The caller
+   * MUST arm background execution only after this returns.
+   */
+  createRunForApprovedPlan(
+    input: {
+      goal: string;
+      projectPath: string;
+      resumedFrom?: string | null;
+      autonomy?: RunAutonomy;
+      linkage?: RunObjectiveLink | null;
+      workflowRevisionHash?: string | null;
+    },
+    persist: (runId: string) => void,
+  ): string {
+    return this.writeAtomically(() => {
+      const runId = this.createRun(input.goal, input.projectPath, input.resumedFrom ?? null, input.autonomy ?? "supervised", input.linkage ?? null);
+      if (input.workflowRevisionHash) this.linkRunWorkflowRevision(runId, input.workflowRevisionHash);
+      persist(runId);
+      return runId;
+    });
+  }
+
+  /**
+   * DH-647 M3. The earliest run started for an exact (objective, approved
+   * plan revision) pair, if any — the anchor that makes a repeated start
+   * request idempotent: the caller returns this existing run rather than
+   * launching a second one for a plan already under way. Ordered oldest-first
+   * so the original start wins over any later recovery run that inherited the
+   * same objective/revision linkage.
+   */
+  findRunForApprovedPlan(objectiveId: string, approvedPlanRevision: number): string | null {
+    const row = this.database
+      .prepare("SELECT id FROM runs WHERE objective_id = ? AND approved_plan_revision = ? ORDER BY created_at ASC, id ASC LIMIT 1")
+      .get(objectiveId, approvedPlanRevision) as { id: string } | undefined;
+    return row?.id ?? null;
+  }
+
   setRunAutonomy(runId: string, autonomy: RunAutonomy): void {
     const result = this.database.prepare("UPDATE runs SET autonomy = ?, updated_at = ? WHERE id = ?").run(autonomy, new Date().toISOString(), runId);
     if (result.changes === 0) throw new Error(`Run '${runId}' was not found`);
@@ -1867,6 +2058,22 @@ export class Ledger {
         ...task,
         title: redactText(task.title),
         description: redactText(task.description),
+        ...(task.consequentialChoice ? { consequentialChoice: redactText(task.consequentialChoice) } : {}),
+      })),
+      // DH-647 S2: the running plan is a separate copy from plan_revisions
+      // (the objective-approval trail) — decisions[] must survive into it too,
+      // or a run's own stored plan would silently disagree with the exact
+      // revision that was approved for it.
+      decisions: (plan.decisions ?? []).map((decision) => ({
+        subject: redactText(decision.subject),
+        question: redactText(decision.question),
+        optionsConsidered: decision.optionsConsidered.map((option) => ({
+          option: redactText(option.option),
+          disposition: option.disposition,
+          reason: option.reason ? redactText(option.reason) : null,
+        })),
+        decidingConstraint: redactText(decision.decidingConstraint),
+        acceptedCost: redactText(decision.acceptedCost),
       })),
     };
     if (currentStatus === "running") {
@@ -2733,9 +2940,13 @@ export class Ledger {
     const reviews = this.listReviewReceipts(runId);
     const integrationSet = this.getIntegrationSet(runId);
     const delivery = this.getDeliveryHandoff(runId);
-    const canonical = JSON.stringify({ run, attempts: normalizedAttempts, blackboard, toolReceipts, reviews, integrationSet, delivery });
+    // DH-647 S3: includeSuperseded so the export is a complete record of what
+    // this run decided, not just the current answer — a superseded decision
+    // is still part of the run's history.
+    const decisions = this.listDecisionRecords({ runId, includeSuperseded: true });
+    const canonical = JSON.stringify({ run, attempts: normalizedAttempts, blackboard, toolReceipts, reviews, integrationSet, delivery, decisions });
     return {
-      version: 5,
+      version: 6,
       generatedAt: new Date().toISOString(),
       run,
       attempts: normalizedAttempts,
@@ -2744,6 +2955,7 @@ export class Ledger {
       reviews,
       integrationSet,
       delivery,
+      decisions,
       integritySha256: createHash("sha256").update(canonical).digest("hex"),
     };
   }
@@ -3902,6 +4114,366 @@ export class Ledger {
       "UPDATE review_receipts SET invalidated_at = ?, invalidation_reason = ? WHERE run_id = ? AND invalidated_at IS NULL",
     ).run(new Date().toISOString(), redactText(reason), runId);
     return Number(result.changes);
+  }
+
+  /**
+   * DH-647. Append-only by design: this is the ONLY way a decision's content
+   * ever reaches the ledger, and there is deliberately no counterpart that
+   * edits one afterward. A changed mind is recorded by creating a NEW record
+   * that supersedes this one (see `supersedes`), never by mutating this one's
+   * fields — so a rejected approach and the reason it was rejected read the
+   * same way to every future reader, unaltered by hindsight.
+   */
+  createDecisionRecord(input: DecisionRecordInput): DecisionRecord {
+    const normalized = this.normalizeDecisionInput(input);
+
+    const supersedes = input.supersedes?.trim() || null;
+    const whatChanged = input.whatChanged?.trim() || null;
+    if (supersedes && !whatChanged) {
+      throw new Error("Superseding a decision record requires stating what changed");
+    }
+    if (!supersedes && whatChanged) {
+      throw new Error("whatChanged is only meaningful when supersedes is set");
+    }
+
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    this.writeAtomically(() => {
+      if (supersedes) {
+        const target = this.database.prepare("SELECT id, subject, scope, product_id, run_id FROM decision_records WHERE id = ?").get(supersedes) as
+          | { id: string; subject: string; scope: string; product_id: string | null; run_id: string | null }
+          | undefined;
+        if (!target) throw new Error(`Unknown decision record '${supersedes}' to supersede`);
+        // M5 — supersession domain integrity. A successor must stay in the
+        // SAME domain as the record it replaces: same scope, and for a
+        // product/run decision the same product/run identity. Otherwise a
+        // Product B (or machine/run) record could supersede Product A's head,
+        // hiding Product A's current answer behind a successor that Product
+        // A's own filter excludes. Checked inside the same head-check
+        // transaction so it cannot race a concurrent supersede.
+        if (normalized.scope !== target.scope) {
+          throw new Error(
+            `Cannot supersede a '${target.scope}'-scoped decision with a '${normalized.scope}'-scoped one; a successor must keep the same scope`,
+          );
+        }
+        if (target.scope === "product" && normalized.productId !== target.product_id) {
+          throw new Error(
+            `Cannot supersede a decision for product '${target.product_id}' with one for product '${normalized.productId}'; cross-product supersession is not allowed`,
+          );
+        }
+        if (target.scope === "run" && normalized.runId !== target.run_id) {
+          throw new Error(
+            `Cannot supersede a decision from run '${target.run_id}' with one from run '${normalized.runId}'; a run-scoped successor must name the same run`,
+          );
+        }
+        // Walk the supersession chain forward from the target to find whether
+        // it is already the head, or already superseded — in which case the
+        // refusal names the actual head so the caller can retarget instead of
+        // guessing which record in the chain is current.
+        let head: { id: string; subject: string } = { id: target.id, subject: target.subject };
+        for (;;) {
+          const child = this.database.prepare("SELECT id, subject FROM decision_records WHERE supersedes = ?").get(head.id) as
+            | { id: string; subject: string }
+            | undefined;
+          if (!child) break;
+          head = child;
+        }
+        if (head.id !== target.id) {
+          throw new Error(
+            `Decision record '${supersedes}' has already been superseded; supersede the current head '${head.id}' (subject: '${head.subject}') instead`,
+          );
+        }
+      }
+      this.insertDecisionRow(id, now, normalized, {
+        source: input.source,
+        supersedes,
+        whatChanged: whatChanged ? redactText(whatChanged) : null,
+        provenance: null,
+      });
+    });
+    return this.getDecisionRecord(id)!;
+  }
+
+  /**
+   * DH-647 M6 (defense in depth). Shared field validation + normalization for
+   * every path that creates a decision record. Enforces the option honesty
+   * rules AND the scope↔association contract server-side, so even a caller
+   * that bypasses the HTTP schema (an architect batch, a future internal
+   * caller) cannot store a malformed scope: a product decision must name a
+   * product, a run decision must name a run, and a machine decision — a
+   * standing choice for the box, independent of any one product or run —
+   * names neither (matching what S1 stored for machine scope).
+   */
+  private normalizeDecisionInput(input: DecisionRecordInput): {
+    subject: string;
+    question: string;
+    decidingConstraint: string;
+    evidence: string;
+    acceptedCost: string;
+    options: DecisionOption[];
+    scope: DecisionScope;
+    productId: string | null;
+    runId: string | null;
+  } {
+    const subject = input.subject.trim();
+    const question = input.question.trim();
+    const decidingConstraint = input.decidingConstraint.trim();
+    const evidence = input.evidence.trim();
+    const acceptedCost = input.acceptedCost.trim();
+    if (!subject) throw new Error("A decision record requires a subject");
+    if (!question) throw new Error("A decision record requires a question");
+    if (!decidingConstraint) throw new Error("A decision record requires the deciding constraint");
+    if (!evidence) throw new Error("A decision record requires the evidence relied on");
+    if (!acceptedCost) throw new Error("A decision record requires the accepted cost — what the choice gave up");
+    if (!input.options.length) throw new Error("A decision record requires at least one option");
+
+    const options: DecisionOption[] = input.options.map((option) => ({
+      option: option.option.trim(),
+      disposition: option.disposition,
+      reason: option.reason && option.reason.trim() ? option.reason.trim() : null,
+    }));
+    for (const option of options) {
+      if (!option.option) throw new Error("Every option requires a description");
+    }
+    const selected = options.filter((option) => option.disposition === "selected");
+    if (selected.length !== 1) {
+      throw new Error(`A decision record must select exactly one option (found ${selected.length})`);
+    }
+    for (const option of options) {
+      if (option.disposition === "rejected" && !option.reason) {
+        throw new Error(`Rejected option '${option.option}' requires a reason`);
+      }
+    }
+
+    const productId = input.productId?.trim() || null;
+    const runId = input.runId?.trim() || null;
+    if (input.scope === "product" && !productId) {
+      throw new Error("A product-scoped decision record must name the product it applies to");
+    }
+    if (input.scope === "run" && !runId) {
+      throw new Error("A run-scoped decision record must name the run it applies to");
+    }
+    if (input.scope === "machine" && (productId || runId)) {
+      throw new Error("A machine-scoped decision record is independent of any product or run and must name neither");
+    }
+
+    return { subject, question, decidingConstraint, evidence, acceptedCost, options, scope: input.scope, productId, runId };
+  }
+
+  /** Raw redacted insert shared by createDecisionRecord and the approval-persistence batch. Callers own the enclosing transaction and all validation. */
+  private insertDecisionRow(
+    id: string,
+    now: string,
+    normalized: ReturnType<Ledger["normalizeDecisionInput"]>,
+    extra: {
+      source: DecisionSource;
+      supersedes: string | null;
+      whatChanged: string | null;
+      provenance: { objectiveId: string; planRevision: number; decisionOrdinal: number } | null;
+    },
+  ): void {
+    this.database.prepare(
+      `INSERT INTO decision_records
+       (id, subject, question, options_json, deciding_constraint, evidence, accepted_cost, scope, product_id, run_id, source, supersedes, what_changed, created_at, objective_id, plan_revision, decision_ordinal)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      id,
+      redactText(normalized.subject),
+      redactText(normalized.question),
+      JSON.stringify(redactValue(normalized.options)),
+      redactText(normalized.decidingConstraint),
+      redactText(normalized.evidence),
+      redactText(normalized.acceptedCost),
+      normalized.scope,
+      normalized.productId,
+      normalized.runId,
+      extra.source,
+      extra.supersedes,
+      extra.whatChanged,
+      now,
+      extra.provenance?.objectiveId ?? null,
+      extra.provenance?.planRevision ?? null,
+      extra.provenance?.decisionOrdinal ?? null,
+    );
+  }
+
+  /**
+   * DH-647 M1/M2/M3. The single approval boundary EVERY run type's decisions
+   * flow through. Turns the architect's proposed `decisions[]` on the exact
+   * approved plan into durable DecisionRecords (source 'architect') in ONE
+   * transaction, keyed by the provenance triple (objectiveId, planRevision,
+   * decisionOrdinal). An already-persisted triple is skipped silently, so
+   * re-approval, duplicate start clicks, and recovery-run replanning can never
+   * duplicate a record — the storage-level partial unique index over the same
+   * triple backs this idempotency check.
+   *
+   * `objectiveId` provenance carries the RUN id for a run with no objective: a
+   * product-less objective has no product to outlive, so the run itself is the
+   * provenance anchor and the triple stays unique across runs. Returns how
+   * many records were newly persisted vs skipped as already-present.
+   */
+  persistApprovedPlanDecisions(input: {
+    runId: string;
+    objectiveId: string | null;
+    planRevision: number;
+    productId: string | null;
+    scope: DecisionScope;
+    planSummary: string;
+    decisions: readonly PlanDecision[];
+  }): { persisted: number; skipped: number } {
+    const provenanceObjectiveId = input.objectiveId ?? input.runId;
+    return this.writeAtomically(() => {
+      let persisted = 0;
+      let skipped = 0;
+      input.decisions.forEach((decision, decisionOrdinal) => {
+        const existing = this.database
+          .prepare("SELECT id FROM decision_records WHERE objective_id = ? AND plan_revision = ? AND decision_ordinal = ?")
+          .get(provenanceObjectiveId, input.planRevision, decisionOrdinal) as { id: string } | undefined;
+        if (existing) {
+          skipped += 1;
+          return;
+        }
+        const normalized = this.normalizeDecisionInput({
+          subject: decision.subject,
+          question: decision.question,
+          options: decision.optionsConsidered,
+          decidingConstraint: decision.decidingConstraint,
+          // The plan schema carries no separate 'evidence' field, so the run
+          // that produced the decision IS the evidence pointer (S2 design).
+          evidence: `Recorded from the approved architect plan for run ${input.runId} (plan summary: ${input.planSummary}).`,
+          acceptedCost: decision.acceptedCost,
+          scope: input.scope,
+          productId: input.productId,
+          runId: input.runId,
+          source: "architect",
+        });
+        this.insertDecisionRow(crypto.randomUUID(), new Date().toISOString(), normalized, {
+          source: "architect",
+          supersedes: null,
+          whatChanged: null,
+          provenance: { objectiveId: provenanceObjectiveId, planRevision: input.planRevision, decisionOrdinal },
+        });
+        persisted += 1;
+      });
+      return { persisted, skipped };
+    });
+  }
+
+  getDecisionRecord(id: string): DecisionRecord | null {
+    const row = this.database.prepare("SELECT * FROM decision_records WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    const child = this.database.prepare("SELECT id FROM decision_records WHERE supersedes = ?").get(id) as { id: string } | undefined;
+    return toDecisionRecord(row, child?.id ?? null);
+  }
+
+  /** Map of `supersedes -> id` for every decision record that supersedes another, built once per call. */
+  private decisionSupersededByMap(): Map<string, string> {
+    const rows = this.database
+      .prepare("SELECT id, supersedes FROM decision_records WHERE supersedes IS NOT NULL")
+      .all() as unknown as Array<{ id: string; supersedes: string }>;
+    const map = new Map<string, string>();
+    for (const row of rows) map.set(row.supersedes, row.id);
+    return map;
+  }
+
+  /**
+   * Excludes superseded records by default — a reader asking "has this been
+   * decided before?" wants the current answer, not every draft of it. Pass
+   * `includeSuperseded` to see the full history; superseded rows still carry
+   * their `supersededBy` link either way.
+   */
+  listDecisionRecords(options: { productId?: string; runId?: string; scope?: DecisionScope; includeSuperseded?: boolean } = {}): DecisionRecord[] {
+    const conditions: string[] = [];
+    const params: string[] = [];
+    if (options.productId) {
+      conditions.push("product_id = ?");
+      params.push(options.productId);
+    }
+    if (options.runId) {
+      conditions.push("run_id = ?");
+      params.push(options.runId);
+    }
+    if (options.scope) {
+      conditions.push("scope = ?");
+      params.push(options.scope);
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    const rows = this.database
+      .prepare(`SELECT * FROM decision_records ${where} ORDER BY created_at ASC, id ASC`)
+      .all(...params) as unknown as Array<Record<string, unknown>>;
+    const supersededBy = this.decisionSupersededByMap();
+    return rows
+      .filter((row) => options.includeSuperseded || !supersededBy.has(String(row.id)))
+      .map((row) => toDecisionRecord(row, supersededBy.get(String(row.id)) ?? null));
+  }
+
+  /**
+   * Walks `supersedes` links in both directions from `id` and returns the
+   * whole chain oldest-first, so the trail reads as one history rather than
+   * contradicting notes.
+   */
+  getDecisionChain(id: string): DecisionRecord[] {
+    const root = this.getDecisionRecord(id);
+    if (!root) throw new Error(`Unknown decision record '${id}'`);
+    const older: DecisionRecord[] = [];
+    for (let cursor = root; cursor.supersedes; ) {
+      const previous = this.getDecisionRecord(cursor.supersedes);
+      if (!previous) break;
+      older.push(previous);
+      cursor = previous;
+    }
+    older.reverse();
+    const newer: DecisionRecord[] = [];
+    for (let cursor = root; cursor.supersededBy; ) {
+      const next = this.getDecisionRecord(cursor.supersededBy);
+      if (!next) break;
+      newer.push(next);
+      cursor = next;
+    }
+    return [...older, root, ...newer];
+  }
+
+  /**
+   * Deterministic keyword search over subject and question — SQL LIKE per
+   * normalized token, no embeddings, no network (locked design decision 2).
+   * Relevance-ordered: a subject hit ranks before a question-only hit, and
+   * ties break newest-first. Excludes superseded records, mirroring
+   * `listDecisionRecords`'s default — "has this been decided before?" wants
+   * the CURRENT answer; the superseded drafts stay reachable through
+   * `getDecisionChain` or `listDecisionRecords({ includeSuperseded: true })`.
+   */
+  searchDecisionRecords(query: string, options: { productId?: string } = {}): DecisionRecord[] {
+    const tokens = normalizeDecisionSearchTokens(query);
+    if (!tokens.length) return [];
+    const conditions = [`(${tokens.map(() => "(lower(subject) LIKE ? OR lower(question) LIKE ?)").join(" OR ")})`];
+    const params: string[] = [];
+    for (const token of tokens) params.push(`%${token}%`, `%${token}%`);
+    if (options.productId) {
+      conditions.push("product_id = ?");
+      params.push(options.productId);
+    }
+    const rows = this.database
+      .prepare(`SELECT * FROM decision_records WHERE ${conditions.join(" AND ")}`)
+      .all(...params) as unknown as Array<Record<string, unknown>>;
+    const supersededBy = this.decisionSupersededByMap();
+    const ranked = rows
+      .filter((row) => !supersededBy.has(String(row.id)))
+      .map((row) => ({
+        row,
+        subjectHit: tokens.some((token) => String(row.subject).toLowerCase().includes(token)),
+      }));
+    ranked.sort((a, b) => {
+      if (a.subjectHit !== b.subjectHit) return a.subjectHit ? -1 : 1;
+      const byRecency = String(b.row.created_at).localeCompare(String(a.row.created_at));
+      if (byRecency !== 0) return byRecency;
+      // minor-3 — deterministic final tie-breaker. Two equally-ranked records
+      // created in the same millisecond must order the same way on every
+      // machine, forever; without this the capped selection (e.g. the top-8
+      // planning context) depends on the database's unspecified input order.
+      // Immutable record id is the stable last key.
+      return String(a.row.id).localeCompare(String(b.row.id));
+    });
+    return ranked.map(({ row }) => toDecisionRecord(row, supersededBy.get(String(row.id)) ?? null));
   }
 
   listModels(connectionId?: string): ModelRecord[] {

@@ -2530,6 +2530,44 @@ export class Ledger {
     return rows.map((row) => this.getRun(row.id)).filter((run): run is RunSummary => run !== null);
   }
 
+  /**
+   * Gate finding M-50-limit. Projection-specific complete read: EVERY run
+   * the ledger has ever recorded, not just the 50 most recent `listRuns()`
+   * serves to the `/api/runs` sidebar (left unchanged — that endpoint is
+   * deliberately a recent-activity list, polled frequently by the cockpit
+   * heartbeat, and was never the thing making a completeness promise).
+   * `/api/inbox` (items + program) and `/api/status-export` promise "every
+   * decision ... across every run" and "every run the ledger knows about"
+   * (src/ui/index.html) — reusing the 50-row sidebar query there meant an
+   * old awaiting-approval plan, a paused run, or a pending delivery step
+   * fell out of view the instant a 51st run existed, even though the
+   * ledger still held it. That is a silent loss of an owner-actionable
+   * decision, not a cosmetic gap.
+   *
+   * Choice + cost, so the tradeoff is explicit rather than assumed: an
+   * unlimited scan (no targeted "non-terminal OR has a delivery" filter)
+   * was chosen over a targeted query because the Program status view's own
+   * promised text is "every run the ledger knows about" — a targeted
+   * filter would still under-report an old terminal run's `finished` bucket
+   * membership once it ages out, quietly reintroducing the same class of
+   * gap this fix exists to close. Cost: one indexed `SELECT id` plus one
+   * `getRun()` per run — each `getRun()` is itself 3 further indexed
+   * queries (tasks, checks, and an events page capped at 200) — so this is
+   * O(N) in the LIFETIME run count for one project's ledger, not O(1) like
+   * the sidebar's capped query. That is acceptable here because this query
+   * backs three deliberately infrequent, owner-initiated actions (opening
+   * the Inbox tab, opening Program status, downloading a status export) —
+   * never the polled sidebar or cockpit heartbeat — so the added latency is
+   * paid only when an owner actually opens one of those views, not on every
+   * refresh tick.
+   */
+  listAllRuns(): RunSummary[] {
+    const rows = this.database
+      .prepare("SELECT id FROM runs ORDER BY created_at DESC")
+      .all() as unknown as Array<{ id: string }>;
+    return rows.map((row) => this.getRun(row.id)).filter((run): run is RunSummary => run !== null);
+  }
+
   getRun(runId: string): RunSummary | null {
     const run = this.database.prepare("SELECT * FROM runs WHERE id = ?").get(runId) as
       | RunRow

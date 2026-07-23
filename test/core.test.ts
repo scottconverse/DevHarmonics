@@ -3325,6 +3325,52 @@ test("projectProgramStatus puts every run in exactly one bucket, owner-actionabl
   assert.equal(new Set(allRunIds).size, allRunIds.length, "a run must never appear in more than one bucket/group entry");
 });
 
+test("projectProgramStatus classifies a terminal run with a lingering 'retry' task as finished, never retrying (M-terminal-retry)", () => {
+  // The orchestrator's failure path (src/orchestrator.ts) can leave a task at
+  // TaskStatus 'retry' on a run that has already reached a terminal
+  // RunStatus (src/domain.ts's runTransitions permit 'failed'/'cancelled'
+  // from 'running' regardless of task state) — there is no live worker loop
+  // left to observe once the run itself is terminal, so classifying it as
+  // "actively retrying" would be an unobserved claim, not a recorded fact.
+  const failedWithRetry = inboxFixtureRun({
+    id: "run-failed-retry",
+    status: "failed",
+    tasks: [programFixtureTask({ id: "t1", status: "retry", attemptCount: 4 })],
+  });
+  const cancelledWithRetry = inboxFixtureRun({
+    id: "run-cancelled-retry",
+    status: "cancelled",
+    tasks: [programFixtureTask({ id: "t1", status: "retry", attemptCount: 2 })],
+  });
+  const readyWithRetry = inboxFixtureRun({
+    id: "run-ready-retry",
+    status: "ready",
+    tasks: [programFixtureTask({ id: "t1", status: "retry", attemptCount: 1 })],
+    delivery: null,
+  });
+  // Control: the SAME task shape on a live 'running' run must still land in
+  // 'retrying' — this test is about the run's terminal status, not the task.
+  const runningWithRetry = inboxFixtureRun({
+    id: "run-running-retry",
+    status: "running",
+    tasks: [programFixtureTask({ id: "t1", status: "retry", attemptCount: 1 })],
+  });
+
+  const runs = [failedWithRetry, cancelledWithRetry, readyWithRetry, runningWithRetry];
+  const program = projectProgramStatus(runs, [], [], Date.parse("2026-07-22T12:00:00.000Z"));
+
+  const bucketOf = (runId: string): ProgramBucket => {
+    const entry = program.groups.flatMap((group) => group.runs).find((run) => run.runId === runId);
+    assert.ok(entry, `${runId} must appear exactly once in the projection`);
+    return entry!.bucket;
+  };
+
+  assert.equal(bucketOf("run-failed-retry"), "finished", "a terminal failed run is finished even with a retry task on record");
+  assert.equal(bucketOf("run-cancelled-retry"), "finished", "a terminal cancelled run is finished even with a retry task on record");
+  assert.equal(bucketOf("run-ready-retry"), "finished", "a terminal ready run is finished even with a retry task on record");
+  assert.equal(bucketOf("run-running-retry"), "retrying", "control: a LIVE run with the same retry task is still 'retrying'");
+});
+
 function programFixtureObjective(overrides: Partial<ObjectiveRecord> = {}): ObjectiveRecord {
   return {
     id: "objective-1",
@@ -3576,10 +3622,11 @@ test("the reconciliation results HTML seam (src/ui/app.js) escapes findings and 
   assert.equal(/reconcile-matches/.test(nothing), false, "an empty result must never render as a match");
 
   const hostileMessage = 'The ledger records branch </strong><script>alert(document.cookie)</script> — <img src=x onerror=alert(1)>';
+  const hostileMatchMessage = 'Branch <script>alert("m")</script> is still at the reviewed commit, as the ledger records.';
   const result = {
     checkedAt: new Date(Date.now() - 60_000).toISOString(),
     findings: [
-      { artifact: "branch", state: "matches", message: "should not be shown verbatim for a match" },
+      { artifact: "branch", state: "matches", message: hostileMatchMessage },
       { artifact: "pull_request", state: "diverged", message: hostileMessage },
       { artifact: "checks", state: "unobserved", message: 'Could not check: <iframe src=javascript:alert(2)>"><svg onload=alert(3)>' },
     ],
@@ -3592,18 +3639,22 @@ test("the reconciliation results HTML seam (src/ui/app.js) escapes findings and 
   assert.match(html, /reconcile-unobserved/, "an unobserved artifact gets its own treatment");
   assert.match(html, /role="alert"/, "a divergence is announced as an alert; nothing else needs to be");
 
-  // The ledger record is never presented as remote confirmation on its own —
-  // a match states it was actually confirmed against GitHub.
-  assert.match(html, /confirmed on GitHub/i);
+  // M-checks-pending (render half): a match renders the backend's own
+  // factual, escaped message — never a blanket "confirmed on GitHub,
+  // matches the ledger" stand-in that could misdescribe what this specific
+  // artifact check actually observed.
+  assert.match(html, /is still at the reviewed commit, as the ledger records/, "the match shows the backend's own per-artifact message");
+  assert.doesNotMatch(html, /confirmed on GitHub, matches the ledger/i, "no blanket confirmation text stands in for the real observation");
   // Unobserved is stated plainly as "could not check", never as silence or
   // as a confirmation.
   assert.match(html, /could not check/i);
 
-  // Every hostile field is escaped, never dropped, never executed.
+  // Every hostile field is escaped, never dropped, never executed — including the match's own message.
   assert.doesNotMatch(html, /<script/i);
   assert.doesNotMatch(html, /<img/i);
   assert.doesNotMatch(html, /<iframe/i);
   assert.doesNotMatch(html, /<svg/i);
+  assert.match(html, /&lt;script&gt;alert\(&quot;m&quot;\)&lt;\/script&gt;/, "the match message is escaped, not dropped");
   assert.match(html, /&lt;script&gt;alert\(document\.cookie\)&lt;\/script&gt;/);
   assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
   assert.match(html, /&lt;iframe src=javascript:alert\(2\)&gt;/);

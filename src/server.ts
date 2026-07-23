@@ -252,8 +252,15 @@ async function route(
   // this route's own existing convention of returning everything a single
   // view needs in one payload (e.g. /api/models already folds in health and
   // quota-group health alongside the model list).
+  //
+  // Gate finding M-50-limit: this reads `listAllRuns()`, NOT `listRuns()` —
+  // the 50-run cap that backs the `/api/runs` sidebar would silently drop
+  // an old awaiting-approval plan, paused run, or pending delivery once 51+
+  // runs exist, contradicting "every decision ... across every run"
+  // (src/ui/index.html). See Ledger.listAllRuns's doc comment for the query
+  // cost this trades for completeness.
   if (request.method === "GET" && url.pathname === "/api/inbox") {
-    const runs = context.ledger.listRuns();
+    const runs = context.ledger.listAllRuns();
     sendJson(response, 200, {
       items: projectInbox(runs),
       program: projectProgramStatus(runs, context.ledger.listProducts(), context.ledger.listObjectives()),
@@ -266,8 +273,14 @@ async function route(
   // src/status-export.ts's module doc for the structural allowlist that
   // enforces "contains no value written by an agent"). Served as an
   // attachment, same convention as /api/runs/:id/evidence/export above.
+  //
+  // Gate finding M-50-limit: reads `listAllRuns()` (see its doc comment in
+  // src/ledger.ts), not the 50-run-capped `listRuns()` the sidebar uses —
+  // an exported status page that silently omitted older runs would be a
+  // worse failure mode than a slow download, since the owner shares this
+  // file expecting it to be complete.
   if (request.method === "GET" && url.pathname === "/api/status-export") {
-    const runs = context.ledger.listRuns();
+    const runs = context.ledger.listAllRuns();
     const html = generateStatusExportHtml(runs, context.ledger.listProducts(), context.ledger.listObjectives());
     const filenameDate = new Date().toISOString().slice(0, 10);
     response.writeHead(200, {

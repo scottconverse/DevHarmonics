@@ -219,7 +219,12 @@ function renderReconciliationFindingHtml(finding) {
   if (finding.state === "unobserved") {
     return `<p class="reconcile-finding reconcile-unobserved"><strong>${artifact}:</strong> ${message}</p>`;
   }
-  return `<p class="reconcile-finding reconcile-matches"><strong>${artifact}:</strong> confirmed on GitHub, matches the ledger.</p>`;
+  // M-checks-pending (render half): show the backend's own escaped, factual
+  // message per artifact instead of a blanket "confirmed on GitHub, matches
+  // the ledger" for every match — the ledger stores no check-result
+  // baseline, so a generic confirmation could misdescribe what was actually
+  // observed for this specific artifact.
+  return `<p class="reconcile-finding reconcile-matches"><strong>${artifact}:</strong> ${message}</p>`;
 }
 
 function renderReconciliationHtml(result) {

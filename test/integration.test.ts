@@ -1029,11 +1029,11 @@ test("POST /api/runs/:id/reconcile-delivery observes the remote read-only and re
   seedLedger.setRunStatus(runId, "running");
   seedLedger.setRunStatus(runId, "ready", "READY");
   seedLedger.prepareDeliveryRepository({ runId, repositoryId: "repo:matches", localPath: project, baseBranch: "main", baseCommit: "a".repeat(40), headCommit: "b".repeat(40), branch: "devharmonics/recon-matches" });
-  seedLedger.updateDeliveryRepository(runId, "repo:matches", { status: "merged", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
+  seedLedger.updateDeliveryRepository(runId, "repo:matches", { status: "merged", pullRequestUrl: "https://github.com/example/fixture/pull/1", remoteUrl: "https://github.com/example/fixture.git" });
   seedLedger.prepareDeliveryRepository({ runId, repositoryId: "repo:diverged", localPath: project, baseBranch: "main", baseCommit: "a".repeat(40), headCommit: "e".repeat(40), branch: "devharmonics/recon-diverged" });
-  seedLedger.updateDeliveryRepository(runId, "repo:diverged", { status: "draft_pr_created", pullRequestUrl: "https://github.com/example/fixture/pull/2" });
+  seedLedger.updateDeliveryRepository(runId, "repo:diverged", { status: "draft_pr_created", pullRequestUrl: "https://github.com/example/fixture/pull/2", remoteUrl: "https://github.com/example/fixture.git" });
   seedLedger.prepareDeliveryRepository({ runId, repositoryId: "repo:unobserved", localPath: project, baseBranch: "main", baseCommit: "a".repeat(40), headCommit: "e".repeat(40), branch: "devharmonics/recon-unobserved" });
-  seedLedger.updateDeliveryRepository(runId, "repo:unobserved", { status: "draft_pr_created", pullRequestUrl: "https://github.com/example/fixture/pull/3" });
+  seedLedger.updateDeliveryRepository(runId, "repo:unobserved", { status: "draft_pr_created", pullRequestUrl: "https://github.com/example/fixture/pull/3", remoteUrl: "https://github.com/example/fixture.git" });
   seedLedger.close();
 
   try {
@@ -1327,6 +1327,89 @@ test("GET /api/inbox also serves the program status view, read-only, grouped by 
   }
 });
 
+test("GET /api/inbox and GET /api/status-export show a run older than the most-recent-50 sidebar window (M-50-limit)", async () => {
+  // Gate finding M-50-limit: /api/inbox (items + program) and
+  // /api/status-export were fed from Ledger.listRuns(), which hard-limits to
+  // the 50 most recent runs for the `/api/runs` sidebar. Once 51+ runs
+  // exist, an old awaiting-approval plan, paused run, or delivery could fall
+  // outside that window and silently vanish from both views, contradicting
+  // "every decision ... across every run" (src/ui/index.html). This seeds
+  // the OLDEST run as awaiting plan approval, then buries it under 55 newer
+  // runs, and asserts it still surfaces.
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-50-limit-"));
+  const project = await createRepository(root);
+  await initializeProject(project);
+  const dbPath = path.join(devHarmonicsDirectory(project), "devharmonics.db");
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false });
+
+  const seedLedger = new Ledger(dbPath);
+
+  // The oldest run carries BOTH a pending delivery step (an inbox item) and
+  // a delivered (pushed) repository (a status-export record), so one run
+  // exercises both routes' use of the same underlying query.
+  const oldestRunId = seedLedger.createRun("Ship the very first migration", project);
+  seedLedger.setRunStatus(oldestRunId, "running");
+  seedLedger.setRunStatus(oldestRunId, "ready", "READY");
+  seedLedger.prepareDeliveryRepository({
+    runId: oldestRunId,
+    repositoryId: "repo:oldest",
+    localPath: project,
+    baseBranch: "main",
+    baseCommit: "a".repeat(40),
+    headCommit: "b".repeat(40),
+    branch: "devharmonics/oldest-fixture",
+  });
+  seedLedger.updateDeliveryRepository(oldestRunId, "repo:oldest", {
+    status: "branch_pushed",
+    remoteUrl: "https://github.com/example-owner/oldest-repo",
+  });
+
+  // Force a strictly later created_at (millisecond ISO resolution) on every
+  // filler run so the oldest run is unambiguously oldest, not merely tied.
+  await delay(5);
+
+  const FILLER_COUNT = 55;
+  for (let i = 0; i < FILLER_COUNT; i += 1) {
+    const fillerId = seedLedger.createRun(`Filler run ${i}`, project);
+    seedLedger.setRunStatus(fillerId, "running");
+    seedLedger.setRunStatus(fillerId, "ready", "READY");
+  }
+  seedLedger.close();
+
+  try {
+    const inboxResponse = await fetch(`${dashboard.url}/api/inbox`);
+    assert.equal(inboxResponse.status, 200);
+    const { items, program } = (await inboxResponse.json()) as {
+      items: Array<Record<string, any>>;
+      program: { groups: Array<{ runs: Array<Record<string, any>> }> };
+    };
+
+    const oldestItem = items.find((item) => item.runId === oldestRunId);
+    assert.ok(oldestItem, "the oldest run's pending delivery step must still appear in the inbox despite 55 newer runs existing");
+    assert.equal(oldestItem!.kind, "delivery_step_approval");
+    assert.equal(oldestItem!.repositoryId, "repo:oldest");
+
+    const programRuns = program.groups.flatMap((group) => group.runs);
+    const oldestProgramEntry = programRuns.find((entry) => entry.runId === oldestRunId);
+    assert.ok(oldestProgramEntry, "the oldest run must still appear in the program status view");
+    assert.equal(oldestProgramEntry!.bucket, "waiting_on_you");
+
+    // The sidebar's own /api/runs query is UNCHANGED — it may still cap at
+    // 50 most-recent runs. This finding is scoped to the inbox/program/
+    // status-export projections, not the sidebar.
+    const sidebar = (await (await fetch(`${dashboard.url}/api/runs`)).json()) as { runs: unknown[] };
+    assert.equal(sidebar.runs.length, 50, "the /api/runs sidebar keeps its existing 50-run cap, unaffected by this fix");
+
+    const exportResponse = await fetch(`${dashboard.url}/api/status-export`);
+    assert.equal(exportResponse.status, 200);
+    const html = await exportResponse.text();
+    assert.match(html, /devharmonics\/oldest-fixture/, "the oldest run's delivered branch must still appear in the status export despite 55 newer runs existing");
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("GET /api/status-export downloads a standalone HTML page with owner identifiers, no agent-written text, and never mutates the ledger", async () => {
   // DH-645 S4. Same light seeded-ledger-over-HTTP harness as the /api/inbox
   // tests above: startDashboard first (so reconcileInterruptedRuns() runs
@@ -1405,8 +1488,16 @@ test("GET /api/status-export downloads a standalone HTML page with owner identif
     assert.match(html, /devharmonics\/status-export-fixture/, "the branch name must appear");
     assert.match(html, /example-owner\/civiccore/, "the repository must appear");
     assert.match(html, /#17/, "the pull request number must appear");
-    assert.match(html, /Ship the reporting service export/, "the owner-typed run title must appear");
-    assert.match(html, /CivicSuite/, "the owner-named product must appear");
+    assert.match(html, /repo:civic/, "the card must be headed by the repository id");
+
+    // No free text reaches the export — not even OWNER-typed text (review
+    // finding C1: a Workbench-converted objective's run.goal, or a
+    // product's name, can itself be model-authored, so status-export.ts
+    // never reads either field regardless of provenance; see its module
+    // doc and test/status-export.test.ts for the same guarantee unit-tested
+    // directly against buildStatusExportRecords/generateStatusExportHtml).
+    assert.doesNotMatch(html, /Ship the reporting service export/, "the owner-typed run goal must never appear in the export (C1)");
+    assert.doesNotMatch(html, /CivicSuite/, "the owner-named product must never appear in the export (C1)");
 
     // No agent-written value anywhere in the download.
     assert.doesNotMatch(html, new RegExp(AGENT_MARKER), "an agent-written run verdict must never appear in the exported page");

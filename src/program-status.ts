@@ -6,9 +6,12 @@ import { projectInbox } from "./inbox.js";
  * DH-645 S2. The program view is a PURE projection of existing ledger state
  * — same discipline as `projectInbox` (src/inbox.ts): no new schema, no
  * writes, nothing invented. It answers "how is the whole program doing?" by
- * sorting every run the ledger currently knows about (see `Ledger.listRuns`,
- * which returns the 50 most recent — the same set `/api/runs` and the inbox
- * already work from) into exactly one of five buckets.
+ * sorting every run the ledger currently knows about (the caller — see
+ * `GET /api/inbox` in src/server.ts — passes `Ledger.listAllRuns()`, which
+ * genuinely returns every run on record, NOT the 50-most-recent-capped
+ * `Ledger.listRuns()` that backs the `/api/runs` sidebar; see
+ * `listAllRuns`'s doc comment in src/ledger.ts for why and at what query
+ * cost) into exactly one of five buckets.
  *
  * BUCKET PRECEDENCE (a run is classified by the first rule it matches; a run
  * matches exactly one bucket):
@@ -20,10 +23,19 @@ import { projectInbox } from "./inbox.js";
  *      `projectInbox` itself rather than re-deriving the same predicates a
  *      second time) — the two views can never disagree about who is
  *      waiting on the owner.
- *   2. retrying — not already waiting_on_you, and at least one task on the
- *      run currently has TaskStatus 'retry' (src/domain.ts). A task in
- *      retry is a live worker loop the ledger has evidence is repeating an
- *      attempt, distinct from an owner decision or a quiet gap.
+ *   2. retrying — not already waiting_on_you, the run's own RunStatus is
+ *      'planning' or 'running' (the two "live" statuses — see LIVE_RUN_STATUSES
+ *      below), and at least one task on the run currently has TaskStatus
+ *      'retry' (src/domain.ts). A task in retry is a live worker loop ONLY
+ *      when the run itself is still live: the orchestrator's failure path
+ *      can leave a task at 'retry' on a run that has already reached a
+ *      terminal RunStatus (runTransitions in src/domain.ts permits
+ *      'failed'/'cancelled' from 'running' independent of task state), and
+ *      by then there is no worker left retrying anything — reporting
+ *      "retrying" there would be an unobserved claim dressed up as a fact
+ *      (this project's honesty standard: unobserved is never confirmation).
+ *      A terminal run with a stale retry task instead falls through to
+ *      bucket 5, finished.
  *   3. stalled — not already claimed above, run.status is 'running' or
  *      'planning' (RUN_STATUSES, src/domain.ts — the two "live" statuses),
  *      and the run's last ledger activity is at or past
@@ -204,7 +216,13 @@ export function projectProgramStatus(
 
   for (const run of runs) {
     const waitingItems = waitingItemsByRun.get(run.id);
-    const retryTask = run.tasks.find((task) => task.status === "retry");
+    // A retry task only reflects a LIVE worker loop when the run itself is
+    // still 'planning'/'running' — a terminal run (ready/not_ready/failed/
+    // cancelled) can retain a stale 'retry' task from before it terminated,
+    // and nothing is actively retrying it anymore (M-terminal-retry).
+    const retryTask = LIVE_RUN_STATUSES.has(run.status)
+      ? run.tasks.find((task) => task.status === "retry")
+      : undefined;
 
     let bucket: ProgramBucket;
     let reason: string;

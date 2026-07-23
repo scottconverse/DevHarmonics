@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 
@@ -18,6 +18,22 @@ export interface ProcessRequest {
    * left running in the background. Defaults to 5s.
    */
   killGraceMs?: number;
+  /**
+   * R11(b)/round3: how long the Windows `taskkill /T` helper itself gets to
+   * report success or failure before it is treated as failed (a hung helper
+   * must never be trusted forever). Defaults to 5s. Ignored on POSIX.
+   */
+  windowsTaskkillDeadlineMs?: number;
+  /**
+   * Test-only seam: overrides how the Windows tree-kill helper (`taskkill`)
+   * is spawned, so terminate()'s failure/retry/deadline/fallback paths
+   * (round-3 finding "Windows taskkill failure path") can be exercised
+   * deterministically without depending on a genuinely hanging or
+   * genuinely un-killable real process — neither can be produced portably
+   * or deterministically in a test environment. Never set by production
+   * callers; ignored on non-Windows platforms.
+   */
+  windowsTaskkillSpawn?: (pid: number) => ChildProcess;
 }
 
 export interface ProcessResult {
@@ -26,6 +42,15 @@ export interface ProcessResult {
   exitCode: number;
   durationMs: number;
   timedOut: boolean;
+  /**
+   * R11(c)/round3: true when termination fell back to killing only the
+   * direct child (Windows: both taskkill attempts failed/hung; see
+   * terminate()'s Windows branch). Full process-tree termination can no
+   * longer be guaranteed once that fallback ran — a grandchild taskkill
+   * could not reach may still be running in the background. Callers must
+   * never report this as a plain, fully-confirmed timeout.
+   */
+  treeKillUnconfirmed: boolean;
 }
 
 export async function runProcess(request: ProcessRequest): Promise<ProcessResult> {
@@ -39,6 +64,8 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
     // timeout timer or an aborted `signal`) — guards against sending it
     // twice and gates the SIGKILL escalation below.
     let terminating = false;
+    // R11(c)/round3: see ProcessResult.treeKillUnconfirmed.
+    let treeKillUnconfirmed = false;
 
     const resolved = resolveCommand(request.command, request.args);
     // The child is NOT spawned with `signal` directly: Node's own
@@ -104,33 +131,59 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
         // must fall back to killing the direct child so 'exit' (and the
         // drain backstop below) still fires and runProcess always settles —
         // never silently trust that taskkill worked.
-        let killer: ReturnType<typeof spawn> | null = null;
-        try {
-          killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
-        } catch {
+        //
+        // R11(b)/round3: a launch failure or nonzero exit is retried ONCE
+        // (the direct child may still be alive for a second attempt to
+        // reach) before falling back — a single transient taskkill failure
+        // must not immediately give up on a full tree kill. taskkill also
+        // gets its OWN deadline: a helper that launches but never emits
+        // 'error' or 'exit' (hung) is treated as failed too, never trusted
+        // forever.
+        const spawnTaskkill =
+          request.windowsTaskkillSpawn ??
+          ((targetPid: number) => spawn("taskkill", ["/pid", String(targetPid), "/T", "/F"], { windowsHide: true, stdio: "ignore" }));
+        const taskkillDeadlineMs = request.windowsTaskkillDeadlineMs ?? 5_000;
+
+        const fallbackToDirectChild = (): void => {
+          // R11(c)/round3: from here on, full tree termination cannot be
+          // guaranteed — taskkill's /T tree enumeration needs the target
+          // pid to still be alive and reachable, and both attempts above
+          // either failed or never confirmed. A grandchild taskkill could
+          // not reach may still be running once this fallback fires.
+          treeKillUnconfirmed = true;
           try {
             child.kill("SIGKILL");
           } catch {
             // already gone
           }
-          return;
-        }
-        killer.on("error", () => {
-          try {
-            child.kill("SIGKILL");
-          } catch {
-            // already gone
-          }
-        });
-        killer.on("exit", (code) => {
-          if (code !== 0) {
-            try {
-              child.kill("SIGKILL");
-            } catch {
-              // already gone
+        };
+
+        const attemptTaskkill = (isRetry: boolean): void => {
+          let attemptSettled = false;
+          let deadline: ReturnType<typeof setTimeout> | null = null;
+          const finish = (succeeded: boolean): void => {
+            if (attemptSettled) return;
+            attemptSettled = true;
+            if (deadline) clearTimeout(deadline);
+            if (succeeded) return;
+            if (!isRetry) {
+              attemptTaskkill(true);
+              return;
             }
+            fallbackToDirectChild();
+          };
+          let killer: ChildProcess;
+          try {
+            killer = spawnTaskkill(pid);
+          } catch {
+            finish(false);
+            return;
           }
-        });
+          deadline = setTimeout(() => finish(false), taskkillDeadlineMs);
+          killer.on("error", () => finish(false));
+          killer.on("exit", (code) => finish(code === 0));
+        };
+        attemptTaskkill(false);
       } else {
         // R11b: signal the whole process group (negative pid) so a
         // grandchild spawned by the direct child is torn down too, not just
@@ -157,6 +210,26 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
         killTimer = setTimeout(() => {
           killGroup("SIGKILL");
         }, killGraceMs);
+      }
+    }
+
+    // R11(a)/round3: on POSIX, the direct child exiting does NOT mean the
+    // whole process group is dead — a SIGTERM-cooperative direct child can
+    // exit promptly while a SIGTERM-ignoring grandchild in the same group
+    // survives. `close`/`exit` arriving before killGraceMs elapses used to
+    // just cancel the scheduled group SIGKILL (`killTimer`) via
+    // cleanupTimers() below, silently letting that grandchild live. Fire an
+    // immediate, idempotent group SIGKILL sweep instead — signalling an
+    // already-dead group throws ESRCH, swallowed, so a redundant sweep after
+    // a genuinely clean tree exit is harmless.
+    function sweepGroupKill(): void {
+      if (process.platform === "win32") return;
+      const pid = child.pid;
+      if (typeof pid !== "number") return;
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {
+        // ESRCH (group already gone) or any other benign race — nothing to do.
       }
     }
 
@@ -206,6 +279,12 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
     // 'close' handler below — this only guarantees close can arrive.
     child.on("exit", () => {
       if (!terminating || settled) return;
+      // R11(a)/round3: fire the group sweep now, as soon as the direct
+      // child is confirmed exited — see sweepGroupKill() above. Doing this
+      // here (rather than only relying on the scheduled killTimer) means a
+      // SIGTERM-ignoring grandchild is swept even when the direct child
+      // exits well before killGraceMs elapses.
+      sweepGroupKill();
       drainTimer = setTimeout(() => {
         child.stdout.destroy();
         child.stderr.destroy();
@@ -226,6 +305,7 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
           exitCode: code ?? (timedOut ? 124 : 1),
           durationMs: Date.now() - startedAt,
           timedOut,
+          treeKillUnconfirmed,
         });
       }
     });

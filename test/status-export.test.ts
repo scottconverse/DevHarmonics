@@ -326,6 +326,66 @@ test("the shipped page peels an annotated tag through a second GET .../git/tags/
   assert.match(html, /tagObjectResponse/, "the peeled fetch result must be threaded into the response classifyTag reads");
 });
 
+// round3 Minor "the annotated-tag peel composes two fresh timeouts instead
+// of one tag-check budget": each fetchGitHub() call used to start its own
+// independent FETCH_TIMEOUT_MS (10s) timer, so the tag check's two
+// sequential fetches (ref, then peel) could together take up to ~20s — the
+// combined check must never exceed the ~10s nominal budget of a single
+// logical check.
+test("the shipped page's tag check shares ONE deadline across both the ref fetch and the annotated-tag peel fetch (round3 minor)", () => {
+  const html = renderStatusExportHtml([], new Date("2026-07-22T12:00:00.000Z"));
+
+  // fetchGitHub must accept a shared external signal so a caller CAN thread
+  // one deadline through multiple fetches, and must not start its own fresh
+  // timer when given one.
+  assert.match(
+    html,
+    /function fetchGitHub\(url,\s*sharedSignal\)/,
+    "fetchGitHub must accept an optional shared deadline/signal from its caller",
+  );
+  assert.match(
+    html,
+    /if\s*\(sharedSignal\)[\s\S]{0,200}?else[\s\S]{0,120}?setTimeout\(function \(\) \{ controller\.abort\(\); \}, FETCH_TIMEOUT_MS\)/,
+    "fetchGitHub must only start its own fresh FETCH_TIMEOUT_MS timer when it was NOT given a shared signal",
+  );
+
+  // The tag check itself must create exactly one shared deadline...
+  const tagBlockStart = html.indexOf("if (record.tagName) {");
+  assert.ok(tagBlockStart !== -1, "expected the tag-check block");
+  const unboundedQueueMarker = html.indexOf("M-export-unbounded");
+  assert.ok(unboundedQueueMarker > tagBlockStart, "expected a stable end marker after the tag-check block");
+  const tagBlock = html.slice(tagBlockStart, unboundedQueueMarker);
+
+  assert.equal(
+    (tagBlock.match(/new AbortController\(\)/g) ?? []).length,
+    1,
+    "the tag check must create exactly ONE AbortController shared by both its fetches, not one per fetch",
+  );
+  assert.equal(
+    (tagBlock.match(/setTimeout\(/g) ?? []).length,
+    1,
+    "the tag check must schedule exactly ONE deadline timer covering both fetches, not a fresh one per fetch",
+  );
+
+  // ...and pass that SAME signal to both the ref fetch and the peel fetch.
+  // Matched per source LINE (not a bracket-balanced expression match) since
+  // the ref call's URL itself contains a nested `encodeURIComponent(...)`
+  // — a naive `[^)]*` would stop at that inner `)`, not the call's own.
+  const refLine = tagBlock.split("\n").find((line) => line.includes("fetchGitHub(") && line.includes("/git/ref/tags/"));
+  const peelLine = tagBlock.split("\n").find((line) => line.includes("fetchGitHub(") && line.includes("/git/tags/"));
+  assert.ok(refLine, "expected the tag ref fetch call");
+  assert.ok(peelLine, "expected the annotated-tag peel fetch call");
+  const refSignal = refLine!.match(/,\s*([A-Za-z0-9_.]+)\s*\)\s*;\s*$/);
+  const peelSignal = peelLine!.match(/,\s*([A-Za-z0-9_.]+)\s*\)\s*;\s*$/);
+  assert.ok(refSignal, "the ref fetch must pass a shared deadline/signal as its second argument to fetchGitHub");
+  assert.ok(peelSignal, "the peel fetch must pass a shared deadline/signal as its second argument to fetchGitHub");
+  assert.equal(
+    refSignal![1],
+    peelSignal![1],
+    "both fetches in one tag check must share the SAME deadline/signal variable, not each compose a fresh FETCH_TIMEOUT_MS timer",
+  );
+});
+
 test("the shipped page only reports mergeSignal 'merged' once classifyPullRequest's full merge-identity check actually matched (R9-export)", () => {
   const html = renderStatusExportHtml([], new Date("2026-07-22T12:00:00.000Z"));
   assert.match(

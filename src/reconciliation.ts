@@ -39,6 +39,15 @@ export interface RepositoryReconciliationResult {
   hasDivergence: boolean;
   /** Convenience for callers: true iff at least one finding could not be checked. */
   hasUnobserved: boolean;
+  /**
+   * R-starvation/round3: a snapshot, at `checkedAt`, of the module-wide
+   * count of runners that hit `boundedRun`'s hard cap without ever
+   * confirming their own termination — see `unconfirmedRunnerCount`. Their
+   * semaphore permits have already been released (so they can't starve new
+   * checks), but this stays visible so a permanently-stuck background
+   * process is never silent.
+   */
+  unconfirmedRunners: number;
 }
 
 /**
@@ -129,18 +138,41 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | "timed_out
  */
 class Semaphore {
   private active = 0;
-  private readonly waiters: Array<() => void> = [];
+  private readonly waiters: Array<(acquired: boolean) => void> = [];
   constructor(private readonly limit: number) {}
 
-  async acquire(): Promise<void> {
+  /**
+   * R-starvation/round3: `deadlineMs` bounds how long a caller queues before
+   * giving up. Without this, permits held forever by runners that never
+   * confirm their own termination (see `boundedRun`'s hard-cap giveup below)
+   * would leave every later `acquire()` call waiting unboundedly, long past
+   * whatever timeout budget that caller itself has. Resolves `false`
+   * (permit never granted — never a permit `release()` needs to undo) once
+   * the deadline elapses instead of `true`.
+   */
+  acquire(deadlineMs: number): Promise<boolean> {
     if (this.active < this.limit) {
       this.active += 1;
-      return;
+      return Promise.resolve(true);
     }
-    await new Promise<void>((resolve) => this.waiters.push(resolve));
-    // A released permit is handed directly to the next waiter (see
-    // `release`) without ever dropping `active` below `limit`, so no
-    // increment happens here — the permit was already counted.
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout>;
+      const finish = (acquired: boolean): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        // Already removed by `release()` (via `shift()`) when acquired is
+        // true; this is then a harmless no-op. Removes itself from the
+        // queue when it gave up instead (acquired === false), so `release`
+        // never hands a permit to an abandoned waiter.
+        const index = this.waiters.indexOf(finish);
+        if (index !== -1) this.waiters.splice(index, 1);
+        resolve(acquired);
+      };
+      timer = setTimeout(() => finish(false), deadlineMs);
+      this.waiters.push(finish);
+    });
   }
 
   release(): void {
@@ -150,7 +182,7 @@ class Semaphore {
       // and letting a fresh `acquire()` race for it — that race would let
       // `active` transiently dip below `limit`, allowing a second caller to
       // grab a permit and overshoot the cap.
-      next();
+      next(true);
       return;
     }
     this.active = Math.max(0, this.active - 1);
@@ -159,6 +191,18 @@ class Semaphore {
 
 const GLOBAL_RECONCILIATION_CONCURRENCY = 6;
 const globalReconciliationSlots = new Semaphore(GLOBAL_RECONCILIATION_CONCURRENCY);
+
+/**
+ * R-starvation/round3: how many `boundedRun` calls have given up at the hard
+ * kill-grace cap without ever confirming their underlying runner actually
+ * settled. Their semaphore permit has already been released at that point
+ * (see `boundedRun`) so they can no longer block new checks, but a
+ * background process may genuinely still be running. Exposed on every
+ * `RepositoryReconciliationResult` so this condition stays visible instead
+ * of silently vanishing the moment its slot is freed. Decremented if/when
+ * the abandoned runner eventually does settle.
+ */
+let unconfirmedRunnerCount = 0;
 
 /**
  * Every external read goes through this. Bounded independently of whatever
@@ -184,13 +228,27 @@ async function boundedRun(
   request: ProcessRequest,
   timeoutMs: number,
   killGraceMs: number,
-): Promise<ProcessResult | "timed_out" | "timed_out_unconfirmed"> {
+): Promise<ProcessResult | "timed_out" | "timed_out_unconfirmed" | "timed_out_tree_unconfirmed" | "busy"> {
   const controller = new AbortController();
-  // R12: held for the real lifetime of the runner call (released once it
-  // actually settles below), not just for however long boundedRun's own
-  // bounded wait takes — the external process keeps occupying a slot until
-  // it is truly done, timed out or not.
-  await globalReconciliationSlots.acquire();
+  // R-starvation/round3: `acquire()` is itself now bounded by this call's
+  // own timeout budget — a caller that cannot get a global slot within
+  // timeoutMs gives up and reports "busy" WITHOUT ever starting external
+  // work, rather than queuing unboundedly behind runners that may never
+  // free their slot (see the hard-cap giveup below).
+  const acquired = await globalReconciliationSlots.acquire(timeoutMs);
+  if (!acquired) {
+    return "busy";
+  }
+  // R-starvation/round3: guards against releasing the SAME permit twice —
+  // once here at the hard-cap giveup below, and again whenever the
+  // abandoned runner eventually does settle (via `settled.finally` below).
+  let released = false;
+  const releasePermit = (): void => {
+    if (released) return;
+    released = true;
+    globalReconciliationSlots.release();
+  };
+
   const runnerPromise = runner({ ...request, signal: controller.signal, killGraceMs });
   // Wrapped so a late rejection (e.g. after we've already moved on to the
   // timeout path) never becomes an unhandled rejection.
@@ -198,7 +256,7 @@ async function boundedRun(
     (result) => ({ ok: true as const, result }),
     (error) => ({ ok: false as const, error }),
   );
-  settled.finally(() => globalReconciliationSlots.release());
+  settled.finally(() => releasePermit());
 
   const primary = await withTimeout(settled, timeoutMs);
   if (primary !== "timed_out") {
@@ -214,7 +272,29 @@ async function boundedRun(
     // Still unsettled after the hard cap — termination was never actually
     // confirmed. This is NOT the same claim as a confirmed kill; callers
     // must word it differently (see `observe` below).
+    //
+    // R-starvation/round3: release this permit NOW so global capacity
+    // actually recovers instead of being held forever by a runner that may
+    // never settle — `releasePermit`'s `released` guard makes this safe
+    // even if the abandoned runner's promise does eventually settle later
+    // (the `settled.finally` above would otherwise release the SAME permit
+    // a second time). Track it in the module gauge so a permanently-stuck
+    // runner stays visible rather than silently vanishing once its slot is
+    // freed.
+    releasePermit();
+    unconfirmedRunnerCount += 1;
+    settled.then(() => {
+      unconfirmedRunnerCount = Math.max(0, unconfirmedRunnerCount - 1);
+    });
     return "timed_out_unconfirmed";
+  }
+  if (confirmation.ok && confirmation.result.treeKillUnconfirmed) {
+    // R11(c)/round3: the direct process WAS confirmed terminated, but only
+    // because process.ts's Windows taskkill fallback could kill just the
+    // direct child — a grandchild the failed taskkill could not reach may
+    // still be running. A distinct, weaker claim than an ordinary confirmed
+    // timeout; never worded the same way (see `observe` below).
+    return "timed_out_tree_unconfirmed";
   }
   return "timed_out";
 }
@@ -227,11 +307,21 @@ async function observe(
   killGraceMs: number,
   unobservedContext: string,
 ): Promise<{ ok: true; result: ProcessResult } | { ok: false; finding: { state: "unobserved"; message: string } }> {
-  let result: ProcessResult | "timed_out" | "timed_out_unconfirmed";
+  let result: ProcessResult | "timed_out" | "timed_out_unconfirmed" | "timed_out_tree_unconfirmed" | "busy";
   try {
     result = await boundedRun(runner, request, timeoutMs, killGraceMs);
   } catch (error) {
     return { ok: false, finding: { state: "unobserved", message: `Could not check ${unobservedContext}: ${errorMessage(error)}` } };
+  }
+  // R-starvation/round3: the server could not free a global slot for this
+  // check within its own timeout budget — NO external work was ever
+  // started for it (see boundedRun), so this is a distinct claim from any
+  // timeout below.
+  if (result === "busy") {
+    return {
+      ok: false,
+      finding: { state: "unobserved", message: `Could not check ${unobservedContext}: the server is busy reconciling other runs — try again shortly` },
+    };
   }
   // R11c: a runner that never confirmed its own death even past the hard
   // kill-grace cap is a distinct, weaker claim than a confirmed kill —
@@ -240,6 +330,19 @@ async function observe(
     return {
       ok: false,
       finding: { state: "unobserved", message: `Could not check ${unobservedContext}: the check timed out (termination unconfirmed)` },
+    };
+  }
+  // R11(c)/round3: the process itself was confirmed stopped, but only via a
+  // fallback that could reach the direct child alone — background cleanup
+  // (any grandchild) could not be confirmed. Never worded as a plain,
+  // fully-confirmed timeout.
+  if (result === "timed_out_tree_unconfirmed") {
+    return {
+      ok: false,
+      finding: {
+        state: "unobserved",
+        message: `Could not check ${unobservedContext}: the check was stopped, but background cleanup could not be confirmed`,
+      },
     };
   }
   if (result === "timed_out") {
@@ -616,6 +719,7 @@ export async function reconcileDeliveryRepository(
     findings,
     hasDivergence: findings.some((finding) => finding.state === "diverged"),
     hasUnobserved: findings.some((finding) => finding.state === "unobserved"),
+    unconfirmedRunners: unconfirmedRunnerCount,
   };
 }
 

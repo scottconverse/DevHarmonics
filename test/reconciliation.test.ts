@@ -6,7 +6,8 @@ import { runProcess } from "../src/process.js";
 import type { ProcessRequest, ProcessResult } from "../src/process.js";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawnSync, type ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import os from "node:os";
 import path from "node:path";
 
@@ -33,11 +34,11 @@ function fixtureDelivery(overrides: Partial<DeliveryRepositoryRecord> = {}): Del
 }
 
 function ok(stdout: string): ProcessResult {
-  return { stdout, stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+  return { stdout, stderr: "", exitCode: 0, durationMs: 1, timedOut: false, treeKillUnconfirmed: false };
 }
 
 function fail(stderr: string): ProcessResult {
-  return { stdout: "", stderr, exitCode: 1, durationMs: 1, timedOut: false };
+  return { stdout: "", stderr, exitCode: 1, durationMs: 1, timedOut: false, treeKillUnconfirmed: false };
 }
 
 function findingFor(findings: ReconciliationFinding[], artifact: ReconciliationFinding["artifact"]): ReconciliationFinding | undefined {
@@ -705,6 +706,126 @@ test("reconcileDelivery bounds concurrent external checks GLOBALLY across differ
   assert.ok(maxConcurrent >= 4, "the global pool should still allow meaningful concurrency across different runs, not serialize everything");
 });
 
+// round3 Major "six unconfirmed runners can permanently starve all
+// reconciliation": six runners that never settle (and never confirm their
+// own termination, even past boundedRun's hard cap) used to hold all six
+// global permits FOREVER, since a slot was only ever released when the
+// underlying runner actually settled. A later call would then wait
+// unboundedly in acquire() — before its own primary timeout even started.
+// Proves both halves of the fix: (a) a 7th call gives up within its OWN
+// budget instead of hanging, and never starts external work while busy;
+// (b) once the six starvers hit their hard cap and give up, their permits
+// are released, so an 8th call afterward gets a permit and actually runs.
+test("global semaphore: six permanently-unsettled runners cannot starve reconciliation forever", async () => {
+  const neverSettles = () => new Promise<ProcessResult>(() => {}); // ignores the AbortSignal entirely, never resolves
+  const starverPromises = Array.from({ length: 6 }, (_, index) =>
+    reconcileDeliveryRepository(fixtureDelivery({ repositoryId: `repo:starve-${index}` }), neverSettles, 100, 50),
+  );
+
+  // Give the six starvers a moment to actually acquire their permits before
+  // the 7th call is issued, so it is genuinely queued behind a full pool.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  let seventhRunnerCalled = false;
+  const seventhRunner = async (): Promise<ProcessResult> => {
+    seventhRunnerCalled = true;
+    return ok("");
+  };
+  const seventhStartedAt = Date.now();
+  const seventhResult = await reconcileDeliveryRepository(fixtureDelivery({ repositoryId: "repo:seventh" }), seventhRunner, 200, 50);
+  const seventhElapsedMs = Date.now() - seventhStartedAt;
+
+  assert.ok(seventhElapsedMs < 1_000, `expected the 7th call to give up near its own budget instead of hanging, took ${seventhElapsedMs}ms`);
+  assert.equal(seventhRunnerCalled, false, "the 7th call must never start external work while every global slot is held");
+  const seventhBranch = findingFor(seventhResult.findings, "branch")!;
+  assert.equal(seventhBranch.state, "unobserved");
+  assert.match(seventhBranch.message, /busy/i);
+
+  // Once the six starvers each hit their hard cap (timeoutMs + killGraceMs +
+  // the confirmation margin) and give up, their permits are released even
+  // though the starver runners themselves never actually settled.
+  await Promise.all(starverPromises);
+
+  let eighthRunnerCalled = false;
+  const eighthDelivery = fixtureDelivery({ repositoryId: "repo:eighth" });
+  const eighthRunner = async (): Promise<ProcessResult> => {
+    eighthRunnerCalled = true;
+    return ok(`${eighthDelivery.headCommit}\trefs/heads/${eighthDelivery.branch}\n`);
+  };
+  const eighthResult = await reconcileDeliveryRepository(eighthDelivery, eighthRunner, 200, 50);
+  assert.equal(eighthRunnerCalled, true, "capacity should have recovered once the starvers gave up at their hard cap");
+  assert.equal(findingFor(eighthResult.findings, "branch")!.state, "matches");
+});
+
+// round3 Major (fix path, no-double-release): boundedRun's hard-cap giveup
+// releases a starver's permit EARLY, before the underlying runner has
+// actually settled. If that later, real settlement released the SAME
+// permit a second time, the semaphore would hand out a phantom extra slot —
+// letting more than GLOBAL_RECONCILIATION_CONCURRENCY (6) callers hold a
+// permit at once. This proves it does not: six starvers give up their
+// permits at the hard cap; six "occupier" callers immediately take all six
+// recovered permits and hold them open; only THEN do the starvers' real
+// runner promises actually resolve. A "prober" queued behind the occupiers
+// must stay queued (busy) through all of this — a phantom permit would let
+// it in early.
+test("global semaphore: a starver's real, late settlement never double-releases its already-freed permit", async () => {
+  let releaseStarvers: () => void = () => {};
+  const starverGate = new Promise<void>((resolve) => {
+    releaseStarvers = resolve;
+  });
+  const starverRunner = (): Promise<ProcessResult> =>
+    new Promise((resolve) => {
+      // Ignores the AbortSignal (never confirms termination on its own,
+      // like a real hung external process) until the test manually lets it
+      // go via `releaseStarvers()`.
+      starverGate.then(() => resolve(ok("")));
+    });
+  const starverPromises = Array.from({ length: 6 }, (_, index) =>
+    reconcileDeliveryRepository(fixtureDelivery({ repositoryId: `repo:dbl-starve-${index}` }), starverRunner, 60, 60),
+  );
+  // Each starver's OUTER reconcileDeliveryRepository call settles once it
+  // hits its hard cap — proving all six permits have been released — even
+  // though the starverRunner promises themselves are still pending on
+  // starverGate.
+  await Promise.all(starverPromises);
+
+  let releaseOccupiers: () => void = () => {};
+  const occupierGate = new Promise<void>((resolve) => {
+    releaseOccupiers = resolve;
+  });
+  const occupierRunner = async (): Promise<ProcessResult> => {
+    await occupierGate;
+    return ok("");
+  };
+  const occupierPromises = Array.from({ length: 6 }, (_, index) =>
+    reconcileDeliveryRepository(fixtureDelivery({ repositoryId: `repo:dbl-occupy-${index}` }), occupierRunner, 5_000, 5_000),
+  );
+  // Give the six occupiers a moment to actually acquire the six permits
+  // just recovered from the starvers' hard-cap giveup.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  let proberRunnerCalled = false;
+  const proberRunner = async (): Promise<ProcessResult> => {
+    proberRunnerCalled = true;
+    return ok("");
+  };
+  const proberPromise = reconcileDeliveryRepository(fixtureDelivery({ repositoryId: "repo:dbl-prober" }), proberRunner, 2_000, 100);
+
+  // Now let the starvers' real (abandoned) runner promises actually
+  // resolve, well after their permits were already released. A buggy
+  // double-release here would hand the queued prober a phantom permit even
+  // though all six real occupiers still legitimately hold theirs.
+  releaseStarvers();
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(proberRunnerCalled, false, "a starver's late settlement must not double-release its permit and let the prober in early");
+
+  // Legitimately free capacity: the occupiers release for real.
+  releaseOccupiers();
+  await Promise.all(occupierPromises);
+  await proberPromise;
+  assert.equal(proberRunnerCalled, true, "the prober should acquire a permit once the occupiers legitimately release theirs");
+});
+
 // Minor: the timeout/grace races in boundedRun must cancel their losing
 // timer once the runner settles first — otherwise every fast (non-timed-out)
 // reconciliation leaves a live timer scheduled for the full timeoutMs. A
@@ -853,6 +974,168 @@ if (process.platform === "win32") {
         alive = isAlive(grandchildPid);
       }
       assert.equal(alive, false, `expected the orphaned grandchild (pid ${grandchildPid}) to be dead, but it is still running`);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
+// round3 "Windows taskkill failure path NOT RESOLVED": the real `taskkill`
+// binary cannot be forced to fail or hang portably/deterministically (a live
+// pid we own is always killable, and hanging a real Microsoft binary isn't
+// reproducible). `windowsTaskkillSpawn` is a narrow test-only seam (see
+// src/process.ts) that substitutes how the helper is spawned so these
+// exact failure/retry/deadline/fallback branches in terminate() can be
+// exercised for real, against a REAL long-running direct child, without
+// faking anything else.
+if (process.platform === "win32") {
+  test("runProcess retries a failing taskkill once, then falls back to killing the direct child and flags treeKillUnconfirmed", async () => {
+    let taskkillCalls = 0;
+    const fakeTaskkillSpawn = (): ChildProcess => {
+      taskkillCalls += 1;
+      const fake = new EventEmitter() as unknown as ChildProcess;
+      queueMicrotask(() => fake.emit("exit", 1)); // always reports failure, never actually kills anything
+      return fake;
+    };
+    const startedAt = Date.now();
+    const result = await runProcess({
+      command: process.execPath,
+      args: ["-e", "setTimeout(() => {}, 60000)"],
+      cwd: process.cwd(),
+      timeoutMs: 200,
+      killGraceMs: 200,
+      windowsTaskkillSpawn: fakeTaskkillSpawn,
+    });
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(taskkillCalls, 2, "expected exactly one retry after the first taskkill attempt failed");
+    assert.equal(result.timedOut, true);
+    assert.equal(result.treeKillUnconfirmed, true, "falling back to a direct-child-only kill must flag tree-kill as unconfirmed, never a silent normal timeout");
+    assert.ok(elapsedMs < 5_000, `expected the retry+fallback path to settle quickly, took ${elapsedMs}ms`);
+  });
+
+  test("runProcess treats a hung taskkill helper (neither error nor exit) as failed once its own deadline elapses, and still retries once before falling back", async () => {
+    let taskkillCalls = 0;
+    const fakeTaskkillSpawn = (): ChildProcess => {
+      taskkillCalls += 1;
+      return new EventEmitter() as unknown as ChildProcess; // never emits 'error' or 'exit' at all
+    };
+    const startedAt = Date.now();
+    const result = await runProcess({
+      command: process.execPath,
+      args: ["-e", "setTimeout(() => {}, 60000)"],
+      cwd: process.cwd(),
+      timeoutMs: 200,
+      killGraceMs: 200,
+      windowsTaskkillSpawn: fakeTaskkillSpawn,
+      windowsTaskkillDeadlineMs: 150,
+    });
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(taskkillCalls, 2, "a taskkill that never confirms must still be retried once before falling back");
+    assert.equal(result.timedOut, true);
+    assert.equal(result.treeKillUnconfirmed, true, "a hung taskkill that forced a direct-child-only fallback must flag tree-kill as unconfirmed");
+    assert.ok(elapsedMs < 5_000, `expected the deadline+retry+fallback path to settle well under 5s, took ${elapsedMs}ms`);
+  });
+
+  test("runProcess trusts a taskkill that reports success on the first attempt: no retry, treeKillUnconfirmed stays false", async () => {
+    let taskkillCalls = 0;
+    const fakeTaskkillSpawn = (targetPid: number): ChildProcess => {
+      taskkillCalls += 1;
+      const fake = new EventEmitter() as unknown as ChildProcess;
+      queueMicrotask(() => {
+        // Emulate what a real successful `taskkill /T /F` does: the target
+        // actually dies. Otherwise nothing would ever kill the real child
+        // this test spawned, and runProcess would hang waiting for 'close'.
+        try {
+          process.kill(targetPid, "SIGKILL");
+        } catch {
+          // already gone
+        }
+        fake.emit("exit", 0);
+      });
+      return fake;
+    };
+    const result = await runProcess({
+      command: process.execPath,
+      args: ["-e", "setTimeout(() => {}, 60000)"],
+      cwd: process.cwd(),
+      timeoutMs: 200,
+      killGraceMs: 200,
+      windowsTaskkillSpawn: fakeTaskkillSpawn,
+    });
+    assert.equal(taskkillCalls, 1, "a successful first attempt must not be retried");
+    assert.equal(result.timedOut, true);
+    assert.equal(result.treeKillUnconfirmed, false, "a confirmed successful tree-kill must not be flagged unconfirmed");
+  });
+}
+
+// round3 "Confirmed process-tree shutdown NOT RESOLVED" (POSIX half): a
+// SIGTERM-cooperative direct child that exits BEFORE the scheduled group
+// SIGKILL fires must not let a SIGTERM-ignoring grandchild in the same
+// process group survive — 'close' used to just cancel the pending group
+// SIGKILL. This spawns a direct child that exits almost immediately on
+// SIGTERM while it has already forked a detached SIGTERM-ignoring
+// grandchild sharing its process group, and proves the grandchild is
+// swept anyway. POSIX-only: Windows has no process groups (its tree-kill
+// goes through taskkill, covered above) and process.kill(-pid, ...) does
+// not carry the same meaning there.
+if (process.platform !== "win32") {
+  test("runProcess sweeps a SIGTERM-ignoring grandchild even when the direct child exits on SIGTERM before the group SIGKILL grace elapses", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-posix-sweep-"));
+    try {
+      const pidfile = path.join(root, "grandchild.pid");
+      const script = path.join(root, "cooperative-parent.js");
+      // The direct child: forks a detached grandchild (same process group,
+      // since the direct child itself is the group leader per process.ts's
+      // `detached: true`) that ignores SIGTERM, writes its own pid, then
+      // exits promptly and cooperatively on SIGTERM — well before
+      // killGraceMs elapses.
+      await writeFile(
+        script,
+        `
+        const { spawn } = require("node:child_process");
+        const fs = require("node:fs");
+        const pidfile = process.argv[2];
+        const grandchild = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setTimeout(() => {}, 60000);"], { stdio: "ignore" });
+        fs.writeFileSync(pidfile, String(grandchild.pid));
+        process.on("SIGTERM", () => process.exit(0));
+        setTimeout(() => {}, 60000);
+        `,
+        "utf8",
+      );
+
+      const startedAt = Date.now();
+      const result = await runProcess({
+        command: process.execPath,
+        args: [script, pidfile],
+        cwd: root,
+        timeoutMs: 2_000,
+        killGraceMs: 2_000, // deliberately long: proves the sweep fires on 'exit', not the killTimer
+      });
+      const elapsedMs = Date.now() - startedAt;
+
+      assert.equal(result.timedOut, true);
+      assert.ok(elapsedMs < 3_000, `expected the direct child's prompt SIGTERM exit to settle runProcess well before the 2s group-kill grace, took ${elapsedMs}ms`);
+
+      assert.ok(existsSync(pidfile), "the grandchild should have written its pidfile before the 2s timeout");
+      const grandchildPid = Number((await readFile(pidfile, "utf8")).trim());
+      assert.ok(Number.isInteger(grandchildPid) && grandchildPid > 0, `expected a valid pid in the pidfile, got ${grandchildPid}`);
+
+      const isAlive = (pid: number): boolean => {
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
+      const deadline = Date.now() + 3_000;
+      let alive = isAlive(grandchildPid);
+      while (alive && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        alive = isAlive(grandchildPid);
+      }
+      assert.equal(alive, false, `expected the SIGTERM-ignoring grandchild (pid ${grandchildPid}) to be swept immediately, but it is still running`);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

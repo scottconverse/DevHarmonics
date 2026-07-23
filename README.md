@@ -1,14 +1,14 @@
-﻿<div align="center">
+<div align="center">
 
 # DevHarmonics
 
 ### One objective. A verified AI development crew.
 
-**Run several AI coding agents on your own repository at once â€” each in its own Git worktree, checked by commands you configured, reviewed by a model that didn't write the code, and recorded in a local SQLite ledger you can read after the fact.**
+**Run several AI coding agents on your own repository at once — each in its own Git worktree, checked by commands you configured, reviewed by a model that didn't write the code, and recorded in a local SQLite ledger you can read after the fact.**
 
-DevHarmonics never merges anything without you. It hands you a reviewed branch and the receipts â€” and when you say so, it pushes, opens the pull request, merges, and tags, each step on its own explicit approval, all from the dashboard.
+DevHarmonics never merges anything without you. It hands you a reviewed branch and the receipts — and when you say so, it pushes, opens the pull request, merges, and tags, each step on its own explicit approval, all from the dashboard.
 
-[Quick start](#quick-start) Â· [How a run works](#how-a-run-works) Â· [User manual](docs/USER_MANUAL.md) Â· [Architecture](docs/ARCHITECTURE.md) Â· [Product spec](docs/PRODUCT_SPEC.md) Â· [Landing page](https://scottconverse.github.io/DevHarmonics/)
+[Quick start](#quick-start) · [How a run works](#how-a-run-works) · [User manual](docs/USER_MANUAL.md) · [Architecture](docs/ARCHITECTURE.md) · [Product spec](docs/PRODUCT_SPEC.md) · [Landing page](https://scottconverse.github.io/DevHarmonics/)
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Latest release](https://img.shields.io/badge/release-v0.6.1-informational)](https://github.com/scottconverse/DevHarmonics/releases/tag/v0.6.1)
@@ -20,7 +20,7 @@ DevHarmonics never merges anything without you. It hands you a reviewed branch a
 
 ---
 
-Runs entirely on your machine Â· No model API keys for normal use Â· One isolated worktree per task Â· Every attempt, check, and verdict persisted in SQLite Â· No automatic merge
+Runs entirely on your machine · No model API keys for normal use · One isolated worktree per task · Every attempt, check, and verdict persisted in SQLite · No automatic merge
 
 <!-- Add a current dashboard screenshot here: docs/assets/dashboard.png -->
 
@@ -34,11 +34,11 @@ DevHarmonics answers that question structurally rather than by trusting the agen
 
 - Each task gets its own Git branch and temporary worktree, so parallel work cannot collide.
 - Models choose a validator **by name** from your config. They cannot hand DevHarmonics a shell command to run.
-- The final review is read-only, done by a different model, and â€” at medium and high risk â€” by a model that was not the implementor.
-- Reviewers are decorrelated by **evidence lens**, not just by provider: an artifact-lens reviewer judges the diff and repository without ever seeing the workers' reports, while a claims-lens reviewer judges the reports without ever seeing the code â€” and a deterministic gate cross-checks the claimed file changes against the integrated diff. A worker that narrates changes it never made fails on the mismatch, mechanically.
-- The integration diff is inspected for signs that the *verification itself* was weakened â€” deleted or skipped tests, weakened assertions, unconditional success, swallowed errors.
+- The final review is read-only, done by a different model, and — at medium and high risk — by a model that was not the implementor.
+- Reviewers are decorrelated by **evidence lens**, not just by provider: an artifact-lens reviewer judges the diff and repository without ever seeing the workers' reports, while a claims-lens reviewer judges the reports without ever seeing the code — and a deterministic gate cross-checks the claimed file changes against the integrated diff. A worker that narrates changes it never made fails on the mismatch, mechanically.
+- The integration diff is inspected for signs that the *verification itself* was weakened — deleted or skipped tests, weakened assertions, unconditional success, swallowed errors.
 - A write task that changed no files does not pass.
-- Every invocation's tokens and cost land in the ledger, and each run can show its actual cost beside what the same work would have cost on the priciest qualified model â€” the saving from routing cheap-where-proven is a number, not a feeling.
+- Every invocation's tokens and cost land in the ledger, and each run can show its actual cost beside what the same work would have cost on the priciest qualified model — the saving from routing cheap-where-proven is a number, not a feeling.
 
 ---
 
@@ -46,23 +46,23 @@ DevHarmonics answers that question structurally rather than by trusting the agen
 
 ```mermaid
 flowchart TD
-    G["Objective draft<br/>outcome Â· criteria Â· risk Â· scope"] --> A["Read-only architect"]
+    G["Objective draft<br/>outcome · criteria · risk · scope"] --> A["Read-only architect"]
     A --> P["Immutable plan revision<br/>typed task DAG"]
     P --> OK{"Owner decision"}
     OK -->|revise| A
     OK -->|approve this exact revision| S["Dependency scheduler"]
-    S --> W1["Worker Â· isolated worktree"]
-    S --> W2["Worker Â· isolated worktree"]
-    S --> W3["Worker Â· isolated worktree"]
+    S --> W1["Worker · isolated worktree"]
+    S --> W2["Worker · isolated worktree"]
+    S --> W3["Worker · isolated worktree"]
     W1 --> V["Allowlisted validators<br/>+ verification-integrity check"]
     W2 --> V
     W3 --> V
     V --> I["Serial merge into the<br/>run integration branch"]
     I --> R["Read-only reviewer quorum<br/>implementor-independent"]
-    R -->|NOT READY| F["Scoped fixer tasks<br/>revalidate Â· re-review"]
+    R -->|NOT READY| F["Scoped fixer tasks<br/>revalidate · re-review"]
     F --> R
     R -->|READY| D["Reviewed branch + SQLite receipts"]
-    D --> DL["Cockpit delivery â€” each step its own approval<br/>push Â· draft PR Â· merge Â· tag"]
+    D --> DL["Cockpit delivery — each step its own approval<br/>push · draft PR · merge · tag"]
 ```
 
 Planning, approval, execution, and review are separate durable stages. Saving an objective starts nothing. Each architect proposal is appended as a numbered, immutable plan revision; approving one marks that exact revision, and the run executes the stored plan rather than silently regenerating it. Restart the machine and the record of what you authorized is still there.
@@ -77,7 +77,7 @@ Planning, approval, execution, and review are separate durable stages. Saving an
 
 ### Plan before anything moves
 
-A read-only architect turns your objective into a typed, dependency-aware task graph. You preview the DAG, the repository impact map, permissions, checks, proposed model assignments, and capacity â€” then approve one exact revision or send it back.
+A read-only architect turns your objective into a typed, dependency-aware task graph. You preview the DAG, the repository impact map, permissions, checks, proposed model assignments, and capacity — then approve one exact revision or send it back.
 
 </td>
 <td width="50%" valign="top">
@@ -109,14 +109,14 @@ Reviewer count, minimum distinct providers, and implementor independence are con
 
 ### Keep receipts that survive a restart
 
-Runs, tasks, attempts, checks, reviews, and typed events live in SQLite. Review receipts are bound to hashes of the exact plan, check evidence, task reports, diff, and repository base/HEAD set â€” the evidence exporter fails closed when they no longer match.
+Runs, tasks, attempts, checks, reviews, and typed events live in SQLite. Review receipts are bound to hashes of the exact plan, check evidence, task reports, diff, and repository base/HEAD set — the evidence exporter fails closed when they no longer match.
 
 </td>
 <td width="50%" valign="top">
 
 ### Steer without opening a terminal
 
-While a run is working you can hold and resume task admission, reprioritise or reassign a queued task, deliver a clarification at the next attempt boundary, or interrupt an active attempt â€” which stops it, keeps it as evidence, and continues in a new attributed attempt.
+While a run is working you can hold and resume task admission, reprioritise or reassign a queued task, deliver a clarification at the next attempt boundary, or interrupt an active attempt — which stops it, keeps it as evidence, and continues in a new attributed attempt.
 
 </td>
 </tr>
@@ -125,20 +125,20 @@ While a run is working you can hold and resume task admission, reprioritise or r
 
 ### Run it again as a workflow
 
-A workflow is a versioned, parameterized document in the tracked `workflows/` directory, identified by content hash. Instantiate it with typed inputs and it becomes a normal objective through the same composer â€” and the run pins the exact revision it executed, immutably. Editing a workflow can never rewrite what a historical run did, and promoting a pilot can never silently widen its permissions.
+A workflow is a versioned, parameterized document in the tracked `workflows/` directory, identified by content hash. Instantiate it with typed inputs and it becomes a normal objective through the same composer — and the run pins the exact revision it executed, immutably. Editing a workflow can never rewrite what a historical run did, and promoting a pilot can never silently widen its permissions.
 
 </td>
 <td width="50%" valign="top">
 
 ### Deliver without leaving the cockpit
 
-For a `READY` run: push the exact reviewed SHA, open a draft pull request, merge it, and tag the release â€” from the dashboard, each step its own explicit approval and receipt. The merge refuses conflicts, red or pending checks, and a head that drifted from the reviewed commit.
+For a `READY` run: push the exact reviewed SHA, open a draft pull request, merge it, and tag the release — from the dashboard, each step its own explicit approval and receipt. The merge refuses conflicts, red or pending checks, and a head that drifted from the reviewed commit.
 
 </td>
 </tr>
 </table>
 
-An **Inbox** view collects every plan approval, delivery approval, and paused run waiting on you across every run in one list â€” the same approvals as inside each run, never a second gate â€” alongside a **Program status** panel showing every run's state at a glance.
+An **Inbox** view collects every plan approval, delivery approval, and paused run waiting on you across every run in one list — the same approvals as inside each run, never a second gate — alongside a **Program status** panel showing every run's state at a glance.
 
 ---
 
@@ -168,7 +168,7 @@ Alongside it sits a smaller gate that came out of running this system against re
 
 ## No API keys for normal use
 
-DevHarmonics is an orchestration layer over the **official** provider CLIs. It does not proxy provider HTTP APIs, and it never asks for an OpenAI, Anthropic, or Google password â€” authentication happens only in provider-owned terminals and browser pages.
+DevHarmonics is an orchestration layer over the **official** provider CLIs. It does not proxy provider HTTP APIs, and it never asks for an OpenAI, Anthropic, or Google password — authentication happens only in provider-owned terminals and browser pages.
 
 Common model API-key and cloud-credential environment variables are stripped from every provider child process. Credential-shaped strings are redacted at the ledger boundary before prompts, output, errors, checks, reviews, and events are persisted or returned through the dashboard.
 
@@ -177,12 +177,12 @@ Common model API-key and cloud-credential environment variables are stripped fro
 | Codex CLI | Supported | `codex login` | Subscription session owned by the CLI |
 | Claude Code | Supported | `claude auth login` | Subscription session owned by the CLI |
 | Google Antigravity | Supported | first-run `agy` sign-in | One connection whose catalog may expose Google, Anthropic, **and** OpenAI models; its Gemini and Claude/GPT quota groups cool independently |
-| Ollama (local) | Partial | none | Discovered locally; schedulable only after exact-fingerprint qualification. Reviewers get bounded diff chunks; implementors get scoped `file.read` / `file.search` / hash-checked `file.patch` inside their worktree â€” no shell, commit, merge, or external write |
+| Ollama (local) | Partial | none | Discovered locally; schedulable only after exact-fingerprint qualification. Reviewers get bounded diff chunks; implementors get scoped `file.read` / `file.search` / hash-checked `file.patch` inside their worktree — no shell, commit, merge, or external write |
 | OpenRouter | Optional, off by default | OAuth | Disconnected and paid routing disabled by default. Spending needs three policy gates plus per-run and monthly caps. You never paste a key |
-| Agent Client Protocol | Planned | â€” | Contract-defined; no transport yet |
+| Agent Client Protocol | Planned | — | Contract-defined; no transport yet |
 
 > [!IMPORTANT]
-> Planning requires at least one signed-in subscription CLI â€” no local model is qualified for the architect role. An **already-approved** plan does not: qualified local models can carry and review the work with every subscription signed out.
+> Planning requires at least one signed-in subscription CLI — no local model is qualified for the architect role. An **already-approved** plan does not: qualified local models can carry and review the work with every subscription signed out.
 
 ---
 
@@ -206,7 +206,7 @@ node dist/src/cli.js doctor
 node dist/src/cli.js serve --project C:\path\to\your\repository
 ```
 
-`doctor` reports each provider across separate configuration, installation, authentication, account-visibility, model-entitlement, control-plane-health, capacity, and assignment-availability layers. Model entitlement and remaining subscription capacity stay explicitly **unknown** until verified â€” a successful login is not presented as proof of either.
+`doctor` reports each provider across separate configuration, installation, authentication, account-visibility, model-entitlement, control-plane-health, capacity, and assignment-availability layers. Model entitlement and remaining subscription capacity stay explicitly **unknown** until verified — a successful login is not presented as proof of either.
 
 The last command opens the dashboard at `http://127.0.0.1:4317`. Leave the terminal open.
 
@@ -244,13 +244,13 @@ devharmonics run --project C:\repos\shop --agents auto `
 
 `--agents` is not clamped: there is no product-level agent ceiling. Effective parallelism is still bounded by ready tasks, machine resources, provider throttling, and subscription limits.
 
-`--autonomy observe` is fail-closed â€” every task must be diagnostic, read-only, and low risk, and read-only worker output must carry path/line evidence where the task contract requires it.
+`--autonomy observe` is fail-closed — every task must be diagnostic, read-only, and low risk, and read-only worker output must carry path/line evidence where the task contract requires it.
 
 ---
 
 ## Project configuration
 
-The first `init`, `serve`, or `run` creates a runtime directory inside the target project and adds it to that repository's private `.git/info/exclude` â€” the shared `.gitignore` is left alone.
+The first `init`, `serve`, or `run` creates a runtime directory inside the target project and adds it to that repository's private `.git/info/exclude` — the shared `.gitignore` is left alone.
 
 ```text
 .devharmonics/
@@ -302,7 +302,7 @@ The generated file contains more than this; version 1 files from earlier release
 }
 ```
 
-`gemini` is the internal compatibility key for the Google Antigravity connection. Validator commands and arguments may use a `${repoRoot}` token, expanded to the owning repository's root â€” which keeps a registered validator portable across checkouts.
+`gemini` is the internal compatibility key for the Google Antigravity connection. Validator commands and arguments may use a `${repoRoot}` token, expanded to the owning repository's root — which keeps a registered validator portable across checkouts.
 
 </details>
 
@@ -316,7 +316,7 @@ Register a **product**, then attach each local Git checkout with its role, expec
 
 **Canonical intelligence sources** go a step further. Point DevHarmonics at the governance, architecture, version, status, compatibility, and release files that actually matter in each repository, and a scan produces an immutable snapshot with exact revisions, SHA-256 content hashes, working-tree state, explicit subject-aware claims, unavailable-source findings, and cited contradictions with path and line numbers. Git tags are deliberately not read as product claims. The latest bounded findings are injected into planning.
 
-Execution then creates an **exact integration set**: an independent integration branch and worktree per affected repository, each pinned to a retained base commit. Tasks in different repositories run concurrently; merges into the same repository stay serialized. Blocking review findings must name exactly one repository â€” an unscoped finding fails closed rather than being guessed at.
+Execution then creates an **exact integration set**: an independent integration branch and worktree per affected repository, each pinned to a retained base commit. Tasks in different repositories run concurrently; merges into the same repository stay serialized. Blocking review findings must name exactly one repository — an unscoped finding fails closed rather than being guessed at.
 
 > [!WARNING]
 > Multi-repository execution supports **one repository per task**. It does not yet reconstruct an interrupted integration set after a restart, clean retained worktrees automatically, or let a single task mutate several repositories.
@@ -325,9 +325,9 @@ Execution then creates an **exact integration set**: an independent integration 
 
 ## Delivery, and the line DevHarmonics will not cross
 
-The line is this: **nothing leaves your machine without an explicit owner approval for that specific action.** There is no automatic merge, no automatic tag, and no standing permission â€” approving a push does not approve the pull request, and approving the pull request does not approve the merge.
+The line is this: **nothing leaves your machine without an explicit owner approval for that specific action.** There is no automatic merge, no automatic tag, and no standing permission — approving a push does not approve the pull request, and approving the pull request does not approve the merge.
 
-Within that line, delivery is complete from the dashboard. For a `READY` run, the board shows the exact base branch, base commit, reviewed HEAD, and delivery branch, and you can take the whole delivery to done without opening GitHub: push that exact SHA, open a **draft** pull request, merge it, and tag the release â€” each step minting its own external-write approval and tool-policy receipt. A one-click complete flow runs the remaining steps, still one approval per consequential action. This exists because the product is meant to be the whole dev team for a product manager, and product managers do not log into GitHub to finish a delivery.
+Within that line, delivery is complete from the dashboard. For a `READY` run, the board shows the exact base branch, base commit, reviewed HEAD, and delivery branch, and you can take the whole delivery to done without opening GitHub: push that exact SHA, open a **draft** pull request, merge it, and tag the release — each step minting its own external-write approval and tool-policy receipt. A one-click complete flow runs the remaining steps, still one approval per consequential action. This exists because the product is meant to be the whole dev team for a product manager, and product managers do not log into GitHub to finish a delivery.
 
 The merge step is never blind: it checks the live pull-request state and refuses merge conflicts, pending or failing status checks, and a pull-request head that is no longer the reviewed commit. Tagging validates the tag name, tags the actual merge commit, records the applied tag, recovers a failed tag push by reusing the local tag, and refuses a different tag on an already-tagged delivery. Completed steps reconcile idempotently, concurrent operations on the same repository are refused, and the UI locks the delivery card while a step is in flight.
 
@@ -342,7 +342,7 @@ External writes are off by default (`runPolicy.allowExternalWrites`).
 
 A single Node process: a loopback HTTP server, a dependency-free browser UI, an orchestrator, and a SQLite ledger. No daemon, no queue broker, no container, no hosted control plane.
 
-Everything provider-specific sits behind one `RuntimeAdapter` contract covering connection, model selection, invocation, events, results, usage, and **classified** failures â€” which is why a subscription CLI, a local Ollama runtime, and an OAuth API transport can be scheduled, cooled, and failed over by the same code path, and why adding a transport does not mean touching the orchestrator.
+Everything provider-specific sits behind one `RuntimeAdapter` contract covering connection, model selection, invocation, events, results, usage, and **classified** failures — which is why a subscription CLI, a local Ollama runtime, and an OAuth API transport can be scheduled, cooled, and failed over by the same code path, and why adding a transport does not mean touching the orchestrator.
 
 <details>
 <summary><strong>Module map</strong></summary>
@@ -353,14 +353,14 @@ Everything provider-specific sits behind one `RuntimeAdapter` contract covering 
 | [`src/server.ts`](src/server.ts) | Loopback HTTP API, persisted SSE stream, static dashboard |
 | [`src/orchestrator.ts`](src/orchestrator.ts) | Planning, scheduling, retries, integration, review, steering, cancellation |
 | [`src/ledger.ts`](src/ledger.ts) | SQLite persistence and its ordered transactional migrations |
-| [`src/runtime.ts`](src/runtime.ts) Â· [`src/providers.ts`](src/providers.ts) | Transport-neutral contracts and provider process adapters |
-| [`src/worktrees.ts`](src/worktrees.ts) Â· [`src/integration-sets.ts`](src/integration-sets.ts) | Task/integration worktrees and multi-repository coordination |
-| [`src/validators.ts`](src/validators.ts) Â· [`src/verification-integrity.ts`](src/verification-integrity.ts) | Allowlisted check execution and gate-weakening analysis |
-| [`src/policy.ts`](src/policy.ts) Â· [`src/local-tools.ts`](src/local-tools.ts) | Tool trust/side-effect policy and the scoped local-model tool loop |
-| [`src/routing.ts`](src/routing.ts) Â· [`src/qualification.ts`](src/qualification.ts) Â· [`src/model-performance.ts`](src/model-performance.ts) | Adaptive selection, first-use qualification, empirical profiles |
+| [`src/runtime.ts`](src/runtime.ts) · [`src/providers.ts`](src/providers.ts) | Transport-neutral contracts and provider process adapters |
+| [`src/worktrees.ts`](src/worktrees.ts) · [`src/integration-sets.ts`](src/integration-sets.ts) | Task/integration worktrees and multi-repository coordination |
+| [`src/validators.ts`](src/validators.ts) · [`src/verification-integrity.ts`](src/verification-integrity.ts) | Allowlisted check execution and gate-weakening analysis |
+| [`src/policy.ts`](src/policy.ts) · [`src/local-tools.ts`](src/local-tools.ts) | Tool trust/side-effect policy and the scoped local-model tool loop |
+| [`src/routing.ts`](src/routing.ts) · [`src/qualification.ts`](src/qualification.ts) · [`src/model-performance.ts`](src/model-performance.ts) | Adaptive selection, first-use qualification, empirical profiles |
 | [`src/redaction.ts`](src/redaction.ts) | Centralized secret scrubbing before the ledger and UI boundaries |
 | [`src/workflows.ts`](src/workflows.ts) | Versioned parameterized workflow documents, fail-closed parsing, typed instantiation |
-| [`src/reporter.ts`](src/reporter.ts) Â· [`src/delivery.ts`](src/delivery.ts) | Immutable evidence export and approved branch/draft-PR handoff |
+| [`src/reporter.ts`](src/reporter.ts) · [`src/delivery.ts`](src/delivery.ts) | Immutable evidence export and approved branch/draft-PR handoff |
 
 Full detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -371,7 +371,7 @@ Full detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Routing is adaptive but auditable. Every concrete decision retains its individual score sources rather than a single total, and the dashboard replays them as **Why this model** evidence: workload tier, qualification state, pins, established reliability and latency, relative catalog price among comparable paid candidates, and provider independence for review.
 
-Empirical profiles are sliced by workload. Under 5 observations is *insufficient*, 5â€“19 is *emerging*, 20 or more is *established* â€” and **only established slices may alter reliability or latency routing.** Run-level `NOT READY` participation is displayed as non-causal evidence and cannot penalize a model without task-linked findings.
+Empirical profiles are sliced by workload. Under 5 observations is *insufficient*, 5–19 is *emerging*, 20 or more is *established* — and **only established slices may alter reliability or latency routing.** Run-level `NOT READY` participation is displayed as non-causal evidence and cannot penalize a model without task-linked findings.
 
 A qualification fingerprint covers the provider, exact model ID, capability metadata, runtime version, adapter version, and qualification-suite version. When a fingerprint changes, prior evidence goes stale and the model cannot be scheduled until it requalifies. Retirement requires three consecutive authoritative missing observations.
 
@@ -397,8 +397,8 @@ What that judgement rests on, in both directions:
 | Signal | Reading |
 |---|---|
 | Automated suite | 296 tests across configuration, credential stripping, provider parsing, plan validation, cancellation, SQLite receipts, local-model qualification and chunked review, review-lens quorums and the claims/diff divergence gate, workflow parsing/provenance/promotion guards, cockpit delivery gates, workspace-isolation guards, the inbox/program-status projections, delivered-vs-observed reconciliation, the standalone status export, the dashboard server, and full fake-provider orchestration through real Git worktrees |
-| Schema handling | Ordered transactional migrations to ledger schema 34, automatic pre-upgrade backups, integrity + foreign-key validation, rollback on failure, and refusal to open a newer schema |
-| Continuous integration | **None in this repository.** The merge gate is the local suite plus independent review â€” nothing automated catches a regression on push |
+| Schema handling | Ordered transactional migrations to ledger schema 35, automatic pre-upgrade backups, integrity + foreign-key validation, rollback on failure, and refusal to open a newer schema |
+| Continuous integration | **None in this repository.** The merge gate is the local suite plus independent review — nothing automated catches a regression on push |
 | Distribution | Source checkout only. No installer, no published package |
 | Operational tooling | Temporary worktrees are retained for inspection until explicit cleanup is added; an interrupted integration set is not reconstructed after restart |
 
@@ -407,13 +407,13 @@ What that judgement rests on, in both directions:
 - A Git **merge conflict** fails the affected task. The automatic fixer handles structured reviewer findings, not conflicts.
 - Provider quotas originate with each subscription. DevHarmonics classifies observed failures and can cool and reroute, but reliable remaining-quota telemetry is not consistently available from providers.
 - Large CPU-only local reviews can be materially slower than subscription reviewers.
-- Manual model registry entries are inventory records only â€” they imply no account visibility, verification, qualification, or schedulability.
+- Manual model registry entries are inventory records only — they imply no account visibility, verification, qualification, or schedulability.
 - Local Mellum2 specialists are tracked as two separate upgrade lanes (Instruct and Thinking) and are never downloaded, activated, or promoted automatically; scheduling additionally requires a structured-output, contradiction-detection, and requirement-count benchmark.
 
 ### Roadmap
 
-**Available now** â€” everything above without a *planned* qualifier, including cockpit-complete delivery, live run steering, visible operation feedback, review evidence lenses, per-run cost counterfactuals, and reusable workflows â€” all proven against a real multi-repository product (the first cross-repository CivicSuite delivery was pushed, PR'd, and merged from the cockpit).
-**Planned** â€” Agent Client Protocol transport; integration-set restart reconstruction; automatic worktree cleanup; one task spanning several repositories.
+**Available now** — everything above without a *planned* qualifier, including cockpit-complete delivery, live run steering, visible operation feedback, review evidence lenses, per-run cost counterfactuals, and reusable workflows — all proven against a real multi-repository product (the first cross-repository CivicSuite delivery was pushed, PR'd, and merged from the cockpit).
+**Planned** — Agent Client Protocol transport; integration-set restart reconstruction; automatic worktree cleanup; one task spanning several repositories.
 
 Planned items are proposals recorded in [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md), not dated commitments.
 
@@ -431,7 +431,7 @@ If you want a managed cloud product, an agent that merges to `main` on your beha
 
 About 17,500 lines of TypeScript with Zod schemas at every input boundary, exactly one production dependency (`zod`), and a 2,700-line dashboard written in plain HTML, CSS, and JavaScript with no build step.
 
-The integration suite runs **fake provider commands against temporary Git repositories**, so the full orchestration path â€” planning, worktrees, validators, merges, review â€” is exercised without a single real credential. Contributions must keep it that way.
+The integration suite runs **fake provider commands against temporary Git repositories**, so the full orchestration path — planning, worktrees, validators, merges, review — is exercised without a single real credential. Contributions must keep it that way.
 
 ```powershell
 npm.cmd ci
@@ -453,8 +453,8 @@ Read [Contributing](CONTRIBUTING.md) first. Design proposals start as a GitHub D
 | [Architecture](docs/ARCHITECTURE.md) | Components, trust boundaries, persistence, deliberate non-features |
 | [Product specification](docs/PRODUCT_SPEC.md) | Canonical product definition |
 | [Implementation plan](docs/IMPLEMENTATION_PLAN.md) | Increment-by-increment delivery plan |
-| [Changelog](CHANGELOG.md) Â· [Security policy](SECURITY.md) | Release history and private vulnerability reporting |
+| [Changelog](CHANGELOG.md) · [Security policy](SECURITY.md) | Release history and private vulnerability reporting |
 
 ## License
 
-[Apache License 2.0](LICENSE) â€” use, modify, and redistribute under its terms, including the patent grant and the requirement to preserve attribution and change notices.
+[Apache License 2.0](LICENSE) — use, modify, and redistribute under its terms, including the patent grant and the requirement to preserve attribution and change notices.

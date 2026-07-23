@@ -527,9 +527,22 @@ ${classifyScript}
   var records = dataEl ? JSON.parse(dataEl.textContent || "[]") : [];
   var FETCH_TIMEOUT_MS = 10000;
 
-  async function fetchGitHub(url) {
+  // round3 Minor: 'sharedSignal', when passed, means the CALLER owns the
+  // single deadline for this logical check (see the tag check below, which
+  // threads one AbortController's signal through both of its fetches) — no
+  // fresh FETCH_TIMEOUT_MS timer is started here in that case, so a
+  // multi-fetch check never composes into more than its one shared budget.
+  // Without it (the default), fetchGitHub keeps its own independent
+  // FETCH_TIMEOUT_MS deadline, unchanged from before.
+  async function fetchGitHub(url, sharedSignal) {
     var controller = new AbortController();
-    var timer = setTimeout(function () { controller.abort(); }, FETCH_TIMEOUT_MS);
+    var ownTimer = null;
+    if (sharedSignal) {
+      if (sharedSignal.aborted) controller.abort();
+      else sharedSignal.addEventListener("abort", function () { controller.abort(); });
+    } else {
+      ownTimer = setTimeout(function () { controller.abort(); }, FETCH_TIMEOUT_MS);
+    }
     try {
       var res = await fetch(url, { headers: { Accept: "application/vnd.github+json" }, signal: controller.signal });
       var body = null;
@@ -547,7 +560,7 @@ ${classifyScript}
       }
       return { ok: false, reason: "network error — this browser could not reach GitHub" };
     } finally {
-      clearTimeout(timer);
+      if (ownTimer) clearTimeout(ownTimer);
     }
   }
 
@@ -628,15 +641,26 @@ ${classifyScript}
       // R6-export: presence alone does not prove a force-moved tag is
       // unchanged. Read the tag ref first; when it names an annotated tag
       // object (type "tag") rather than a commit directly, peel it one more
-      // hop through the SAME fetchGitHub helper (and its timeout) before
-      // classifyTag ever compares a commit against the recorded merge
-      // commit. classifyTag itself stays pure/synchronous — both fetch
-      // results are threaded in as a single response.
-      var tagRefResponse = await fetchGitHub(base + "/git/ref/tags/" + encodeURIComponent(record.tagName));
-      if (tagRefResponse.ok && tagRefResponse.body && tagRefResponse.body.object && tagRefResponse.body.object.type === "tag" && tagRefResponse.body.object.sha) {
-        tagRefResponse.tagObjectResponse = await fetchGitHub(base + "/git/tags/" + tagRefResponse.body.object.sha);
+      // hop through the SAME fetchGitHub helper before classifyTag ever
+      // compares a commit against the recorded merge commit. classifyTag
+      // itself stays pure/synchronous — both fetch results are threaded in
+      // as a single response.
+      //
+      // round3 Minor: ONE deadline for the whole logical tag check, shared
+      // across both fetches — without this, a slow ref response followed by
+      // a stalled peel could take nearly 2x FETCH_TIMEOUT_MS, since each
+      // fetchGitHub call used to start its own fresh timer.
+      var tagCheckController = new AbortController();
+      var tagCheckTimer = setTimeout(function () { tagCheckController.abort(); }, FETCH_TIMEOUT_MS);
+      try {
+        var tagRefResponse = await fetchGitHub(base + "/git/ref/tags/" + encodeURIComponent(record.tagName), tagCheckController.signal);
+        if (tagRefResponse.ok && tagRefResponse.body && tagRefResponse.body.object && tagRefResponse.body.object.type === "tag" && tagRefResponse.body.object.sha) {
+          tagRefResponse.tagObjectResponse = await fetchGitHub(base + "/git/tags/" + tagRefResponse.body.object.sha, tagCheckController.signal);
+        }
+        setCheckState(index, "tag", classify("tag", { tag: record.tagName, mergeCommitOid: record.mergeCommitOid }, tagRefResponse));
+      } finally {
+        clearTimeout(tagCheckTimer);
       }
-      setCheckState(index, "tag", classify("tag", { tag: record.tagName, mergeCommitOid: record.mergeCommitOid }, tagRefResponse));
     }
   }
 

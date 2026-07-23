@@ -52,9 +52,9 @@ function escapeHtml(value = "") {
 
 // M1 security fix (2026-07-22): review findings are reviewer-authored free text
 // (severity/location/rationale/disposition) that was concatenated straight into
-// innerHTML — a hostile or careless finding string could inject markup or script
+// innerHTML — a hostile or careless finding string could smuggle markup or script
 // into the cockpit. Escape every finding-sourced field. Extracted as a pure
-// function so the injection case is regression-tested directly against the
+// function so the hostile-markup case is regression-tested directly against the
 // exact code path refreshEvidence() renders.
 function renderFindingHtml(finding) {
   const severity = escapeHtml(String(finding.severity || "").toUpperCase());

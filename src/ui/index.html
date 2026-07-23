@@ -164,12 +164,12 @@
             <div id="run-status" class="status-pill"></div>
             <button id="approve-run" class="primary hidden">Approve &amp; continue</button>
             <button id="pause-run" class="secondary hidden" title="Stops new work from starting; anything already in progress finishes its current step first.">Pause run</button>
-            <button id="resume-run" class="primary hidden" title="Starts a recovery run: your approved plan, evidence, and finished work are kept, and interrupted tasks start over from their last safe point.">Resume this run</button>
+            <button id="resume-run" class="primary hidden" title="Starts a fresh recovery run linked to this one: everything recorded so far is kept for the record, but the work itself starts over — DevHarmonics plans again and re-runs the remaining tasks rather than continuing mid-task.">Resume this run</button>
             <button id="cancel-run" class="danger hidden">Cancel run</button>
           </div>
           <details class="run-status-legend">
             <summary>What do these run statuses mean?</summary>
-            <p class="field-help">Planning: the AI is still building the plan — nothing has changed yet. Awaiting approval: the run is stopped and needs your click above before it continues. Running: AI workers are actively making changes, inside the limits you approved. Paused: work is stopped but nothing is lost — resume it any time. Ready: the run finished and its work is ready to deliver. Not ready: the run finished but at least one task or check didn't pass — open a task card below to see which. Failed: the run itself could not complete. Cancelled: the run was stopped before finishing.</p>
+            <p class="field-help">Planning: the AI is still building the plan — nothing has changed yet. Awaiting approval: the run is stopped and needs your click above before it continues. Running: AI workers are actively making changes, inside the limits you approved. Paused: work is stopped; resuming starts a fresh recovery run. Ready: the run finished and its work is ready to deliver. Not ready: the run finished but something didn't pass — a task, a check, or the independent review — open the task cards and Final review below to see which. Failed: the run itself could not complete. Cancelled: the run was stopped before finishing.</p>
           </details>
 
           <div class="metrics">
@@ -316,7 +316,7 @@
             <div class="panel-heading"><div><span class="step">R</span><h2>Add a local repository</h2></div><span class="muted">DevHarmonics inspects Git state read-only and records compatibility issues.</span></div>
             <div class="settings-grid">
               <label>Product<select id="repository-product" class="input" required></select></label>
-              <label>Local folder<input id="repository-path" class="input" required spellcheck="false" placeholder="C:\\Users\\Scott\\Documents\\GitHub\\CivicSuite"></label>
+              <label>Local folder<input id="repository-path" class="input" required spellcheck="false" placeholder="C:\\Projects\\my-app"></label>
               <label>Repository role<select id="repository-role" class="input"><option value="umbrella">Umbrella</option><option value="shared_platform">Shared platform</option><option value="module" selected>Module</option><option value="desktop">Desktop</option><option value="installer">Installer</option><option value="documentation">Documentation</option><option value="release_truth">Release truth</option><option value="other">Other</option></select><small class="field-help">Umbrella = the top-level repo that ties the others together · Shared platform = shared code other repos depend on · Release truth = the repo whose files declare the official current version.</small></label>
               <label>Expected branch <small>Optional</small><input id="repository-branch" class="input" placeholder="main"></label>
             </div>
@@ -444,7 +444,7 @@
         </section>
 
         <section id="evidence-view" class="workspace-view hidden" aria-labelledby="evidence-title">
-          <div class="view-heading"><div><p class="eyebrow">READ-ONLY REPORTER</p><h2 id="evidence-title">Run evidence</h2><p class="field-help">Every attempt, review, and tool decision from a run is recorded here, and DevHarmonics never edits or deletes a record after it's written — this is the record you'd show someone to explain what happened.</p></div><div class="evidence-actions"><button id="refresh-evidence" class="secondary" type="button">Refresh evidence</button><button id="export-evidence" class="primary" type="button" title="Downloads this run's complete evidence file to your computer, exactly as recorded.">Export JSON</button></div></div>
+          <div class="view-heading"><div><p class="eyebrow">READ-ONLY REPORTER</p><h2 id="evidence-title">Run evidence</h2><p class="field-help">Every attempt, review, and tool decision from a run is recorded here as it happens — this is the record you'd show someone to explain what actually happened. This view is read-only.</p></div><div class="evidence-actions"><button id="refresh-evidence" class="secondary" type="button">Refresh evidence</button><button id="export-evidence" class="primary" type="button" title="Downloads this run's complete evidence file to your computer, exactly as recorded.">Export JSON</button></div></div>
           <div id="evidence-empty" class="panel empty-state">Select a run on the left to see its permanent record — every attempt, review, and tool decision, exactly as it happened.</div>
           <div id="evidence-content" class="hidden">
             <div id="evidence-metrics" class="metrics"></div>
@@ -452,7 +452,7 @@
             <section id="evidence-verdict" class="panel evidence-verdict" aria-live="polite"></section>
             <section class="panel evidence-panel"><div class="panel-heading"><h3>Independent review receipts</h3><span id="evidence-review-count" class="muted"></span></div><p class="field-help"><strong>READY</strong> = no blocking problems found, safe to deliver · <strong>NOT READY</strong> = problems found that must be fixed first · <strong>INCONCLUSIVE</strong> = the reviewer couldn't reach a definite verdict, often from missing evidence · <strong>invalidated</strong> = this review's verdict no longer applies because something changed after it ran; kept for the record, but don't rely on it. Each target is a repository (or path within one) the reviewer assessed separately.</p><div id="evidence-reviews" class="evidence-list"></div></section>
             <section class="panel evidence-panel"><div class="panel-heading"><h3>Integrity and attempts</h3><span class="muted">Evidence fingerprint (sha256):</span> <code id="evidence-hash"></code></div><p class="field-help">A fingerprint of this record, useful for comparing copies or citing it — it does not prove the record was never edited. It's recomputed from the database each time you view it, so it reflects the record's current contents, not a sealed original.</p><div id="evidence-attempts" class="evidence-list"></div></section>
-            <section class="panel evidence-panel"><div class="panel-heading"><h3>Tool policy receipts</h3><span id="evidence-tool-count" class="muted"></span></div><p class="field-help"><strong>allow</strong> = you gave permission for this step; whether it then succeeded is shown by the step's own result entry · <strong>deny</strong> = the tool call was blocked. "Locks" prevent another agent from touching the same file or resource at the same time.</p><div id="evidence-tools" class="evidence-list"></div></section>
+            <section class="panel evidence-panel"><div class="panel-heading"><h3>Tool policy receipts</h3><span id="evidence-tool-count" class="muted"></span></div><p class="field-help"><strong>allow</strong> = the step was permitted under the rules you configured (including your approval when one was required) — it does not by itself mean the step succeeded; look at the step's own result entry for that · <strong>deny</strong> = the tool call was blocked. "Locks" prevent another agent from touching the same file or resource at the same time.</p><div id="evidence-tools" class="evidence-list"></div></section>
           </div>
         </section>
       </main>

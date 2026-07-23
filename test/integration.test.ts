@@ -975,6 +975,155 @@ test("the delivery HTTP route serializes per repository, types its refusals, and
   }
 });
 
+test("POST /api/runs/:id/reconcile-delivery observes the remote read-only and reports the matches/diverged/unobserved trichotomy per artifact", async () => {
+  // DH-645 S3. Seeds a run whose delivery record spans three repositories —
+  // one pushed-and-merged (matching remote), one with a closed-without-merge
+  // draft PR (diverged), and one whose gh reads are refused (unobserved) —
+  // directly against the ledger, AFTER startDashboard() (S1's lesson:
+  // reconcileInterruptedRuns() runs once at startup and would otherwise
+  // reconcile a seeded-before-start run's status out from under this test).
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-reconcile-http-"));
+  const project = await createRepository(root);
+  await initializeProject(project);
+
+  const runner = async (request: { command: string; args: string[] }) => {
+    const joined = request.args.join(" ");
+    if (request.command === "git" && request.args[0] === "ls-remote" && request.args.includes("--tags")) {
+      return { stdout: "", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "git" && request.args[0] === "ls-remote" && joined.includes("recon-matches")) {
+      return { stdout: `${"b".repeat(40)}\trefs/heads/devharmonics/recon-matches\n`, stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "git" && request.args[0] === "ls-remote" && joined.includes("recon-diverged")) {
+      return { stdout: `${"e".repeat(40)}\trefs/heads/devharmonics/recon-diverged\n`, stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    if (request.command === "git" && request.args[0] === "ls-remote" && joined.includes("recon-unobserved")) {
+      return { stdout: `${"e".repeat(40)}\trefs/heads/devharmonics/recon-unobserved\n`, stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+    }
+    return { stdout: "", stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+  };
+
+  // Route pull requests by their URL (each repository gets a distinct PR
+  // number) rather than cwd, since every repository fixture shares one local
+  // checkout in this test.
+  const routedRunner = async (request: { command: string; args: string[]; cwd: string }) => {
+    if (request.command === "gh" && request.args[1] === "view") {
+      const pullRequestUrl = request.args[2] ?? "";
+      if (pullRequestUrl.endsWith("/pull/1")) {
+        return { stdout: JSON.stringify({ state: "MERGED", headRefOid: "b".repeat(40), statusCheckRollup: [{ status: "COMPLETED", conclusion: "SUCCESS" }] }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+      }
+      if (pullRequestUrl.endsWith("/pull/2")) {
+        return { stdout: JSON.stringify({ state: "CLOSED", headRefOid: "e".repeat(40), statusCheckRollup: [] }), stderr: "", exitCode: 0, durationMs: 1, timedOut: false };
+      }
+      if (pullRequestUrl.endsWith("/pull/3")) {
+        return { stdout: "", stderr: "gh: not logged in to any GitHub hosts. Run gh auth login", exitCode: 1, durationMs: 1, timedOut: false };
+      }
+    }
+    return runner(request);
+  };
+
+  const dashboard = await startDashboard({ projectPath: project, port: 0, open: false, deliveryRunner: routedRunner as never });
+  const dbPath = path.join(devHarmonicsDirectory(project), "devharmonics.db");
+  const seedLedger = new Ledger(dbPath);
+  const runId = seedLedger.createRun("Reconcile three repositories", project);
+  seedLedger.setRunStatus(runId, "running");
+  seedLedger.setRunStatus(runId, "ready", "READY");
+  seedLedger.prepareDeliveryRepository({ runId, repositoryId: "repo:matches", localPath: project, baseBranch: "main", baseCommit: "a".repeat(40), headCommit: "b".repeat(40), branch: "devharmonics/recon-matches" });
+  seedLedger.updateDeliveryRepository(runId, "repo:matches", { status: "merged", pullRequestUrl: "https://github.com/example/fixture/pull/1" });
+  seedLedger.prepareDeliveryRepository({ runId, repositoryId: "repo:diverged", localPath: project, baseBranch: "main", baseCommit: "a".repeat(40), headCommit: "e".repeat(40), branch: "devharmonics/recon-diverged" });
+  seedLedger.updateDeliveryRepository(runId, "repo:diverged", { status: "draft_pr_created", pullRequestUrl: "https://github.com/example/fixture/pull/2" });
+  seedLedger.prepareDeliveryRepository({ runId, repositoryId: "repo:unobserved", localPath: project, baseBranch: "main", baseCommit: "a".repeat(40), headCommit: "e".repeat(40), branch: "devharmonics/recon-unobserved" });
+  seedLedger.updateDeliveryRepository(runId, "repo:unobserved", { status: "draft_pr_created", pullRequestUrl: "https://github.com/example/fixture/pull/3" });
+  seedLedger.close();
+
+  try {
+    const missing = await fetch(`${dashboard.url}/api/runs/${"0".repeat(8)}-0000-0000-0000-${"0".repeat(12)}/reconcile-delivery`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+    assert.equal(missing.status, 404, "an unknown run is a 404, not a server fault");
+
+    const response = await fetch(`${dashboard.url}/api/runs/${runId}/reconcile-delivery`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+    assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+    const { repositories } = (await response.json()) as { repositories: Array<{ repositoryId: string; findings: Array<{ artifact: string; state: string; message: string }>; hasDivergence: boolean; hasUnobserved: boolean }> };
+    assert.equal(repositories.length, 3, "one reconciliation result per delivered repository");
+
+    const byRepo = (id: string) => repositories.find((repo) => repo.repositoryId === id)!;
+
+    const matches = byRepo("repo:matches");
+    assert.equal(matches.hasDivergence, false);
+    assert.equal(matches.hasUnobserved, false);
+    assert.ok(matches.findings.every((finding) => finding.state === "matches"), "every observed artifact for the untouched repository matches");
+    assert.ok(matches.findings.some((finding) => finding.artifact === "branch"));
+    assert.ok(matches.findings.some((finding) => finding.artifact === "pull_request"));
+    assert.ok(matches.findings.some((finding) => finding.artifact === "checks"));
+
+    const diverged = byRepo("repo:diverged");
+    assert.equal(diverged.hasDivergence, true);
+    const prFinding = diverged.findings.find((finding) => finding.artifact === "pull_request")!;
+    assert.equal(prFinding.state, "diverged");
+    assert.match(prFinding.message, /closed without merging/i, "the finding names the ledger's claim vs. observed reality in plain English");
+
+    const unobserved = byRepo("repo:unobserved");
+    assert.equal(unobserved.hasUnobserved, true);
+    assert.equal(unobserved.hasDivergence, false, "an unobserved artifact must never be counted as, or presented as, a divergence");
+    const prUnobserved = unobserved.findings.find((finding) => finding.artifact === "pull_request")!;
+    assert.equal(prUnobserved.state, "unobserved");
+    assert.match(prUnobserved.message, /could not check/i, "unobserved is reported as 'could not check', never dropped and never a silent confirmation");
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("POST /api/runs/:id/reconcile-delivery is bounded by a timeout so a hanging tool cannot hang the route", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "devharmonics-reconcile-timeout-"));
+  const project = await createRepository(root);
+  await initializeProject(project);
+
+  const hangingRunner = () => new Promise<never>(() => {}); // never resolves — simulates a hung git/gh process
+  const dashboard = await startDashboard({
+    projectPath: project,
+    port: 0,
+    open: false,
+    deliveryRunner: hangingRunner as never,
+    reconciliationTimeoutMs: 300,
+  });
+  const dbPath = path.join(devHarmonicsDirectory(project), "devharmonics.db");
+  const seedLedger = new Ledger(dbPath);
+  const runId = seedLedger.createRun("Reconcile against a hanging tool", project);
+  seedLedger.setRunStatus(runId, "running");
+  seedLedger.setRunStatus(runId, "ready", "READY");
+  seedLedger.prepareDeliveryRepository({ runId, repositoryId: "repo:hang", localPath: project, baseBranch: "main", baseCommit: "a".repeat(40), headCommit: "b".repeat(40), branch: "devharmonics/recon-hang" });
+  seedLedger.updateDeliveryRepository(runId, "repo:hang", { status: "branch_pushed" });
+  seedLedger.close();
+
+  try {
+    const startedAt = Date.now();
+    const response = await fetch(`${dashboard.url}/api/runs/${runId}/reconcile-delivery`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(response.status, 200);
+    assert.ok(elapsedMs < 5_000, `the route must not hang on a stuck tool, took ${elapsedMs}ms`);
+    const { repositories } = (await response.json()) as { repositories: Array<{ findings: Array<{ artifact: string; state: string }> }> };
+    const branch = repositories[0]!.findings.find((finding) => finding.artifact === "branch")!;
+    assert.equal(branch.state, "unobserved");
+
+    // The server itself must still be responsive after a hung reconciliation
+    // call settled — the shared HTTP server was never blocked.
+    const stillAlive = await fetch(`${dashboard.url}/api/runs`);
+    assert.equal(stillAlive.status, 200);
+  } finally {
+    await dashboard.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("GET /api/inbox projects pending decisions read-only and drops them the instant the ledger shows them resolved", async () => {
   // DH-645 S1. Seeds three kinds of genuinely-waiting decision directly
   // against the ledger, then drives the REAL HTTP endpoint. No

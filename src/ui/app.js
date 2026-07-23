@@ -29,7 +29,26 @@ const state = {
   steering: {},
   inboxItems: [],
   program: { groups: [], totals: {} },
+  // DH-645 S3. Client-side ONLY (locked decision 1: nothing here is
+  // persisted) — reconciliation is computed on request and lives only for
+  // this page session. Keyed by `${runId}:${repositoryId}`.
+  reconciliationByRepo: {},
 };
+
+function reconciliationKey(runId, repositoryId) {
+  return `${runId}:${repositoryId}`;
+}
+
+/**
+ * A run's divergence marker (S3 story item 4) reflects only the LAST
+ * reconciliation this page session ran for any of its repositories — never
+ * a persisted or historical claim, and it clears the moment a later check on
+ * the same repository comes back clean.
+ */
+function runHasKnownDivergence(runId) {
+  const prefix = `${runId}:`;
+  return Object.keys(state.reconciliationByRepo).some((key) => key.startsWith(prefix) && state.reconciliationByRepo[key].hasDivergence);
+}
 const $ = (selector) => document.querySelector(selector);
 
 async function api(url, options = {}) {
@@ -103,12 +122,24 @@ function renderInboxItemHtml(item) {
   const runId = escapeHtml(item.runId || "");
   const label = escapeHtml(item.actionTarget?.label || "Open");
   const waiting = escapeHtml(formatWaitingSince(item.waitingSinceIso));
+  // DH-645 S3: a delivery item can ask the same honest question the delivery
+  // panel does ("Check against GitHub") without leaving the inbox. Only
+  // rendered for delivery items that actually name a repository; the ledger
+  // record itself is never presented as remote confirmation — nothing is
+  // shown here until this button is clicked (state hydrated by
+  // renderInboxList, since this function stays a pure, state-free seam).
+  const repositoryId = item.repositoryId ? escapeHtml(item.repositoryId) : "";
+  const reconcileMarkup = item.kind === "delivery_step_approval" && repositoryId
+    ? `<button class="secondary small" type="button" data-reconcile-run-id="${runId}" data-reconcile-repository-id="${repositoryId}">Check against GitHub</button>
+      <div class="reconcile-results" data-reconcile-results-for="${runId}:${repositoryId}"></div>`
+    : "";
   return `<article class="inbox-item" data-inbox-kind="${kind}">
     <div>
       <strong>${title}</strong>
       <span>${INBOX_KIND_LABELS[item.kind] || kind} · waiting since ${waiting}</span>
       <p>${summary}</p>
       <p>${evidence}</p>
+      ${reconcileMarkup}
     </div>
     <button class="secondary small" type="button" data-inbox-run-id="${runId}">${label}</button>
   </article>`;
@@ -134,10 +165,19 @@ function renderProgramRunHtml(entry) {
   const bucket = escapeHtml(String(entry.bucket || ""));
   const goal = escapeHtml(entry.goalSummary || "");
   const reason = escapeHtml(entry.reason || "");
-  return `<button type="button" class="program-run" data-program-bucket="${bucket}" data-program-run-id="${runId}">
+  // DH-645 S3 item 4: client-side-only divergence marker (never persisted —
+  // see runHasKnownDivergence). `entry.divergent` is a plain boolean this
+  // module computes itself before rendering; nothing here reads free text
+  // from it, so no new escaping surface, but the class/marker still only
+  // ever appears when explicitly set — a caller that omits the field (as
+  // every existing caller and this function's own regression test does)
+  // renders identically to before this marker existed.
+  const divergent = Boolean(entry.divergent);
+  return `<button type="button" class="program-run${divergent ? " program-run-diverged" : ""}" data-program-bucket="${bucket}" data-program-run-id="${runId}">
     <strong>${goal}</strong>
     <span class="program-run-bucket">${PROGRAM_BUCKET_LABELS[entry.bucket] || bucket}</span>
     <span class="program-run-reason">${reason}</span>
+    ${divergent ? '<span class="program-run-divergence-marker" role="alert">GitHub check found a divergence — see the delivery panel</span>' : ""}
   </button>`;
 }
 
@@ -151,6 +191,46 @@ function renderProgramGroupHtml(group) {
     <h3>${label}<span class="program-group-counts">${escapeHtml(counts)}</span></h3>
     ${(group.runs || []).map(renderProgramRunHtml).join("")}
   </section>`;
+}
+
+// DH-645 S3. Delivered-vs-observed reconciliation render seam. `result` is
+// whatever POST /api/runs/:id/reconcile-delivery returned for one repository
+// (see src/reconciliation.ts) — its findings' `message` strings ultimately
+// echo branch names, PR state, and GitHub's own text, so every interpolated
+// field is escaped, same threat shape and same pure-function-for-testing
+// discipline as renderInboxItemHtml/renderProgramRunHtml above. Three
+// visually distinct treatments, honestly labeled (locked decision 3): a
+// match is a single quiet confirmation line; a divergence is a prominent,
+// alert-role finding; "could not check" is never rendered as, or worded
+// like, a confirmation.
+const RECONCILIATION_ARTIFACT_LABELS = {
+  branch: "Branch",
+  pull_request: "Pull request",
+  checks: "Checks",
+  tag: "Release tag",
+};
+
+function renderReconciliationFindingHtml(finding) {
+  const artifact = escapeHtml(RECONCILIATION_ARTIFACT_LABELS[finding.artifact] || finding.artifact || "");
+  const message = escapeHtml(finding.message || "");
+  if (finding.state === "diverged") {
+    return `<p class="reconcile-finding reconcile-diverged" role="alert"><strong>${artifact} — diverged from the ledger:</strong> ${message}</p>`;
+  }
+  if (finding.state === "unobserved") {
+    return `<p class="reconcile-finding reconcile-unobserved"><strong>${artifact}:</strong> ${message}</p>`;
+  }
+  return `<p class="reconcile-finding reconcile-matches"><strong>${artifact}:</strong> confirmed on GitHub, matches the ledger.</p>`;
+}
+
+function renderReconciliationHtml(result) {
+  if (!result || !Array.isArray(result.findings) || !result.findings.length) {
+    return '<p class="reconcile-finding reconcile-unobserved">Nothing has been delivered to GitHub yet for this repository — there is nothing to check.</p>';
+  }
+  const checkedAt = escapeHtml(formatWaitingSince(result.checkedAt));
+  return `<div class="reconcile-results-body">
+    ${result.findings.map(renderReconciliationFindingHtml).join("")}
+    <p class="field-help reconcile-checked-at">Checked against GitHub ${checkedAt} ago.</p>
+  </div>`;
 }
 
 // DH-632 visible operation feedback: one shared acknowledgement/lifecycle layer for
@@ -1206,6 +1286,22 @@ async function refreshInbox() {
   if (state.view === "inbox") { renderInboxList(); renderProgramStatus(); }
 }
 
+// DH-645 S3. Read-only, on-demand: POSTs the reconciliation route for a run
+// and stores every repository's result in page-session-only state (never
+// persisted — locked decision 1). The route itself returns results for
+// every delivered repository on the run, so one click updates every card
+// for that run, not just the one clicked.
+async function runReconciliationCheck(runId) {
+  const { repositories } = await api(`/api/runs/${runId}/reconcile-delivery`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  for (const result of repositories) {
+    state.reconciliationByRepo[reconciliationKey(result.runId, result.repositoryId)] = result;
+  }
+  return repositories;
+}
+
 function renderInboxBadge() {
   const badge = $("#inbox-nav-badge");
   if (!badge) return;
@@ -1219,6 +1315,18 @@ function renderInboxList() {
   $("#inbox-empty").classList.toggle("hidden", items.length > 0);
   $("#inbox-list").classList.toggle("hidden", items.length === 0);
   $("#inbox-list").innerHTML = items.map(renderInboxItemHtml).join("");
+  // renderInboxItemHtml stays a pure, state-free seam (regression-tested
+  // against hostile markup); this hydration pass fills in any reconciliation
+  // result this page session already holds for a rendered item, using the
+  // exact same escaping seam the delivery panel uses.
+  for (const item of items) {
+    if (item.kind !== "delivery_step_approval" || !item.repositoryId) continue;
+    const key = reconciliationKey(item.runId, item.repositoryId);
+    const result = state.reconciliationByRepo[key];
+    if (!result) continue;
+    const container = document.querySelector(`[data-reconcile-results-for="${CSS.escape(key)}"]`);
+    if (container) container.innerHTML = renderReconciliationHtml(result);
+  }
 }
 
 // DH-645 S2. Same recompute-on-every-refresh discipline as renderInboxList:
@@ -1231,7 +1339,15 @@ function renderProgramStatus() {
   const groups = state.program?.groups || [];
   empty.classList.toggle("hidden", groups.length > 0);
   panel.classList.toggle("hidden", groups.length === 0);
-  panel.innerHTML = groups.map(renderProgramGroupHtml).join("");
+  // DH-645 S3 item 4: annotate each run entry with this SESSION's own
+  // client-side-only reconciliation state before rendering — the projection
+  // from the server never carries this (locked decision 1: nothing here is
+  // persisted).
+  const annotated = groups.map((group) => ({
+    ...group,
+    runs: (group.runs || []).map((entry) => ({ ...entry, divergent: runHasKnownDivergence(entry.runId) })),
+  }));
+  panel.innerHTML = annotated.map(renderProgramGroupHtml).join("");
 }
 
 function connectEventStream() {
@@ -1469,6 +1585,11 @@ function renderDelivery(run) {
     const merged = ["merged", "tagged"].includes(repository.status);
     const tagged = repository.status === "tagged";
     const settled = tagged;
+    // DH-645 S3: "Check against GitHub" is only offered once something has
+    // actually been pushed — reconciling a 'prepared' or 'failed' record
+    // would mean asking about an artifact that was never delivered.
+    const reconcilable = pushed;
+    const reconciliation = state.reconciliationByRepo[reconciliationKey(run.id, repository.repositoryId)];
     return `<article class="integration-repository-card delivery-repository-card">
       <header><strong>${escapeHtml(repository.repositoryId)}</strong><span class="lifecycle ${created ? "qualified" : repository.status === "failed" ? "degraded" : ""}" title="${escapeHtml(DELIVERY_STATUS_DEFINITIONS[repository.status] || "")}">${escapeHtml(repository.status.replaceAll("_", " "))}</span></header>
       <small class="muted">commit range</small>
@@ -1478,6 +1599,10 @@ function renderDelivery(run) {
       ${repository.pullRequestUrl ? `<a class="delivery-pr-link" href="${escapeHtml(repository.pullRequestUrl)}" target="_blank" rel="noreferrer">${merged ? "View merged pull request" : "Open draft pull request"}</a>` : ""}
       ${repository.error ? `<p class="error">${escapeHtml(repository.error)}</p>` : ""}
       ${tagged ? `<p class="delivery-done">Delivered, merged, and tagged${repository.releaseTag ? ` as ${escapeHtml(repository.releaseTag)}` : ""} — this repository is fully shipped.</p>` : merged ? `<p class="delivery-done">Merged under your approval. Tag the release below when you are ready.</p>` : ""}
+      ${reconcilable ? `<div class="plan-actions delivery-reconcile-row">
+        <button class="secondary small" type="button" data-reconcile-check data-repository-id="${escapeHtml(repository.repositoryId)}">Check against GitHub</button>
+      </div>
+      <div class="reconcile-results" data-reconcile-results-for="${escapeHtml(reconciliationKey(run.id, repository.repositoryId))}">${reconciliation ? renderReconciliationHtml(reconciliation) : ""}</div>` : ""}
       <div class="plan-actions">
         <button class="secondary small" type="button" data-delivery-action="push_branch" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || pushed ? "disabled" : ""}>${pushed ? "Branch pushed ✓" : "Approve &amp; push branch"}</button>
         <button class="secondary small" type="button" data-delivery-action="create_draft_pr" data-repository-id="${escapeHtml(repository.repositoryId)}" data-head-commit="${escapeHtml(repository.headCommit)}" ${!externalWritesAllowed || !pushed || created ? "disabled" : ""}>${created ? "Draft PR created ✓" : "Approve &amp; create draft pull request"}</button>
@@ -1845,7 +1970,18 @@ $("#refresh-inbox").addEventListener("click", async () => {
     renderProgramStatus();
   }, { busyLabel: "Refreshing…" });
 });
-$("#inbox-list").addEventListener("click", (event) => {
+$("#inbox-list").addEventListener("click", async (event) => {
+  // DH-645 S3: same honest, non-destructive "Check against GitHub" action as
+  // the delivery panel, reachable without leaving the inbox.
+  const reconcileButton = event.target.closest("[data-reconcile-run-id]");
+  if (reconcileButton) {
+    await withOperation(reconcileButton, "Checking against GitHub", async () => {
+      await runReconciliationCheck(reconcileButton.dataset.reconcileRunId);
+      renderInboxList();
+      renderProgramStatus();
+    }, { busyLabel: "Checking…" });
+    return;
+  }
   const button = event.target.closest("[data-inbox-run-id]");
   if (!button) return;
   state.composing = false;
@@ -2303,6 +2439,18 @@ $("#board").addEventListener("click", (event) => {
   if (button) openTask(button.dataset.taskId);
 });
 $("#delivery-repositories").addEventListener("click", async (event) => {
+  // DH-645 S3: a separate, non-destructive action — no confirm() dialog,
+  // because unlike every other control in this panel it changes nothing;
+  // it only asks GitHub a question and shows the honest answer.
+  const reconcileButton = event.target.closest("[data-reconcile-check]");
+  if (reconcileButton) {
+    await withOperation(reconcileButton, "Checking against GitHub", async () => {
+      await runReconciliationCheck(state.selectedRunId);
+      const run = state.runs.find((item) => item.id === state.selectedRunId);
+      if (run) renderDelivery(run);
+    }, { busyLabel: "Checking…" });
+    return;
+  }
   const button = event.target.closest("[data-delivery-action]");
   if (!button) return;
   const action = button.dataset.deliveryAction;

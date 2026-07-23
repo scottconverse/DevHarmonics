@@ -458,3 +458,15 @@ pre { margin: 0; padding: 12px; overflow: auto; max-height: 280px; background: #
 .program-run[data-program-bucket="waiting_on_you"] .program-run-bucket { color: var(--blue); }
 .program-run[data-program-bucket="finished"] .program-run-bucket { color: var(--muted); }
 .program-run-reason { color: var(--muted); font-size: 12px; }
+
+/* DH-645 S3 reconciliation: three honestly-distinct treatments, plus the
+   client-side-only program-view divergence marker (never persisted). */
+.delivery-reconcile-row { margin-top: 10px; }
+.reconcile-results { margin-top: 8px; display: grid; gap: 6px; }
+.reconcile-finding { margin: 0; font-size: 12px; line-height: 1.45; padding: 2px 0; }
+.reconcile-matches { color: var(--muted); }
+.reconcile-diverged { color: var(--red); font-weight: 650; background: rgba(255, 107, 107, .08); border: 1px solid var(--red); border-radius: 8px; padding: 8px 10px; }
+.reconcile-unobserved { color: var(--amber); font-style: italic; }
+.reconcile-checked-at { margin-top: 2px; }
+.program-run-diverged { border-left: 3px solid var(--red); padding-left: 8px; }
+.program-run-divergence-marker { color: var(--red); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }

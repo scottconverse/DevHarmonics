@@ -3534,6 +3534,118 @@ test("the program run HTML seam (src/ui/app.js) escapes every interpolated field
   assert.match(html, /&lt;iframe src=javascript:alert\(3\)&gt;/, "reason is escaped in full, not dropped");
 });
 
+test("the program run HTML seam renders a client-side-only divergence marker only when told to, and never otherwise", () => {
+  // DH-645 S3 item 4. A run's divergence marker reflects only this page
+  // session's own last reconciliation (never persisted); the pure render
+  // function takes that as a plain `divergent` boolean so it stays testable
+  // without any server or DOM state.
+  const appSource = readFileSync(path.join(process.cwd(), "src", "ui", "app.js"), "utf8");
+  const start = appSource.indexOf('function escapeHtml(value = "")');
+  const end = appSource.indexOf("\n// DH-632 visible operation feedback");
+  const { renderProgramRunHtml } = new Function(
+    `${appSource.slice(start, end)}; return { escapeHtml, renderProgramRunHtml };`,
+  )() as { renderProgramRunHtml: (entry: Record<string, unknown>) => string };
+
+  const clean = renderProgramRunHtml({ runId: "run-1", bucket: "moving", goalSummary: "Ship it", reason: "1 of 2 tasks done" });
+  assert.doesNotMatch(clean, /program-run-diverged/, "no marker class when divergent is unset");
+  assert.doesNotMatch(clean, /GitHub check found a divergence/i, "no marker text when divergent is unset");
+
+  const diverged = renderProgramRunHtml({ runId: "run-1", bucket: "moving", goalSummary: "Ship it", reason: "1 of 2 tasks done", divergent: true });
+  assert.match(diverged, /program-run-diverged/, "the diverged class is present when divergent is set");
+  assert.match(diverged, /role="alert"/, "the marker is announced as an alert");
+  assert.match(diverged, /GitHub check found a divergence/i);
+});
+
+test("the reconciliation results HTML seam (src/ui/app.js) escapes findings and gives matches/diverged/unobserved three visually distinct treatments", () => {
+  // DH-645 S3. Drive the REAL shipped renderReconciliationHtml pure seam
+  // extracted from src/ui/app.js. finding.message ultimately echoes branch
+  // names and GitHub's own PR/check text — same threat shape as
+  // renderFindingHtml/renderInboxItemHtml above.
+  const appSource = readFileSync(path.join(process.cwd(), "src", "ui", "app.js"), "utf8");
+  const start = appSource.indexOf('function escapeHtml(value = "")');
+  const end = appSource.indexOf("\n// DH-632 visible operation feedback");
+  assert.ok(start >= 0 && end > start, "escapeHtml/renderReconciliationHtml must be extractable from app.js");
+  const { renderReconciliationHtml } = new Function(
+    `${appSource.slice(start, end)}; return { escapeHtml, renderReconciliationHtml };`,
+  )() as { renderReconciliationHtml: (result: Record<string, unknown>) => string };
+
+  // Nothing delivered yet: an explicit, honest "nothing to check" state, not
+  // a blank panel and not a false confirmation.
+  const nothing = renderReconciliationHtml({ findings: [] });
+  assert.match(nothing, /nothing to check/i);
+  assert.equal(/reconcile-matches/.test(nothing), false, "an empty result must never render as a match");
+
+  const hostileMessage = 'The ledger records branch </strong><script>alert(document.cookie)</script> — <img src=x onerror=alert(1)>';
+  const result = {
+    checkedAt: new Date(Date.now() - 60_000).toISOString(),
+    findings: [
+      { artifact: "branch", state: "matches", message: "should not be shown verbatim for a match" },
+      { artifact: "pull_request", state: "diverged", message: hostileMessage },
+      { artifact: "checks", state: "unobserved", message: 'Could not check: <iframe src=javascript:alert(2)>"><svg onload=alert(3)>' },
+    ],
+  };
+  const html = renderReconciliationHtml(result);
+
+  // Three visually distinct treatments.
+  assert.match(html, /reconcile-matches/, "a match gets its own quiet treatment");
+  assert.match(html, /reconcile-diverged/, "a divergence gets its own prominent treatment");
+  assert.match(html, /reconcile-unobserved/, "an unobserved artifact gets its own treatment");
+  assert.match(html, /role="alert"/, "a divergence is announced as an alert; nothing else needs to be");
+
+  // The ledger record is never presented as remote confirmation on its own —
+  // a match states it was actually confirmed against GitHub.
+  assert.match(html, /confirmed on GitHub/i);
+  // Unobserved is stated plainly as "could not check", never as silence or
+  // as a confirmation.
+  assert.match(html, /could not check/i);
+
+  // Every hostile field is escaped, never dropped, never executed.
+  assert.doesNotMatch(html, /<script/i);
+  assert.doesNotMatch(html, /<img/i);
+  assert.doesNotMatch(html, /<iframe/i);
+  assert.doesNotMatch(html, /<svg/i);
+  assert.match(html, /&lt;script&gt;alert\(document\.cookie\)&lt;\/script&gt;/);
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.match(html, /&lt;iframe src=javascript:alert\(2\)&gt;/);
+  assert.match(html, /&quot;&gt;&lt;svg onload=alert\(3\)&gt;/);
+});
+
+test("the inbox item HTML seam offers a 'Check against GitHub' button, escaped, only for delivery items that name a repository", () => {
+  // DH-645 S3. Extends the S1 escaping-seam test above: the reconcile button
+  // and its (initially empty) results container must escape repositoryId
+  // exactly like every other free-text-derived field, and must never appear
+  // for a kind/record that has nothing to check.
+  const appSource = readFileSync(path.join(process.cwd(), "src", "ui", "app.js"), "utf8");
+  const start = appSource.indexOf('function escapeHtml(value = "")');
+  const end = appSource.indexOf("\n// DH-632 visible operation feedback");
+  const { renderInboxItemHtml } = new Function(
+    `${appSource.slice(start, end)}; return { escapeHtml, renderInboxItemHtml };`,
+  )() as { renderInboxItemHtml: (item: Record<string, unknown>) => string };
+
+  const planItem = { kind: "plan_approval", runId: "run-1", title: "Ship it", plainSummary: "s", evidence: "e", actionTarget: { label: "Open" } };
+  assert.doesNotMatch(renderInboxItemHtml(planItem), /Check against GitHub/, "a non-delivery item offers no reconcile button — there is nothing to check");
+
+  const noRepo = { kind: "delivery_step_approval", runId: "run-1", title: "Ship it", plainSummary: "s", evidence: "e", actionTarget: { label: "Open" } };
+  assert.doesNotMatch(renderInboxItemHtml(noRepo), /Check against GitHub/, "a delivery item with no repositoryId offers no reconcile button");
+
+  const hostileItem = {
+    kind: "delivery_step_approval",
+    runId: '"><img src=x onerror=alert(9)>',
+    repositoryId: '"><script>alert(document.cookie)</script>',
+    title: "Ship it",
+    plainSummary: "s",
+    evidence: "e",
+    actionTarget: { label: "Open" },
+  };
+  const html = renderInboxItemHtml(hostileItem);
+  assert.match(html, /Check against GitHub/);
+  assert.doesNotMatch(html, /<script/i, "a <script> tag in repositoryId must never reach innerHTML unescaped");
+  assert.doesNotMatch(html, /<img/i);
+  assert.match(html, /data-reconcile-run-id="[^"]*&lt;img[^"]*"/);
+  assert.match(html, /data-reconcile-repository-id="[^"]*&lt;script&gt;/);
+  assert.match(html, /data-reconcile-results-for="[^"]*&lt;img[^"]*:[^"]*&lt;script&gt;[^"]*"/, "the results container key is composed from the SAME escaped values");
+});
+
 test("migration 30's delivery-table rebuild preserves row data from a physical schema-29 database", async () => {
   // Gate finding ENG-3 (2026-07-22): the CHECK-widening RENAME/rebuild in
   // migration 30 had no test proving a delivery row's VALUES survive it.

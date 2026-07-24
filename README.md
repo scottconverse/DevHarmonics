@@ -12,6 +12,7 @@ DevHarmonics never merges anything without you. It hands you a reviewed branch a
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Latest release](https://img.shields.io/badge/release-v0.6.1-informational)](https://github.com/scottconverse/DevHarmonics/releases/tag/v0.6.1)
+[![CI](https://github.com/scottconverse/DevHarmonics/actions/workflows/ci.yml/badge.svg)](https://github.com/scottconverse/DevHarmonics/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/node-%E2%89%A524-green)](package.json)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](#requirements)
 [![Status](https://img.shields.io/badge/status-early%20public%20preview-orange)](#project-status)
@@ -398,9 +399,9 @@ What that judgement rests on, in both directions:
 
 | Signal | Reading |
 |---|---|
-| Automated suite | 339 tests across configuration, credential stripping, provider parsing, plan validation, cancellation, SQLite receipts, local-model qualification and chunked review, review-lens quorums and the claims/diff divergence gate, workflow parsing/provenance/promotion guards, cockpit delivery gates, workspace-isolation guards, the inbox/program-status projections, delivered-vs-observed reconciliation, the standalone status export, decision records and their retrieval, the dashboard server, and full fake-provider orchestration through real Git worktrees |
+| Automated suite | 353 declared cross-platform test cases across configuration, credential stripping, provider parsing, plan validation, cancellation, SQLite receipts, local-model qualification and chunked review, review-lens quorums and the claims/diff divergence gate, workflow parsing/provenance/promotion guards, cockpit delivery gates, workspace-isolation guards, the inbox/program-status projections, delivered-vs-observed reconciliation, the standalone status export, decision records and their retrieval, the CI harness, the dashboard server, and full fake-provider orchestration through real Git worktrees. Each OS run executes the applicable subset (the process-tree cases include mutually exclusive Windows and POSIX declarations), and the runner reports its executable count in that run |
 | Schema handling | Ordered transactional migrations to ledger schema 37, automatic pre-upgrade backups, integrity + foreign-key validation, rollback on failure, and refusal to open a newer schema |
-| Continuous integration | **None in this repository.** The merge gate is the local suite plus independent review — nothing automated catches a regression on push |
+| Continuous integration | GitHub Actions runs the release-truth check and full suite on Node 24 for Ubuntu and Windows. Separate Ubuntu jobs run every compiled test file once in a logged, seeded shuffled order and mutation-prove that the verification-integrity sentinel goes RED before restoration returns it to GREEN |
 | Distribution | Source checkout only. No installer, no published package |
 | Operational tooling | Temporary worktrees are retained for inspection until explicit cleanup is added; an interrupted integration set is not reconstructed after restart |
 

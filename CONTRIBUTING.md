@@ -9,6 +9,15 @@ npm.cmd ci
 npm.cmd run check
 ```
 
+GitHub Actions runs `check` on Node 24 for Ubuntu and Windows. It also runs
+the full compiled suite in a logged, seeded test-file order and mutation-proves
+the verification-integrity sentinel. To reproduce those lanes locally:
+
+```powershell
+npm.cmd run test:randomized -- --seed local-reproduction
+npm.cmd run test:mutation
+```
+
 Keep provider authentication outside tests. The integration suite uses fake provider commands and temporary Git repositories; contributions must not require real subscription credentials or API keys.
 
 Use focused commits, preserve safety boundaries, and update documentation and tests whenever observable behavior changes.

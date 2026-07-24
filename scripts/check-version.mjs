@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { countDeclaredNodeTests } from "../dist/src/ci-harness.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
@@ -41,6 +42,14 @@ const expectations = [
   // LEDGER_SCHEMA_VERSION or renames the prior-tag rollback target.
   ["docs/ROLLBACK.md", `backup-v33-to-v34`],
   ["docs/ROLLBACK.md", `Ledger schema 33 → 34`],
+  // Development-line rollback truth after Slices B/C: a direct opening by
+  // the schema-37 build creates one v34-to-v37 backup even though migrations
+  // 35, 36, and 37 apply in order. Keep both the pairwise history and the
+  // actual direct-upgrade backup name visible.
+  ["docs/ROLLBACK.md", `Ledger schema 34 → 35`],
+  ["docs/ROLLBACK.md", `Ledger schema 35 → 36`],
+  ["docs/ROLLBACK.md", `Ledger schema 36 → 37`],
+  ["docs/ROLLBACK.md", `backup-v34-to-v37`],
 ];
 
 const failures = [];
@@ -110,24 +119,27 @@ if (process.argv.includes("--release")) {
   checks += 1;
 }
 
-// Truth-sourced test count (R4-003, fixed for good): the README states a test
-// total that drifted four times because it was a hand-maintained literal. Count
-// the actual `test(` declarations in test/*.test.ts and require the README to
-// match — so the number can never again claim a total the suite doesn't have.
+// Truth-sourced declared-test census (R4-003 / UNIT1-AUD-001). Runtime totals
+// differ by OS because the process-tree regressions deliberately declare
+// mutually exclusive Windows and POSIX cases. Count every syntactic test,
+// test.only, test.skip, and test.todo call across the source instead: the AST
+// ignores comments/string examples and includes indented/conditional cases.
+// README labels this number as declarations and explicitly explains the
+// per-platform subset, so it cannot be mistaken for one run's TAP total.
 {
   const testDir = path.join(root, "test");
   const testFiles = (await readdir(testDir)).filter((name) => name.endsWith(".test.ts"));
   let declared = 0;
   for (const file of testFiles) {
     const contents = await readFile(path.join(testDir, file), "utf8");
-    declared += (contents.match(/^test\(/gm) ?? []).length;
+    declared += countDeclaredNodeTests(contents, file);
   }
   const readme = await readFile(path.join(root, "README.md"), "utf8");
-  const claimed = readme.match(/(\d+) tests across/);
+  const claimed = readme.match(/(\d+) declared cross-platform test cases/);
   if (!claimed) {
-    failures.push("README.md: missing the 'N tests across' automated-suite count");
+    failures.push("README.md: missing the declared cross-platform test-case census");
   } else if (Number(claimed[1]) !== declared) {
-    failures.push(`README.md: claims ${claimed[1]} tests across, but test/*.test.ts declares ${declared} — update README.md:397 to ${declared}`);
+    failures.push(`README.md: claims ${claimed[1]} declared cross-platform test cases, but the syntax-aware test/*.test.ts census is ${declared}`);
   }
   checks += 1;
 }

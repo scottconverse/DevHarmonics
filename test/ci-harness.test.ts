@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { countDeclaredNodeTests, replaceExactlyOnce, seededShuffle } from "../src/ci-harness.js";
 import { analyzeVerificationIntegrity } from "../src/verification-integrity.js";
@@ -61,4 +62,12 @@ test("declared test census counts syntax, not line shape or comment/string phant
   `;
 
   assert.equal(countDeclaredNodeTests(source, "fixture.test.ts"), 3);
+});
+
+test("the cross-platform suite uses the runner's canonical temporary directory", async () => {
+  const workflow = await readFile(".github/workflows/ci.yml", "utf8");
+  const fullSuite = workflow.slice(workflow.indexOf("  full-suite:"), workflow.indexOf("  randomized-order:"));
+
+  assert.match(fullSuite, /TEMP:\s*\$\{\{\s*runner\.temp\s*\}\}/);
+  assert.match(fullSuite, /TMP:\s*\$\{\{\s*runner\.temp\s*\}\}/);
 });

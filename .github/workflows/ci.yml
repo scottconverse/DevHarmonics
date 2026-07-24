@@ -35,6 +35,12 @@ jobs:
         run: npm ci
       - name: Run release-truth checks and the full suite
         run: npm run check
+        # Windows runner defaults can expose the same directory once as an 8.3
+        # path and once as its long path, defeating security-sensitive
+        # containment comparisons. The runner context supplies one spelling.
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
 
   randomized-order:
     name: Randomized test-file order

@@ -18,7 +18,12 @@ import { startDashboard } from "../src/server.js";
 import { ModelCatalogCoordinator } from "../src/catalog.js";
 
 async function git(cwd: string, args: string[]) {
-  const result = await runProcess({ command: "git", args, cwd, timeoutMs: 30_000 });
+  const result = await runProcess({
+    command: "git",
+    args: ["-c", "user.name=DevHarmonics Tests", "-c", "user.email=devharmonics-tests@local", ...args],
+    cwd,
+    timeoutMs: 30_000,
+  });
   assert.equal(result.exitCode, 0, result.stderr || result.stdout);
   return result;
 }
@@ -28,17 +33,11 @@ async function createRepository(root: string): Promise<string> {
   await import("node:fs/promises").then(({ mkdir }) => mkdir(project, { recursive: true }));
   await git(project, ["init", "-b", "main"]);
   await writeFile(path.join(project, "README.md"), "# Fixture\n", "utf8");
-  await writeFile(path.join(project, ".gitignore"), "node_modules/\n", "utf8");
+  // No trailing slash: POSIX sees the shared-dependency fixture below as a
+  // symlink, not a directory, while Windows exposes it as a junction.
+  await writeFile(path.join(project, ".gitignore"), "/node_modules\n", "utf8");
   await git(project, ["add", "."]);
-  await git(project, [
-    "-c",
-    "user.name=DevHarmonics Tests",
-    "-c",
-    "user.email=devharmonics-tests@local",
-    "commit",
-    "-m",
-    "fixture",
-  ]);
+  await git(project, ["commit", "-m", "fixture"]);
   return project;
 }
 
@@ -4521,8 +4520,15 @@ if ((args[0] === "auth" && args[1] === "status") || args[0] === "models" || (arg
 console.log("I am unable to comply with that request.");
 process.exit(0);
 `, "utf8");
-  const unqualifiable = path.join(root, "unqualifiable.cmd");
-  await writeFile(unqualifiable, `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`, "utf8");
+  const unqualifiable = process.platform === "win32"
+    ? path.join(root, "unqualifiable.cmd")
+    : path.join(root, "unqualifiable.sh");
+  if (process.platform === "win32") {
+    await writeFile(unqualifiable, `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`, "utf8");
+  } else {
+    await writeFile(unqualifiable, `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`, "utf8");
+    await chmod(unqualifiable, 0o755);
+  }
   const fixture = await createFakeCli(root);
 
   await initializeProject(project);

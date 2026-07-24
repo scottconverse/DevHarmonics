@@ -21,10 +21,13 @@
     "start": "node dist/src/cli.js",
     "launch": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/start-devharmonics.ps1",
     "dev": "tsx src/cli.ts",
-    "test": "npm run build && node --test \"dist/test/*.test.js\"",
-    "version:check": "node scripts/check-version.mjs",
-    "version:check:release": "node scripts/check-version.mjs --release",
-    "check": "npm run version:check && npm test"
+    "test": "npm run build && npm run test:compiled",
+    "test:compiled": "node --test \"dist/test/*.test.js\"",
+    "test:randomized": "npm run build && node scripts/run-tests-randomized.mjs",
+    "test:mutation": "npm run build && node scripts/verify-mutation-discipline.mjs",
+    "version:check": "npm run build --silent && node scripts/check-version.mjs",
+    "version:check:release": "npm run build --silent && node scripts/check-version.mjs --release",
+    "check": "npm run build && node scripts/check-version.mjs && npm run test:compiled"
   },
   "dependencies": {
     "zod": "^4.0.0"

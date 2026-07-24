@@ -4,6 +4,12 @@ All notable DevHarmonics changes are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- GitHub Actions CI runs the release-truth check and full suite on Node 24 for Ubuntu and Windows, plus separate seeded test-file-order and mutation-discipline lanes. The mutation lane asserts its verification-integrity mutation applied exactly once, requires the named sentinel to fail for the expected reason, restores the compiled guard, and requires the sentinel to pass.
+- The rollback guide now records the unreleased ledger transitions from schema 34 through 37 and the actual single `backup-v34-to-v37` snapshot produced by a direct upgrade.
+- The release-truth gate now derives README's declared cross-platform test census from the TypeScript syntax tree, so indented and conditional tests count while comments and string examples do not; the README distinguishes that declaration census from each operating system's executable TAP total.
+
 ## [0.6.1] - 2026-07-22
 
 ### Added

@@ -7,6 +7,41 @@ just an older checkout. The same general pattern applies to any downgrade:
 reinstall the older source, restore the matching pre-upgrade ledger backup,
 and accept that ledger records created after the upgrade stay behind.
 
+## Development-line rollback: ledger schema 37 → v0.6.1
+
+The unreleased development line after v0.6.1 advances the ledger through
+three ordered migrations:
+
+1. **Ledger schema 34 → 35** adds the `runs_status` index used by the
+   approval Inbox projection.
+2. **Ledger schema 35 → 36** adds append-only decision records.
+3. **Ledger schema 36 → 37** adds decision provenance, uniqueness indexes,
+   and database triggers that prevent decision-record updates and deletes.
+
+Backups describe the schema the database actually started at and the maximum
+schema supported by the build that opened it. Therefore, opening a schema-34
+v0.6.1 ledger directly with the current schema-37 build creates one snapshot
+named
+`devharmonics.db.backup-v34-to-v37-<timestamp>-<id>.sqlite`. It does **not**
+create separate v34-to-v35, v35-to-v36, and v36-to-v37 files while applying
+the three migrations in one transaction. Those pairwise names exist only
+when an intermediate development build whose maximum schema was 35 or 36
+performed that upgrade.
+
+To return from the schema-37 development line to v0.6.1:
+
+1. Stop DevHarmonics.
+2. Keep the schema-37 ledger by renaming it; do not delete it.
+3. Restore the matching
+   `devharmonics.db.backup-v34-to-v37-*.sqlite` snapshot as
+   `devharmonics.db`.
+4. Check out v0.6.1, run `npm.cmd ci` and `npm.cmd run build`, then restart
+   DevHarmonics.
+
+The restored ledger contains none of the Inbox-index, decision-record, or
+decision-provenance changes made after the schema-34 snapshot. The renamed
+schema-37 ledger retains that later data for re-upgrade or inspection.
+
 ## Rollback plan for v0.6.1 → v0.6.0
 
 v0.6.1 applies migration 34 and runs ledger schema 34; v0.6.0 only

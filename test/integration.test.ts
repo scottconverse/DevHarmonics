@@ -18,7 +18,12 @@ import { startDashboard } from "../src/server.js";
 import { ModelCatalogCoordinator } from "../src/catalog.js";
 
 async function git(cwd: string, args: string[]) {
-  const result = await runProcess({ command: "git", args, cwd, timeoutMs: 30_000 });
+  const result = await runProcess({
+    command: "git",
+    args: ["-c", "user.name=DevHarmonics Tests", "-c", "user.email=devharmonics-tests@local", ...args],
+    cwd,
+    timeoutMs: 30_000,
+  });
   assert.equal(result.exitCode, 0, result.stderr || result.stdout);
   return result;
 }
@@ -28,17 +33,11 @@ async function createRepository(root: string): Promise<string> {
   await import("node:fs/promises").then(({ mkdir }) => mkdir(project, { recursive: true }));
   await git(project, ["init", "-b", "main"]);
   await writeFile(path.join(project, "README.md"), "# Fixture\n", "utf8");
-  await writeFile(path.join(project, ".gitignore"), "node_modules/\n", "utf8");
+  // No trailing slash: POSIX sees the shared-dependency fixture below as a
+  // symlink, not a directory, while Windows exposes it as a junction.
+  await writeFile(path.join(project, ".gitignore"), "/node_modules\n", "utf8");
   await git(project, ["add", "."]);
-  await git(project, [
-    "-c",
-    "user.name=DevHarmonics Tests",
-    "-c",
-    "user.email=devharmonics-tests@local",
-    "commit",
-    "-m",
-    "fixture",
-  ]);
+  await git(project, ["commit", "-m", "fixture"]);
   return project;
 }
 

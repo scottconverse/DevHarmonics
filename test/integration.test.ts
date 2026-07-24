@@ -4520,8 +4520,15 @@ if ((args[0] === "auth" && args[1] === "status") || args[0] === "models" || (arg
 console.log("I am unable to comply with that request.");
 process.exit(0);
 `, "utf8");
-  const unqualifiable = path.join(root, "unqualifiable.cmd");
-  await writeFile(unqualifiable, `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`, "utf8");
+  const unqualifiable = process.platform === "win32"
+    ? path.join(root, "unqualifiable.cmd")
+    : path.join(root, "unqualifiable.sh");
+  if (process.platform === "win32") {
+    await writeFile(unqualifiable, `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`, "utf8");
+  } else {
+    await writeFile(unqualifiable, `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`, "utf8");
+    await chmod(unqualifiable, 0o755);
+  }
   const fixture = await createFakeCli(root);
 
   await initializeProject(project);

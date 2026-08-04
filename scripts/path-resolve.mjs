@@ -38,43 +38,65 @@ export function resolvePathCommand(name, { platform = process.platform, env = pr
 }
 
 /**
+ * Windows env-var names are case-insensitive, but a plain object spread of
+ * process.env preserves whatever casing the parent shell used (Git Bash:
+ * COMSPEC). A case-sensitive lookup silently misses it — found by this
+ * module's own test suite.
+ *
+ * Exported so other spawn-planning callers (e.g. the process supervisor)
+ * share one case-insensitive lookup instead of re-deriving it.
+ */
+export function lookupEnv(env, name) {
+  const lower = name.toLowerCase();
+  const key = Object.keys(env).find((candidate) => candidate.toLowerCase() === lower);
+  return key === undefined ? undefined : env[key];
+}
+
+/**
+ * Decide HOW to spawn a resolved command, without actually spawning it.
+ *
+ * Split out of runResolved so an async caller (child_process.spawn, in the
+ * supervisor) can reuse the exact same .cmd/.bat ComSpec-wrap decision that
+ * runResolved uses for spawnSync — the EINVAL/DEP0190 problem described below
+ * is identical for both APIs, and duplicating the branch risks the two
+ * drifting apart.
+ */
+export function spawnPlan(command, args = [], { platform = process.platform, env = process.env } = {}) {
+  const wrap = platform === "win32" && /\.(cmd|bat)$/i.test(command);
+  if (!wrap) {
+    return { spawnCommand: command, spawnArgs: args, verbatim: false };
+  }
+  // Absolute fallback: the child resolves a bare "cmd.exe" against ITS env's
+  // PATH, which a caller may legitimately have narrowed to a fixture dir.
+  const comspec = lookupEnv(env, "ComSpec")
+    ?? path.join(lookupEnv(env, "SystemRoot") ?? "C:\\Windows", "System32", "cmd.exe");
+  return {
+    spawnCommand: comspec,
+    spawnArgs: ["/d", "/s", "/c", command, ...args],
+    verbatim: true,
+  };
+}
+
+/**
  * Synchronously run a resolved executable path safely on every platform.
  *
  * Node cannot spawn a `.cmd`/`.bat` file directly on Windows — it throws
  * EINVAL (a deliberate restriction tied to a shell-escaping CVE class), and
  * `shell: true` with an args array draws deprecation DEP0190. The sanctioned
  * pattern is an explicit ComSpec wrap with verbatim arguments; that is what
- * this helper does, and only for the recognized-extension case. Both failure
- * modes were hit live against the real Codex CLI (2026-08-04).
+ * spawnPlan decides, and only for the recognized-extension case. Both
+ * failure modes were hit live against the real Codex CLI (2026-08-04).
  *
  * Callers must pass internally constructed args only; nothing here escapes
  * untrusted content for cmd.exe.
  */
-/**
- * Windows env-var names are case-insensitive, but a plain object spread of
- * process.env preserves whatever casing the parent shell used (Git Bash:
- * COMSPEC). A case-sensitive lookup silently misses it — found by this
- * module's own test suite.
- */
-function lookupEnv(env, name) {
-  const lower = name.toLowerCase();
-  const key = Object.keys(env).find((candidate) => candidate.toLowerCase() === lower);
-  return key === undefined ? undefined : env[key];
-}
-
 export function runResolved(command, args = [], { timeoutMs = 20_000, platform = process.platform, env = process.env } = {}) {
-  const wrap = platform === "win32" && /\.(cmd|bat)$/i.test(command);
-  // Absolute fallback: the child resolves a bare "cmd.exe" against ITS env's
-  // PATH, which a caller may legitimately have narrowed to a fixture dir.
-  const comspec = lookupEnv(env, "ComSpec")
-    ?? path.join(lookupEnv(env, "SystemRoot") ?? "C:\\Windows", "System32", "cmd.exe");
-  const spawnCommand = wrap ? comspec : command;
-  const spawnArgs = wrap ? ["/d", "/s", "/c", command, ...args] : args;
+  const { spawnCommand, spawnArgs, verbatim } = spawnPlan(command, args, { platform, env });
   const result = spawnSync(spawnCommand, spawnArgs, {
     encoding: "utf8",
     timeout: timeoutMs,
     windowsHide: true,
-    windowsVerbatimArguments: wrap,
+    windowsVerbatimArguments: verbatim,
     env,
   });
   return {

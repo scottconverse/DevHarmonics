@@ -17,6 +17,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: Install dependencies
+        # Required since slice 5 introduced the repo's first real dependency
+        # (@agentclientprotocol/sdk); the zero-dep era needed no install.
+        run: npm ci
       - name: Syntax + full test suite
         run: npm run check
       - name: Doctor smoke — completes honestly on a machine with nothing installed

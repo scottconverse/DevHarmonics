@@ -16,6 +16,14 @@ async function main() {
     process.stdout.write(`${USAGE}\n`);
     return 0;
   }
+  if (command === "--version" || command === "-v") {
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const path = await import("node:path");
+    const pkg = JSON.parse(readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"));
+    process.stdout.write(`devharmonics ${pkg.version}\n`);
+    return 0;
+  }
   if (command === "doctor") return doctorCommand(rest);
   throw new Error(`Unknown command: ${command}\n${USAGE}`);
 }

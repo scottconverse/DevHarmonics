@@ -6,6 +6,7 @@ import path from "node:path";
 import process from "node:process";
 import { runWorker } from "./run-worker.mjs";
 import { integrateWorkerBranch } from "./integrate.mjs";
+import { runReview } from "./review.mjs";
 import { superviseProcess } from "./supervise.mjs";
 import { resolvePathCommand } from "./path-resolve.mjs";
 import { SUBPROCESS_PROVIDERS } from "./providers.mjs";
@@ -48,6 +49,7 @@ export async function runPipeline({
   provider,
   model = null,
   check = null,          // "command arg arg..." run inside the worker worktree
+  reviewer = null,       // { lane, provider, model } — independent review after integration
   taskId = null,
   timeoutMs = 15 * 60_000,
   env = process.env,
@@ -72,7 +74,7 @@ export async function runPipeline({
   const added = git(repo, ["worktree", "add", "-b", workerBranch, wt, baseRef]);
   if (!added.ok) throw new Error(`could not create worker worktree: ${added.stderr.trim()}`);
 
-  const stages = { worker: null, commit: null, validator: null, integration: null };
+  const stages = { worker: null, commit: null, validator: null, integration: null, review: null };
   try {
     const workerResult = await runWorker({
       taskId: runId,
@@ -123,10 +125,41 @@ export async function runPipeline({
       env,
     });
     stages.integration = integration;
+    if (!integration.integrated) {
+      return { integrated: false, reason: integration.reason, runId, baseRef, integrationBranch: null, integrationHead: null, stages, evidenceRoot };
+    }
+
+    // Independent review AFTER the deterministic gates: the model reviewer is
+    // the last layer, never the first. Its verdict cannot rescue a run the
+    // gates refused, and the divergence check inside runReview outranks it.
+    if (reviewer) {
+      const claimedPaths = git(repo, ["diff", "--name-only", baseRef, workerBranch]).stdout
+        .split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      const review = await runReview({
+        repository: repo,
+        integrationBranch,
+        baseRef,
+        goal: prompt,
+        reviewer,
+        claimedPaths,
+        evidenceRoot,
+        env,
+        timeoutMs,
+      });
+      stages.review = { verdict: review.verdict, findings: review.findings?.length ?? 0, divergence: review.divergence?.length ?? 0, receipt: review.reviewReceiptPath };
+      if (review.verdict !== "READY") {
+        return {
+          integrated: true, reviewed: false, reason: `review-not-ready (${review.findings?.length ?? 0} finding(s), ${review.divergence?.length ?? 0} divergence)`,
+          runId, baseRef, integrationBranch, integrationHead: integration.integrationHead, stages, evidenceRoot,
+        };
+      }
+    }
+
     return {
-      integrated: integration.integrated,
-      reason: integration.integrated ? "ready-for-owner-review" : integration.reason,
-      runId, baseRef, integrationBranch: integration.integrated ? integrationBranch : null,
+      integrated: true,
+      reviewed: Boolean(reviewer),
+      reason: "ready-for-owner-review",
+      runId, baseRef, integrationBranch,
       integrationHead: integration.integrationHead, stages, evidenceRoot,
     };
   } finally {
@@ -135,8 +168,19 @@ export async function runPipeline({
   }
 }
 
+/** --reviewer "provider:model" (subprocess lane) or "http:provider:model". */
+function parseReviewerSpec(spec) {
+  const parts = spec.split(":");
+  if (parts[0] === "http") {
+    if (parts.length < 3) throw new Error('--reviewer http form is "http:provider:model"');
+    return { lane: "http", provider: parts[1], model: parts.slice(2).join(":") };
+  }
+  if (parts.length < 2) throw new Error('--reviewer must be "provider:model" or "http:provider:model"');
+  return { lane: "subprocess", provider: parts[0], model: parts.slice(1).join(":") };
+}
+
 export async function runCommandCli(argv, { write = (t) => process.stdout.write(t) } = {}) {
-  const options = { repository: null, prompt: null, provider: null, model: null, check: null, taskId: null, asJson: false, timeoutMinutes: 15 };
+  const options = { repository: null, prompt: null, provider: null, model: null, check: null, reviewer: null, taskId: null, asJson: false, timeoutMinutes: 15 };
   for (let i = 0; i < argv.length; i += 1) {
     const next = () => { i += 1; return argv[i]; };
     switch (argv[i]) {
@@ -145,6 +189,7 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
       case "--provider": options.provider = next(); break;
       case "--model": options.model = next(); break;
       case "--check": options.check = next(); break;
+      case "--reviewer": options.reviewer = next(); break;
       case "--task-id": options.taskId = next(); break;
       case "--timeout-minutes": options.timeoutMinutes = Number(next()); break;
       case "--json": options.asJson = true; break;
@@ -160,6 +205,7 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
     provider: options.provider,
     model: options.model,
     check: options.check,
+    reviewer: options.reviewer ? parseReviewerSpec(options.reviewer) : null,
     taskId: options.taskId,
     timeoutMs: Math.round(options.timeoutMinutes * 60_000),
   });
@@ -169,7 +215,12 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
   } else {
     write(`run:         ${result.runId} (base ${result.baseRef?.slice(0, 8)})\n`);
     write(`outcome:     ${result.integrated ? "INTEGRATED" : "REFUSED"} — ${result.reason}\n`);
-    if (result.integrated) {
+    if (result.stages?.review) {
+      const r = result.stages.review;
+      write(`review:      ${r.verdict} (${r.findings} finding(s), ${r.divergence} divergence)
+`);
+    }
+    if (result.integrated && result.reason === "ready-for-owner-review") {
       write(`branch:      ${result.integrationBranch} @ ${result.integrationHead?.slice(0, 8)}\n`);
       write(`\nSTOPPED at the owner approval boundary. Nothing was pushed.\n`);
       write(`Review the branch and the evidence bundle, then merge/push only if you approve.\n`);

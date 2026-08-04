@@ -12,14 +12,17 @@ function tempDir() {
 test("a recognized Windows extension wins over the bare npm POSIX shim", () => {
   const dir = tempDir();
   try {
+    // Fixture casing matches PATHEXT exactly: these platform-faked tests run
+    // on real filesystems of BOTH case sensitivities in CI, and only exact
+    // casing is valid on both. True case-insensitive matching is asserted by
+    // the win32-gated test below. (Ubuntu CI caught the mismatch live.)
     writeFileSync(path.join(dir, "codex"), "#!/bin/sh\n");
-    writeFileSync(path.join(dir, "codex.cmd"), "@echo off\r\n");
+    writeFileSync(path.join(dir, "codex.CMD"), "@echo off\r\n");
     const resolved = resolvePathCommand("codex", {
       platform: "win32",
       env: { PATH: dir, PATHEXT: ".COM;.EXE;.BAT;.CMD" },
     });
-    // Windows paths are case-insensitive; PATHEXT casing must not matter.
-    assert.equal(resolved.toLowerCase(), path.join(dir, "codex.cmd").toLowerCase());
+    assert.equal(resolved.toLowerCase(), path.join(dir, "codex.CMD").toLowerCase());
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -29,13 +32,13 @@ test("an earlier PATH directory wins over a later one", () => {
   const first = tempDir();
   const second = tempDir();
   try {
-    writeFileSync(path.join(first, "tool.cmd"), "@echo off\r\n");
-    writeFileSync(path.join(second, "tool.cmd"), "@echo off\r\n");
+    writeFileSync(path.join(first, "tool.CMD"), "@echo off\r\n");
+    writeFileSync(path.join(second, "tool.CMD"), "@echo off\r\n");
     const resolved = resolvePathCommand("tool", {
       platform: "win32",
       env: { PATH: `${first};${second}`, PATHEXT: ".CMD" },
     });
-    assert.equal(resolved.toLowerCase(), path.join(first, "tool.cmd").toLowerCase());
+    assert.equal(resolved.toLowerCase(), path.join(first, "tool.CMD").toLowerCase());
   } finally {
     rmSync(first, { recursive: true, force: true });
     rmSync(second, { recursive: true, force: true });
@@ -57,7 +60,7 @@ test("resolution uses the caller's env, never the ambient one", () => {
   // resolves against process.env — the exact bug class hit on 2026-08-04.
   const dir = tempDir();
   try {
-    writeFileSync(path.join(dir, "onlyhere.cmd"), "@echo off\r\n");
+    writeFileSync(path.join(dir, "onlyhere.CMD"), "@echo off\r\n");
     const resolved = resolvePathCommand("onlyhere", {
       platform: "win32",
       env: { PATH: dir, PATHEXT: ".CMD" },
@@ -68,6 +71,22 @@ test("resolution uses the caller's env, never the ambient one", () => {
       null,
       "must NOT fall back to any ambient PATH",
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("on a real Windows filesystem, PATHEXT casing does not have to match the file", { skip: process.platform !== "win32" }, () => {
+  // The genuinely case-insensitive behavior, asserted only where the
+  // filesystem actually provides it.
+  const dir = tempDir();
+  try {
+    writeFileSync(path.join(dir, "mixcase.cmd"), "@echo off\r\n");
+    const resolved = resolvePathCommand("mixcase", {
+      platform: "win32",
+      env: { PATH: dir, PATHEXT: ".CMD" },
+    });
+    assert.ok(resolved !== null, "case-insensitive FS must match .CMD suffix to .cmd file");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

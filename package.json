@@ -1,0 +1,22 @@
+{
+  "name": "devharmonics",
+  "version": "0.1.0",
+  "description": "A local-first, host-agnostic software factory: any agent app coordinates, any qualified model works, every claim carries a receipt.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "devharmonics": "scripts/cli.mjs"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "check": "node --check scripts/cli.mjs && node --check scripts/doctor.mjs && node --check scripts/probes.mjs && node --check scripts/config.mjs && node --check scripts/receipts.mjs && node --check scripts/path-resolve.mjs && npm test",
+    "doctor": "node scripts/cli.mjs doctor"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/scottconverse/DevHarmonics.git"
+  }
+}

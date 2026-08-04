@@ -109,7 +109,7 @@ test("runResolved spawns a real .cmd file on Windows without EINVAL", { skip: pr
     writeFileSync(script, "@echo off\r\necho ARG=%1\r\nexit /b 0\r\n");
     const run = runResolved(script, ["hello"]);
     assert.equal(run.ok, true, run.error ?? run.stderr);
-    assert.match(run.stdout, /ARG=hello/);
+    assert.match(run.stdout, /ARG="?hello"?/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -123,7 +123,7 @@ test("runResolved executes a bare shell script on POSIX", { skip: process.platfo
     chmodSync(script, 0o755);
     const run = runResolved(script, ["hello"]);
     assert.equal(run.ok, true, run.error ?? run.stderr);
-    assert.match(run.stdout, /ARG=hello/);
+    assert.match(run.stdout, /ARG="?hello"?/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

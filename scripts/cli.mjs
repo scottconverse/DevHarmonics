@@ -4,6 +4,7 @@ import { doctorCommand } from "./doctor.mjs";
 
 const USAGE = `Usage:
   devharmonics doctor [--json] [--config <file>]
+  devharmonics qualify [--execute] [--json] [--lane L] [--role R] [--skip-current]
   devharmonics worker --provider <codex|claude|agy> --prompt <text> --cwd <dir>
                       [--model <id>] [--task-id <id>] [--runs-root <dir>]
                       [--sandbox read-only|workspace-write]
@@ -15,7 +16,10 @@ Commands:
            PASS/FAIL/SKIPPED per check. Exit 0 = assessment completed
            (FAILs included); exit 2 = doctor itself could not run.
   worker   Run ONE bounded subprocess-lane worker and leave a receipt.
-           Exit 0 = completed; 1 = failed or timeout; 2 = runner error.`;
+           Exit 0 = completed; 1 = failed or timeout; 2 = runner error.
+  qualify  Plan (default) or --execute the qualification sweep: every
+           discovered candidate x applicable role, real harnesses, every
+           result appended to qualifications.jsonl pass or fail.`;
 
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
@@ -35,6 +39,10 @@ async function main() {
   if (command === "worker") {
     const { workerCommand } = await import("./worker-command.mjs");
     return workerCommand(rest);
+  }
+  if (command === "qualify") {
+    const { qualifyCommand } = await import("./qualify-command.mjs");
+    return qualifyCommand(rest);
   }
   throw new Error(`Unknown command: ${command}\n${USAGE}`);
 }

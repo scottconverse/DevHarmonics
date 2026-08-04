@@ -61,6 +61,24 @@ export function lookupEnv(env, name) {
  * is identical for both APIs, and duplicating the branch risks the two
  * drifting apart.
  */
+/**
+ * cmd.exe-safe quoting for one argument (the cross-spawn recipe). With
+ * windowsVerbatimArguments Node performs NO quoting, so an argument
+ * containing spaces arrives as many argv tokens and one containing quotes
+ * can break cmd.exe's own parsing. Found live 2026-08-04: claude.cmd's
+ * argv-delivered prompt was shredded into word-per-token ("-p Reply with
+ * exactly ..."), and a JSON-bearing prompt produced cmd's "The system
+ * cannot find the file specified". codex survived only because its prompt
+ * rides stdin; agy because it is a native .exe that never takes this wrap.
+ */
+function escapeCmdArg(value) {
+  let escaped = String(value)
+    .replace(/(\\*)"/g, '$1$1\\"')
+    .replace(/(\\*)$/, "$1$1");
+  escaped = `"${escaped}"`;
+  return escaped.replace(/([()\][%!^"`<>&|;, *?])/g, "^$1");
+}
+
 export function spawnPlan(command, args = [], { platform = process.platform, env = process.env } = {}) {
   const wrap = platform === "win32" && /\.(cmd|bat)$/i.test(command);
   if (!wrap) {
@@ -72,7 +90,7 @@ export function spawnPlan(command, args = [], { platform = process.platform, env
     ?? path.join(lookupEnv(env, "SystemRoot") ?? "C:\\Windows", "System32", "cmd.exe");
   return {
     spawnCommand: comspec,
-    spawnArgs: ["/d", "/s", "/c", command, ...args],
+    spawnArgs: ["/d", "/s", "/c", [command, ...args].map(escapeCmdArg).join(" ")],
     verbatim: true,
   };
 }

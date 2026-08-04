@@ -147,7 +147,7 @@ test(
       writeFileSync(script, "@echo off\r\necho ARG=%1\r\nexit /b 0\r\n");
       const result = await superviseProcess({ command: script, args: ["hello"] });
       assert.equal(result.exitCode, 0, result.error ?? result.stderr);
-      assert.match(result.stdout, /ARG=hello/);
+      assert.match(result.stdout, /ARG="?hello"?/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -175,4 +175,27 @@ test("onStdout callback chunks concatenate to exactly the returned stdout", asyn
   assert.equal(result.exitCode, 0);
   assert.equal(seen, result.stdout);
   assert.match(result.stdout, /chunk0[\s\S]*chunk3/);
+});
+
+test("a .cmd child receives a spaces-and-quotes argument INTACT through the wrap", { skip: process.platform !== "win32" }, async () => {
+  // Found live 2026-08-04: the verbatim ComSpec wrap joined args unquoted, so
+  // claude.cmd received `-p Reply with exactly ...` as many argv tokens (its
+  // prompt shredded), and a prompt containing JSON quotes broke cmd.exe's own
+  // parsing outright. codex survived only because its prompt rides stdin.
+  const { mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const dir = mkdtempSync(path.join(os.tmpdir(), "dh-quote-"));
+  try {
+    const script = path.join(dir, "echo-args.cmd");
+    writeFileSync(script, "@echo off\r\necho FIRST=%1\r\n");
+    const tricky = 'Reply with {"minimumHours": 3} and no other text.';
+    const result = await superviseProcess({ command: script, args: [tricky], cwd: dir, prompt: null, timeoutMs: 20_000 });
+    assert.equal(result.exitCode, 0, result.stderr || result.error);
+    // %1 keeps the surrounding quotes cmd needs; strip them for comparison.
+    const first = result.stdout.trim().replace(/^FIRST=/, "").replace(/^"|"$/g, "");
+    assert.equal(first.replaceAll('\\"', '"'), tricky, `argv[1] must arrive as ONE intact argument, got: ${result.stdout.trim()}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

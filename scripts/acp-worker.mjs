@@ -109,25 +109,43 @@ function extractResolvedModel(newSessionResponse) {
  * connection instead of running one shot to completion, so it can't reuse
  * superviseProcess directly.
  */
-function killTree(child, platform) {
+async function killTree(child, platform, { escalateMs = 5_000, reapDeadlineMs = 10_000 } = {}) {
   if (!child || child.pid == null) return;
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  // Resolution must WAIT for the child's close — supervise.mjs's own rule,
+  // originally dropped in this copy. Ubuntu CI caught it live: SIGTERM was
+  // fired and the runner resolved immediately, so the caller observed a
+  // still-dying pid, and the unref'd SIGKILL escalation could never fire
+  // once the test process exited. (Windows masked it: taskkill /F is
+  // synchronous and forced.)
+  const closed = new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) resolve();
+    else child.once("close", resolve);
+  });
   if (platform === "win32") {
     spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true });
-    return;
-  }
-  try {
-    process.kill(-child.pid, "SIGTERM");
-  } catch {
-    // Already exited — fine.
-  }
-  const escalate = setTimeout(() => {
+  } else {
     try {
-      process.kill(-child.pid, "SIGKILL");
+      process.kill(-child.pid, "SIGTERM");
     } catch {
       // Already exited — fine.
     }
-  }, 5000);
-  escalate.unref?.();
+  }
+  let escalate = null;
+  if (platform !== "win32") {
+    escalate = setTimeout(() => {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        // Already exited — fine.
+      }
+    }, escalateMs);
+  }
+  try {
+    await Promise.race([closed, new Promise((resolve) => setTimeout(resolve, reapDeadlineMs))]);
+  } finally {
+    if (escalate) clearTimeout(escalate);
+  }
 }
 
 export async function runAcpWorker({
@@ -342,7 +360,7 @@ export async function runAcpWorker({
   // The prompt turn (if it ever completed) is over; nothing further should
   // be talking to this adapter process. Kill it in every terminal case, not
   // only on timeout — a bounded worker never leaves a zombie behind.
-  killTree(child, platform);
+  await killTree(child, platform);
 
   if (outcome.kind === "timeout") {
     return finish({

@@ -12,7 +12,7 @@
   },
   "scripts": {
     "test": "node --test \"test/*.test.mjs\"",
-    "check": "node --check scripts/cli.mjs && node --check scripts/doctor.mjs && node --check scripts/probes.mjs && node --check scripts/config.mjs && node --check scripts/receipts.mjs && node --check scripts/path-resolve.mjs && node --check scripts/supervise.mjs && node --check scripts/providers.mjs && node --check scripts/run-worker.mjs && node --check scripts/worker-command.mjs && npm test",
+    "check": "node --check scripts/cli.mjs && node --check scripts/doctor.mjs && node --check scripts/probes.mjs && node --check scripts/config.mjs && node --check scripts/receipts.mjs && node --check scripts/path-resolve.mjs && node --check scripts/supervise.mjs && node --check scripts/providers.mjs && node --check scripts/run-worker.mjs && node --check scripts/worker-command.mjs && node --check scripts/messages-client.mjs && node --check scripts/local-patch.mjs && npm test",
     "doctor": "node scripts/cli.mjs doctor"
   },
   "repository": {

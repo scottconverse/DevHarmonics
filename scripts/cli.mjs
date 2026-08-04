@@ -5,6 +5,8 @@ import { doctorCommand } from "./doctor.mjs";
 const USAGE = `Usage:
   devharmonics doctor [--json] [--config <file>]
   devharmonics qualify [--execute] [--json] [--lane L] [--role R] [--skip-current]
+  devharmonics run --repository <repo> --prompt <text> --provider <p>
+                   [--model m] [--check "cmd args"] [--task-id t] [--json]
   devharmonics worker --provider <codex|claude|agy> --prompt <text> --cwd <dir>
                       [--model <id>] [--task-id <id>] [--runs-root <dir>]
                       [--sandbox read-only|workspace-write]
@@ -19,7 +21,11 @@ Commands:
            Exit 0 = completed; 1 = failed or timeout; 2 = runner error.
   qualify  Plan (default) or --execute the qualification sweep: every
            discovered candidate x applicable role, real harnesses, every
-           result appended to qualifications.jsonl pass or fail.`;
+           result appended to qualifications.jsonl pass or fail.
+  run      One bounded task through the full pipeline: clean-tree intake,
+           isolated worker, optional --check validator, empty-diff +
+           tampercheck gates, serial integration — then STOP at the owner
+           approval boundary. Exit 0 = integrated; 1 = refused; 2 = error.`;
 
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
@@ -43,6 +49,10 @@ async function main() {
   if (command === "qualify") {
     const { qualifyCommand } = await import("./qualify-command.mjs");
     return qualifyCommand(rest);
+  }
+  if (command === "run") {
+    const { runCommandCli } = await import("./run-command.mjs");
+    return runCommandCli(rest);
   }
   throw new Error(`Unknown command: ${command}\n${USAGE}`);
 }

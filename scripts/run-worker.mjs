@@ -168,25 +168,38 @@ export async function runWorker({
   // Concurrency cap: claim one of the live worker slots, waiting (bounded by
   // this run's own timeout) rather than oversubscribing — a full house means
   // work serializes, never that a fifth worker runs anyway.
-  const slotDeadline = Date.now() + timeoutMs;
+  const slotStart = Date.now();
+  const slotDeadline = slotStart + timeoutMs;
+  let announcedWait = false;
   for (;;) {
     try {
       slot = acquireWorkerSlot(fanoutStateRoot, fanoutBudgets.maxConcurrentWorkers, { taskId });
       break;
     } catch (error) {
+      // UX-009 (audit): a silent bounded wait is indistinguishable from a
+      // hang — say once, on stderr, what is being waited for and for how long.
+      if (!announcedWait) {
+        announcedWait = true;
+        process.stderr.write(`waiting for a free worker slot (${fanoutBudgets.maxConcurrentWorkers} in use under ${fanoutStateRoot}; will wait up to ${Math.round(timeoutMs / 60_000)}m)
+`);
+      }
       if (Date.now() >= slotDeadline) {
         return finish({ status: "failed", exit: { error: `fanout-concurrency: ${error.message} (waited ${timeoutMs}ms for a free worker slot under ${fanoutStateRoot})`, args: invocation.args } });
       }
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
+  // ENG-007 (audit): time spent waiting for a slot spends the run's own
+  // --timeout-minutes budget — the flag bounds the whole worker attempt, not
+  // "up to 2x" of itself under contention.
+  const remainingTimeoutMs = Math.max(1_000, timeoutMs - (Date.now() - slotStart));
 
   const supervised = await superviseProcess({
     command,
     args: invocation.args,
     cwd,
     prompt: invocation.promptDelivery === "stdin" ? prompt : null,
-    timeoutMs,
+    timeoutMs: remainingTimeoutMs,
     env: childEnv,
   });
   writeFileSync(path.join(runDir, "stdout.log"), supervised.stdout);

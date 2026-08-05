@@ -82,11 +82,11 @@ export async function workerCommand(argv) {
       ? Object.entries(receipt.usage).filter(([, v]) => v != null).map(([k, v]) => `${k}=${v}`).join(" ") || "none reported"
       : "none reported";
     process.stdout.write([
-      `status:   ${receipt.status}`,
-      `provider: ${receipt.provider} (requested ${receipt.requestedModel}, resolved ${receipt.resolvedModel ?? "unverified"})`,
-      `usage:    ${usage}`,
-      `receipt:  ${path.join(runDir, "receipt.json")}`,
-      receipt.exit?.error ? `error:    ${receipt.exit.error}` : null,
+      `status:      ${receipt.status}`,
+      `provider:    ${receipt.provider} (requested ${receipt.requestedModel}, resolved ${receipt.resolvedModel ?? "unverified"})`,
+      `usage:       ${usage}`,
+      `receipt:     ${path.join(runDir, "receipt.json")}`,
+      receipt.exit?.error ? `error:       ${receipt.exit.error}` : null,
     ].filter(Boolean).join("\n") + "\n");
   }
   return receipt.status === "completed" ? 0 : 1;

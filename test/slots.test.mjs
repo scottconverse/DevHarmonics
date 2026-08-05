@@ -92,3 +92,53 @@ test("Windows delete-pending EPERM remains lock contention", (t) => {
   assert.equal(isContendedClaim({ code: "EEXIST" }, lockPath, "linux"), true);
   assert.equal(isContendedClaim({ code: "EACCES" }, lockPath, "win32"), false);
 });
+
+// --- Audit fix-pass TEST-005: the dead-PID reclaim race, in-suite ------------
+// The GauntletGate 25-thread proof lived outside the repo and could not re-run.
+// This ports it as a repeatable cross-process race: N real node processes race
+// to claim ONE slot whose current owner is provably dead. Exactly one may win;
+// every loser must see the documented "occupied" refusal, never a raw
+// EEXIST/EPERM escaping the reclaim path.
+test("dead-PID reclaim race: N concurrent processes, exactly one winner, losers refuse cleanly", async (t) => {
+  const { spawn } = await import("node:child_process");
+  const { writeFileSync: wf } = await import("node:fs");
+  const root = mkdtempSync(path.join(tmpdir(), "dh-slots-race-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  // Seed slot 1 with a dead owner: PIDs are recycled, so find a definitely-dead
+  // one by spawning and reaping a real child first.
+  const probe = spawn(process.execPath, ["-e", "process.exit(0)"]);
+  const deadPid = probe.pid;
+  await new Promise((resolve) => probe.on("close", resolve));
+  const slotDir = path.join(root, "worker-slots");
+  const { mkdirSync: mk } = await import("node:fs");
+  mk(slotDir, { recursive: true });
+  wf(path.join(slotDir, "1.lock"), `${JSON.stringify({ pid: deadPid, startedAt: new Date().toISOString() })}\n`);
+
+  const contender = `
+    import { acquireWorkerSlot } from ${JSON.stringify(new URL("../scripts/slots.mjs", import.meta.url).href)};
+    try {
+      acquireWorkerSlot(${JSON.stringify(root)}, 1, { taskId: "racer-" + process.pid });
+      console.log("WON");
+      setTimeout(() => process.exit(0), 800); // hold the slot while siblings race
+    } catch (error) {
+      if (/worker slots are occupied/i.test(error.message)) { console.log("REFUSED"); process.exit(0); }
+      console.log("RAW:" + error.message); process.exit(1);
+    }
+  `;
+  const contenderFile = path.join(root, "contender.mjs");
+  wf(contenderFile, contender);
+  const N = 10;
+  const results = await Promise.all(Array.from({ length: N }, () => new Promise((resolve) => {
+    const child = spawn(process.execPath, [contenderFile], { windowsHide: true });
+    let out = "";
+    child.stdout.on("data", (d) => { out += d; });
+    child.on("close", (code) => resolve({ code, out: out.trim() }));
+  })));
+
+  const winners = results.filter((r) => r.out === "WON");
+  const refused = results.filter((r) => r.out === "REFUSED");
+  const raw = results.filter((r) => r.out.startsWith("RAW:"));
+  assert.equal(raw.length, 0, `raw fs errors escaped the reclaim path: ${raw.map((r) => r.out).join("; ")}`);
+  assert.equal(winners.length, 1, `exactly one contender may reclaim the dead slot, got ${winners.length} (${results.map((r) => r.out).join(",")})`);
+  assert.equal(winners.length + refused.length, N);
+});

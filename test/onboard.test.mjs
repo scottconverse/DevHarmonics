@@ -228,10 +228,12 @@ test("probeRepoGovernance PASSes only on a correctly onboarded repo, and reports
 
 // --- 6. doctor wiring --------------------------------------------------------
 
-test("runDoctor adds the governance check only when a repository is supplied; check count matches the existing no-repo expectation otherwise", () => withRepo(async (repo) => {
+test("runDoctor reports governance SKIPPED without a repository, and probes it for real with one (DOC-002)", () => withRepo(async (repo) => {
   const withoutRepo = await runDoctor({ config: fixtureConfig(), probeTimeoutMs: 3_000 });
-  assert.equal(withoutRepo.checks.length, 4, "must match test/doctor.test.mjs's existing 4-check expectation, unmodified");
-  assert.equal(withoutRepo.checks.some((c) => c.id === "repo:governance"), false);
+  assert.equal(withoutRepo.checks.length, 5, "governance now appears as an honest SKIPPED row, matching the manual");
+  const skipped = withoutRepo.checks.find((c) => c.id === "repo:governance");
+  assert.equal(skipped?.status, "SKIPPED");
+  assert.match(skipped?.detail ?? "", /no repository in scope/);
 
   const plan = planOnboarding({ repository: repo, detectorTemplateDir: NO_DETECTOR_TEMPLATES });
   applyOnboarding({ repository: repo, plan });
@@ -269,24 +271,18 @@ test("cli doctor --repository wires the governance check through the real subpro
   }
 }));
 
-test("cli doctor without --repository behaves exactly as before (no governance check)", () => {
-  // NOTE on why this doesn't also assert an exact checks.length: loadConfig
-  // deep-merges a --config file over defaultConfig() (config.mjs's
-  // deepMerge), so clis/endpoints from the file land ALONGSIDE the real
-  // default codex/claude/agy/ollama/lmstudio/litellm entries, not in place
-  // of them — exactly why test/doctor.test.mjs's own equivalent CLI-spawn
-  // test asserts `counts.FAIL >= 3` rather than an exact count. The
-  // hermetic, exact-count "4 checks without a repository" proof already
-  // lives above, in the in-process runDoctor test, which passes a config
-  // object directly (no file, no merge). This test's job is narrower: prove
-  // that omitting --repository through the real CLI never adds the
-  // governance check.
+test("cli doctor without --repository reports governance SKIPPED through the real subprocess (DOC-002)", () => {
+  // TEST-007 discipline: deaden every DEFAULT endpoint/CLI structurally, so
+  // the deep merge cannot resurrect live probing of this machine here.
   const dir = tempDir("dh-onboard-doctorcfg-");
   try {
+    const defaults = defaultConfig();
+    const dead = { baseUrl: "http://127.0.0.1:1" };
+    const ghost = { command: "definitely-not-installed-tool" };
     const file = path.join(dir, "dead.json");
     writeFileSync(file, JSON.stringify({
-      endpoints: { deadend: { baseUrl: "http://127.0.0.1:1" } },
-      clis: { ghost: { command: "definitely-not-installed-tool" } },
+      endpoints: { ...Object.fromEntries(Object.keys(defaults.endpoints).map((k) => [k, dead])), deadend: dead },
+      clis: { ...Object.fromEntries(Object.keys(defaults.clis).map((k) => [k, ghost])), ghost },
       rigor: {
         tampercheckCommand: "definitely-not-installed-tampercheck",
         skillHosts: { claude: path.join(dir, "none"), codex: path.join(dir, "nada") },
@@ -295,7 +291,8 @@ test("cli doctor without --repository behaves exactly as before (no governance c
     const run = spawnSync(process.execPath, [CLI, "doctor", "--json", "--config", file], { encoding: "utf8", timeout: 60_000 });
     assert.equal(run.status, 0, run.stderr);
     const report = JSON.parse(run.stdout);
-    assert.equal(report.checks.some((c) => c.id === "repo:governance"), false);
+    const governance = report.checks.find((c) => c.id === "repo:governance");
+    assert.equal(governance?.status, "SKIPPED", "the row must appear, honestly SKIPPED, exactly as the manual describes");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

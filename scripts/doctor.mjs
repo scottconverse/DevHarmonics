@@ -40,11 +40,11 @@ export async function runDoctor({ config, probeTimeoutMs = 45_000, repository = 
     report(probeSkillParity("rigor:skill-parity", config.rigor.skillHosts, config.rigor.skillName)),
   ];
 
-  // Only in scope when a target repository was named: doctor's no-repo
-  // behavior must stay exactly as it was before onboarding existed.
-  if (repository) {
-    checks.push(report(probeRepoGovernance("repo:governance", repository, { pinnedVersion: TAMPERCHECK_PINNED_VERSION })));
-  }
+  // DOC-002 (audit): the probe itself has an honest SKIPPED branch for a null
+  // repository — surface it instead of omitting the row, so the report shows
+  // "repo:governance SKIPPED — no repository in scope" exactly as the manual
+  // describes, rather than a silently absent line.
+  checks.push(report(probeRepoGovernance("repo:governance", repository ?? null, { pinnedVersion: TAMPERCHECK_PINNED_VERSION })));
 
   const counts = { PASS: 0, FAIL: 0, SKIPPED: 0 };
   for (const check of checks) counts[check.status] += 1;

@@ -296,9 +296,11 @@ test("worker produced nothing: fake CLI exits 0 with no file written -> worker-e
     assert.equal(result.reason, "worker-empty-diff");
     assert.equal(result.stages.commit.committed, false);
 
-    // Worker branch never advanced past baseRef: no commit landed.
-    const workerHead = git(repo, ["rev-parse", `devharmonics/task/${result.runId}`]).trim();
-    assert.equal(workerHead, result.baseRef);
+    // QA-005: a worker branch that never advanced past baseRef has provably
+    // nothing to blend — the refusal now deletes it, so a retry with the same
+    // task-id is not punished for a worker that produced nothing.
+    assert.equal(branchExists(repo, `devharmonics/task/${result.runId}`), false,
+      "a pristine (commitless) worker branch must be cleaned up on refusal");
 
     assertWorktreeHygiene(repo, result.runId);
   } finally {
@@ -705,4 +707,14 @@ test("ENG-001: budgets passed to runPipeline are ENFORCED — two runs against o
   } finally {
     for (const d of [repo, providerDir, tampercheckDir]) rmSync(d, { recursive: true, force: true });
   }
+});
+
+test("TEST-006/QA-009: run's --tampercheck-sha256 parse errors — bad hex exits 2; a missing value says so", () => {
+  const bad = spawnSync(process.execPath, [CLI, "run", "--repository", ".", "--prompt", "p", "--provider", "codex", "--tampercheck-sha256", "nothex"], { encoding: "utf8", timeout: 30_000 });
+  assert.equal(bad.status, 2);
+  assert.match(bad.stderr, /--tampercheck-sha256 must be a 64-hex-character sha256 digest, got: "nothex"/);
+
+  const missing = spawnSync(process.execPath, [CLI, "run", "--repository", ".", "--prompt", "p", "--provider", "codex", "--tampercheck-sha256"], { encoding: "utf8", timeout: 30_000 });
+  assert.equal(missing.status, 2);
+  assert.match(missing.stderr, /got: missing value/);
 });

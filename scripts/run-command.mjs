@@ -441,6 +441,16 @@ ${(stages.validator.stdoutTail || "").slice(-800)}`
     };
   } finally {
     cleanup();
+    // QA-005 (audit): a refused run used to leave devharmonics/task/<id> behind
+    // even when the worker never committed anything, turning every transient
+    // failure into manual cleanup on retry. A branch still pointing EXACTLY at
+    // the pinned base provably has nothing to blend into a future attempt —
+    // delete it. A branch with commits is preserved (the no-resume refusal's
+    // rationale genuinely applies there).
+    const workerTip = git(repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${workerBranch}`]).stdout.trim();
+    if (workerTip && workerTip === baseRef) {
+      git(repo, ["branch", "-D", workerBranch]);
+    }
   }
 }
 
@@ -455,7 +465,11 @@ export function describeTampercheckIdentity(binary) {
   // QA-002 (audit): three states, never conflated — a REQUESTED pin whose
   // comparison failed must not read as a verified one.
   if (binary.pinned && binary.verified) {
-    return `tampercheck: identity pinned — sha256 verified (${binary.path})\n`;
+    // ENG-002: for a pip console-script launcher, the hash binds the LAUNCHER
+    // file, not the package code in site-packages that produces the verdict —
+    // say so rather than letting the strongest claim overreach.
+    const launcherNote = binary.launcherShaped ? "; binds the launcher file — the Python package it invokes is not covered by this pin, see the manual" : "";
+    return `tampercheck: identity pinned — sha256 verified (${binary.path}${launcherNote})\n`;
   }
   if (binary.pinned) {
     return `tampercheck: identity pin REQUESTED but MISMATCHED — the gate refused (${binary.path} is sha256 ${binary.sha256 ?? "(unreadable)"})\n`;
@@ -530,7 +544,7 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
       case "--tampercheck-sha256": {
         const raw = next();
         if (!/^[0-9a-fA-F]{64}$/.test(raw ?? "")) {
-          throw new Error(`--tampercheck-sha256 must be a 64-hex-character sha256 digest, got: ${JSON.stringify(raw)} (doctor prints the resolved binary's value)`);
+          throw new Error(`--tampercheck-sha256 must be a 64-hex-character sha256 digest, got: ${raw === undefined ? "missing value" : JSON.stringify(raw)} (doctor prints the resolved binary's value)`);
         }
         options.expectedTampercheckSha256 = raw;
         break;

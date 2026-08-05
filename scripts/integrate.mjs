@@ -66,6 +66,14 @@ const REASONS = Object.freeze([
   "set-blocked-not-advanced",
 ]);
 
+/** The one-per-repository serialization lock's path (ENG-005): derived from
+ * the repository, never from a per-run evidence root. Exported so the
+ * invariant is testable. */
+export function integrationLockPath(repository) {
+  const repoKey = createHash("sha256").update(path.resolve(repository)).digest("hex");
+  return path.join(path.resolve(repository), ".devharmonics", "locks", `${repoKey}.lock`);
+}
+
 function fail(message) {
   throw new Error(`integrateWorkerBranch: ${message}`);
 }
@@ -228,7 +236,14 @@ export async function integrateWorkerBranch({
   // path so two integrations into the SAME repo queue rather than
   // interleave, while unrelated repositories never contend with each other.
   const repoKey = createHash("sha256").update(path.resolve(repository)).digest("hex");
-  const lockPath = path.join(evidenceRoot, "locks", `${repoKey}.lock`);
+  // ENG-005 (audit): the lock was KEYED by repository but LOCATED under the
+  // per-run evidence root, so two integrations into the same repo from
+  // different runs/sets held two different lock files and never contended —
+  // the stated "serialize per repository" invariant was false exactly when
+  // D1's concurrency made it reachable. The lock now lives in the repo's own
+  // state dir, one path per repository, so cross-invocation same-repo
+  // integrations genuinely queue.
+  const lockPath = integrationLockPath(repository);
   const lock = await acquireFileLock(lockPath, { taskId, repository }, { timeoutMs: 60_000, retryMs: 25 });
 
   const gates = {
@@ -354,8 +369,17 @@ export async function integrateWorkerBranch({
     // This is the evidence the old receipts could not provide: which artifact
     // answered. Unreadable is recorded as null rather than guessed.
     let tampercheckSha256 = null;
+    let tampercheckLauncherShaped = false;
     try {
-      tampercheckSha256 = createHash("sha256").update(readFileSync(resolvedTampercheck)).digest("hex");
+      const binaryBytes = readFileSync(resolvedTampercheck);
+      tampercheckSha256 = createHash("sha256").update(binaryBytes).digest("hex");
+      // ENG-002 (audit): pip console scripts are LAUNCHERS — a generated .EXE
+      // or "#!...python" shim whose hash does NOT bind the package code in
+      // site-packages that actually produces the verdict. Detect the shape
+      // (a shebang, or a binary that references python) so the identity line
+      // can say what the pin really binds instead of overclaiming.
+      const head = binaryBytes.subarray(0, 2).toString("utf8");
+      tampercheckLauncherShaped = head === "#!" || binaryBytes.includes("python") || binaryBytes.includes("Python");
     } catch {
       tampercheckSha256 = null;
     }
@@ -369,6 +393,7 @@ export async function integrateWorkerBranch({
       // must never look like the succeeded strict mode.
       pinned: Boolean(expectedTampercheckSha256),
       verified: false,
+      launcherShaped: tampercheckLauncherShaped,
     };
 
     // Checksum pin: the only local check a stub author cannot satisfy by

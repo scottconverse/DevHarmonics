@@ -73,9 +73,16 @@ try {
     timeoutMs: 5 * 60_000,
   });
   console.log(`run 2 (cap $0.000001): ${describe(tiny.receipt)}`);
+  // ENG-011 (audit): only claim "enforced" when the failure is actually
+  // budget-shaped — a timeout, auth failure, or network blip is not evidence
+  // of enforcement, and a livefire verdict must not overclaim.
+  const tinyEvidence = `${tiny.receipt.exit?.error ?? ""} ${tiny.parsed?.finalText ?? ""}`;
+  const budgetShaped = /budget|max[- ]?budget|spend|cost limit/i.test(tinyEvidence) || (tiny.receipt.usage?.costUsd ?? 0) > 0.000001;
   console.log(tiny.receipt.status === "completed"
     ? "observed: the tiny cap did NOT stop the run — record this in the README (enforcement semantics)"
-    : "observed: the tiny cap stopped the run — the ceiling is enforced by the real CLI");
+    : budgetShaped
+      ? "observed: the tiny cap stopped the run for a budget-shaped reason — the ceiling is enforced by the real CLI"
+      : "observed: the run failed for a NON-budget reason — INCONCLUSIVE about enforcement; inspect the receipt before recording a verdict");
   if (!tiny.receipt.args?.includes("--max-budget-usd")) {
     console.error("FAIL: --max-budget-usd was not in the tiny-cap invocation args");
     failures += 1;

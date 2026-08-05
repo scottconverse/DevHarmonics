@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -466,6 +466,37 @@ test("TEST-008: executeQualification threads admission (defaulting to the qualif
       deps: { runWorker: capturingRunWorker },
     });
     assert.deepEqual(captured, explicit);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ENG-004: an admission (fanout-*) refusal is an infrastructure outcome — never a capability verdict in the ledger", async () => {
+  const dir = tmp("dh-qualify-fanout-");
+  try {
+    const qualificationsPath = path.join(dir, "qualifications.jsonl");
+    const workRoot = path.join(dir, "work");
+    const refusedRunWorker = async () => ({
+      receipt: {
+        status: "failed",
+        exit: { code: null, timedOut: false, error: "fanout-workers-exceeded: 100 of 100 workers already admitted in the last 24h (ledger: x)" },
+        usage: null,
+        receiptId: "r-refused",
+      },
+      runDir: path.join(dir, "rd"),
+      parsed: null,
+    });
+    const result = await executeQualification({
+      candidate: subprocessCandidate,
+      role: "analysis",
+      workRoot,
+      qualificationsPath,
+      deps: { runWorker: refusedRunWorker },
+    });
+    assert.equal(result.passed, false);
+    assert.match(result.infrastructureRefused, /^fanout-workers-exceeded/);
+    assert.equal(existsSync(qualificationsPath), false,
+      "an infrastructure refusal must append NOTHING — latest-record-wins would demote a passing candidate");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -80,7 +80,7 @@ function printResult(result, asJson, write) {
   }
   write(`DevHarmonics integration set: ${result.setId}\n\n`);
   write(`${renderMemberTable(result.members)}\n`);
-  write(`\nset:       ${result.setReady ? "READY" : "NOT READY"}\n`);
+  write(`\nset:         ${result.setReady ? "READY" : "NOT READY"}\n`);
   // One environment, one binary, one identity posture — report it once, from the
   // first member whose gate actually fingerprinted a binary (R-7 visibility).
   const fingerprinted = result.members.find((m) => m.gates?.tampercheckBinary?.path);
@@ -93,14 +93,14 @@ function printResult(result, asJson, write) {
   const assurance = result.setReady ? weakestAssurance(result.members) : null;
   if (assurance) {
     const required = result.members.find((m) => m.requiredEvidence)?.requiredEvidence ?? [];
-    write(`assurance: ${describeAssurance(assurance, required)}\n`);
+    write(`assurance:   ${describeAssurance(assurance, required)}\n`);
   }
   // The missing-evidence disclosure prints for BLOCKED sets too — an
   // insufficient-evidence refusal should name what was missing right here.
   const missing = [...new Set(result.members.flatMap((m) => m.missingEvidence ?? []))];
-  if (missing.length) write(`${assurance ? "           " : "missing:   "}REFUSED for missing evidence: ${missing.join(", ")}\n`);
-  if (!result.setReady) write(`blockedBy: ${result.blockedBy.join(", ")}\n`);
-  write(`evidence:  ${result.evidencePath}\n`);
+  if (missing.length) write(`${assurance ? "             " : "missing:     "}REFUSED for missing evidence: ${missing.join(", ")}\n`);
+  if (!result.setReady) write(`blockedBy:   ${result.blockedBy.join(", ")}\n`);
+  write(`evidence:    ${result.evidencePath}\n`);
 }
 
 export async function setCommand(argv, {
@@ -126,7 +126,7 @@ export async function setCommand(argv, {
       case "--tampercheck-sha256": {
         const raw = next();
         if (!/^[0-9a-fA-F]{64}$/.test(raw ?? "")) {
-          throw new Error(`--tampercheck-sha256 must be a 64-hex-character sha256 digest, got: ${JSON.stringify(raw)} (doctor prints the resolved binary's value)`);
+          throw new Error(`--tampercheck-sha256 must be a 64-hex-character sha256 digest, got: ${raw === undefined ? "missing value" : JSON.stringify(raw)} (doctor prints the resolved binary's value)`);
         }
         options.expectedTampercheckSha256 = raw;
         break;

@@ -43,8 +43,14 @@ function printApply(plan, result, asJson, write) {
   const width = Math.max(...plan.steps.map((s) => s.id.length));
   for (const step of plan.steps) {
     const failed = result.errors.find((e) => e.id === step.id);
-    const outcome = result.applied.includes(step.id) ? "WROTE" : failed ? "ERROR" : "SKIP";
-    write(`${outcome.padEnd(6)} ${step.id.padEnd(width)}  ${failed ? failed.reason : step.description}\n`);
+    // QA-003 (audit): a step that DIFFERS from the template must not collapse
+    // into the same SKIP as "already present" — drift ridden over silently is
+    // how a weakened pin survives an --apply. The dry run already says
+    // `differs`; the apply path now does too.
+    const differs = !result.applied.includes(step.id) && !failed && step.status === "differs";
+    const outcome = result.applied.includes(step.id) ? "WROTE" : failed ? "ERROR" : differs ? "DIFFER" : "SKIP";
+    const note = failed ? failed.reason : differs ? `${step.description} — existing file differs from the template; re-run with --force to rewrite` : step.description;
+    write(`${outcome.padEnd(6)} ${step.id.padEnd(width)}  ${note}\n`);
   }
   write(`\n${result.applied.length} written, ${result.skipped.length} skipped, ${result.errors.length} error(s)\n`);
 }

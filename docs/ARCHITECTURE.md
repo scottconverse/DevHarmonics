@@ -33,7 +33,7 @@ were deleted from the machine.
 
 ## 2. Module map
 
-Every file in `scripts/` (27 as of this writing), one line each:
+Every file in `scripts/` (29 as of this writing), one line each:
 
 | File | Responsibility |
 |---|---|
@@ -57,6 +57,8 @@ Every file in `scripts/` (27 as of this writing), one line each:
 | `qualify.mjs` | The qualification harnesses themselves (analysis, benchmark, tool_use, structured_write) plus the sweep planner/executor that records pass/fail to the ledger. |
 | `receipts.mjs` | Defines the one receipt schema (`devharmonics-receipt-v1`) shared by all three lanes; builds, validates, and writes `receipt.json`. |
 | `review.mjs` | Independent artifact-lens review: a model verdict plus a deterministic claims-vs-diff divergence check; always writes a review evidence bundle. |
+| `assurance.mjs` | The assurance ladder (`gates-only` → `validated`/`reviewed` → `validated+reviewed`), the `--require-evidence` floor parser, and the honest describe strings both `run` and `set` print. |
+| `suite-qualification.mjs` | SPEC §2.4 labeling: detects whether a target repo carries the deterministic-detector CI workflow and labels validator evidence accordingly — detection only, never enforcement. |
 | `run-command.mjs` | The single-repository pipeline (`runPipeline`) and its CLI surface (`runCommandCli`): intake through every gate to the owner-approval stop, across all three worker lanes. |
 | `run-worker.mjs` | Subprocess-lane worker runner: resolves the CLI, builds its invocation, supervises it, parses its output, and always writes a receipt. |
 | `set-command.mjs` | CLI surface for `devharmonics set`: parses repeated `--member`/`--base` flags into a plan and runs it through `planIntegrationSet` + `integrateSet`. |
@@ -144,28 +146,39 @@ flowchart TD
     StagedOk -- yes --> Commit["git commit on the worker branch"]
     Commit --> CommitOk{"commit succeeded?"}
     CommitOk -- no --> R4["REFUSED: commit-failed"]
-    CommitOk -- yes --> CheckGiven{"--check given?"}
-    CheckGiven -- no --> Gate1
-    CheckGiven -- yes --> Resolve{"validator command on PATH?"}
-    Resolve -- no --> R5["REFUSED: validator-unresolvable"]
-    Resolve -- yes --> Validate["run --check inside the worker worktree"]
-    Validate --> ValidateOk{"exit 0, no timeout?"}
-    ValidateOk -- no --> R6["REFUSED: validator-failed"]
-    ValidateOk -- yes --> Gate1
-    Gate1["integrateWorkerBranch:<br/>acquire this repository's file lock"] --> Gate1a{"diff(mergeBase, workerBranch) nonempty?"}
+    CommitOk -- yes --> Gate0
+    Gate0["integrateWorkerBranch:<br/>acquire this repository's own lock<br/>(.devharmonics/locks/&lt;repoKey&gt;.lock)"] --> Gate0a{"baseRef an ancestor of workerBranch?"}
+    Gate0a -- no --> R12["REFUSED: stale-worker-base<br/>(a merge would combine changes nobody gated)"]
+    Gate0a -- yes --> Gate1a{"diff(mergeBase, workerBranch) nonempty?"}
     Gate1a -- no --> R7["REFUSED: empty-diff<br/>(runs for every lane, unlike the subprocess/acp-only pre-check above)"]
-    Gate1a -- yes --> Gate2{"tampercheck resolvable on PATH?"}
+    Gate1a -- yes --> Gate2{"tampercheck resolved?<br/>(PATH, or a pinned --tampercheck-path)"}
     Gate2 -- no --> R8["REFUSED: tampercheck-unavailable"]
-    Gate2 -- yes --> Gate2b{"identity check armed<br/>(expectedTampercheckVersion) and mismatched?"}
-    Gate2b -- yes --> R8
-    Gate2b -- "no (off by default)" --> Gate2c["run tampercheck --from mergeBase --to workerHead<br/>in a detached temp worktree"]
+    Gate2 -- yes --> Gate2p{"--tampercheck-sha256 pin given<br/>and checksum mismatched?"}
+    Gate2p -- yes --> R8
+    Gate2p -- no --> Gate2b{"identity shape check (ON by default):<br/>does --version look like a bare semver?"}
+    Gate2b -- no --> R8
+    Gate2b -- yes --> Gate2c["run tampercheck --from mergeBase --to workerHead<br/>in a detached temp worktree"]
     Gate2c --> Gate2d{"exit code?"}
     Gate2d -- "0" --> Merge
     Gate2d -- "1: findings" --> R9["REFUSED: tampercheck-findings"]
     Gate2d -- "2, timeout, or crash" --> R8
-    Merge["--no-ff merge worker branch into<br/>devharmonics/integration/RUN_ID"] --> MergeOk{"merge clean?"}
+    Merge["build the --no-ff merge DETACHED —<br/>no branch moves yet (candidate-first)"] --> MergeOk{"merge clean?"}
     MergeOk -- no --> R10["REFUSED: merge-conflict (auto-aborted, no repair attempted)"]
-    MergeOk -- yes --> ReviewerGiven{"--reviewer given?"}
+    MergeOk -- yes --> FinalArtifact["tampercheck the MERGED CANDIDATE itself<br/>(the exact commit to be delivered)"]
+    FinalArtifact --> FinalOk{"clean?"}
+    FinalOk -- "findings" --> R13["REFUSED: final-artifact-findings"]
+    FinalOk -- "crash/timeout" --> R14["REFUSED: final-artifact-unavailable"]
+    FinalOk -- yes --> CheckGiven{"--check given?"}
+    CheckGiven -- no --> Advance
+    CheckGiven -- yes --> Resolve{"validator command on PATH?"}
+    Resolve -- no --> R5["REFUSED: validator-unresolvable"]
+    Resolve -- yes --> Validate["run --check in a checkout of the<br/>MERGED CANDIDATE (R-5), credential-stripped"]
+    Validate --> ValidateOk{"exit 0, no timeout?"}
+    ValidateOk -- no --> R6["REFUSED: validator-failed"]
+    ValidateOk -- yes --> Advance
+    Advance["advance devharmonics/integration/RUN_ID<br/>to the gated candidate (the LAST action)"] --> AdvanceOk{"ref moved?"}
+    AdvanceOk -- no --> R15["REFUSED: integration-ref-locked<br/>(e.g. the branch is checked out somewhere)"]
+    AdvanceOk -- yes --> ReviewerGiven{"--reviewer given?"}
     ReviewerGiven -- no --> Stop
     ReviewerGiven -- yes --> Review["independent reviewer sees the diff + validator receipt,<br/>never the worker's own narration"]
     Review --> Divergence["claims-vs-diff divergence check<br/>(the pipeline supplies no worker-claims manifest today,<br/>so this is reported 'not checked' — finding M-1)"]
@@ -185,16 +198,25 @@ an empty diff inside `local-patch.mjs` itself surfaces as generic
 `worker-failed` instead, with the real explanation in the receipt's detail.
 `empty-diff` at `Gate1a` runs identically for every lane, since it lives
 inside `integrateWorkerBranch` downstream of all three worker paths.
-`tampercheck-unavailable` folds four causes into one reason: not found on
-`PATH`, a failed identity check, a timeout, or any exit code other than 0 or
-1 — a crashed integrity gate is never distinguished from a merely strict
-one. The identity check (`Gate2b`) exists only because of a real finding:
-`docs/FALSIFICATION.md` records an adversarial test where a stub
-`tampercheck` earlier on `PATH` always exited 0 and a weakening change was
-integrated as a result. The fix (`expectedTampercheckVersion`) is implemented
-in `integrate.mjs` but is **off by default and not passed by
-`run-command.mjs` or `integration-set.mjs`** — using it today means calling
-`integrateWorkerBranch` directly as a library function.
+`tampercheck-unavailable` folds five causes into one reason: not found on
+`PATH` (or a nonexistent `--tampercheck-path`), a failed `--tampercheck-sha256`
+checksum pin, a failed identity shape check, a timeout, or any exit code other
+than 0 or 1 — a crashed integrity gate is never distinguished from a merely
+strict one. The identity shape check exists because of a real finding:
+`docs/FALSIFICATION.md` records an adversarial test where a stub `tampercheck`
+earlier on `PATH` always exited 0 and a weakening change was integrated as a
+result. That shape check is **on by default** for both `run` and `set`; the
+stronger bindings — `--tampercheck-path` (exact binary, PATH never consulted)
+and `--tampercheck-sha256` (content pin) — are CLI flags on both commands, and
+the output always states the posture the gate ran with (`pinned — sha256
+verified`, `pin REQUESTED but MISMATCHED`, or `version-shape only (unpinned)`).
+The candidate-first merge and final-artifact scan exist because of the
+decisive 2026-08-05 audit finding (A1-1/A4-1): the previous flow advanced the
+ref on merge and only ever scanned the worker's tree, so a reused integration
+branch ahead of base could deliver a combined tree no gate had seen. The ref
+update is now the last action, after the delivered commit itself passed
+every gate — including the operator's `--check`, which runs against the
+merged candidate (R-5), never just the worker's own tree.
 
 The `Divergence` node is likewise deliberately inert in the pipeline today
 (finding M-1). `claimsArtifactDivergence` in `review.mjs` is sound and tested,
@@ -242,15 +264,17 @@ prompt as an ongoing project session). The rule underneath all of this,
 stated directly in `run-worker.mjs` and `acp-worker.mjs`: an attempt that
 leaves no evidence must be indistinguishable from one that never happened.
 
-The worker-env boundary (`worker-env.mjs`'s `workerEnv()`) is called in four
+The worker-env boundary (`worker-env.mjs`'s `workerEnv()`) is called in seven
 places: the two worker spawns — `run-worker.mjs` (subprocess) and
-`acp-worker.mjs` (ACP) — and, since GAUNTLET-2026-08-05 finding C-2, the two
-`--check` validator spawns as well: `run-command.mjs`'s subprocess/acp
-validator and `local-patch.mjs`'s http-lane check. The validators run *inside
-the worktree the untrusted worker just committed to*, so a planted test line or
-`pretest` hook must not inherit the operator's credentials; earlier builds ran
-them with the full environment. The `strippedEnv` *receipt field* is still
-populated only by the two worker spawns (the validators use the stripped
+`acp-worker.mjs` (ACP) — plus `local-patch.mjs`'s http-lane check (C-2), and
+four sites inside `integrate.mjs`: the tampercheck identity probe, the
+worker-tree scan, the final-artifact scan of the merged candidate, and the
+`--check` validator, which since R-5 runs inside the integration engine
+against the merged candidate. Everything that executes with its working
+directory inside a worktree the untrusted worker contributed to runs
+credential-stripped; earlier builds ran validators (and once, tampercheck
+itself) with the full environment. The `strippedEnv` *receipt field* is
+populated by both worker spawns (the other call sites use the stripped
 environment but do not emit their own receipt). `workerEnv()` strips an explicit
 list of provider API keys, cloud credentials, and secret-bearing connection
 strings (`DATABASE_URL`, `REDIS_URL`, `MONGODB_URI`, `SENTRY_DSN`), plus any
@@ -388,7 +412,7 @@ by the end (confirmed via `wc -l`, then a full read of each, plus the
 rewritten `cli.mjs` and `run-command.mjs`); the non-use of
 `expectedTampercheckVersion` and `budgets.maxWorkerMinutes` outside their own
 defining module (the latter has since been deleted outright, and the
-admission ledger since wired into both worker lanes as the fan-out ceiling), the exact two call sites of `workerEnv()`, the absence of
+admission ledger since wired into both worker lanes as the fan-out ceiling; `workerEnv()` call sites have since grown to seven with the R-5 validator move), the then-two call sites of `workerEnv()`, the absence of
 any `"interrupted"` status literal outside `receipts.mjs`'s schema, and that
 `local-patch.mjs` never produces a `"timeout"` status were each confirmed
 with a targeted `grep` rather than assumed.

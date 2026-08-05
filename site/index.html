@@ -10,7 +10,7 @@
   :root{
     --bg:#0a0e12; --surface:#10151b; --surface-2:#131a21; --elevated:#18212a;
     --border:#222d37; --border-bright:#33424f;
-    --text:#e8eef4; --muted:#98a5b3; --faint:#66727f;
+    --text:#e8eef4; --muted:#98a5b3; --faint:#7d8b99;
     --accent:#45d290; --accent-dim:#2f9d68; --accent-ink:#06170e; --glow:rgba(69,210,144,.13);
     --refuse:#f26a60; --warn:#e6b567; --info:#82a6f2;
     --mono:ui-monospace,"Cascadia Code","SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
@@ -53,13 +53,14 @@
   .brand svg{display:block}
   .navlinks{display:flex;gap:22px;margin-left:auto;align-items:center}
   .navlinks a{color:var(--muted);font-size:.92rem}
+  .navlinks a.btn-primary,.navlinks a.btn-primary:hover{color:var(--accent-ink)}
   .navlinks a:hover{color:var(--text);text-decoration:none}
   .btn{display:inline-flex;align-items:center;gap:8px;font-family:var(--sans);font-size:.92rem;font-weight:560;padding:9px 16px;border-radius:var(--radius-sm);border:1px solid var(--border-bright);color:var(--text);background:var(--elevated);cursor:pointer;transition:border-color .15s,background .15s,transform .05s}
   .btn:hover{border-color:var(--accent-dim);background:#1b2530;text-decoration:none}
   .btn:active{transform:translateY(1px)}
   .btn-primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
   .btn-primary:hover{background:#54e09e;border-color:#54e09e;color:var(--accent-ink)}
-  .navtoggle{display:none;margin-left:auto;background:none;border:1px solid var(--border-bright);border-radius:8px;color:var(--text);width:40px;height:36px;font-size:1.1rem;cursor:pointer}
+  .navtoggle{display:none;margin-left:auto;background:none;border:1px solid var(--border-bright);border-radius:8px;color:var(--text);width:44px;height:44px;font-size:1.1rem;cursor:pointer}
 
   /* hero */
   .hero{padding-top:clamp(48px,7vw,88px);border-top:none}
@@ -122,12 +123,13 @@
   .lane b{font-weight:600}
   .lane .lm{color:var(--muted);font-size:.9rem}
   .lane .status{font-family:var(--mono);font-size:.72rem;color:var(--faint);text-align:right;white-space:nowrap}
+  @media (max-width:560px){.lane .status{white-space:normal}}
 
   /* gate chain */
   .chain{margin-top:48px;display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px}
   .gate{position:relative;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:18px 16px}
   .gate .gn{font-family:var(--mono);font-size:.7rem;color:var(--faint);letter-spacing:.1em}
-  .gate h4{margin:.5rem 0 .35rem;font-size:.98rem;font-weight:620}
+  .gate h3{margin:.5rem 0 .35rem;font-size:.98rem;font-weight:620}
   .gate p{font-size:.82rem;color:var(--muted);margin:0}
   .gate.pass{border-color:var(--accent-dim);box-shadow:inset 0 0 0 1px rgba(69,210,144,.12)}
   .gate .refuse{margin-top:10px;font-family:var(--mono);font-size:.7rem;color:var(--refuse);display:flex;align-items:center;gap:6px}
@@ -196,8 +198,9 @@
     .split.rev>div:first-child{order:0}
     .navlinks{display:none}
     .navtoggle{display:block}
-    .navlinks.open{display:flex;position:absolute;top:62px;left:0;right:0;flex-direction:column;background:var(--bg);border-bottom:1px solid var(--border);padding:16px 24px;gap:16px;margin:0}
-    .navlinks.open .btn{width:100%;justify-content:center}
+    .navlinks.open{display:flex;position:absolute;top:62px;left:0;right:0;flex-direction:column;background:var(--bg);border-bottom:1px solid var(--border);padding:16px 24px;gap:4px;margin:0}
+    .navlinks.open a{padding:10px 0}
+    .navlinks.open .btn{width:100%;justify-content:center;padding:13px 16px}
     .cmp-row{grid-template-columns:1fr}
     .cmp-row>div{border-top:1px solid var(--border)}
   }
@@ -250,7 +253,7 @@
       </div>
     </div>
     <div class="term" role="img" aria-label="Terminal showing the devharmonics doctor command probing local CLIs and model endpoints, with a mix of PASS and FAIL results verified by real attempts.">
-      <div class="term-bar"><i></i><i></i><i></i><span class="term-title">devharmonics doctor — capability probe (real output)</span></div>
+      <div class="term-bar"><i></i><i></i><i></i><span class="term-title">devharmonics doctor — capability probe (representative output)</span></div>
       <div class="term-body"><pre><span class="prompt">$</span> <span class="cmd">devharmonics doctor</span>
 
 <span class="ok">PASS</span>  cli:codex          <span class="dim">codex-cli 0.145.0</span>
@@ -337,26 +340,26 @@
     </div>
     <div class="chain">
       <div class="gate">
-        <div class="gn">STEP 01</div><h4>Isolated worktree</h4>
+        <div class="gn">STEP 01</div><h3>Isolated worktree</h3>
         <p>The worker edits a fresh git worktree in your temp dir — never your own checkout.</p>
       </div>
       <div class="gate pass">
-        <div class="gn">GATE 02</div><h4>Empty-diff</h4>
+        <div class="gn">GATE 02</div><h3>Empty-diff</h3>
         <p>A branch that changed nothing does not pass. No false green from a no-op.</p>
         <div class="refuse">empty-diff</div>
       </div>
       <div class="gate pass">
-        <div class="gn">GATE 03</div><h4>tampercheck</h4>
+        <div class="gn">GATE 03</div><h3>tampercheck</h3>
         <p>An integrity scan of the diff, with an identity check on the binary itself before its verdict is trusted.</p>
         <div class="refuse">findings / unavailable</div>
       </div>
       <div class="gate pass">
-        <div class="gn">GATE 04</div><h4>Serial merge</h4>
+        <div class="gn">GATE 04</div><h3>Serial merge</h3>
         <p>A <code>--no-ff</code> merge into an integration branch, per-repository lock, auto-abort on conflict.</p>
         <div class="refuse">merge-conflict</div>
       </div>
       <div class="gate">
-        <div class="gn">STEP 05</div><h4>Independent review</h4>
+        <div class="gn">STEP 05</div><h3>Independent review</h3>
         <p>Optional. An artifact-lens reviewer sees the diff and receipts — never the worker's own narration.</p>
         <div class="refuse">review-not-ready</div>
       </div>
@@ -431,7 +434,7 @@
     <div class="steps">
       <div class="step"><div class="sn"></div><div><h3>Intake</h3><p>Point <code>devharmonics run</code> at a repository with a clean tracked working tree. It pins the current <code>HEAD</code> as the base and refuses to proceed on uncommitted tracked changes — nothing is stashed or silently skipped.</p></div></div>
       <div class="step"><div class="sn"></div><div><h3>Isolated work</h3><p>A worker on the lane you chose makes the change inside a throwaway worktree. The pipeline stages and commits it on a task branch; a no-op refuses immediately as <code>worker-empty-diff</code>.</p></div></div>
-      <div class="step"><div class="sn"></div><div><h3>Validate &amp; gate</h3><p>Your optional <code>--check</code> command runs in the worktree with a credential-stripped environment. Then the empty-diff and tampercheck gates run at the integration boundary — a crashed gate is never read as a pass.</p></div></div>
+      <div class="step"><div class="sn"></div><div><h3>Validate &amp; gate</h3><p>The empty-diff, base-ancestry, and tampercheck gates run at the integration boundary, the merge is built detached, and the merged candidate itself is scanned again — then your optional <code>--check</code> command runs against that exact merged candidate, with a credential-stripped environment. A crashed gate is never read as a pass.</p></div></div>
       <div class="step"><div class="sn"></div><div><h3>Merge &amp; review</h3><p>A <code>--no-ff</code> merge into an integration branch, then an optional independent reviewer that judges the diff and receipts — never the worker's own story of what it did.</p></div></div>
       <div class="step"><div class="sn"></div><div><h3>Stop for you</h3><p>The run prints the integration branch and the evidence bundle, and stops. Bringing the change into your own history is a decision only you make.</p></div></div>
     </div>
@@ -444,7 +447,7 @@
     <div class="card" style="padding:32px">
       <span class="tag">The novel piece</span>
       <h3 style="font-size:1.3rem">Multi-repository integration sets</h3>
-      <p style="margin-top:.6rem">Plan a change that spans several repositories and judge it all-or-nothing. Each member is pinned to its own exact base commit at plan time, gets its own integration branch, and merges under the same per-repository lock. One task never touches two repositories — it's enforced structurally, not by convention — and advancement is genuinely two-phase: every member is gated and its merged candidate built first, with no branch moving; integration refs advance only after every member passes, so a refused member means nothing advances anywhere (<code>set-blocked-not-advanced</code>), never a half-applied set.</p>
+      <p style="margin-top:.6rem">Plan a change that spans several repositories and judge it all-or-nothing. Each member is pinned to its own exact base commit at plan time, gets its own integration branch, and merges under the same per-repository lock — and one task never touches two repositories, enforced structurally, not by convention.</p><p style="margin-top:.6rem">Advancement is genuinely two-phase. First, every member is gated and its merged candidate built, with no branch moving. Only after every member passes do the integration refs advance. If any member is refused, nothing advances anywhere (<code>set-blocked-not-advanced</code>) — never a half-applied set.</p>
     </div>
     <div class="card" style="padding:32px">
       <span class="tag">Admission, not routing</span>
@@ -527,7 +530,7 @@
       <div class="status-list">
         <div class="sitem"><span class="m built">Built</span><p><b>All eight pipeline slices</b> — the three lanes, qualification, single-repo pipeline, review, and multi-repo sets are implemented and live-fire accepted.</p></div>
         <div class="sitem"><span class="m early">From source</span><p><b>No published package.</b> Install via <code>git clone</code> + <code>npm link</code>; there is no npm or registry release.</p></div>
-        <div class="sitem"><span class="m partial">Partial</span><p>The <b>ACP lane's receipt</b> doesn't yet record its stripped-env list, and an <b>HTTP-lane review</b> isn't handed the check result. Both are documented.</p></div>
+        <div class="sitem"><span class="m partial">Partial</span><p><b>Usage metering is only as good as provider reporting:</b> <code>agy</code> reports no token usage at all, and the http lane's single bounded model call isn't metered by the fan-out ceilings. There is also <b>no resume</b> — an interrupted run starts over, by design. All documented.</p></div>
         <div class="sitem"><span class="m partial">By design</span><p><b>No resume, no auto-merge repair, no dashboard.</b> An interrupted run starts over; conflicts and the UI are a human's job.</p></div>
       </div>
     </div>
@@ -572,11 +575,18 @@
   (function(){
     var t=document.querySelector('.navtoggle'), l=document.getElementById('navlinks');
     if(!t||!l)return;
+    function close(){ l.classList.remove('open'); t.setAttribute('aria-expanded','false'); }
     t.addEventListener('click',function(){
       var open=l.classList.toggle('open');
       t.setAttribute('aria-expanded',open?'true':'false');
     });
-    l.addEventListener('click',function(e){ if(e.target.tagName==='A'){l.classList.remove('open');t.setAttribute('aria-expanded','false');} });
+    l.addEventListener('click',function(e){ if(e.target.tagName==='A'){close();} });
+    document.addEventListener('keydown',function(e){
+      if(e.key==='Escape'&&l.classList.contains('open')){ close(); t.focus(); }
+    });
+    document.addEventListener('click',function(e){
+      if(l.classList.contains('open')&&!l.contains(e.target)&&e.target!==t&&!t.contains(e.target)){ close(); }
+    });
   })();
 </script>
 </body>

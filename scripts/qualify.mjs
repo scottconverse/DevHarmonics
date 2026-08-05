@@ -155,6 +155,14 @@ async function subprocessTextRoundtrip({ candidate, workRoot, env, timeoutMs, pr
 
 // --- analysis ---------------------------------------------------------------
 
+/** ENG-004 (audit): an admission refusal (fanout-*) is an INFRASTRUCTURE
+ * outcome, never evidence about model capability — it must not become a
+ * `passed:false` verdict that de-qualifies a previously passing candidate. */
+function infrastructureRefusal(receipt) {
+  const error = receipt?.exit?.error;
+  return typeof error === "string" && error.startsWith("fanout-") ? error : null;
+}
+
 async function runAnalysis({ candidate, workRoot, env, timeoutMs, deps, admission }) {
   if (candidate.lane === "http") {
     const result = await httpTextRoundtrip({ candidate, deps, timeoutMs, prompt: ANALYSIS_PROMPT, maxTokens: 32 });
@@ -170,6 +178,8 @@ async function runAnalysis({ candidate, workRoot, env, timeoutMs, deps, admissio
     };
   }
   const run = await subprocessTextRoundtrip({ candidate, workRoot, env, timeoutMs, prompt: ANALYSIS_PROMPT, role: "analysis", deps, admission });
+  const infraAnalysis = infrastructureRefusal(run.receipt);
+  if (infraAnalysis) return { passed: false, infrastructureRefused: infraAnalysis, detail: infraAnalysis, usage: null, receiptRef: null };
   const passed = run.receipt.status === "completed" && verdictExactMarker(run.parsed?.finalText, ANALYSIS_MARKER);
   return {
     passed,
@@ -197,6 +207,8 @@ async function runBenchmark({ candidate, workRoot, env, timeoutMs, deps, admissi
     return { passed, detail: benchmarkDetail(passed, parsed), usage: result.usage, receiptRef: null };
   }
   const run = await subprocessTextRoundtrip({ candidate, workRoot, env, timeoutMs, prompt: BENCHMARK_PROMPT, role: "benchmark", deps, admission });
+  const infraBenchmark = infrastructureRefusal(run.receipt);
+  if (infraBenchmark) return { passed: false, infrastructureRefused: infraBenchmark, detail: infraBenchmark, usage: null, receiptRef: null };
   const { passed, parsed } = run.receipt.status === "completed"
     ? benchmarkVerdict(run.parsed?.finalText)
     : { passed: false, parsed: { error: `worker status=${run.receipt.status}`, minimumHours: null } };
@@ -327,6 +339,8 @@ async function runStructuredWriteSubprocess({ candidate, workRoot, env, timeoutM
     timeoutMs,
     env,
   });
+  const infraWrite = infrastructureRefusal(receipt);
+  if (infraWrite) return { passed: false, infrastructureRefused: infraWrite, detail: infraWrite, usage: null, receiptRef: null };
 
   // The worker's own claim of success is never the evidence — verify
   // independently: a real, nonempty diff, and the real check green.
@@ -407,6 +421,21 @@ export async function executeQualification({
     outcome = { passed: false, detail: `harness threw: ${error.message}`, usage: null, receiptRef: null };
   }
   const durationMs = Date.now() - startedAt;
+
+  // ENG-004: an infrastructure refusal is never appended to
+  // qualifications.jsonl — that ledger is capability evidence, and a
+  // budget-exhausted sweep must not demote candidates that passed yesterday
+  // (the consumer is latest-record-wins).
+  if (outcome.infrastructureRefused) {
+    return {
+      passed: false,
+      infrastructureRefused: outcome.infrastructureRefused,
+      detail: outcome.detail,
+      durationMs,
+      usage: null,
+      receiptRef: null,
+    };
+  }
 
   const record = {
     candidateId: candidate.id,

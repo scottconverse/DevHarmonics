@@ -297,18 +297,28 @@ export async function runAcpWorker({
   } catch (error) {
     return finish({ status: "failed", error: `fanout-admission-unavailable: ${error.message}` });
   }
-  const slotDeadline = Date.now() + timeoutMs;
+  const slotStart = Date.now();
+  const slotDeadline = slotStart + timeoutMs;
+  let announcedWait = false;
   for (;;) {
     try {
       slot = acquireWorkerSlot(fanoutStateRoot, fanoutBudgets.maxConcurrentWorkers, { taskId });
       break;
     } catch (error) {
+      // UX-009 (audit): never wait silently — one stderr line, once.
+      if (!announcedWait) {
+        announcedWait = true;
+        process.stderr.write(`waiting for a free worker slot (${fanoutBudgets.maxConcurrentWorkers} in use under ${fanoutStateRoot}; will wait up to ${Math.round(timeoutMs / 60_000)}m)
+`);
+      }
       if (Date.now() >= slotDeadline) {
         return finish({ status: "failed", error: `fanout-concurrency: ${error.message} (waited ${timeoutMs}ms for a free worker slot under ${fanoutStateRoot})` });
       }
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
+  // ENG-007 (audit): the wait spends the run's own timeout budget.
+  timeoutMs = Math.max(1_000, timeoutMs - (Date.now() - slotStart));
 
   const platform = process.platform;
   // Host-session hygiene (found live 2026-08-04): when the coordinator IS a

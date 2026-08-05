@@ -78,10 +78,10 @@ export async function probeMessagesEndpoint(id, baseUrl, { timeoutMs = 45_000, d
   try {
     discovery = await discoverModel(baseUrl, discoveryTimeoutMs);
   } catch (error) {
-    return { id, status: "FAIL", detail: `unreachable: ${error.message}`, baseUrl, model: null, durationMs: null };
+    return { id, status: "FAIL", detail: `unreachable: ${error.message} — probed ${baseUrl}`, baseUrl, model: null, durationMs: null };
   }
   if (!discovery.model) {
-    return { id, status: "FAIL", detail: "endpoint did not list any available model (server down, or no model loaded)", baseUrl, model: null, durationMs: null };
+    return { id, status: "FAIL", detail: `endpoint did not list any available model (server down, or no model loaded) — probed ${baseUrl}`, baseUrl, model: null, durationMs: null };
   }
   const started = Date.now();
   try {

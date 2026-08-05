@@ -176,3 +176,20 @@ hardlink/junction/directory-symlink-in-prefix/traversal matrix.
   (the admission ledger library is not wired into any command today).
 - Receipt cross-field usage consistency (each field is well-typed; the sum is
   not checked against the parts).
+
+## Current state addendum — 2026-08-05, late (post-audit fix passes)
+
+The entries above are a dated adversarial record and stand unedited. For a
+reader assessing the defense as it ships TODAY, the F-1 story has moved on:
+
+- The identity **shape check is ON by default** for both `run` and `set`
+  (`requireTampercheckIdentity`, `scripts/integrate.mjs`).
+- The strong bindings are **CLI flags on both commands**: `--tampercheck-path`
+  (exact binary, `PATH` never consulted) and `--tampercheck-sha256` (content
+  pin; `doctor` prints the value to copy). A mismatched pin refuses.
+- Every `run`/`set` prints the identity posture the gate actually ran with —
+  verified pin, requested-but-mismatched pin, or version-shape-only — so the
+  loose mode can never read as the strict one, and a launcher-shaped binary's
+  pin says it binds the launcher file, not the Python package it invokes.
+- See `docs/USER_MANUAL.md` "The tampercheck identity check" for the current
+  contract, and `livefire/` for the retained real-tool proofs.

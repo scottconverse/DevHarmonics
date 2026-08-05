@@ -224,6 +224,15 @@ export async function qualifyCommand(argv, { write = (text) => { process.stdout.
     });
     rows.push({ ...row, result });
     if (!options.asJson) printRowResult(row, result, write);
+    // ENG-004 (audit): a fan-out ceiling tripping mid-sweep is an
+    // infrastructure stop, not a string of capability failures — abort the
+    // sweep honestly instead of recording refusals against every remaining
+    // candidate.
+    if (result.infrastructureRefused) {
+      const remaining = plan.length - rows.length;
+      write(`\nsweep ABORTED: ${result.infrastructureRefused}\n${remaining} candidate/role pair(s) left unassessed — nothing was recorded against them.\n`);
+      break;
+    }
   }
   printExecuteSummary(rows, options.asJson, write);
   return 0;

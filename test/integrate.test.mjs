@@ -578,3 +578,142 @@ test("serialization: two concurrent non-conflicting integrations into one repo n
   assert.equal(b1.reason, null);
   assert.equal(b2.reason, null);
 }));
+
+// --- Audit fix-pass: TEST-003, TEST-006 (tampercheckPath), ENG-005 ----------
+
+// TEST-003: the validator must be provably sensitive to R-5's own bug class —
+// a check that PASSES on the worker's tree but FAILS on the merged candidate.
+// Same divergence fixture as the final-artifact test above, with the fake
+// tampercheck always clean so the VALIDATOR is the gate that must catch it.
+test("TEST-003: a check that passes the worker tree but fails the merged candidate refuses validator-failed", async () => {
+  const repo = tempDir("dh-int-repo-");
+  const evidenceRoot = tempDir("dh-int-evidence-");
+  const fixtureDir = tempDir("dh-int-fixtures-");
+  const INTEGRATION = "devharmonics/integration/valdiverge";
+  try {
+    git(repo, ["init", "-q", "-b", "main"]);
+    git(repo, ["config", "user.email", "test@example.com"]);
+    git(repo, ["config", "user.name", "Test User"]);
+    writeFileSync(path.join(repo, "config.txt"), "api=v1\n");
+    writeFileSync(path.join(repo, "client.txt"), "client=v1\n");
+    // The check: refuse exactly the COMBINATION the merge produces.
+    writeFileSync(path.join(repo, "check.mjs"), [
+      'import { readFileSync } from "node:fs";',
+      'const api = readFileSync("config.txt", "utf8");',
+      'const client = readFileSync("client.txt", "utf8");',
+      'if (api.includes("api=v2") && client.includes("client=v1-feature")) {',
+      '  console.error("CHECK FAIL: forbidden combination");',
+      "  process.exit(1);",
+      "}",
+      'console.log("CHECK PASS");',
+      "process.exit(0);",
+      "",
+    ].join("\n"));
+    git(repo, ["add", "-A"]);
+    git(repo, ["commit", "-q", "-m", "base"]);
+    const baseRef = git(repo, ["rev-parse", "HEAD"]).trim();
+
+    // worker cut from base (ancestry valid) — changes client only; its own tree passes the check
+    git(repo, ["branch", "worker-vd", baseRef]);
+    let wt = tempDir("dh-int-wt-");
+    git(repo, ["worktree", "add", "-q", wt, "worker-vd"]);
+    writeFileSync(path.join(wt, "client.txt"), "client=v1-feature\n");
+    git(wt, ["add", "-A"]);
+    git(wt, ["commit", "-q", "-m", "worker feature"]);
+    const workerHead = git(repo, ["rev-parse", "worker-vd"]).trim();
+    git(repo, ["worktree", "remove", "--force", wt]);
+
+    // reused integration branch ahead of base — changes config only
+    git(repo, ["branch", INTEGRATION, baseRef]);
+    wt = tempDir("dh-int-wt-");
+    git(repo, ["worktree", "add", "-q", wt, INTEGRATION]);
+    writeFileSync(path.join(wt, "config.txt"), "api=v2\n");
+    git(wt, ["add", "-A"]);
+    git(wt, ["commit", "-q", "-m", "prior integration"]);
+    git(repo, ["worktree", "remove", "--force", wt]);
+    const preMergeHead = git(repo, ["rev-parse", INTEGRATION]).trim();
+
+    fakeClean(fixtureDir);
+    const result = await integrateWorkerBranch({
+      repository: repo,
+      integrationBranch: INTEGRATION,
+      workerBranch: "worker-vd",
+      baseRef,
+      taskId: "task-val-diverge",
+      evidenceRoot,
+      check: { command: "node", args: ["check.mjs"] },
+      env: pathOnlyEnv(fixtureDir),
+      timeoutMs: 20_000,
+    });
+
+    assert.equal(result.gates.tampercheck.status, "pass");
+    assert.equal(result.gates.finalArtifact.status, "pass", "tampercheck is clean by design — the VALIDATOR must be the catcher");
+    assert.equal(result.gates.validator.status, "refused", JSON.stringify(result.gates.validator));
+    assert.equal(result.reason, "validator-failed");
+    assert.notEqual(result.gates.validator.candidateHead, workerHead,
+      "the validator provably ran against a candidate that differs from the worker tree");
+    assert.equal(git(repo, ["rev-parse", INTEGRATION]).trim(), preMergeHead, "the ref must not advance");
+  } finally {
+    for (const d of [repo, evidenceRoot, fixtureDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+// TEST-006: the tampercheckPath mode — never consults PATH, and a nonexistent
+// path refuses rather than falling back.
+test("TEST-006: tampercheckPath pins the exact binary (no PATH consulted); a nonexistent path refuses", async () => {
+  await withTemps(async ({ repo, evidenceRoot, fixtureDir }) => {
+    const baseRef = git(repo, ["rev-parse", "HEAD"]).trim();
+    branchFrom(repo, "worker-tp", "main", "line1\nCHANGED\n");
+    fakeClean(fixtureDir);
+    const pinnedBinary = path.join(fixtureDir, process.platform === "win32" ? "tampercheck.cmd" : "tampercheck");
+
+    // Nonexistent absolute path: fail closed.
+    const refused = await integrateWorkerBranch({
+      repository: repo,
+      integrationBranch: "devharmonics/integration/tp1",
+      workerBranch: "worker-tp",
+      baseRef,
+      taskId: "task-tp-missing",
+      evidenceRoot,
+      tampercheckPath: path.join(fixtureDir, "does-not-exist.exe"),
+      env: noToolEnv(fixtureDir),
+      timeoutMs: 20_000,
+    });
+    assert.equal(refused.integrated, false);
+    assert.equal(refused.reason, "tampercheck-unavailable");
+    assert.match(refused.gates.tampercheck.detail, /existing absolute path/);
+
+    // Real absolute path with NO tampercheck on PATH: integrates — the pin,
+    // not PATH resolution, found the binary.
+    const pinned = await integrateWorkerBranch({
+      repository: repo,
+      integrationBranch: "devharmonics/integration/tp2",
+      workerBranch: "worker-tp",
+      baseRef,
+      taskId: "task-tp-pinned",
+      evidenceRoot,
+      tampercheckPath: pinnedBinary,
+      env: noToolEnv(fixtureDir),
+      timeoutMs: 20_000,
+    });
+    assert.equal(pinned.integrated, true, JSON.stringify(pinned));
+    assert.equal(pinned.gates.tampercheckBinary.source, "configured-absolute-path");
+    assert.equal(pinned.gates.tampercheckBinary.path, pinnedBinary);
+  });
+});
+
+// ENG-005: the per-repository serialization lock derives from the REPOSITORY,
+// never from a per-run evidence root — two runs against one repo share it.
+test("ENG-005: the integration lock path is repository-scoped, identical across evidence roots", async () => {
+  const { integrationLockPath } = await import("../scripts/integrate.mjs");
+  const repo = tempDir("dh-int-lockpath-");
+  try {
+    const a = integrationLockPath(repo);
+    const b = integrationLockPath(path.join(repo, "..", path.basename(repo)));
+    assert.equal(a, b, "path spelling variants of one repo must produce ONE lock path");
+    assert.ok(a.startsWith(path.resolve(repo)), "the lock lives inside the repository's own state dir");
+    assert.match(a, /[/\]\.devharmonics[/\]locks[/\][0-9a-f]{64}\.lock$/);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});

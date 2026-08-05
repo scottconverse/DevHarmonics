@@ -45,12 +45,15 @@ how to read the combined result.
   candidate; if a finalize fails partway, the refs already advanced are
   rolled back to their recorded pre-merge positions. `setReady` is `true`
   only when every member prepared **and** finalized cleanly.
-- **A blocking finding must name exactly one repository, or the set fails
-  closed.** `scopeFinding` resolves a finding to one `repositoryId` via an
-  explicit field or a recognized `"<repositoryId>:"` prefix on
-  `finding.location`. Zero matches, more than one, or an id outside the set
-  all refuse (`scoped: false`); the caller must then treat that finding as
-  blocking the whole set. This function never guesses.
+- **Blocking findings are member-scoped by construction.** Each member gets
+  its own reviewer, judged against a member-scoped goal, and any member's
+  NOT_READY blocks the whole set — no runtime path produces a cross-member
+  finding to mis-attribute. For callers that aggregate findings across
+  members, the exported `scopeFinding` helper resolves a finding to one
+  `repositoryId` via an explicit field or a recognized `"<repositoryId>:"`
+  location prefix; zero matches, more than one, or an id outside the set all
+  refuse (`scoped: false`) — it never guesses. Nothing at runtime calls it
+  today; it is a tested primitive, not live spine.
 
 ## What v1 deliberately does NOT do
 
@@ -68,6 +71,7 @@ how to read the combined result.
 |---|---|---|
 | `planIntegrationSet` | throws (fail closed) | Empty/non-array `members`; duplicate `repositoryId`; two `repositoryId`s resolving to the same repository root; `repository` missing, not a directory, or not a git root; `workerBranch` or an explicit `baseRef` that doesn't resolve to a commit. A malformed plan is refused before anything runs. |
 | per member (`integrateWorkerBranch`, reused) | `stale-worker-base` / `empty-diff` / `tampercheck-findings` / `tampercheck-unavailable` / `merge-conflict` / `final-artifact-findings` / `final-artifact-unavailable` / `validator-failed` / `validator-unresolvable` / `integration-ref-locked` | Unchanged from `scripts/integrate.mjs` — see that module. |
+| per member, review phase | `review-not-ready` | This member's own independent review returned NOT_READY (a crashed reviewer is never a pass); blocks the whole set. |
 | per member, evidence floor | `insufficient-evidence (missing: ...)` | A `--require-evidence` demand (validator and/or review) was not met for this member; the set does not reach `setReady`. |
 | per member, set-level annotation | `set-blocked-not-advanced` | This member passed every gate, but a sibling did not — its integration ref was deliberately **not** advanced and its parked candidate was abandoned. Nothing is half-applied. |
 | per member, finalize | `integration-ref-moved` | The member's integration branch moved between the gated prepare and the finalize, so its candidate is no longer the right successor. Not advanced. |

@@ -48,6 +48,10 @@ export function summarizeLedger(ledgerText, paid) {
   for (const [index, line] of ledgerText.split(/\r?\n/).entries()) {
     if (!line) continue;
     const entry = JSON.parse(line);
+    // ENG-010 (audit): fan-out worker records cohabit this ledger; the money
+    // summaries must never count them (their unpaid reservations carry
+    // reservedTokens 0 and would skew any future unpaid-path caller).
+    if (entry.kind === "worker") continue;
     if (entry.paid !== paid) continue;
     let identity = entry.invocationId;
     if (!identity) {
@@ -103,7 +107,7 @@ export async function reserveUnpaidTaskUsage({ stateRoot, taskId, metadata = {} 
   const lock = await acquireFileLock(path.join(stateRoot, "usage.lock"), { taskId, stage: "reserved", paid: false });
   try {
     const ledgerText = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
-    if (ledgerText.split(/\r?\n/).filter(Boolean).some((line) => JSON.parse(line).taskId === taskId)) {
+    if (ledgerText.split(/\r?\n/).filter(Boolean).some((line) => { const e = JSON.parse(line); return e.kind !== "worker" && e.taskId === taskId; })) {
       throw new Error(`Task ${taskId} already has an attempt`);
     }
     const invocationId = createInvocationId();
@@ -150,7 +154,7 @@ export async function reservePaidUsage({
   try {
     const ledgerText = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
     if (rejectTaskReuse && ledgerText.split(/\r?\n/).filter(Boolean)
-      .some((line) => JSON.parse(line).taskId === taskId)) {
+      .some((line) => { const e = JSON.parse(line); return e.kind !== "worker" && e.taskId === taskId; })) {
       throw new Error(`Task ${taskId} already has an attempt`);
     }
     const spent = summarizeLedger(ledgerText, true);
@@ -320,7 +324,12 @@ export async function reconcileWorker({ stateRoot, invocationId, taskId, status,
 export function deriveStateRoot(runsRoot) {
   const resolved = path.resolve(runsRoot);
   const segments = resolved.split(path.sep);
-  const index = segments.lastIndexOf(".devharmonics");
+  // ENG-008 (audit): match case-insensitively where the filesystem does — a
+  // differently-cased ".DevHarmonics" is the SAME directory on win32/darwin,
+  // and an exact match silently forked the meter into a nested .fanout there.
+  const caseInsensitive = process.platform === "win32" || process.platform === "darwin";
+  const matches = (segment) => (caseInsensitive ? segment.toLowerCase() === ".devharmonics" : segment === ".devharmonics");
+  const index = segments.findLastIndex(matches);
   if (index >= 0) return segments.slice(0, index + 1).join(path.sep);
   return path.join(resolved, ".fanout");
 }

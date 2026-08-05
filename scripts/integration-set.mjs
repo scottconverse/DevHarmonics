@@ -3,7 +3,12 @@ import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import process from "node:process";
-import { integrateWorkerBranch } from "./integrate.mjs";
+import {
+  integrateWorkerBranch,
+  finalizeIntegrationCandidate,
+  abandonIntegrationCandidate,
+  rollbackIntegrationRef,
+} from "./integrate.mjs";
 
 /**
  * Multi-repo extension of scripts/integrate.mjs (design contract:
@@ -170,6 +175,8 @@ export async function integrateSet({ set, evidenceRoot, env, timeoutMs }) {
   if (typeof set.setId !== "string" || set.setId.trim().length === 0) failIntegrate("set.setId must be a non-empty string");
   if (typeof evidenceRoot !== "string" || evidenceRoot.trim().length === 0) failIntegrate("evidenceRoot must be a non-empty string");
 
+  // PHASE 1 — prepare every member: all gates run and a gated candidate commit is
+  // built per repository, but NO integration ref moves anywhere yet.
   const attempts = await Promise.all(set.members.map(async (member) => {
     const memberEvidenceRoot = path.join(evidenceRoot, "members", member.repositoryId);
     try {
@@ -180,6 +187,7 @@ export async function integrateSet({ set, evidenceRoot, env, timeoutMs }) {
         baseRef: member.baseCommit,
         taskId: `${set.setId}-${member.repositoryId}`,
         evidenceRoot: memberEvidenceRoot,
+        deferRefUpdate: true,
         env,
         timeoutMs,
       });
@@ -193,31 +201,86 @@ export async function integrateSet({ set, evidenceRoot, env, timeoutMs }) {
       // as a pass, and the set as a whole is still reported.
       return {
         member,
-        outcome: { integrated: false, reason: "integration-error", integrationHead: null, gates: null, evidencePath: null },
+        outcome: { integrated: false, prepared: false, reason: "integration-error", integrationHead: null, gates: null, evidencePath: null },
         threw: error?.message ?? String(error),
       };
     }
   }));
 
-  const setReady = attempts.every(({ outcome }) => outcome.integrated === true);
+  const allPrepared = attempts.every(({ outcome }) => outcome.prepared === true);
+  const abandonAll = () => {
+    for (const { member, outcome } of attempts) {
+      if (outcome?.candidateRef) abandonIntegrationCandidate({ repository: member.repository, candidateRef: outcome.candidateRef });
+    }
+  };
+
+  // PHASE 2 — commit the set. Only reached when EVERY member produced a gated
+  // candidate, so a blocked set leaves every repository exactly as it was. This is
+  // the atomicity the docs previously only claimed: the old flow advanced each
+  // member as it passed and relabelled survivors "advanced-but-set-blocked",
+  // leaving a half-applied cross-repo change on disk.
+  let finalizeFailure = null;
+  const advanced = [];
+  if (allPrepared) {
+    // Sequential: a failure mid-way is then trivially rewindable.
+    for (const { member, outcome } of attempts) {
+      const res = finalizeIntegrationCandidate({
+        repository: member.repository,
+        integrationBranch: member.integrationBranch,
+        candidateHead: outcome.candidateHead,
+        expectedPreMergeHead: outcome.preMergeHead,
+        candidateRef: outcome.candidateRef,
+      });
+      if (!res.ok) { finalizeFailure = { member, ...res }; break; }
+      advanced.push({ member, outcome });
+    }
+    if (finalizeFailure) {
+      // Rewind whatever already advanced, so the set is still all-or-nothing.
+      for (const { member, outcome } of advanced) {
+        rollbackIntegrationRef({ repository: member.repository, integrationBranch: member.integrationBranch, toCommit: outcome.preMergeHead });
+      }
+      advanced.length = 0;
+      abandonAll();
+    }
+  } else {
+    abandonAll();
+  }
+
+  const setReady = allPrepared && finalizeFailure === null;
 
   const members = attempts.map(({ member, outcome, threw }) => {
-    const setBlocked = outcome.integrated === true && !setReady;
+    // A member that passed every gate but whose set was blocked is reported as
+    // gated-but-deliberately-not-advanced — not as a success, and not as a
+    // half-applied change the operator has to remember to avoid.
+    const gatedButBlocked = outcome?.prepared === true && !setReady;
     return {
       repositoryId: member.repositoryId,
-      integrated: outcome.integrated,
-      reason: setBlocked ? "advanced-but-set-blocked" : outcome.reason,
-      integrationHead: outcome.integrationHead ?? null,
-      evidencePath: outcome.evidencePath ?? null,
+      integrated: setReady,
+      prepared: outcome?.prepared === true,
+      reason: setReady
+        ? null
+        : gatedButBlocked
+          ? "set-blocked-not-advanced"
+          : (outcome?.reason ?? null),
+      integrationHead: setReady ? (outcome.candidateHead ?? null) : null,
+      evidencePath: outcome?.evidencePath ?? null,
       baseCommit: member.baseCommit,
       workerBranch: member.workerBranch,
       integrationBranch: member.integrationBranch,
-      gates: outcome.gates ?? null,
+      gates: outcome?.gates ?? null,
       ...(threw ? { threw } : {}),
+      ...(finalizeFailure && finalizeFailure.member.repositoryId === member.repositoryId
+        ? { finalizeRefused: { reason: finalizeFailure.reason, detail: finalizeFailure.detail } }
+        : {}),
     };
   });
 
-  const blockedBy = members.filter((m) => m.integrated === false).map((m) => m.repositoryId);
+  // Only members that failed to PREPARE actually block the set; a member that was
+  // gated fine is not itself a blocker.
+  const blockedBy = members.filter((m) => m.prepared !== true).map((m) => m.repositoryId);
+  if (finalizeFailure && !blockedBy.includes(finalizeFailure.member.repositoryId)) {
+    blockedBy.push(finalizeFailure.member.repositoryId);
+  }
 
   mkdirSync(evidenceRoot, { recursive: true });
   const bundle = {

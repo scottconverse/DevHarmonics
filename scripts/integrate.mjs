@@ -55,6 +55,12 @@ const REASONS = Object.freeze([
   // The integration branch ref could not be advanced (e.g. it is checked out in
   // the owner's own working tree) — refuse rather than yank it from under them.
   "integration-ref-locked",
+  // Two-phase: the branch moved between the gated prepare and the finalize, so
+  // the candidate is no longer the right successor.
+  "integration-ref-moved",
+  // A set member was fully gated but the set as a whole was blocked, so its ref
+  // was deliberately NOT advanced (replaces the old advanced-but-set-blocked).
+  "set-blocked-not-advanced",
 ]);
 
 function fail(message) {
@@ -195,6 +201,11 @@ export async function integrateWorkerBranch({
   // Both are opt-in, but the resolved path AND its checksum are ALWAYS recorded
   // in the evidence, so a receipt can say which binary actually answered — the
   // thing it previously could not.
+  // Two-phase readiness (multi-repo sets). When true, every gate runs and the
+  // integration candidate is built and parked under a ref, but the integration
+  // BRANCH is not moved — the caller finalizes only once all members passed, so a
+  // blocked set leaves nothing advanced anywhere.
+  deferRefUpdate = false,
   tampercheckPath = null,
   expectedTampercheckSha256 = null,
   expectedTampercheckVersion = null,
@@ -573,8 +584,31 @@ export async function integrateWorkerBranch({
         stdout: finalRun.stdout,
       };
 
-      // Only now advance the ref — the last action, after every gate. Fails if
-      // the owner has this branch checked out; refuse rather than move it.
+      // Two-phase mode (multi-repo sets): stop here with a fully gated candidate
+      // and let the caller decide whether EVERY member passed before any ref in
+      // any repository moves. The candidate is parked under a real ref so the
+      // commit stays reachable (an unreferenced commit could be gc'd between
+      // phases) and so it is inspectable if the set is abandoned.
+      if (deferRefUpdate) {
+        const candidateRef = `refs/devharmonics/candidate/${taskId}`;
+        const parked = git(repository, ["update-ref", candidateRef, candidateHead]);
+        if (!parked.ok) fail(`could not park integration candidate at ${candidateRef}: ${parked.stderr.trim()}`);
+        reason = null;
+        return {
+          integrated: false,
+          prepared: true,
+          candidateHead,
+          candidateRef,
+          preMergeHead,
+          reason,
+          integrationHead: null,
+          gates,
+          evidencePath: writeEvidence(),
+        };
+      }
+
+      // Single-repo mode: advance the ref — the last action, after every gate.
+      // Fails if the owner has this branch checked out; refuse rather than move it.
       const update = git(repository, ["branch", "-f", integrationBranch, candidateHead]);
       if (!update.ok) {
         gates.finalArtifact.detail += " (but the branch ref could not be advanced)";
@@ -597,6 +631,49 @@ export async function integrateWorkerBranch({
   } finally {
     lock.release();
   }
+}
+
+/**
+ * Phase 2 of two-phase integration: advance the integration branch to a candidate
+ * that already passed every gate in a `deferRefUpdate` run.
+ *
+ * Refuses if the branch no longer points where phase 1 left it — something else
+ * moved it in between, so the gated candidate is no longer the right successor.
+ * Never merges, never re-gates; it only moves a ref that a gated candidate earned.
+ */
+export function finalizeIntegrationCandidate({ repository, integrationBranch, candidateHead, expectedPreMergeHead, candidateRef = null }) {
+  const current = git(repository, ["rev-parse", integrationBranch]);
+  if (!current.ok) {
+    return { ok: false, reason: "integration-ref-locked", detail: `could not resolve "${integrationBranch}": ${current.stderr.trim()}` };
+  }
+  const head = current.stdout.trim();
+  if (head !== expectedPreMergeHead) {
+    return {
+      ok: false,
+      reason: "integration-ref-moved",
+      detail: `"${integrationBranch}" is now ${head.slice(0, 12)}, but the gated candidate was prepared against ${String(expectedPreMergeHead).slice(0, 12)}`,
+    };
+  }
+  const update = git(repository, ["branch", "-f", integrationBranch, candidateHead]);
+  if (!update.ok) {
+    return { ok: false, reason: "integration-ref-locked", detail: update.stderr.trim() };
+  }
+  if (candidateRef) git(repository, ["update-ref", "-d", candidateRef]);
+  return { ok: true, integrationHead: candidateHead };
+}
+
+/** Drop a parked candidate — the set was blocked, so nothing is delivered. */
+export function abandonIntegrationCandidate({ repository, candidateRef }) {
+  if (!candidateRef) return { ok: true };
+  const res = git(repository, ["update-ref", "-d", candidateRef]);
+  return { ok: res.ok, detail: res.ok ? null : res.stderr.trim() };
+}
+
+/** Put an integration branch back where it was, used if a later member of the
+ * same set fails to finalize after earlier ones already advanced. */
+export function rollbackIntegrationRef({ repository, integrationBranch, toCommit }) {
+  const res = git(repository, ["branch", "-f", integrationBranch, toCommit]);
+  return { ok: res.ok, detail: res.ok ? null : res.stderr.trim() };
 }
 
 export const INTEGRATION_REASONS = REASONS;

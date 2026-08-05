@@ -285,7 +285,7 @@ test("integrateSet: two-repo set, both clean -> setReady true, both real merge c
   assert.ok(logB.includes(result.members[1].integrationHead));
 }));
 
-test("integrateSet: repo B trips tampercheck -> setReady false, blockedBy [repoB], repoA advanced-but-set-blocked, repoA branch intact, set.json records both", () => withTemps(2, async ({ repos, evidenceRoot, fixtureDir }) => {
+test("integrateSet: repo B trips tampercheck -> ATOMIC: setReady false, blockedBy [repoB], and repoA is gated but NOT advanced (nothing half-applied)", () => withTemps(2, async ({ repos, evidenceRoot, fixtureDir }) => {
   fakeConditional(fixtureDir);
   const [repoA, repoB] = repos;
   branchFrom(repoA, "worker-a", "main", "line1\nline2\nCHANGED-A\n"); // clean: no trigger file
@@ -304,19 +304,29 @@ test("integrateSet: repo B trips tampercheck -> setReady false, blockedBy [repoB
   assert.deepEqual(result.blockedBy, ["repoB"]);
 
   const [mA, mB] = result.members;
+  // TWO-PHASE ATOMICITY (audit 2026-08-05): repoA passed every gate, but because
+  // the SET was blocked its integration ref was deliberately never advanced. The
+  // old behavior advanced it and relabelled it "advanced-but-set-blocked", leaving
+  // a half-applied cross-repo change on disk that a consumer could pick up.
   assert.equal(mA.repositoryId, "repoA");
-  assert.equal(mA.integrated, true);
-  assert.equal(mA.reason, "advanced-but-set-blocked");
-  assert.ok(mA.integrationHead);
+  assert.equal(mA.prepared, true, "repoA's own gates passed");
+  assert.equal(mA.integrated, false, "no member is integrated unless the whole set is");
+  assert.equal(mA.reason, "set-blocked-not-advanced");
+  assert.equal(mA.integrationHead, null);
 
   assert.equal(mB.repositoryId, "repoB");
+  assert.equal(mB.prepared, false);
   assert.equal(mB.integrated, false);
   assert.equal(mB.reason, "tampercheck-findings");
   assert.equal(mB.integrationHead, null);
 
-  // repoA's branch is honestly left in place — not rolled back.
+  // repoA's integration branch exists (prepare creates it at the pinned base) but
+  // must still point AT THAT BASE — no merge was delivered anywhere.
   const headA = git(repoA, ["rev-parse", "devharmonics/integration/" + plan.setId]).trim();
-  assert.equal(headA, mA.integrationHead);
+  assert.equal(headA, plan.members[0].baseCommit, "repoA must NOT be advanced when the set is blocked");
+  // The parked candidate was abandoned, not left lying around.
+  const candidateA = spawnSync("git", ["-C", repoA, "rev-parse", "--verify", "--quiet", `refs/devharmonics/candidate/${plan.setId}-repoA`]);
+  assert.notEqual(candidateA.status, 0, "an abandoned set must not leave candidate refs behind");
   // repoB's integration branch was never created (merge never attempted).
   const existsB = spawnSync("git", ["-C", repoB, "rev-parse", "--verify", "--quiet", `refs/heads/devharmonics/integration/${plan.setId}`]);
   assert.notEqual(existsB.status, 0);
@@ -325,7 +335,7 @@ test("integrateSet: repo B trips tampercheck -> setReady false, blockedBy [repoB
   assert.equal(bundle.setReady, false);
   assert.deepEqual(bundle.blockedBy, ["repoB"]);
   assert.equal(bundle.members.length, 2);
-  assert.equal(bundle.members[0].reason, "advanced-but-set-blocked");
+  assert.equal(bundle.members[0].reason, "set-blocked-not-advanced");
   assert.equal(bundle.members[1].reason, "tampercheck-findings");
 }));
 

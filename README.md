@@ -6,7 +6,9 @@ The design test applied to every decision: **the factory must survive any single
 
 ## Status
 
-**Specification stage. No code yet.** The complete spec and slice-by-slice implementation plan live in [docs/SPEC.md](docs/SPEC.md). Implementation begins at Slice 0 (skeleton + doctor) and every slice ends with a live-fire acceptance against real tools — never shim-only green.
+**All eight spec slices implemented and live-fire accepted** (2026-08-05). CI green on Windows and Ubuntu; 194 tests. Every slice was accepted against real tools on a real machine — real provider CLIs, real local model endpoints, real diffs independently verified — never shim-only green.
+
+Read [docs/USER_MANUAL.md](docs/USER_MANUAL.md) to use it, and [docs/FALSIFICATION.md](docs/FALSIFICATION.md) before trusting it: one gate was deceived under adversarial test and fixed, and the attack surface that pass did *not* cover is named rather than omitted. The manual's Known Limitations section is complete and unflattering by design.
 
 ## The shape of it
 

@@ -10,6 +10,7 @@ import { runReview } from "./review.mjs";
 import { superviseProcess } from "./supervise.mjs";
 import { resolvePathCommand } from "./path-resolve.mjs";
 import { SUBPROCESS_PROVIDERS } from "./providers.mjs";
+import { loadConfig } from "./config.mjs";
 
 /**
  * The single-repo pipeline (spec slice 4): intake -> isolated worker ->
@@ -142,6 +143,11 @@ export async function runPipeline({
         goal: prompt,
         reviewer,
         claimedPaths,
+        checkReceiptsSummary: stages.validator
+          ? `Validator: ${stages.validator.command}
+exit code: ${stages.validator.exitCode}${stages.validator.timedOut ? " (timed out)" : ""}
+${(stages.validator.stdoutTail || "").slice(-800)}`
+          : "No validator was configured for this run.",
         evidenceRoot,
         env,
         timeoutMs,
@@ -169,11 +175,18 @@ export async function runPipeline({
 }
 
 /** --reviewer "provider:model" (subprocess lane) or "http:provider:model". */
-function parseReviewerSpec(spec) {
+function parseReviewerSpec(spec, config) {
   const parts = spec.split(":");
   if (parts[0] === "http") {
+    // Found by the slice-8 manual audit: this form parsed but could never
+    // work — runReview's http branch needs a baseUrl and nothing supplied
+    // one, so it failed closed as reviewer-unavailable every time. The
+    // endpoint now comes from config by provider name.
     if (parts.length < 3) throw new Error('--reviewer http form is "http:provider:model"');
-    return { lane: "http", provider: parts[1], model: parts.slice(2).join(":") };
+    const provider = parts[1];
+    const baseUrl = config?.endpoints?.[provider]?.baseUrl;
+    if (!baseUrl) throw new Error(`--reviewer http:${provider}: no endpoints.${provider}.baseUrl in config`);
+    return { lane: "http", provider, model: parts.slice(2).join(":"), baseUrl };
   }
   if (parts.length < 2) throw new Error('--reviewer must be "provider:model" or "http:provider:model"');
   return { lane: "subprocess", provider: parts[0], model: parts.slice(1).join(":") };
@@ -205,7 +218,7 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
     provider: options.provider,
     model: options.model,
     check: options.check,
-    reviewer: options.reviewer ? parseReviewerSpec(options.reviewer) : null,
+    reviewer: options.reviewer ? parseReviewerSpec(options.reviewer, loadConfig().config) : null,
     taskId: options.taskId,
     timeoutMs: Math.round(options.timeoutMinutes * 60_000),
   });

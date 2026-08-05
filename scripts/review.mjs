@@ -314,6 +314,7 @@ export async function runReview({
   goal,
   reviewer,
   claimedPaths = null,
+  checkReceiptsSummary = null,
   evidenceRoot,
   env = process.env,
   timeoutMs = 10 * 60_000,
@@ -364,7 +365,9 @@ export async function runReview({
   const basePrompt = reviewerPrompt({
     goal,
     diffStat,
-    checkReceiptsSummary: "No check receipts were supplied to this review.",
+    // Threaded from the caller (slice-8 audit finding: this was a hardcoded
+    // placeholder, so a reviewer never saw the validator's real result).
+    checkReceiptsSummary: checkReceiptsSummary ?? "No check receipts were supplied to this review.",
   });
 
   const identity = { provider: reviewer.provider, modelId: reviewer.model };

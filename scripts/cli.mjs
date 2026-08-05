@@ -5,6 +5,7 @@ import { doctorCommand } from "./doctor.mjs";
 const USAGE = `Usage:
   devharmonics doctor [--json] [--config <file>]
   devharmonics qualify [--execute] [--json] [--lane L] [--role R] [--skip-current]
+  devharmonics onboard <repo> [--apply] [--force] [--json]
   devharmonics run --repository <repo> --prompt <text> --provider <p>
                    [--model m] [--check "cmd args"] [--task-id t] [--json]
   devharmonics worker --provider <codex|claude|agy> --prompt <text> --cwd <dir>
@@ -22,6 +23,9 @@ Commands:
   qualify  Plan (default) or --execute the qualification sweep: every
            discovered candidate x applicable role, real harnesses, every
            result appended to qualifications.jsonl pass or fail.
+  onboard  Make a repository governed: install the pinned tampercheck CI
+           workflow and the private state exclude. Dry run by default;
+           --apply writes. Idempotent; --force rewrites a differing pin.
   run      One bounded task through the full pipeline: clean-tree intake,
            isolated worker, optional --check validator, empty-diff +
            tampercheck gates, serial integration — then STOP at the owner
@@ -53,6 +57,10 @@ async function main() {
   if (command === "run") {
     const { runCommandCli } = await import("./run-command.mjs");
     return runCommandCli(rest);
+  }
+  if (command === "onboard") {
+    const { onboardCommand } = await import("./onboard-command.mjs");
+    return onboardCommand(rest);
   }
   throw new Error(`Unknown command: ${command}\n${USAGE}`);
 }

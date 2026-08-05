@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { resolvePathCommand, runResolved } from "./path-resolve.mjs";
+import { CI_WORKFLOW_RELATIVE_PATH, parseTampercheckWorkflow } from "./onboard.mjs";
 
 /**
  * Doctor probes. Every probe returns { id, status, detail, ...evidence } where
@@ -132,6 +133,34 @@ export function probeSkillParity(id, skillHosts, skillName) {
   const absent = findings.filter((f) => !f.present).map((f) => f.host);
   const note = absent.length ? ` (absent on: ${absent.join(", ")})` : "";
   return { id, status: "PASS", detail: `v${versions[0]} on ${present.map((f) => f.host).join(", ")}${note}`, hosts: findings };
+}
+
+/**
+ * Repo-governance probe (spec: onboarding must be independently verifiable,
+ * not just independently doable): PASS only when the target repository has
+ * the tampercheck CI workflow AND it pins the expected version. FAIL carries
+ * the precise reason — absent, present-but-unpinned, or pinned to the wrong
+ * version — so a caller never has to guess why governance isn't in place.
+ * SKIPPED only when `repository` is null: no repo was in scope for this
+ * doctor run, which is a deliberately different condition than "checked and
+ * found lacking".
+ */
+export function probeRepoGovernance(id, repository, { pinnedVersion } = {}) {
+  if (repository === null) {
+    return { id, status: "SKIPPED", detail: "no repository in scope", repository: null };
+  }
+  const filePath = path.join(repository, CI_WORKFLOW_RELATIVE_PATH);
+  if (!existsSync(filePath)) {
+    return { id, status: "FAIL", detail: `tampercheck CI workflow absent: ${filePath}`, repository, path: filePath };
+  }
+  const { version } = parseTampercheckWorkflow(readFileSync(filePath, "utf8"));
+  if (!version) {
+    return { id, status: "FAIL", detail: `tampercheck workflow present but unpinned (no "tampercheck==<version>" found): ${filePath}`, repository, path: filePath };
+  }
+  if (version !== pinnedVersion) {
+    return { id, status: "FAIL", detail: `tampercheck pinned to ${version}, expected ${pinnedVersion}: ${filePath}`, repository, path: filePath };
+  }
+  return { id, status: "PASS", detail: `tampercheck workflow present, pinned to ${pinnedVersion}: ${filePath}`, repository, path: filePath };
 }
 
 /** Enumerate installed skills per host root, for the doctor's information section. */

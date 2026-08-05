@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { acquireFileLock } from "./slots.mjs";
-import { resolvePathCommand } from "./path-resolve.mjs";
+import { resolvePathCommand, runResolved } from "./path-resolve.mjs";
 import { superviseProcess } from "./supervise.mjs";
 
 /**
@@ -150,6 +150,10 @@ export async function integrateWorkerBranch({
   taskId,
   evidenceRoot,
   tampercheckCommand = "tampercheck",
+  // Falsification finding F-1: set this to require the gate binary to
+  // self-identify before its verdict is trusted. Off by default so an
+  // operator pinning a different version is not locked out silently.
+  expectedTampercheckVersion = null,
   env = process.env,
   timeoutMs = 120_000,
 }) {
@@ -231,6 +235,32 @@ export async function integrateWorkerBranch({
       gates.tampercheck = { status: "refused", detail: `tampercheck command not found on PATH: "${tampercheckCommand}"`, exitCode: null, timedOut: false };
       reason = "tampercheck-unavailable";
       return { integrated: false, reason, integrationHead: null, gates, evidencePath: writeEvidence() };
+    }
+
+    // Identity check before trusting the gate (falsification finding F-1,
+    // 2026-08-05): the gate resolves from PATH, so a PATH-substituted
+    // always-exit-0 stub deceived it in an adversarial trial. A worker
+    // cannot reach this (a child cannot alter its parent's PATH, verified
+    // in the same pass), so this is an operator-environment risk, not a
+    // worker-escape — but a gate that cannot say WHICH tool answered is
+    // not evidence. When expectedTampercheckVersion is set, the resolved
+    // binary must self-report it or the gate refuses. The repo-side pinned
+    // CI install (see docs/INTEGRATION-SETS.md's sibling, `devharmonics
+    // onboard`) remains the independent second copy of this defense.
+    if (expectedTampercheckVersion) {
+      const identity = runResolved(resolvedTampercheck, ["--version"], { env, timeoutMs: 20_000 });
+      const reported = `${identity.stdout}${identity.stderr}`.trim().split(/\r?\n/)[0] ?? "";
+      if (!identity.ok || !reported.includes(expectedTampercheckVersion)) {
+        gates.tampercheck = {
+          status: "refused",
+          detail: `tampercheck identity check failed: expected version ${expectedTampercheckVersion}, resolved ${resolvedTampercheck} reported "${reported || "(no output)"}"`,
+          exitCode: identity.status ?? null,
+          timedOut: false,
+        };
+        reason = "tampercheck-unavailable";
+        return { integrated: false, reason, integrationHead: null, gates, evidencePath: writeEvidence() };
+      }
+      gates.tampercheckIdentity = { status: "pass", detail: `verified ${reported} at ${resolvedTampercheck}` };
     }
 
     const tcWorktree = addWorktree(repository, workerHead, { detach: true });

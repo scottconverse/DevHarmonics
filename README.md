@@ -4,11 +4,24 @@
 
 The design test applied to every decision: **the factory must survive any single vendor, app, or model disappearing.**
 
+## Quick start
+
+There is no published package yet — install from source:
+
+```
+git clone https://github.com/scottconverse/DevHarmonics.git
+cd DevHarmonics
+npm ci
+node scripts/cli.mjs doctor
+```
+
+`doctor` probes every capability the factory depends on — provider CLIs, local model endpoints, the tampercheck integrity gate — and reports PASS/FAIL/SKIPPED for each, honestly, even on a machine with nothing installed yet. See [docs/USER_MANUAL.md](docs/USER_MANUAL.md) for the full command reference, including how to put a `devharmonics` command on your `PATH` with `npm link`.
+
 ## Status
 
-**All eight spec slices implemented and live-fire accepted** (2026-08-05). CI green on Windows and Ubuntu; 194 tests. Every slice was accepted against real tools on a real machine — real provider CLIs, real local model endpoints, real diffs independently verified — never shim-only green.
+**All eight spec slices implemented and live-fire accepted** (2026-08-05). CI green on Windows and Ubuntu; 238 tests (1 skipped on Windows — a POSIX-only probe). Every slice was accepted against real tools on a real machine — real provider CLIs, real local model endpoints, real diffs independently verified — never shim-only green.
 
-Read [docs/USER_MANUAL.md](docs/USER_MANUAL.md) to use it, and [docs/FALSIFICATION.md](docs/FALSIFICATION.md) before trusting it: one gate was deceived under adversarial test and fixed, and the attack surface that pass did *not* cover is named rather than omitted. The manual's Known Limitations section is complete and unflattering by design.
+Read [docs/USER_MANUAL.md](docs/USER_MANUAL.md) to use it, [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) to see how it fits together, and [docs/FALSIFICATION.md](docs/FALSIFICATION.md) before trusting it: one gate was deceived under adversarial test and fixed, and the attack surface that pass did *not* cover is named rather than omitted. The manual's Known Limitations section is complete and unflattering by design.
 
 ## The shape of it
 

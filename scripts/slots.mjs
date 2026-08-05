@@ -100,7 +100,20 @@ export function acquireWorkerSlot(stateRoot, maximum, metadata = {}) {
     } catch (error) {
       if (!isContendedClaim(error, path.join(slotRoot, `${index}.lock`))) throw error;
       if (reclaimDeadClaim(path.join(slotRoot, `${index}.lock`))) {
-        return claim(path.join(slotRoot, `${index}.lock`), { slot: index, ...metadata });
+        // TOCTOU: two contenders can both observe the same dead owner and
+        // both reach this re-claim; the loser's exclusive open throws
+        // EEXIST/EPERM. Unguarded, that raw fs error escaped instead of the
+        // documented "all slots occupied" refusal callers back off on —
+        // proven by a 25-thread race (GauntletGate, 2026-08-05). The sibling
+        // acquireFileLock in this same file already absorbed the identical
+        // race by re-entering its retry loop; these two ported primitives
+        // had drifted. Treating a lost re-claim as "this slot is taken" and
+        // continuing to the next index restores that behavior.
+        try {
+          return claim(path.join(slotRoot, `${index}.lock`), { slot: index, ...metadata });
+        } catch (reclaimError) {
+          if (!isContendedClaim(reclaimError, path.join(slotRoot, `${index}.lock`))) throw reclaimError;
+        }
       }
     }
   }

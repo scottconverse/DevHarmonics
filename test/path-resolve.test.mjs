@@ -128,3 +128,53 @@ test("runResolved executes a bare shell script on POSIX", { skip: process.platfo
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test(
+  "documented limitation: Windows cannot execute a bare extensionless file directly — resolution still finds it, execution still fails, but the diagnostic is now accurate instead of a misleading ENOENT",
+  { skip: process.platform !== "win32" },
+  () => {
+    // A PATH directory containing ONLY a bare, extensionless file — no
+    // .cmd/.exe sibling anywhere. Unlike the "recognized extension wins"
+    // fixture above, there is nothing else on PATH for resolvePathCommand to
+    // prefer, so its documented last-resort fallback (see the comment on
+    // resolvePathCommand) is the only thing that can match.
+    const dir = tempDir();
+    try {
+      const file = path.join(dir, "bare-extensionless-tool");
+      writeFileSync(file, "not a real executable, just bytes\n");
+
+      const resolved = resolvePathCommand("bare-extensionless-tool", {
+        platform: "win32",
+        env: { PATH: dir, PATHEXT: ".COM;.EXE;.BAT;.CMD" },
+      });
+      assert.equal(resolved, file, "the bare extensionless file must still resolve as the last-resort fallback — resolution behavior is unchanged");
+
+      const run = runResolved(resolved, ["hello"], { platform: "win32", timeoutMs: 5000 });
+
+      // The documented limitation itself: Windows' CreateProcess cannot
+      // launch a file with no recognized executable extension, even though
+      // it plainly exists on disk (proven live: this exact fixture, run
+      // against the unpatched code, produced `ok:false, status:null,
+      // error:'spawnSync <path> ENOENT'` with error.code "ENOENT" — despite
+      // the file existing). No code change fixes this; it is a real OS
+      // constraint, not a bug in this module.
+      assert.equal(run.ok, false, "Windows genuinely cannot execute this file — this must still fail");
+      assert.equal(run.status, null);
+      assert.equal(run.stdout, "");
+      assert.equal(run.stderr, "");
+      assert.equal(run.timedOut, false);
+
+      // What CAN be fixed, and is: the diagnostic. A bare libuv "ENOENT" is
+      // actively misleading here (the file demonstrably exists), so the
+      // message must name the real cause and point at the real fix, and
+      // must no longer read as an ordinary "file not found".
+      assert.ok(run.error, "must still report a failure — never silently succeed");
+      assert.doesNotMatch(run.error, /^spawnSync .* ENOENT$/, "must no longer be the bare, misleading libuv ENOENT string");
+      assert.match(run.error, /cannot execute an extensionless file directly/i);
+      assert.match(run.error, /\.cmd or \.exe shim/i, "must point at the real fix");
+      assert.ok(run.error.includes(file), "must name the actual file so the operator can find it");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);

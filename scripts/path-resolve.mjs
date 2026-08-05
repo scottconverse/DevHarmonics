@@ -108,6 +108,15 @@ export function spawnPlan(command, args = [], { platform = process.platform, env
  * Callers must pass internally constructed args only; nothing here escapes
  * untrusted content for cmd.exe.
  */
+/** True only if `p` exists AND is a regular file — never throws. */
+function existsAsFile(p) {
+  try {
+    return existsSync(p) && statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
 export function runResolved(command, args = [], { timeoutMs = 20_000, platform = process.platform, env = process.env } = {}) {
   const { spawnCommand, spawnArgs, verbatim } = spawnPlan(command, args, { platform, env });
   const result = spawnSync(spawnCommand, spawnArgs, {
@@ -117,12 +126,24 @@ export function runResolved(command, args = [], { timeoutMs = 20_000, platform =
     windowsVerbatimArguments: verbatim,
     env,
   });
+  let errorMessage = result.error ? String(result.error.message ?? result.error) : null;
+  // Windows CreateProcess cannot launch a file with no recognized executable
+  // extension (no .exe/.cmd/.bat association), even when the file plainly
+  // exists — libuv surfaces that failure as a plain ENOENT, indistinguishable
+  // from "no such file". Proven live on Windows: resolvePathCommand's bare
+  // extensionless last-resort fallback hits exactly this. When the file
+  // genuinely exists, the message is actively misleading, so it is replaced
+  // with an accurate one naming the real cause. When the file does NOT
+  // exist, ENOENT is already the correct, honest answer and is left alone.
+  if (platform === "win32" && result.error?.code === "ENOENT" && existsAsFile(command)) {
+    errorMessage = `"${command}" exists but Windows cannot execute an extensionless file directly (no .exe/.cmd/.bat association) — libuv reports this as ENOENT even though the file is present. The tool on PATH likely needs a .cmd or .exe shim.`;
+  }
   return {
     ok: result.status === 0 && !result.error,
     status: result.status ?? null,
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",
-    error: result.error ? String(result.error.message ?? result.error) : null,
+    error: errorMessage,
     timedOut: result.error?.code === "ETIMEDOUT",
   };
 }

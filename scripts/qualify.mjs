@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import {
@@ -273,6 +273,21 @@ async function runStructuredWriteHttp({ candidate, workRoot, env, timeoutMs, dep
     timeoutMs,
   };
   const result = await deps.runLocalPatch({ task, client: deps.sendMessages, runsRoot, env });
+
+  // runLocalPatch deliberately leaves its worktree on disk for inspection and
+  // makes cleanup the caller's contract (run-command.mjs honors it). This
+  // caller did not — and because a qualification sweep runs one structured
+  // write per http candidate into a FIXED work root, every sweep permanently
+  // accumulated a full checkout per candidate, forever (GauntletGate, live,
+  // 2026-08-05). A qualification fixture is throwaway by definition: the
+  // receipt is the evidence, not the worktree.
+  if (result.worktreePath) {
+    const removed = spawnSync("git", ["-C", task.repository, "worktree", "remove", "--force", result.worktreePath], { encoding: "utf8" });
+    if (removed.status !== 0) {
+      try { rmSync(result.worktreePath, { recursive: true, force: true }); } catch { /* already gone */ }
+    }
+  }
+
   const passed = result.accepted === true;
   return {
     passed,

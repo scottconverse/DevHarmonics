@@ -26,6 +26,10 @@ export async function superviseProcess({
   env = process.env,
   onStdout = null,
   onStderr = null,
+  // Hard ceiling on waiting for stdio to drain after the child exits.
+  // See the exit/close comment below: a detached descendant can hold the
+  // pipes open forever, so 'close' alone is not a settlement guarantee.
+  drainDeadlineMs = 10_000,
 }) {
   const startedAt = new Date();
   const platform = process.platform;
@@ -39,6 +43,7 @@ export async function superviseProcess({
     let settled = false;
     let killTimer = null;
     let escalateTimer = null;
+    let drainTimer = null;
 
     // finish() is the single resolution path: whichever event fires first
     // ("close", or a synchronous spawn error before the child ever starts)
@@ -49,6 +54,7 @@ export async function superviseProcess({
       settled = true;
       if (killTimer) clearTimeout(killTimer);
       if (escalateTimer) clearTimeout(escalateTimer);
+      if (drainTimer) clearTimeout(drainTimer);
       const finishedAt = new Date();
       resolve({
         exitCode: exitCode ?? null,
@@ -123,11 +129,6 @@ export async function superviseProcess({
       killTimer = setTimeout(() => {
         timedOut = true;
         killTree(child, platform);
-        // A worker that ignores SIGTERM (or, on Windows, a taskkill race
-        // against a not-yet-fully-started tree) would otherwise hang this
-        // promise forever. SIGKILL after a grace period guarantees "close"
-        // still fires. taskkill already uses /F, so this branch is POSIX-only
-        // in practice, but is safe to arm unconditionally.
         escalateTimer = setTimeout(() => {
           try {
             process.kill(-child.pid, "SIGKILL");
@@ -138,8 +139,41 @@ export async function superviseProcess({
       }, timeoutMs);
     }
 
+    // "exit" fires when the process itself terminates. "close" additionally
+    // waits for its stdio to drain — and a DETACHED DESCENDANT that inherited
+    // the piped stdout/stderr keeps those pipes open after the tracked child
+    // is long gone, so "close" may never arrive at all. A CLI that backgrounds
+    // a helper or daemon is an entirely ordinary shape.
+    //
+    // GauntletGate BLOCKER (2026-08-05), reproduced: a child that exited
+    // normally at ~300ms after spawning such a descendant left this promise
+    // unsettled past an 8s outer bound, with the timeout path never even
+    // engaging. The consequences are exactly what this codebase promises can
+    // never happen: no receipt is written (an attempt indistinguishable from
+    // one that never occurred), and inside integrate.mjs the per-repository
+    // lock is held open against every other integration.
+    //
+    // The prior comment claimed SIGKILL guaranteed "close" would fire. It does
+    // not: SIGKILL reaches the direct child, never a detached descendant
+    // holding the shared pipe. acp-worker.mjs's copy of this logic
+    // independently discovered the need for a hard ceiling and added one; that
+    // fix was never carried back here, to the more heavily used sibling. It is
+    // now: "exit" plus a bounded drain deadline guarantees settlement.
+    let exited = false;
+    child.on("exit", (code) => {
+      exited = true;
+      drainTimer = setTimeout(() => {
+        // stdio never drained — settle on the exit code we already have
+        // rather than waiting on a pipe a descendant may hold forever.
+        finish(code);
+      }, drainDeadlineMs);
+      drainTimer.unref?.();
+    });
+
     child.on("close", (code) => {
-      finish(code);
+      // Normal path: stdio drained. Prefer close's code, falling back to the
+      // exit code when close reports null (killed-by-signal).
+      finish(code ?? (exited ? code : null));
     });
   });
 }

@@ -13,6 +13,7 @@ import { runReview } from "./review.mjs";
 import { superviseProcess } from "./supervise.mjs";
 import { resolvePathCommand } from "./path-resolve.mjs";
 import { SUBPROCESS_PROVIDERS } from "./providers.mjs";
+import { workerEnv } from "./worker-env.mjs";
 import { loadConfig } from "./config.mjs";
 
 /**
@@ -237,9 +238,15 @@ export async function runPipeline({
 
       if (check) {
         const { command: checkCommand, args: checkArgs } = splitCheck(check);
-        const resolved = resolvePathCommand(checkCommand, { env });
+        // C-2 (GAUNTLET-2026-08-05): the validator executes INSIDE the worktree
+        // the untrusted worker just committed to, so one planted test line or a
+        // pretest hook would run with every credential on the box and leak it
+        // into stdoutTail -> receipt -> reviewer prompt. Strip credential-shaped
+        // vars exactly as the worker lane does; PATH survives so it still runs.
+        const { env: checkEnv } = workerEnv(env);
+        const resolved = resolvePathCommand(checkCommand, { env: checkEnv });
         if (!resolved) return { integrated: false, reason: `validator-unresolvable: ${checkCommand}`, runId, baseRef, stages, evidenceRoot };
-        const validated = await superviseProcess({ command: resolved, args: checkArgs, cwd: wt, prompt: null, timeoutMs: 10 * 60_000, env });
+        const validated = await superviseProcess({ command: resolved, args: checkArgs, cwd: wt, prompt: null, timeoutMs: 10 * 60_000, env: checkEnv });
         stages.validator = { command: check, exitCode: validated.exitCode, timedOut: validated.timedOut, stdoutTail: validated.stdout.slice(-2000), stderrTail: validated.stderr.slice(-2000) };
         if (validated.exitCode !== 0) {
           return { integrated: false, reason: `validator-failed (exit ${validated.exitCode})`, runId, baseRef, stages, evidenceRoot };
@@ -265,15 +272,25 @@ export async function runPipeline({
     // the last layer, never the first. Its verdict cannot rescue a run the
     // gates refused, and the divergence check inside runReview outranks it.
     if (reviewer) {
-      const claimedPaths = git(repo, ["diff", "--name-only", baseRef, workerBranch]).stdout
-        .split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      // GAUNTLET-2026-08-05 M-1: claimedPaths is deliberately null here. The
+      // divergence gate is sound (see review.mjs / its tests) but it needs a
+      // manifest of what the WORKER claimed it changed, distinct from the diff.
+      // The subprocess lane's worker emits only freeform narration, no
+      // structured change-manifest, and parsing prose for "claimed" paths
+      // yields false positives that would block honest runs. Feeding the diff
+      // back in (the previous behavior) compared the diff to itself — a gate
+      // mathematically incapable of finding anything, reported as a reassuring
+      // "0 divergence". That false green is removed: divergence is reported as
+      // null ("not checked") until a structured worker-claims source exists.
+      // The artifact-lens reviewer still judges the real diff, so the actual
+      // protection is unchanged.
       const review = await runReview({
         repository: repo,
         integrationBranch,
         baseRef,
         goal: prompt,
         reviewer,
-        claimedPaths,
+        claimedPaths: null,
         checkReceiptsSummary: stages.validator
           ? `Validator: ${stages.validator.command}
 exit code: ${stages.validator.exitCode}${stages.validator.timedOut ? " (timed out)" : ""}
@@ -283,10 +300,12 @@ ${(stages.validator.stdoutTail || "").slice(-800)}`
         env,
         timeoutMs,
       });
-      stages.review = { verdict: review.verdict, findings: review.findings?.length ?? 0, divergence: review.divergence?.length ?? 0, receipt: review.reviewReceiptPath };
+      const divergenceCount = review.divergence === null ? null : review.divergence.length;
+      stages.review = { verdict: review.verdict, findings: review.findings?.length ?? 0, divergence: divergenceCount, receipt: review.reviewReceiptPath };
       if (review.verdict !== "READY") {
+        const divergenceNote = divergenceCount === null ? "divergence not checked" : `${divergenceCount} divergence`;
         return {
-          integrated: true, reviewed: false, reason: `review-not-ready (${review.findings?.length ?? 0} finding(s), ${review.divergence?.length ?? 0} divergence)`,
+          integrated: true, reviewed: false, reason: `review-not-ready (${review.findings?.length ?? 0} finding(s), ${divergenceNote})`,
           runId, baseRef, integrationBranch, integrationHead: integration.integrationHead, stages, evidenceRoot,
         };
       }
@@ -384,7 +403,8 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
     write(`outcome:     ${result.integrated ? "INTEGRATED" : "REFUSED"} — ${result.reason}\n`);
     if (result.stages?.review) {
       const r = result.stages.review;
-      write(`review:      ${r.verdict} (${r.findings} finding(s), ${r.divergence} divergence)
+      const divergenceText = r.divergence === null || r.divergence === undefined ? "divergence not checked" : `${r.divergence} divergence`;
+      write(`review:      ${r.verdict} (${r.findings} finding(s), ${divergenceText})
 `);
     }
     if (result.integrated && result.reason === "ready-for-owner-review") {

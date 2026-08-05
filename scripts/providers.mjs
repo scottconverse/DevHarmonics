@@ -89,8 +89,18 @@ export function buildInvocation({
     return {
       commandName: "claude",
       args: [
+        // --print (headless). The prompt is delivered on STDIN, not as a
+        // positional argv element — see promptDelivery below. On Windows
+        // `claude` resolves to claude.CMD (an npm %*-forwarding shim), so an
+        // argv-delivered prompt is parsed by cmd.exe twice and an adversarial
+        // one with an odd `"` count before a metacharacter launched a second
+        // process (GAUNTLET B-1, reproduced live); a multi-line one was
+        // silently truncated at the first newline (C-1). Riding stdin keeps
+        // untrusted model/task/reviewer content off the command line entirely,
+        // where no cmd.exe parse can ever reach it. Verified live 2026-08-05:
+        // `claude -p --output-format json` reads its prompt from stdin,
+        // including through the ComSpec wrap superviseProcess uses.
         "-p",
-        prompt,
         "--output-format",
         "json",
         "--model",
@@ -114,7 +124,7 @@ export function buildInvocation({
       // Deliberately NOT --bare: --bare forces API-key auth, and the factory
       // is subscription-first — non-bare uses the claude.ai subscription
       // OAuth session already signed in on this box.
-      promptDelivery: "argv",
+      promptDelivery: "stdin",
     };
   }
 

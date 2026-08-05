@@ -59,15 +59,36 @@ const EXACT_STRIP = new Set([
   "NPM_TOKEN",
   "PYPI_TOKEN",
   "TWINE_PASSWORD",
+  // Connection strings carry an embedded password/secret but contain no
+  // credential *word* for the shape pass to catch (GAUNTLET-2026-08-05 M-3).
+  "DATABASE_URL",
+  "REDIS_URL",
+  "MONGODB_URI",
+  "SENTRY_DSN",
 ]);
 
 /**
  * Shape-based removal for the long tail no fixed list can enumerate. A name
- * containing one of these markers is credential-shaped; an allowlist of
- * benign lookalikes keeps ordinary tooling working (e.g. a var that merely
- * points at a *path* rather than carrying a secret).
+ * CONTAINING one of these markers is credential-shaped; an allowlist of benign
+ * lookalikes keeps ordinary tooling working (e.g. a var that merely points at a
+ * *path* rather than carrying a secret).
+ *
+ * GAUNTLET-2026-08-05 M-3: the markers previously required a leading underscore
+ * (`_TOKEN`, `_PASSWORD`, ...), so undelimited real names slipped through —
+ * `DBPASSWORD`, `SESSIONTOKEN`, `STRIPESECRETKEY`, `SERVICECREDENTIALS`. The
+ * distinctive credential words match as bare substrings now; the still-ambiguous
+ * short ones (`PASS`, `PWD`) stay underscore-guarded so `PWD`/`OLDPWD`/`COMPASS`
+ * are not swept up.
  */
-const SHAPE_MARKERS = ["_API_KEY", "_SECRET", "_TOKEN", "_PASSWORD", "_CREDENTIALS", "APIKEY"];
+const SHAPE_MARKERS = [
+  "API_KEY", "APIKEY",
+  "SECRET",
+  "TOKEN",
+  "PASSWORD", "PASSWD",
+  "_PASS", "_PWD",
+  "CREDENTIAL",
+  "PRIVATE_KEY", "PRIVATEKEY",
+];
 const SHAPE_ALLOW = new Set([
   "SSH_AUTH_SOCK",       // a socket path, not a secret
   "GPG_TTY",

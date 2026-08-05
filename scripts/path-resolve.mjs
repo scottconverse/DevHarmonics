@@ -62,17 +62,46 @@ export function lookupEnv(env, name) {
  * drifting apart.
  */
 /**
- * cmd.exe-safe quoting for one argument (the cross-spawn recipe). With
- * windowsVerbatimArguments Node performs NO quoting, so an argument
+ * cmd.exe-safe quoting for one argument (the cross-spawn recipe, hardened).
+ * With windowsVerbatimArguments Node performs NO quoting, so an argument
  * containing spaces arrives as many argv tokens and one containing quotes
  * can break cmd.exe's own parsing. Found live 2026-08-04: claude.cmd's
  * argv-delivered prompt was shredded into word-per-token ("-p Reply with
  * exactly ..."), and a JSON-bearing prompt produced cmd's "The system
  * cannot find the file specified". codex survived only because its prompt
  * rides stdin; agy because it is a native .exe that never takes this wrap.
+ *
+ * Two GAUNTLET-2026-08-05 findings are fixed here:
+ *
+ * B-1 (command injection). escapeCmdArg is only ever reached for a .cmd/.bat
+ * target (spawnPlan's wrap condition below), so every argument is parsed by
+ * cmd.exe TWICE — once for the `cmd /c` line, and AGAIN when the batch shim
+ * re-expands its `%star` / `%1` arguments (npm-generated shims all end in a
+ * `%star` forward-all). A single caret
+ * escape survives only the first parse; the metacharacter goes live in the
+ * second. This is the BatBadBut / CVE-2024-27980 class, reproduced live: a
+ * prompt with an odd number of `"` before an `&` launched a second,
+ * attacker-chosen process. The fix is to caret-escape the metacharacters
+ * TWICE so they survive both passes as inert literals — exactly cross-spawn's
+ * `doubleEscapeMetaChars` mode, which this codepath ALWAYS needs because it
+ * always targets a batch shim.
+ *
+ * C-1 (silent newline truncation). cmd.exe terminates its command line at the
+ * first CR/LF, so an argument carrying an embedded newline is truncated there
+ * — every argument after it, including safety flags, silently vanishes. A
+ * caret cannot escape a newline (before a newline it is a line-continuation,
+ * which is worse), so there is no correct in-band encoding. Refuse rather than
+ * silently truncate: throw, fail closed, name the real cause. Multi-line
+ * content must ride a non-argv lane (HTTP, or codex's stdin delivery).
  */
 function escapeCmdArg(value) {
-  let escaped = String(value)
+  const str = String(value);
+  if (/[\r\n]/.test(str)) {
+    throw new Error(
+      "escapeCmdArg: argument contains an embedded newline. cmd.exe truncates its command line at the first CR/LF, so carrying this across the .cmd/.bat shim wrap would silently drop every following argument (GAUNTLET C-1). Deliver multi-line content over a non-argv lane (HTTP, or stdin) instead of refusing here.",
+    );
+  }
+  let escaped = str
     .replace(/(\\*)"/g, '$1$1\\"')
     .replace(/(\\*)$/, "$1$1");
   escaped = `"${escaped}"`;
@@ -118,7 +147,18 @@ function existsAsFile(p) {
  * untrusted content for cmd.exe.
  */
 export function runResolved(command, args = [], { timeoutMs = 20_000, platform = process.platform, env = process.env } = {}) {
-  const { spawnCommand, spawnArgs, verbatim } = spawnPlan(command, args, { platform, env });
+  // spawnPlan can refuse an argument up front (embedded newline — see
+  // escapeCmdArg / GAUNTLET C-1). Report it as an ordinary failed run rather
+  // than throwing, matching this function's "never throws for process-level
+  // failure" contract.
+  let spawnCommand;
+  let spawnArgs;
+  let verbatim;
+  try {
+    ({ spawnCommand, spawnArgs, verbatim } = spawnPlan(command, args, { platform, env }));
+  } catch (err) {
+    return { ok: false, status: null, stdout: "", stderr: "", error: String(err?.message ?? err), timedOut: false };
+  }
   const result = spawnSync(spawnCommand, spawnArgs, {
     encoding: "utf8",
     timeout: timeoutMs,

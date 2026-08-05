@@ -63,8 +63,11 @@ The GauntletGate run (`docs/GAUNTLET-2026-08-05.md`) raised four blocking
 findings via a subagent whose reproductions the coordinator never re-ran. This
 pass reproduced each one against the real, unmodified modules — then fixed it and
 re-verified the fix against a frozen clone of the committed code. Every result
-below was executed, not reasoned about; the runnable scripts live outside the
-repo at `Desktop\Code\devharmonics-sec-audit-evidence\`.
+below was executed, not reasoned about. (The original one-off exploit scripts
+live in a local evidence directory on the owner's machine, outside this repo;
+the *portable, re-runnable* proof against real tools now ships in-repo as the
+`livefire/` lane — see `livefire/README.md` for what it proves and the
+retained results.)
 
 | # | Attack | Result before | Disposition |
 |---|---|---|---|

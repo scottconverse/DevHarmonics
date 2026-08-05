@@ -27,18 +27,24 @@ how to read the combined result.
   pinned commit, never whatever the base ref has since moved to — a set is
   judged against the world as it looked when it was planned.
 - **Same-repository merges serialize; different repositories proceed
-  concurrently.** `integrateSet` runs every member through `Promise.all`. Safe
-  only because (a) `planIntegrationSet` refuses a plan where two members
+  concurrently.** The prepare phase runs every member through `Promise.all`.
+  Safe only because (a) `planIntegrationSet` refuses a plan where two members
   share a repository, and (b) `integrateWorkerBranch` already serializes any
   contention on one repository via its own file lock (`scripts/slots.mjs`).
   Nothing here adds, needs, or duplicates a lock.
-- **Readiness is judged as a set: all-or-nothing.** `setReady` is `true` only
-  when every member's `integrated` is `true` — no partial-READY state. A
-  member that integrates cleanly while a sibling is refused is not rolled
-  back (no cross-repo transaction exists to do that) and not reported as a
-  plain success either: its `reason` becomes `advanced-but-set-blocked`, so
-  nothing downstream mistakes a set-blocked branch for owner-ready state.
-  Honest partial truth, not fake atomicity.
+- **Advancement is all-or-nothing: genuine two-phase prepare/finalize.**
+  **Phase 1 (prepare):** every member runs all its gates and builds its merged
+  candidate with `deferRefUpdate` — the candidate is parked on a durable temp
+  ref (`refs/devharmonics/candidate/<taskId>`, so it is reachable and cannot
+  be garbage-collected between phases) and **no integration ref moves**. If
+  any member fails, every parked candidate is abandoned and nothing advances
+  in any repository; a fully-gated member whose sibling failed reports
+  `set-blocked-not-advanced`. **Phase 2 (finalize):** each member's
+  integration branch is verified to still sit at its recorded pre-merge
+  position (`integration-ref-moved` refusal otherwise), then advanced to its
+  candidate; if a finalize fails partway, the refs already advanced are
+  rolled back to their recorded pre-merge positions. `setReady` is `true`
+  only when every member prepared **and** finalized cleanly.
 - **A blocking finding must name exactly one repository, or the set fails
   closed.** `scopeFinding` resolves a finding to one `repositoryId` via an
   explicit field or a recognized `"<repositoryId>:"` prefix on
@@ -48,8 +54,6 @@ how to read the combined result.
 
 ## What v1 deliberately does NOT do
 
-- **No cross-repo atomic merge or rollback beyond refusing to advance.**
-  Members that already integrated stay integrated when a sibling is refused.
 - **No restart/reconstruction of an interrupted set.** If the process dies
   mid-`integrateSet` there is no saved-set-state to resume; a re-run re-plans
   and re-integrates from scratch, it does not reconstruct a prior attempt.
@@ -63,8 +67,10 @@ how to read the combined result.
 | Stage | Reason | Meaning |
 |---|---|---|
 | `planIntegrationSet` | throws (fail closed) | Empty/non-array `members`; duplicate `repositoryId`; two `repositoryId`s resolving to the same repository root; `repository` missing, not a directory, or not a git root; `workerBranch` or an explicit `baseRef` that doesn't resolve to a commit. A malformed plan is refused before anything runs. |
-| per member (`integrateWorkerBranch`, reused) | `empty-diff` / `tampercheck-findings` / `tampercheck-unavailable` / `merge-conflict` | Unchanged from `scripts/integrate.mjs` — see that module. |
-| per member, set-level annotation | `advanced-but-set-blocked` | This member integrated cleanly, but a sibling member did not, so the set overall is not ready. |
+| per member (`integrateWorkerBranch`, reused) | `stale-worker-base` / `empty-diff` / `tampercheck-findings` / `tampercheck-unavailable` / `merge-conflict` / `final-artifact-findings` / `final-artifact-unavailable` / `validator-failed` / `validator-unresolvable` / `integration-ref-locked` | Unchanged from `scripts/integrate.mjs` — see that module. |
+| per member, evidence floor | `insufficient-evidence (missing: ...)` | A `--require-evidence` demand (validator and/or review) was not met for this member; the set does not reach `setReady`. |
+| per member, set-level annotation | `set-blocked-not-advanced` | This member passed every gate, but a sibling did not — its integration ref was deliberately **not** advanced and its parked candidate was abandoned. Nothing is half-applied. |
+| per member, finalize | `integration-ref-moved` | The member's integration branch moved between the gated prepare and the finalize, so its candidate is no longer the right successor. Not advanced. |
 | per member, defensive | `integration-error` | `integrateWorkerBranch` threw for this member (e.g. the repository changed underneath a planned set between plan and integrate). Never allowed to crash the other members' results; recorded as refused, never as a pass. |
 | `scopeFinding` | `scoped: false` | The finding names no repository, names more than one (an explicit `repositoryId` disagreeing with a location prefix counts as two), or names one outside this set. |
 
@@ -73,7 +79,10 @@ how to read the combined result.
 `integrateSet` always writes `set.json` at `evidenceRoot` — for every outcome,
 including a fully refused set — recording `setId`, `setReady`, `blockedBy`,
 and per member: `repositoryId`, `baseCommit`, `workerBranch`,
-`integrationBranch`, `integrationHead` (or `null`), gate results, and reason.
+`integrationBranch`, `integrationHead` (or `null`), gate results, reason,
+`assurance` (`gates-only` / `validated` / `reviewed` / `validated+reviewed`),
+the repo's `suiteQualification` label, and — when an evidence floor was
+demanded — `requiredEvidence` and `missingEvidence`.
 Each member's own `integrateWorkerBranch` evidence bundle (`integration.json`
 + `tampercheck-output.txt`) lives nested under
 `evidenceRoot/members/<repositoryId>/`.

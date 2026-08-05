@@ -37,7 +37,7 @@ import { detectSuiteQualification } from "./suite-qualification.mjs";
 // Set-level reasons layered on top of integrate.mjs's own REASONS
 // (empty-diff / tampercheck-findings / tampercheck-unavailable /
 // merge-conflict, all unchanged and reused as-is via integrateWorkerBranch).
-const SET_REASONS = Object.freeze(["advanced-but-set-blocked", "integration-error"]);
+const SET_REASONS = Object.freeze(["set-blocked-not-advanced", "integration-error"]);
 
 function failPlan(message) {
   throw new Error(`planIntegrationSet: ${message}`);
@@ -166,11 +166,11 @@ export function planIntegrationSet({ members }) {
  * since-moved baseRef branch tip) — the whole point of the plan step is that
  * the set is judged against the commit it was planned against.
  *
- * Set semantics are all-or-nothing: setReady is true only when every member
- * integrated. A refused member does NOT roll back members that already
- * integrated; those are reported honestly as "advanced-but-set-blocked"
- * rather than faked as either a full success or an atomic rollback this
- * factory does not have (docs/INTEGRATION-SETS.md).
+ * Set semantics are all-or-nothing, in two phases: every member is prepared
+ * (gated, candidate built, ref NOT moved) first, and integration refs advance
+ * only after every member passed. A refused member means nothing advances in
+ * any repository — fully-gated siblings report "set-blocked-not-advanced" and
+ * their parked candidates are abandoned (docs/INTEGRATION-SETS.md).
  */
 export async function integrateSet({
   set,

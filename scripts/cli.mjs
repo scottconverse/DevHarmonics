@@ -11,7 +11,7 @@ const USAGE = `Usage:
                    [--lane subprocess|http|acp] [--files a,b,c]
                    [--adapter <cmd>] [--base-url <url>]
                    [--reviewer <spec>] [--require-evidence validator,review]
-                   [--json]
+                   [--timeout-minutes <n>] [--max-budget-usd <n>] [--json]
   devharmonics worker --provider <codex|claude|agy> --prompt <text> --cwd <dir>
                       [--model <id>] [--task-id <id>] [--runs-root <dir>]
                       [--sandbox read-only|workspace-write]

@@ -444,7 +444,7 @@
     <div class="card" style="padding:32px">
       <span class="tag">The novel piece</span>
       <h3 style="font-size:1.3rem">Multi-repository integration sets</h3>
-      <p style="margin-top:.6rem">Plan a change that spans several repositories and judge it all-or-nothing. Each member is pinned to its own exact base commit at plan time, gets its own integration branch, and merges under the same per-repository lock. One task never touches two repositories — it's enforced structurally, not by convention — and a member that integrates while a sibling is refused is marked <code>advanced-but-set-blocked</code>, never a false success.</p>
+      <p style="margin-top:.6rem">Plan a change that spans several repositories and judge it all-or-nothing. Each member is pinned to its own exact base commit at plan time, gets its own integration branch, and merges under the same per-repository lock. One task never touches two repositories — it's enforced structurally, not by convention — and advancement is genuinely two-phase: every member is gated and its merged candidate built first, with no branch moving; integration refs advance only after every member passes, so a refused member means nothing advances anywhere (<code>set-blocked-not-advanced</code>), never a half-applied set.</p>
     </div>
     <div class="card" style="padding:32px">
       <span class="tag">Admission, not routing</span>

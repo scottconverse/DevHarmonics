@@ -150,10 +150,21 @@ export async function integrateWorkerBranch({
   taskId,
   evidenceRoot,
   tampercheckCommand = "tampercheck",
-  // Falsification finding F-1: set this to require the gate binary to
-  // self-identify before its verdict is trusted. Off by default so an
-  // operator pinning a different version is not locked out silently.
+  // Falsification finding F-1 (docs/FALSIFICATION.md): a PATH-substituted
+  // always-exit-0 stub was accepted as authoritative — demonstrated live.
+  //
+  // The defense is DEFAULT-ON but deliberately checks IDENTITY-SHAPE, not an
+  // exact version: the resolved binary must answer --version with a bare
+  // semantic version, which a real CLI does and an echo-a-sentence stub does
+  // not. Version-pinning was tried first and rejected — it locked out any
+  // operator running a different tampercheck release, trading a real
+  // usability failure for no extra security (an attacker writing a stub can
+  // print any string, including the expected version).
+  //
+  // Set expectedTampercheckVersion to a string to ALSO require that exact
+  // version; set requireTampercheckIdentity false to disable the check.
   expectedTampercheckVersion = null,
+  requireTampercheckIdentity = true,
   env = process.env,
   timeoutMs = 120_000,
 }) {
@@ -247,13 +258,20 @@ export async function integrateWorkerBranch({
     // binary must self-report it or the gate refuses. The repo-side pinned
     // CI install (see docs/INTEGRATION-SETS.md's sibling, `devharmonics
     // onboard`) remains the independent second copy of this defense.
-    if (expectedTampercheckVersion) {
+    if (requireTampercheckIdentity || expectedTampercheckVersion) {
       const identity = runResolved(resolvedTampercheck, ["--version"], { env, timeoutMs: 20_000 });
       const reported = `${identity.stdout}${identity.stderr}`.trim().split(/\r?\n/)[0] ?? "";
-      if (!identity.ok || !reported.includes(expectedTampercheckVersion)) {
+      // A real CLI answers --version with a bare semantic version. An
+      // echo-a-sentence stub does not. Shape, not exact value: version
+      // pinning was tried and rejected — it locked out operators running a
+      // different tampercheck release while adding no security, since a stub
+      // author can print whatever string is expected.
+      const looksLikeVersion = /^v?\d+\.\d+\.\d+/.test(reported);
+      const versionMatches = !expectedTampercheckVersion || reported.includes(expectedTampercheckVersion);
+      if (!identity.ok || !looksLikeVersion || !versionMatches) {
         gates.tampercheck = {
           status: "refused",
-          detail: `tampercheck identity check failed: expected version ${expectedTampercheckVersion}, resolved ${resolvedTampercheck} reported "${reported || "(no output)"}"`,
+          detail: `tampercheck identity check failed: ${resolvedTampercheck} answered --version with "${reported || "(no output)"}"${expectedTampercheckVersion ? ` (expected ${expectedTampercheckVersion})` : " (expected a bare semantic version)"}`,
           exitCode: identity.status ?? null,
           timedOut: false,
         };

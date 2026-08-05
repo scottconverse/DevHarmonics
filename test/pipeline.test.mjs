@@ -172,11 +172,15 @@ function fakeTampercheckDir(mode) {
   const body = TAMPERCHECK_MODES[mode];
   if (!body) throw new Error(`fakeTampercheckDir: unknown mode "${mode}"`);
   const dir = mkdtempSync(path.join(os.tmpdir(), `dh-pipe-tamper-${mode}-`));
+  // Answering --version with a bare semantic version is what a real CLI does,
+  // and what the integration gate's identity check (falsification finding
+  // F-1) requires before trusting a verdict. A fixture that cannot answer it
+  // is indistinguishable from the PATH-substituted stub that check rejects.
   if (process.platform === "win32") {
-    writeFileSync(path.join(dir, "tampercheck.cmd"), `@echo off\r\n${body.win}\r\n`);
+    writeFileSync(path.join(dir, "tampercheck.cmd"), `@echo off\r\nif /I "%~1"=="--version" (echo 0.1.1& exit /b 0)\r\n${body.win}\r\n`);
   } else {
     const file = path.join(dir, "tampercheck");
-    writeFileSync(file, `#!/bin/sh\n${body.posix}\n`);
+    writeFileSync(file, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 0.1.1; exit 0; fi\n${body.posix}\n`);
     chmodSync(file, 0o755);
   }
   return dir;

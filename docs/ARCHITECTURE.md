@@ -33,7 +33,7 @@ were deleted from the machine.
 
 ## 2. Module map
 
-Every file in `scripts/` (26 as of this writing), one line each:
+Every file in `scripts/` (27 as of this writing), one line each:
 
 | File | Responsibility |
 |---|---|
@@ -129,13 +129,11 @@ flowchart TD
     Intake -- "no (untracked files are fine)" --> R1["THROWS: tracked uncommitted changes — exit 2, nothing created"]
     Intake -- yes --> Exclude["pin HEAD as baseRef; add .devharmonics/ to .git/info/exclude"]
     Exclude --> LaneCheck{"--lane?"}
-
     LaneCheck -- http --> Http["local-patch.mjs: its OWN isolated worktree —<br/>write, check, commit only on green (section 3)"]
     Http --> HttpOk{"receipt status completed?"}
     HttpOk -- no --> R2["REFUSED: worker-failed<br/>(local-patch's own empty-diff/parse/check failures all land here)"]
     HttpOk -- yes --> BranchRef["git branch workerBranch at local-patch's own commit"]
     BranchRef --> Gate1
-
     LaneCheck -- "subprocess or acp" --> Worktree["isolated worktree under the OS temp dir,<br/>new branch devharmonics/task/RUN_ID"]
     Worktree --> Worker["worker edits files in it —<br/>subprocess: sandbox=workspace-write, permission=acceptEdits;<br/>acp: permissionMode=allow-edits"]
     Worker --> WorkerOk{"worker status completed?"}
@@ -154,7 +152,6 @@ flowchart TD
     Validate --> ValidateOk{"exit 0, no timeout?"}
     ValidateOk -- no --> R6["REFUSED: validator-failed"]
     ValidateOk -- yes --> Gate1
-
     Gate1["integrateWorkerBranch:<br/>acquire this repository's file lock"] --> Gate1a{"diff(mergeBase, workerBranch) nonempty?"}
     Gate1a -- no --> R7["REFUSED: empty-diff<br/>(runs for every lane, unlike the subprocess/acp-only pre-check above)"]
     Gate1a -- yes --> Gate2{"tampercheck resolvable on PATH?"}
@@ -188,7 +185,6 @@ an empty diff inside `local-patch.mjs` itself surfaces as generic
 `worker-failed` instead, with the real explanation in the receipt's detail.
 `empty-diff` at `Gate1a` runs identically for every lane, since it lives
 inside `integrateWorkerBranch` downstream of all three worker paths.
-
 `tampercheck-unavailable` folds four causes into one reason: not found on
 `PATH`, a failed identity check, a timeout, or any exit code other than 0 or
 1 — a crashed integrity gate is never distinguished from a merely strict

@@ -77,14 +77,20 @@ function branchFromNewFile(dir, branchName, base, filename, content) {
 // a .cmd on win32 (real Windows executables must carry a PATHEXT suffix),
 // a chmod +x shell script elsewhere.
 
+// A fake standing in for a real CLI must answer --version like one: the
+// integration gate's identity check (falsification finding F-1) requires a
+// bare semantic version before it will trust any verdict. A fixture that
+// cannot answer --version is indistinguishable from the PATH-substituted
+// stub that check exists to reject — so answering it makes these fixtures
+// MORE realistic, not the assertions weaker.
 function writeFakeTampercheck(dir, body) {
   if (process.platform === "win32") {
     const file = path.join(dir, "tampercheck.cmd");
-    writeFileSync(file, `@echo off\r\n${body.win}\r\n`);
+    writeFileSync(file, `@echo off\r\nif /I "%~1"=="--version" (echo 0.1.1& exit /b 0)\r\n${body.win}\r\n`);
     return file;
   }
   const file = path.join(dir, "tampercheck");
-  writeFileSync(file, `#!/bin/sh\n${body.posix}\n`);
+  writeFileSync(file, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 0.1.1; exit 0; fi\n${body.posix}\n`);
   chmodSync(file, 0o755);
   return file;
 }

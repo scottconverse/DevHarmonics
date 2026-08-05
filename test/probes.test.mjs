@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -41,6 +42,21 @@ test("probeCli PASSes only by actually executing --version", () => {
     const result = probeCli("cli:faketool", "faketool", { env: { ...process.env, PATH: dir, PATHEXT: ".CMD" } });
     assert.equal(result.status, "PASS", result.detail);
     assert.match(result.version, /9\.9\.9/);
+    assert.equal(result.sha256, undefined, "the fingerprint is opt-in, not a default cost on every CLI probe");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probeCli sha256 option fingerprints the exact resolved binary — the value an operator pins with", () => {
+  const dir = tempDir();
+  try {
+    const file = fakeVersionTool(dir, "faketool", "faketool 9.9.9");
+    const expected = createHash("sha256").update(readFileSync(file)).digest("hex");
+    const result = probeCli("rigor:tampercheck", "faketool", { env: { ...process.env, PATH: dir, PATHEXT: ".CMD" }, sha256: true });
+    assert.equal(result.status, "PASS", result.detail);
+    assert.equal(result.sha256, expected);
+    assert.ok(result.detail.includes(expected), "the digest must be visible in the printed detail, not only in JSON");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

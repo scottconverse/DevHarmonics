@@ -34,7 +34,9 @@ export async function runDoctor({ config, probeTimeoutMs = 45_000, repository = 
   const checks = [
     ...cliChecks,
     ...endpointChecks,
-    report(probeCli("rigor:tampercheck", config.rigor.tampercheckCommand)),
+    // sha256 so an operator who wants the pin (`run`/`set` --tampercheck-sha256)
+    // sees the exact value to copy, fingerprinted from the binary that answered.
+    report(probeCli("rigor:tampercheck", config.rigor.tampercheckCommand, { sha256: true })),
     report(probeSkillParity("rigor:skill-parity", config.rigor.skillHosts, config.rigor.skillName)),
   ];
 

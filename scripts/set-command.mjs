@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { planIntegrationSet, integrateSet } from "./integration-set.mjs";
-import { parseReviewerSpec } from "./run-command.mjs";
+import { parseReviewerSpec, describeTampercheckIdentity } from "./run-command.mjs";
 import { loadConfig } from "./config.mjs";
 import { parseRequireEvidence, describeAssurance } from "./assurance.mjs";
 
@@ -81,6 +81,10 @@ function printResult(result, asJson, write) {
   write(`DevHarmonics integration set: ${result.setId}\n\n`);
   write(`${renderMemberTable(result.members)}\n`);
   write(`\nset:       ${result.setReady ? "READY" : "NOT READY"}\n`);
+  // One environment, one binary, one identity posture — report it once, from the
+  // first member whose gate actually fingerprinted a binary (R-7 visibility).
+  const fingerprinted = result.members.find((m) => m.gates?.tampercheckBinary?.path);
+  if (fingerprinted) write(describeTampercheckIdentity(fingerprinted.gates.tampercheckBinary));
   // Never a bare READY: say what evidence backs it, as `run` does. The set is only
   // as well-evidenced as its weakest member, so that is what is reported.
   const assurance = weakestAssurance(result.members);
@@ -101,7 +105,7 @@ export async function setCommand(argv, {
 } = {}) {
   const { planIntegrationSet: planFn = planIntegrationSet, integrateSet: integrateFn = integrateSet } = deps;
 
-  const options = { members: [], bases: [], evidenceRoot: null, asJson: false, check: null, reviewer: null, goal: null, requireEvidence: null };
+  const options = { members: [], bases: [], evidenceRoot: null, asJson: false, check: null, reviewer: null, goal: null, requireEvidence: null, tampercheckPath: null, expectedTampercheckSha256: null };
   for (let i = 0; i < argv.length; i += 1) {
     const next = () => { i += 1; return argv[i]; };
     switch (argv[i]) {
@@ -112,6 +116,15 @@ export async function setCommand(argv, {
       case "--reviewer": options.reviewer = next(); break;
       case "--goal": options.goal = next(); break;
       case "--require-evidence": options.requireEvidence = next(); break;
+      case "--tampercheck-path": options.tampercheckPath = next(); break;
+      case "--tampercheck-sha256": {
+        const raw = next();
+        if (!/^[0-9a-fA-F]{64}$/.test(raw ?? "")) {
+          throw new Error(`--tampercheck-sha256 must be a 64-hex-character sha256 digest, got: ${JSON.stringify(raw)} (doctor prints the resolved binary's value)`);
+        }
+        options.expectedTampercheckSha256 = raw;
+        break;
+      }
       case "--json": options.asJson = true; break;
       default: throw new Error(`Unknown set option: ${argv[i]}`);
     }
@@ -142,6 +155,8 @@ export async function setCommand(argv, {
   const result = await integrateFn({
     set: plan, evidenceRoot, env, check, reviewer, goal: options.goal,
     requireEvidence: parseRequireEvidence(options.requireEvidence),
+    tampercheckPath: options.tampercheckPath,
+    expectedTampercheckSha256: options.expectedTampercheckSha256,
   });
 
   printResult(result, options.asJson, write);

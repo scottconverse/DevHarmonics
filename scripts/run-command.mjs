@@ -87,6 +87,10 @@ export async function runPipeline({
   // demanded evidence is absent (A4-6). Empty by default — the level is still always
   // reported, so the honest case needs no flag and the strict case is one flag away.
   requireEvidence = [],
+  // R-7 (owner decision): the tampercheck pin stays opt-in, but it must be
+  // REACHABLE — these were library-only knobs no CLI caller could set.
+  tampercheckPath = null,          // absolute path — never consult PATH at all
+  expectedTampercheckSha256 = null, // content pin; mismatch refuses the gate
   taskId = null,
   timeoutMs = 15 * 60_000,
   env = process.env,
@@ -303,6 +307,8 @@ export async function runPipeline({
       taskId: runId,
       evidenceRoot,
       check: check ? splitCheck(check) : null,
+      tampercheckPath,
+      expectedTampercheckSha256,
       env,
     });
     stages.integration = integration;
@@ -409,6 +415,21 @@ ${(stages.validator.stdoutTail || "").slice(-800)}`
   }
 }
 
+/**
+ * One honest line about the integrity gate's identity posture (R-7, owner
+ * decision): the pin stays opt-in, but the loose mode must never look like the
+ * strict one — same pattern as the assurance ladder. Empty when the gate never
+ * fingerprinted a binary (refused before tampercheck, or integration not reached).
+ */
+export function describeTampercheckIdentity(binary) {
+  if (!binary || !binary.path) return "";
+  if (binary.pinned) {
+    return `tampercheck: identity pinned — sha256 verified (${binary.path})\n`;
+  }
+  const hint = binary.sha256 ? ` — pin with --tampercheck-sha256 ${binary.sha256}` : "";
+  return `tampercheck: identity version-shape only (unpinned${hint})\n`;
+}
+
 /** --reviewer "provider:model" (subprocess lane) or "http:provider:model". */
 export function parseReviewerSpec(spec, config) {
   const parts = spec.split(":");
@@ -430,7 +451,7 @@ export function parseReviewerSpec(spec, config) {
 export async function runCommandCli(argv, { write = (t) => process.stdout.write(t) } = {}) {
   const options = {
     repository: null, prompt: null, provider: null, model: null, check: null,
-    reviewer: null, requireEvidence: null, maxBudgetUsd: null, taskId: null, asJson: false, timeoutMinutes: 15,
+    reviewer: null, requireEvidence: null, maxBudgetUsd: null, tampercheckPath: null, expectedTampercheckSha256: null, taskId: null, asJson: false, timeoutMinutes: 15,
     lane: "subprocess", files: null, adapter: "claude-code-acp", baseUrl: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -470,6 +491,15 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
       case "--files": options.files = next(); break;
       case "--adapter": options.adapter = next(); break;
       case "--base-url": options.baseUrl = next(); break;
+      case "--tampercheck-path": options.tampercheckPath = next(); break;
+      case "--tampercheck-sha256": {
+        const raw = next();
+        if (!/^[0-9a-fA-F]{64}$/.test(raw ?? "")) {
+          throw new Error(`--tampercheck-sha256 must be a 64-hex-character sha256 digest, got: ${JSON.stringify(raw)} (doctor prints the resolved binary's value)`);
+        }
+        options.expectedTampercheckSha256 = raw;
+        break;
+      }
       case "--json": options.asJson = true; break;
       default: throw new Error(`Unknown run option: ${argv[i]}`);
     }
@@ -497,6 +527,8 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
     reviewer: options.reviewer ? parseReviewerSpec(options.reviewer, config) : null,
     requireEvidence: parseRequireEvidence(options.requireEvidence),
     maxBudgetUsd: options.maxBudgetUsd,
+    tampercheckPath: options.tampercheckPath,
+    expectedTampercheckSha256: options.expectedTampercheckSha256,
     taskId: options.taskId,
     timeoutMs: Math.round(options.timeoutMinutes * 60_000),
     lane: options.lane,
@@ -511,6 +543,7 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
     write(`run:         ${result.runId} (base ${result.baseRef?.slice(0, 8)})\n`);
     write(`lane:        ${options.lane}\n`);
     write(`outcome:     ${result.integrated ? "INTEGRATED" : "REFUSED"} — ${result.reason}\n`);
+    write(describeTampercheckIdentity(result.stages?.integration?.gates?.tampercheckBinary));
     if (result.stages?.review) {
       const r = result.stages.review;
       const divergenceText = r.divergence === null || r.divergence === undefined ? "divergence not checked" : `${r.divergence} divergence`;

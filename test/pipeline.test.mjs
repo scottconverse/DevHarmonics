@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { runPipeline } from "../scripts/run-command.mjs";
+import { runPipeline, describeTampercheckIdentity } from "../scripts/run-command.mjs";
 
 /**
  * Hermetic coverage for the pipeline (scripts/run-command.mjs: runPipeline +
@@ -414,6 +415,63 @@ test("validator unresolvable: --check names a tool that isn't on PATH -> validat
   } finally {
     for (const d of [repo, providerDir, tampercheckDir]) rmSync(d, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// 6b. tampercheck identity pin (R-7): reachable from the pipeline surface
+// ---------------------------------------------------------------------------
+
+test("tampercheck pin: a wrong sha256 refuses tampercheck-unavailable; the matching digest integrates as pinned", async () => {
+  const repo = initFixtureRepo();
+  const providerDir = fakeProviderDir("fix");
+  const tampercheckDir = fakeTampercheckDir("clean");
+  const tampercheckFile = path.join(tampercheckDir, process.platform === "win32" ? "tampercheck.cmd" : "tampercheck");
+  const realDigest = createHash("sha256").update(readFileSync(tampercheckFile)).digest("hex");
+  try {
+    // Wrong pin: the gate must refuse rather than trust whatever PATH resolved.
+    const refused = await runPipeline({
+      repository: repo,
+      prompt: "fix it",
+      provider: "codex",
+      model: "fake-model-9b",
+      taskId: "pinbad1",
+      expectedTampercheckSha256: "0".repeat(64),
+      env: buildEnv(providerDir, tampercheckDir),
+      timeoutMs: 20_000,
+    });
+    assert.equal(refused.integrated, false, JSON.stringify(refused));
+    assert.equal(refused.reason, "tampercheck-unavailable");
+    assert.match(refused.stages.integration.gates.tampercheck.detail, /checksum mismatch/);
+    assert.equal(refused.stages.integration.gates.tampercheckBinary.pinned, true);
+
+    // Right pin: integrates, and the evidence says the identity was pinned.
+    const pinned = await runPipeline({
+      repository: repo,
+      prompt: "fix it",
+      provider: "codex",
+      model: "fake-model-9b",
+      taskId: "pingood1",
+      expectedTampercheckSha256: realDigest,
+      env: buildEnv(providerDir, tampercheckDir),
+      timeoutMs: 20_000,
+    });
+    assert.equal(pinned.integrated, true, JSON.stringify(pinned));
+    assert.equal(pinned.stages.integration.gates.tampercheckBinary.pinned, true);
+    assert.equal(pinned.stages.integration.gates.tampercheckBinary.sha256, realDigest);
+  } finally {
+    for (const d of [repo, providerDir, tampercheckDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("describeTampercheckIdentity: loose mode never reads like strict mode, and vice versa", () => {
+  assert.equal(describeTampercheckIdentity(null), "");
+  assert.equal(describeTampercheckIdentity({ path: null }), "");
+  const unpinned = describeTampercheckIdentity({ path: "C:/tools/tampercheck.EXE", sha256: "ab".repeat(32), pinned: false });
+  assert.match(unpinned, /version-shape only \(unpinned/);
+  assert.match(unpinned, /--tampercheck-sha256 abab/);
+  const pinned = describeTampercheckIdentity({ path: "C:/tools/tampercheck.EXE", sha256: "ab".repeat(32), pinned: true });
+  assert.match(pinned, /identity pinned — sha256 verified/);
+  assert.doesNotMatch(pinned, /unpinned/);
 });
 
 // ---------------------------------------------------------------------------

@@ -187,6 +187,10 @@ export async function integrateSet({
   // Evidence floor for the SET (A4-6). A set whose members lack demanded evidence
   // does not reach setReady, so nothing advances anywhere.
   requireEvidence = [],
+  // R-7: the tampercheck identity pin, applied to EVERY member's gate — one
+  // operator environment, one binary, one pin.
+  tampercheckPath = null,
+  expectedTampercheckSha256 = null,
   deps = {},
 }) {
   if (!set || typeof set !== "object") failIntegrate("set must be an object (from planIntegrationSet)");
@@ -211,6 +215,8 @@ export async function integrateSet({
         // candidate. A set that cannot pass its checks never advances any member.
         check,
         ...(checkTimeoutMs === undefined ? {} : { checkTimeoutMs }),
+        tampercheckPath,
+        expectedTampercheckSha256,
         env,
         timeoutMs,
       });

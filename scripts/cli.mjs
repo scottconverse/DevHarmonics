@@ -11,7 +11,9 @@ const USAGE = `Usage:
                    [--lane subprocess|http|acp] [--files a,b,c]
                    [--adapter <cmd>] [--base-url <url>]
                    [--reviewer <spec>] [--require-evidence validator,review]
-                   [--timeout-minutes <n>] [--max-budget-usd <n>] [--json]
+                   [--timeout-minutes <n>] [--max-budget-usd <n>]
+                   [--tampercheck-path <abs>] [--tampercheck-sha256 <hex64>]
+                   [--json]
   devharmonics worker --provider <codex|claude|agy> --prompt <text> --cwd <dir>
                       [--model <id>] [--task-id <id>] [--runs-root <dir>]
                       [--sandbox read-only|workspace-write]
@@ -24,7 +26,9 @@ const USAGE = `Usage:
   devharmonics set --member "<repositoryId>=<repoPath>:<workerBranch>" (2+)
                    [--base "<repositoryId>=<ref>"] [--evidence-root <dir>]
                    [--check "cmd args"] [--reviewer <spec>] [--goal <text>]
-                   [--require-evidence validator,review] [--json]
+                   [--require-evidence validator,review]
+                   [--tampercheck-path <abs>] [--tampercheck-sha256 <hex64>]
+                   [--json]
 
 Commands:
   doctor   Probe every capability the factory depends on and report

@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { resolvePathCommand, runResolved } from "./path-resolve.mjs";
 import { CI_WORKFLOW_RELATIVE_PATH, parseTampercheckWorkflow } from "./onboard.mjs";
@@ -11,7 +12,7 @@ import { CI_WORKFLOW_RELATIVE_PATH, parseTampercheckWorkflow } from "./onboard.m
  * PASS by absence of error.
  */
 
-export function probeCli(id, commandName, { env = process.env, platform = process.platform, timeoutMs = 20_000 } = {}) {
+export function probeCli(id, commandName, { env = process.env, platform = process.platform, timeoutMs = 20_000, sha256 = false } = {}) {
   const resolved = resolvePathCommand(commandName, { env, platform });
   if (!resolved) {
     return { id, status: "FAIL", detail: `"${commandName}" not found on PATH`, path: null, version: null };
@@ -22,7 +23,22 @@ export function probeCli(id, commandName, { env = process.env, platform = proces
     return { id, status: "FAIL", detail: `resolved to ${resolved} but --version failed: ${reason}`, path: resolved, version: null };
   }
   const version = `${run.stdout}${run.stderr}`.trim().split(/\r?\n/)[0] ?? "";
-  return { id, status: "PASS", detail: version || "(no version output)", path: resolved, version: version || null };
+  // Opt-in binary fingerprint (R-7): the exact value integrateWorkerBranch's
+  // expectedTampercheckSha256 pin compares against — printed so an operator who
+  // wants to pin has an obvious value to copy. Unreadable is null, never guessed.
+  let digest = null;
+  if (sha256) {
+    try { digest = createHash("sha256").update(readFileSync(resolved)).digest("hex"); } catch { digest = null; }
+  }
+  const detail = version || "(no version output)";
+  return {
+    id,
+    status: "PASS",
+    detail: digest ? `${detail} — sha256 ${digest} (${resolved})` : detail,
+    path: resolved,
+    version: version || null,
+    ...(sha256 ? { sha256: digest } : {}),
+  };
 }
 
 async function fetchJson(url, options, timeoutMs) {

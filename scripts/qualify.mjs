@@ -131,6 +131,7 @@ async function httpTextRoundtrip({ candidate, deps, timeoutMs, prompt, maxTokens
     maxTokens,
     timeoutMs,
     apiKeyEnvVar: candidate.apiKeyEnvVar ?? null,
+    apiKeyCredential: candidate.apiKeyCredential ?? null,
     paidBudget: candidate.paidBudget,
   });
 }
@@ -288,6 +289,7 @@ async function runStructuredWriteHttp({ candidate, workRoot, env, timeoutMs, dep
     timeoutMs,
     // Paid lane pass-through: only set for credentialed candidates.
     apiKeyEnvVar: candidate.apiKeyEnvVar ?? null,
+    apiKeyCredential: candidate.apiKeyCredential ?? null,
     paidBudget: candidate.paidBudget,
   };
   const result = await deps.runLocalPatch({ task, client: deps.sendMessages, runsRoot, env });

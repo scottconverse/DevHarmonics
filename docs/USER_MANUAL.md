@@ -4,7 +4,7 @@
 
 DevHarmonics is a set of plain Node.js command-line scripts that let an AI coding agent make one bounded, gated change to a git repository on your own machine, using accounts you already have — there is no DevHarmonics server and no DevHarmonics account. Work is driven through one of three worker lanes: subprocess (a supervised call to a signed-in subscription CLI — Codex, Claude Code, or Antigravity's `agy`), HTTP (one Anthropic-Messages-API client pointed at a local model server or, only if you opt in, the real Claude API), and ACP (the Agent Client Protocol, driven by an installed ACP adapter over stdio). All three lanes are reachable today from the command line, standalone (`devharmonics worker`, `devharmonics acp`) or as the worker inside the full gated pipeline (`devharmonics run --lane subprocess|http|acp`). A change only reaches a local integration branch after clearing an empty-diff check and a `tampercheck` integrity scan, and it is never pushed anywhere or merged into your own branch — the tool always stops at a point where you, the owner, decide what happens next. Every attempt, whether it succeeds, is refused, or never even starts, leaves a written receipt.
 
-DevHarmonics has eight commands: `doctor`, `onboard`, `qualify`, `worker`, `acp`, `run`, `set`, and `config`. `set` plans and integrates a change across more than one repository at once, judged all-or-nothing; `config` shows the configuration in effect and where it came from.
+DevHarmonics has nine commands: `doctor`, `onboard`, `qualify`, `worker`, `acp`, `run`, `set`, `config`, and `credential`. `set` plans and integrates a change across more than one repository at once, judged all-or-nothing; `config` shows the configuration in effect and where it came from.
 
 ## 2. Requirements
 
@@ -59,6 +59,7 @@ Usage:
   devharmonics onboard <repo> [--apply] [--force] [--json]
   devharmonics config show [--config <file>] [--json]
   devharmonics config path
+  devharmonics credential set <name> | list | delete <name>
   devharmonics run --repository <repo> --prompt <text> --provider <p>
                    [--model m (required: codex, claude)] [--check "cmd args"]
                    [--task-id t] [--lane subprocess|http|acp] [--files a,b,c]
@@ -98,7 +99,7 @@ devharmonics doctor [--json] [--config <file>] [--repository <repo>]
 - `--config <file>` — load a config file instead of the built-in defaults (deep-merged over them). An invalid file is a hard error, never a silent fallback.
 - `--repository <repo>` — also check whether the named repository is "governed" (has the pinned `tampercheck` CI workflow that `devharmonics onboard` installs). Without this flag the check appears as an honest `SKIPPED` row ("no repository in scope"), never FAIL.
 
-What it actually checks: each configured CLI (`codex`, `claude`, `agy`) by resolving it on `PATH` and running its real `--version`; each configured HTTP endpoint (Ollama, LM Studio, LiteLLM) by discovering an available model and sending it a real Messages request; whether `tampercheck` itself is on `PATH`; whether the `dev-rigor-stack-lite` skill is installed at the *same* version under every configured coordinator host (`~/.claude/skills` and `~/.codex/skills` by default); and — only when the config declares a credentialed endpoint — a `paid:<name>` row that says in plain language whether a paid call would actually work: FAIL when the named environment variable is not set, FAIL when `budgets.maxPaidTokens` is missing ("every paid call will refuse"), FAIL when `budgets.allowPaidApi` is not `true` (the double opt-in's master switch), and PASS stating the ceiling in tokens with a clearly-labeled approximate dollar range — plus the USD ceilings, when the pair is configured. Misconfiguration surfaces here, in the diagnostic, not in a refused run.
+What it actually checks: each configured CLI (`codex`, `claude`, `agy`) by resolving it on `PATH` and running its real `--version`; each configured HTTP endpoint (Ollama, LM Studio, LiteLLM) by discovering an available model and sending it a real Messages request; whether `tampercheck` itself is on `PATH`; whether the `dev-rigor-stack-lite` skill is installed at the *same* version under every configured coordinator host (`~/.claude/skills` and `~/.codex/skills` by default); and — only when the config declares a credentialed endpoint — a `paid:<name>` row that says in plain language whether a paid call would actually work: FAIL when the named environment variable is not set (or the named stored credential is not in the store), FAIL when `budgets.maxPaidTokens` is missing ("every paid call will refuse"), FAIL when `budgets.allowPaidApi` is not `true` (the double opt-in's master switch), and PASS stating the ceiling in tokens with a clearly-labeled approximate dollar range — plus the USD ceilings, when the pair is configured. Misconfiguration surfaces here, in the diagnostic, not in a refused run.
 
 **Exit codes:** 0 = the assessment completed, including a report full of FAILs. 2 = doctor itself could not run (bad flag, unreadable config file).
 
@@ -166,7 +167,25 @@ devharmonics config show [--config <file>] [--json]
 devharmonics config path
 ```
 
-`show` resolves configuration exactly the way every other command does (explicit `--config` > the current directory's `.devharmonics/config.json`, created now if absent > built-in defaults) and prints the effective settings with their source. Safe to print and share: the configuration stores environment-variable *names* for credentials, never credential values. `path` prints where the current directory's config file lives. **Exit codes:** 0 = shown; 2 = a bad flag or an unreadable/invalid config file.
+`show` resolves configuration exactly the way every other command does (explicit `--config` > the current directory's `.devharmonics/config.json`, created now if absent > built-in defaults) and prints the effective settings with their source. Safe to print and share: the configuration stores environment-variable *names* or stored-credential *names* for credentials, never credential values. `path` prints where the current directory's config file lives. **Exit codes:** 0 = shown; 2 = a bad flag or an unreadable/invalid config file.
+
+### `credential`
+
+Stores API keys **encrypted at rest** so you never have to manage environment variables — the second half of the "configuration finds you" story (ported from DevHarmonics v1).
+
+```
+devharmonics credential set <name>      # store a key (typed/pasted on stdin)
+devharmonics credential list            # names only — never values
+devharmonics credential delete <name>
+```
+
+`set` reads the key from **stdin** — paste it and press Enter, or pipe it in — never from a command argument, so the secret can't land in your shell history or a process listing. The key is encrypted with Windows DPAPI in **CurrentUser** scope and written to `~/.devharmonics/credentials/<name>.json`: the file is useless on any other machine and to any other Windows account, there is no master password to invent, and the plaintext never touches disk. Point an endpoint at it in the project config:
+
+```json
+"endpoints": { "anthropic": { "baseUrl": "https://api.anthropic.com", "credential": "anthropic" } }
+```
+
+`credential` is the alternative to `apiKeyEnvVar` — configure exactly one per endpoint (both at once is a validation error). Either way the endpoint becomes **paid** and every money guard below applies identically. There is deliberately no `credential show`: once stored, a key is never printed again. `set` is **Windows-only** (DPAPI is a Windows facility, exactly as in v1); on macOS/Linux use `apiKeyEnvVar`, and a store file copied to a non-Windows machine refuses to decrypt with a plain error. **Exit codes:** 0 = done; 2 = bad arguments, or `set` off-Windows.
 
 ### `qualify`
 
@@ -367,7 +386,7 @@ All three are metered per **state root** — the `.devharmonics` directory neare
 
 ### The paid-lane budget
 
-Separate from the fan-out ceilings, real **money** is guarded by the ledger's paid half. Opening the paid lane is a **double opt-in** (the same rule DevHarmonics v1 had): an endpoint becomes paid only when your config names a credential for it (`endpoints.<name>.apiKeyEnvVar` — the *name* of an environment variable holding the key; the key itself is never stored, logged, or written to a receipt), **and** `budgets.allowPaidApi` must be set to `true` — the master switch, `false` by default, so naming a credential alone never spends a cent. With the lane open, `budgets.maxPaidTokens` is the enforced ceiling. The rules, all fail-closed:
+Separate from the fan-out ceilings, real **money** is guarded by the ledger's paid half. Opening the paid lane is a **double opt-in** (the same rule DevHarmonics v1 had): an endpoint becomes paid only when your config names a credential for it — either `endpoints.<name>.apiKeyEnvVar` (the *name* of an environment variable holding the key) or `endpoints.<name>.credential` (the *name* of a key in the DPAPI store, see the `credential` command); in both cases only the name ever appears in config, receipts, or logs, and configuring both on one endpoint is a validation error — **and** `budgets.allowPaidApi` must be set to `true` — the master switch, `false` by default, so naming a credential alone never spends a cent. With the lane open, `budgets.maxPaidTokens` is the enforced ceiling. The rules, all fail-closed:
 
 - **The master switch comes first**: a credentialed call with `allowPaidApi` unset or `false` is refused before the request is ever sent (`paid-api-disabled-by-policy`).
 - **A credentialed call with no configured budget is refused before the request is ever sent** (`paid-budget-unconfigured`). A metered endpoint is never reachable un-metered.
@@ -450,3 +469,6 @@ These are the refusal reasons `run`, `set`, and the integration engine actually 
 | `insufficient-evidence (missing: ...)` | after review | The change integrated, but a `--require-evidence` floor you set was not met (the missing items are named). Exit code 1. Re-run with the demanded validator/reviewer, or drop the floor. |
 | `set-blocked-not-advanced` | `set` only | This member passed every gate, but a sibling in the same set did not — so this member's integration ref was deliberately **not** advanced. Nothing is half-applied anywhere; fix the blocked sibling and re-run the set. |
 | `integration-error` | `set` only | The integration engine threw for this one member (for example, its repository changed underneath a planned set). Recorded as refused; never allowed to take down the rest of the set. |
+| `paid-api-disabled-by-policy` / `paid-budget-unconfigured` / `paid-budget-exceeded` | before any paid http request | The money guards (section 5): the master switch is off, no `maxPaidTokens` ceiling is set, or the ledger's spend plus this call's reservation would cross it. The request was **never sent**. These surface inside the http worker's/reviewer's error detail. |
+| `credential-unavailable` | before any paid http request | The endpoint names a stored credential (`endpoints.<name>.credential`) that is not in the store, or the store file could not be decrypted on this machine/account. Store it with `devharmonics credential set <name>`. The request was never sent. |
+| `paid-monthly-usd-exceeded` | worker admission | Reported dollar spend on this state root reached `budgets.monthlyLimitUsd` within the rolling 30 days; the next worker is refused before it spawns. |

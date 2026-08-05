@@ -113,6 +113,7 @@ export async function runPipeline({
   // money half — reservation before the request, reconciliation after. Keyless
   // local endpoints are unpaid and unaffected.
   apiKeyEnvVar = null,   // http lane only: env var naming the endpoint credential
+  apiKeyCredential = null, // http lane only: stored-credential name (v1 port (d)) — mutually exclusive with apiKeyEnvVar in config
   taskId = null,
   timeoutMs = 15 * 60_000,
   env = process.env,
@@ -229,7 +230,8 @@ export async function runPipeline({
         timeoutMs,
         commitMessage: `devharmonics ${runId}: ${provider}${model ? `:${model}` : ""}`,
         apiKeyEnvVar,
-        paidBudget: apiKeyEnvVar
+        apiKeyCredential,
+        paidBudget: (apiKeyEnvVar || apiKeyCredential)
           ? { stateRoot: path.join(repo, ".devharmonics"), maxPaidTokens: admission?.budgets?.maxPaidTokens, allowPaidApi: admission?.budgets?.allowPaidApi, taskId: runId }
           : undefined,
       };
@@ -411,7 +413,7 @@ export async function runPipeline({
       // The artifact-lens reviewer still judges the real diff, so the actual
       // protection is unchanged.
       // Paid http reviewer: same metering as the http worker call.
-      const pipelineReviewer = reviewer?.lane === "http" && reviewer.apiKeyEnvVar
+      const pipelineReviewer = reviewer?.lane === "http" && (reviewer.apiKeyEnvVar || reviewer.apiKeyCredential)
         ? { ...reviewer, paidBudget: { stateRoot: path.join(repo, ".devharmonics"), maxPaidTokens: admission?.budgets?.maxPaidTokens, allowPaidApi: admission?.budgets?.allowPaidApi, taskId: runId } }
         : reviewer;
       const review = await runReview({
@@ -547,7 +549,7 @@ export function parseReviewerSpec(spec, config) {
     if (!baseUrl) throw new Error(`--reviewer http:${provider}: no endpoints.${provider}.baseUrl in config`);
     // A credentialed endpoint's reviewer call is a PAID call: carry the env-var
     // name so the client meters it (the caller attaches the paid budget).
-    return { lane: "http", provider, model: parts.slice(2).join(":"), baseUrl, apiKeyEnvVar: endpoint?.apiKeyEnvVar ?? null };
+    return { lane: "http", provider, model: parts.slice(2).join(":"), baseUrl, apiKeyEnvVar: endpoint?.apiKeyEnvVar ?? null, apiKeyCredential: endpoint?.credential ?? null };
   }
   if (parts.length < 2) throw new Error('--reviewer must be "provider:model" or "http:provider:model"');
   return { lane: "subprocess", provider: parts[0], model: parts.slice(1).join(":") };
@@ -630,13 +632,16 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
   const files = options.files ? options.files.split(",").map((s) => s.trim()).filter(Boolean) : null;
   let baseUrl = options.baseUrl;
   let apiKeyEnvVar = null;
+  let apiKeyCredential = null;
   if (options.lane === "http" && !baseUrl) {
     const endpoint = config?.endpoints?.[options.provider];
     baseUrl = endpoint?.baseUrl ?? null;
     if (!baseUrl) throw new Error(`--base-url is required for the http lane (no endpoints.${options.provider}.baseUrl in config either)`);
-    // A config endpoint carrying apiKeyEnvVar is the PAID lane opt-in; an
-    // explicit --base-url stays keyless (no way to name a credential for it).
+    // A config endpoint carrying apiKeyEnvVar or a stored-credential name is
+    // the PAID lane opt-in; an explicit --base-url stays keyless (no way to
+    // name a credential for it).
     apiKeyEnvVar = endpoint?.apiKeyEnvVar ?? null;
+    apiKeyCredential = endpoint?.credential ?? null;
   }
 
   // QA-008 (owner decision): state refusals (dirty tree, reused task-id) are
@@ -657,6 +662,7 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
     expectedTampercheckSha256: options.expectedTampercheckSha256,
     admission: { budgets: config.budgets },
     apiKeyEnvVar,
+    apiKeyCredential,
     taskId: options.taskId,
     timeoutMs: Math.round(options.timeoutMinutes * 60_000),
     lane: options.lane,

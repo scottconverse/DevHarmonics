@@ -10,6 +10,7 @@ const USAGE = `Usage:
   devharmonics onboard <repo> [--apply] [--force] [--json]
   devharmonics config show [--config <file>] [--json]
   devharmonics config path
+  devharmonics credential set <name> | list | delete <name>
   devharmonics run --repository <repo> --prompt <text> --provider <p>
                    [--model m (required: codex, claude)] [--check "cmd args"]
                    [--task-id t] [--lane subprocess|http|acp] [--files a,b,c]
@@ -52,7 +53,13 @@ Commands:
   config   Show the effective configuration and where it came from
            (explicit --config > the project's .devharmonics/config.json,
            auto-created on first use > built-in defaults). Never contains
-           credential values — only environment-variable names.
+           credential values — only environment-variable names or
+           stored-credential names.
+  credential  Store API keys encrypted at rest (Windows DPAPI, this
+           account only) under ~/.devharmonics/credentials. "set" reads
+           the key from stdin — never a command argument. Point an
+           endpoint at one with endpoints.<name>.credential. There is
+           no "show": stored keys are never printed again.
   run      One bounded task through the full pipeline: clean-tree intake,
            isolated worker (subprocess, http, or acp lane), optional
            --check validator, empty-diff + tampercheck gates, serial
@@ -106,6 +113,10 @@ async function main() {
   if (command === "config") {
     const { configCommand } = await import("./config-command.mjs");
     return configCommand(rest);
+  }
+  if (command === "credential") {
+    const { credentialCommand } = await import("./credential-command.mjs");
+    return credentialCommand(rest);
   }
   throw new Error(`Unknown command: ${command}\n${USAGE}`);
 }

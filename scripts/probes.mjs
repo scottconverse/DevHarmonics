@@ -197,9 +197,28 @@ export function probeRepoGovernance(id, repository, { pinnedVersion } = {}) {
  * from a refused run. Never touches the network and never reads the key's
  * value; it checks presence of the env var and the budget only.
  */
-export function probePaidBudget(id, endpointName, endpoint, budgets, env = process.env) {
+export function probePaidBudget(id, endpointName, endpoint, budgets, env = process.env, { credentialStore = null } = {}) {
   const envVar = endpoint.apiKeyEnvVar;
-  if (!env[envVar]) {
+  const credentialName = endpoint.credential;
+  // v1 port (d): the endpoint may name a STORED credential instead of an env
+  // var. Presence check only (does the store hold that name) — the diagnostic
+  // never decrypts anything.
+  if (!envVar && credentialName) {
+    let stored = false;
+    try {
+      stored = Boolean(credentialStore?.has(credentialName));
+    } catch { /* an unreadable store reads as not-stored: the FAIL row's remedy is the same */ }
+    if (!stored) {
+      return {
+        id,
+        status: "FAIL",
+        detail: `endpoint "${endpointName}" points at stored credential "${credentialName}", which is not in the credential store — every paid call will refuse before sending. Store it once with: devharmonics credential set ${credentialName}`,
+        endpointName,
+        credential: credentialName,
+        budgetConfigured: Number.isSafeInteger(budgets?.maxPaidTokens) && budgets.maxPaidTokens > 0,
+      };
+    }
+  } else if (!env[envVar]) {
     return {
       id,
       status: "FAIL",
@@ -209,11 +228,12 @@ export function probePaidBudget(id, endpointName, endpoint, budgets, env = proce
       budgetConfigured: Number.isSafeInteger(budgets?.maxPaidTokens) && budgets.maxPaidTokens > 0,
     };
   }
+  const sourceDesc = envVar ? `${envVar} is set` : `stored credential "${credentialName}" present`;
   if (!Number.isSafeInteger(budgets?.maxPaidTokens) || budgets.maxPaidTokens <= 0) {
     return {
       id,
       status: "FAIL",
-      detail: `endpoint "${endpointName}" is credentialed (${envVar} is set) but budgets.maxPaidTokens is not configured — every paid call will refuse before sending. Set budgets.maxPaidTokens in the project config (devharmonics config show) to open the paid lane deliberately.`,
+      detail: `endpoint "${endpointName}" is credentialed (${sourceDesc}) but budgets.maxPaidTokens is not configured — every paid call will refuse before sending. Set budgets.maxPaidTokens in the project config (devharmonics config show) to open the paid lane deliberately.`,
       endpointName,
       apiKeyEnvVar: envVar,
       budgetConfigured: false,
@@ -226,7 +246,7 @@ export function probePaidBudget(id, endpointName, endpoint, budgets, env = proce
     return {
       id,
       status: "FAIL",
-      detail: `endpoint "${endpointName}" is credentialed (${envVar} is set) but budgets.allowPaidApi is not true — every paid call will refuse before sending. Paid API use is a double opt-in: set budgets.allowPaidApi: true in the project config (devharmonics config show) to open the paid lane deliberately.`,
+      detail: `endpoint "${endpointName}" is credentialed (${sourceDesc}) but budgets.allowPaidApi is not true — every paid call will refuse before sending. Paid API use is a double opt-in: set budgets.allowPaidApi: true in the project config (devharmonics config show) to open the paid lane deliberately.`,
       endpointName,
       apiKeyEnvVar: envVar,
       budgetConfigured: true,
@@ -245,7 +265,7 @@ export function probePaidBudget(id, endpointName, endpoint, budgets, env = proce
   return {
     id,
     status: "PASS",
-    detail: `endpoint "${endpointName}" credentialed (${envVar} set); paid lane OPEN (allowPaidApi), ceiling ${tokens.toLocaleString("en-US")} tokens (≈ $${low.toFixed(0)}–$${high.toFixed(0)} at typical per-model API prices — an estimate, not the enforced unit)${usdCeilings}`,
+    detail: `endpoint "${endpointName}" credentialed (${sourceDesc}); paid lane OPEN (allowPaidApi), ceiling ${tokens.toLocaleString("en-US")} tokens (≈ $${low.toFixed(0)}–$${high.toFixed(0)} at typical per-model API prices — an estimate, not the enforced unit)${usdCeilings}`,
     endpointName,
     apiKeyEnvVar: envVar,
     budgetConfigured: true,

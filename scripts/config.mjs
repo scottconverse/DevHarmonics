@@ -70,6 +70,12 @@ export function validateConfig(config) {
         errors.push(`endpoints.${name}.baseUrl must be an http(s) URL`);
       } else if ("apiKeyEnvVar" in endpoint && (typeof endpoint.apiKeyEnvVar !== "string" || !endpoint.apiKeyEnvVar.trim())) {
         errors.push(`endpoints.${name}.apiKeyEnvVar must be a nonempty environment-variable name when present`);
+      } else if ("credential" in endpoint && (typeof endpoint.credential !== "string" || !/^[a-z0-9_-]+$/i.test(endpoint.credential))) {
+        errors.push(`endpoints.${name}.credential must be a stored-credential name (letters, digits, "_", "-") when present`);
+      } else if ("credential" in endpoint && "apiKeyEnvVar" in endpoint) {
+        // Two credential sources on one endpoint is an ambiguity, and money
+        // guards refuse ambiguity — pick the store or the env var, not both.
+        errors.push(`endpoints.${name} names BOTH credential and apiKeyEnvVar — configure exactly one`);
       }
     }
   }
@@ -143,7 +149,7 @@ export function initializeProjectConfig(projectPath) {
       "DevHarmonics configuration — created automatically with the defaults on first use.",
       "Edit values and save; every command reads this file and announces it as its config source.",
       "A --config <file> flag overrides this file for one invocation.",
-      "endpoints.<name>.apiKeyEnvVar names an environment variable holding a REAL credential — that makes the endpoint PAID and requires budgets.allowPaidApi: true plus budgets.maxPaidTokens (optionally budgets.perRunLimitUsd + budgets.monthlyLimitUsd, always as a pair).",
+      "endpoints.<name>.apiKeyEnvVar names an environment variable holding a REAL credential; endpoints.<name>.credential names a key stored via `devharmonics credential set <name>` (pick one, not both). Either makes the endpoint PAID and requires budgets.allowPaidApi: true plus budgets.maxPaidTokens (optionally budgets.perRunLimitUsd + budgets.monthlyLimitUsd, always as a pair).",
       "See docs/USER_MANUAL.md for every field.",
     ],
     ...defaultConfig(),

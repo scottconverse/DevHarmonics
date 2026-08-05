@@ -424,6 +424,7 @@ export async function runReview({
         messages: [{ role: "user", content: `${basePrompt}${diffSection}` }],
         timeoutMs,
         apiKeyEnvVar: reviewer.apiKeyEnvVar ?? null,
+        apiKeyCredential: reviewer.apiKeyCredential ?? null,
         paidBudget: reviewer.paidBudget,
         env,
       });

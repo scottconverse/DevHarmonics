@@ -42,6 +42,11 @@ export async function sendMessages({
   // written into a receipt — receipts record the endpoint, never the credential.
   apiKey = null,
   apiKeyEnvVar = null,
+  // v1 port (d): a third source — the NAME of a key in the DPAPI credential
+  // store (devharmonics credential set <name>). Like apiKeyEnvVar, only the
+  // name ever travels through call chains, receipts, and logs; the secret is
+  // resolved here, at send time, and goes nowhere else.
+  apiKeyCredential = null,
   // PAID-LANE BUDGET (owner correction, 2026-08-05 night): the money half of
   // admission.mjs was nearly deleted on an inference the owner never made.
   // It is now the live guard for every call that carries a REAL credential:
@@ -53,9 +58,6 @@ export async function sendMessages({
   deps = {},
   env = process.env,
 }) {
-  const resolvedApiKey = apiKey
-    ?? (apiKeyEnvVar ? env[apiKeyEnvVar] : undefined)
-    ?? "local";
   if (apiKeyEnvVar && !env[apiKeyEnvVar]) {
     return {
       ok: false,
@@ -66,6 +68,36 @@ export async function sendMessages({
       resolvedModel: null,
     };
   }
+  let storedKey;
+  if (!apiKey && !apiKeyEnvVar && apiKeyCredential) {
+    try {
+      const store = deps.credentialStore ?? (await import("./credential-store.mjs")).createCredentialStore();
+      storedKey = await store.get(apiKeyCredential);
+    } catch (error) {
+      return {
+        ok: false,
+        status: null,
+        error: `credential-unavailable: ${error.message}`,
+        contentText: null,
+        usage: null,
+        resolvedModel: null,
+      };
+    }
+    if (storedKey == null) {
+      return {
+        ok: false,
+        status: null,
+        error: `credential-unavailable: no credential named "${apiKeyCredential}" is stored — store it once with: devharmonics credential set ${apiKeyCredential}`,
+        contentText: null,
+        usage: null,
+        resolvedModel: null,
+      };
+    }
+  }
+  const resolvedApiKey = apiKey
+    ?? (apiKeyEnvVar ? env[apiKeyEnvVar] : undefined)
+    ?? storedKey
+    ?? "local";
 
   // A call is PAID exactly when a real credential rides with it. Fail closed:
   // no configured budget means no paid call — a metered endpoint must never

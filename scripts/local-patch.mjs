@@ -319,6 +319,7 @@ export async function runLocalPatch({ task, client, runsRoot, env = process.env 
       // Paid lane: threaded when the endpoint carries a credential; unset for
       // key-less local servers (the default), which stay unpaid and unmetered.
       apiKeyEnvVar: task.apiKeyEnvVar ?? null,
+      apiKeyCredential: task.apiKeyCredential ?? null,
       paidBudget: task.paidBudget,
       env,
     });

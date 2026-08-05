@@ -402,3 +402,70 @@ test("unpaid: key-less local calls are untouched — no budget required, no ledg
   assert.equal(result.ok, true);
   assert.equal(existsSync(path.join(stateRoot, "usage.jsonl")), false, "an unpaid call writes nothing to the money ledger");
 });
+
+// --- v1 port (d): the stored-credential source --------------------------------
+
+test("credential: a named-but-missing stored credential refuses before any request", async (t) => {
+  let requests = 0;
+  const fakeStore = { get: async () => null };
+  const result = await withServer(
+    jsonHandler(() => { requests += 1; return { body: OK_MESSAGE }; }),
+    (baseUrl) => sendMessages({
+      baseUrl,
+      model: "claude-test",
+      messages: [{ role: "user", content: "hi" }],
+      apiKeyCredential: "anthropic",
+      deps: { credentialStore: fakeStore },
+    }),
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.error, /^credential-unavailable/);
+  assert.match(result.error, /devharmonics credential set anthropic/);
+  assert.equal(requests, 0);
+});
+
+test("credential: a resolved stored credential is PAID — the full double opt-in and budget apply to it", async (t) => {
+  const stateRoot = mkdtempSync(path.join(tmpdir(), "dh-cred-paid-"));
+  t.after(() => rmSync(stateRoot, { recursive: true, force: true }));
+  const fakeStore = { get: async (name) => (name === "anthropic" ? "sk-from-store" : null) };
+
+  // Without allowPaidApi: refused by policy, request never sent.
+  let requests = 0;
+  const refused = await withServer(
+    jsonHandler(() => { requests += 1; return { body: OK_MESSAGE }; }),
+    (baseUrl) => sendMessages({
+      baseUrl,
+      model: "claude-test",
+      messages: [{ role: "user", content: "hi" }],
+      apiKeyCredential: "anthropic",
+      deps: { credentialStore: fakeStore },
+    }),
+  );
+  assert.equal(refused.ok, false);
+  assert.match(refused.error, /^paid-api-disabled-by-policy/);
+  assert.equal(requests, 0);
+
+  // Fully opted in: the call goes through carrying the STORED key, and the
+  // ledger meters it exactly like an env-var credential.
+  let seenApiKey = null;
+  const result = await withServer(
+    jsonHandler((requestBody, request) => {
+      seenApiKey = request.headers["x-api-key"];
+      return { body: OK_MESSAGE };
+    }),
+    (baseUrl) => sendMessages({
+      baseUrl,
+      model: "claude-test",
+      messages: [{ role: "user", content: "hi" }],
+      maxTokens: 64,
+      apiKeyCredential: "anthropic",
+      paidBudget: { stateRoot, allowPaidApi: true, maxPaidTokens: 10_000, taskId: "cred-ok" },
+      deps: { credentialStore: fakeStore },
+    }),
+  );
+  assert.equal(result.ok, true, result.error);
+  assert.equal(seenApiKey, "sk-from-store");
+  const ledger = readFileSync(path.join(stateRoot, "usage.jsonl"), "utf8").split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l));
+  assert.equal(ledger.length, 2, "reservation + terminal, same as the env-var paid path");
+  assert.equal(ledger[0].paid, true);
+});

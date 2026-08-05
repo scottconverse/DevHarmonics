@@ -12,7 +12,13 @@ import { probeCli, probeMessagesEndpoint, probePaidBudget, probeRepoGovernance, 
  * assessment COMPLETED (even with FAILs in it); exit 2 means doctor itself
  * could not run. A crashed assessment must never be mistaken for a clean one.
  */
-export async function runDoctor({ config, probeTimeoutMs = 45_000, repository = null, onProgress = null, env = process.env } = {}) {
+export async function runDoctor({ config, probeTimeoutMs = 45_000, repository = null, onProgress = null, env = process.env, credentialStore = undefined } = {}) {
+  // v1 port (d): the paid row can check stored-credential PRESENCE (never the
+  // value). The real store is only constructed when some endpoint names one,
+  // so a default keyless config touches nothing under the home directory.
+  const resolveStore = async () => (credentialStore !== undefined
+    ? credentialStore
+    : (await import("./credential-store.mjs")).createCredentialStore());
   const report = (check) => {
     try { onProgress?.(check); } catch { /* a progress listener never breaks the assessment */ }
     return check;
@@ -45,8 +51,8 @@ export async function runDoctor({ config, probeTimeoutMs = 45_000, repository = 
   // var isn't set" and "no paid budget configured" here, in the diagnostic,
   // instead of in a refused run.
   for (const [name, endpoint] of Object.entries(config.endpoints)) {
-    if (endpoint?.apiKeyEnvVar) {
-      checks.push(report(probePaidBudget(`paid:${name}`, name, endpoint, config.budgets, env)));
+    if (endpoint?.apiKeyEnvVar || endpoint?.credential) {
+      checks.push(report(probePaidBudget(`paid:${name}`, name, endpoint, config.budgets, env, { credentialStore: await resolveStore() })));
     }
   }
 

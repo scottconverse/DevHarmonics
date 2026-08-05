@@ -168,3 +168,22 @@ test("paid rows appear ONLY for credentialed endpoints, and name each failure's 
   assert.match(usd.detail, /\$100\/30 days/);
   assert.match(usd.detail, /report real cost/);
 });
+
+test("v1 port (d): a stored-credential endpoint gets the same paid row — not-stored FAIL names the exact command; stored + opted-in PASSes", async () => {
+  const config = fixtureConfig();
+  config.endpoints = { anthropic: { baseUrl: "http://127.0.0.1:1", credential: "anthropic" } };
+  config.budgets.maxPaidTokens = 2_000_000;
+  config.budgets.allowPaidApi = true;
+
+  const notStored = await runDoctor({ config, probeTimeoutMs: 3_000, env: {}, credentialStore: { has: () => false } });
+  const missing = notStored.checks.find((c) => c.id === "paid:anthropic");
+  assert.equal(missing?.status, "FAIL");
+  assert.match(missing.detail, /not in the credential store/);
+  assert.match(missing.detail, /devharmonics credential set anthropic/);
+
+  const stored = await runDoctor({ config, probeTimeoutMs: 3_000, env: {}, credentialStore: { has: () => true } });
+  const ok = stored.checks.find((c) => c.id === "paid:anthropic");
+  assert.equal(ok?.status, "PASS", ok?.detail);
+  assert.match(ok.detail, /stored credential "anthropic" present/);
+  assert.match(ok.detail, /2,000,000 tokens/);
+});

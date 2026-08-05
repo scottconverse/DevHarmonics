@@ -176,3 +176,18 @@ test("v1 port (b): the USD limits are a PAIR — one without the other refuses a
   const fullPair = validateConfig(withBudgets({ allowPaidApi: true, maxPaidTokens: 1_000_000, perRunLimitUsd: 5, monthlyLimitUsd: 100 }));
   assert.equal(fullPair.ok, true, fullPair.errors?.join("; "));
 });
+
+test("v1 port (d): endpoints.<name>.credential validates as a store name and is mutually exclusive with apiKeyEnvVar", () => {
+  const base = defaultConfig();
+  const withEndpoint = (endpoint) => ({ ...base, endpoints: { ...base.endpoints, anthropic: { baseUrl: "https://api.anthropic.com", ...endpoint } } });
+
+  assert.equal(validateConfig(withEndpoint({ credential: "anthropic" })).ok, true);
+
+  const badName = validateConfig(withEndpoint({ credential: "../escape" }));
+  assert.equal(badName.ok, false);
+  assert.match(badName.errors.join("; "), /credential must be a stored-credential name/);
+
+  const both = validateConfig(withEndpoint({ credential: "anthropic", apiKeyEnvVar: "ANTHROPIC_API_KEY" }));
+  assert.equal(both.ok, false);
+  assert.match(both.errors.join("; "), /BOTH credential and apiKeyEnvVar/);
+});

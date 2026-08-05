@@ -5,6 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { runWorker } from "./run-worker.mjs";
+import { runAcpWorker } from "./acp-worker.mjs";
+import { runLocalPatch } from "./local-patch.mjs";
+import { sendMessages } from "./messages-client.mjs";
 import { integrateWorkerBranch } from "./integrate.mjs";
 import { runReview } from "./review.mjs";
 import { superviseProcess } from "./supervise.mjs";
@@ -18,7 +21,27 @@ import { loadConfig } from "./config.mjs";
  * approval boundary. Nothing is ever pushed; the deliverable is a local
  * integration branch plus the evidence bundle that says exactly how it
  * got there.
+ *
+ * Three worker LANES share this one pipeline (spec §2.2): "subprocess"
+ * (default, unchanged — an AI CLI run by run-worker.mjs), "acp" (an Agent
+ * Client Protocol adapter run by acp-worker.mjs), and "http" (a
+ * constrained read-file/write-file round trip run by local-patch.mjs
+ * against a plain Messages-API endpoint).
+ *
+ * "subprocess" and "acp" share the exact same worktree/commit/check shape
+ * below — the pipeline itself owns one isolated worktree, the worker
+ * edits files in it, then the pipeline stages+commits+checks the result —
+ * because both are "an agent edits files in a directory I gave it", just
+ * over a different transport (argv/stdout vs. an ACP stdio JSON-RPC
+ * session). "http" is structurally different: local-patch.mjs already
+ * owns its OWN isolated worktree, already validates paths, already runs
+ * the declared check, and already commits only on green, so the pipeline
+ * does none of that work twice — it just turns the resulting commit into
+ * a `workerBranch` ref and lets the SAME integration (gates + merge) and
+ * review logic run unchanged, exactly as the other two lanes do.
  */
+
+const LANES = Object.freeze(["subprocess", "http", "acp"]);
 
 function git(repository, args) {
   const result = spawnSync("git", ["-C", repository, ...args], { encoding: "utf8", windowsHide: true });
@@ -44,17 +67,49 @@ function ensureExcluded(repository) {
   } catch { /* non-fatal: state dir simply shows as untracked */ }
 }
 
+/** Split a simple "command arg arg..." string — unchanged from the original
+ * subprocess-lane --check parsing (no quoting support). The http lane maps
+ * --check onto local-patch's {command, args} the same simple way. */
+function splitCheck(check) {
+  const [command, ...args] = (check ?? "").split(" ").filter(Boolean);
+  return { command, args };
+}
+
 export async function runPipeline({
   repository,
   prompt,
   provider,
   model = null,
-  check = null,          // "command arg arg..." run inside the worker worktree
+  check = null,          // "command arg arg..." — validator (subprocess/acp) or local-patch's check (http)
   reviewer = null,       // { lane, provider, model } — independent review after integration
   taskId = null,
   timeoutMs = 15 * 60_000,
   env = process.env,
+  lane = "subprocess",   // "subprocess" | "http" | "acp"
+  files = null,          // http lane only: array of repo-relative read/write paths (--files)
+  adapterCommand = "claude-code-acp", // acp lane only (--adapter)
+  baseUrl = null,        // http lane only (--base-url)
+  deps = {},
 }) {
+  if (!LANES.includes(lane)) {
+    throw new Error(`runPipeline: lane must be one of ${LANES.join(", ")}, got: ${JSON.stringify(lane)}`);
+  }
+  if (lane === "http" && (!Array.isArray(files) || files.length === 0)) {
+    throw new Error("runPipeline: the http lane requires a non-empty files list (--files, comma-separated repo-relative paths)");
+  }
+
+  // Real modules by default; a caller (tests) may inject any subset via
+  // `deps` — this is what makes the pipeline hermetically testable without
+  // a real AI CLI, a real ACP adapter, or a real HTTP endpoint.
+  const d = {
+    runWorker,
+    runAcpWorker,
+    runLocalPatch,
+    sendMessages,
+    integrateWorkerBranch,
+    ...deps,
+  };
+
   const repo = path.resolve(repository);
   assertCleanTrackedTree(repo);
   ensureExcluded(repo);
@@ -67,56 +122,132 @@ export async function runPipeline({
   const workerBranch = `devharmonics/task/${runId}`;
   const integrationBranch = `devharmonics/integration/${runId}`;
 
-  // Worker worktree lives in the system temp dir — never nested inside the
-  // target repo's working tree (the slice-3 lesson: nested fixtures changed
-  // codex's sandbox verdicts and claude's session behavior).
-  const worktree = mkdtempSync(path.join(os.tmpdir(), `dh-run-${runId}-`));
-  const wt = path.join(worktree, "wt");
-  const added = git(repo, ["worktree", "add", "-b", workerBranch, wt, baseRef]);
-  if (!added.ok) throw new Error(`could not create worker worktree: ${added.stderr.trim()}`);
-
   const stages = { worker: null, commit: null, validator: null, integration: null, review: null };
+
+  // Whatever worktree the lane created (the pipeline's own, for
+  // subprocess/acp; local-patch's own, for http) is always removed here,
+  // exactly once, regardless of outcome — assigned once that worktree
+  // actually exists, a no-op until then.
+  let cleanup = () => {};
+
   try {
-    const workerResult = await runWorker({
-      taskId: runId,
-      provider,
-      model,
-      prompt,
-      cwd: wt,
-      runsRoot: evidenceRoot,
-      sandbox: "workspace-write",
-      permissionMode: "acceptEdits",
-      allowedTools: ["Read", "Edit", "Write"],
-      timeoutMs,
-      env,
-    });
-    stages.worker = { status: workerResult.receipt.status, receiptDir: workerResult.runDir, usage: workerResult.receipt.usage };
-    if (workerResult.receipt.status !== "completed") {
-      return { integrated: false, reason: `worker-${workerResult.receipt.status}`, runId, baseRef, stages, evidenceRoot };
-    }
+    if (lane === "http") {
+      const { command, args } = splitCheck(check);
+      const task = {
+        taskId: runId,
+        repository: repo,
+        base: baseRef,
+        model: model ?? "unspecified",
+        baseUrl,
+        instructions: prompt,
+        readPaths: files,
+        writePaths: files,
+        check: { command, args },
+        commitMessage: `devharmonics ${runId}: ${provider}${model ? `:${model}` : ""}`,
+      };
+      const patchResult = await d.runLocalPatch({ task, client: d.sendMessages, runsRoot: evidenceRoot, env });
+      stages.worker = {
+        status: patchResult.receipt.status,
+        receiptDir: patchResult.runDir,
+        usage: patchResult.receipt.usage,
+        detail: patchResult.detail,
+      };
 
-    git(wt, ["add", "-A"]);
-    const staged = git(wt, ["diff", "--cached", "--stat"]).stdout.trim();
-    if (!staged) {
-      stages.commit = { committed: false };
-      return { integrated: false, reason: "worker-empty-diff", runId, baseRef, stages, evidenceRoot };
-    }
-    const committed = git(wt, ["commit", "-m", `devharmonics ${runId}: ${provider}${model ? `:${model}` : ""}`]);
-    if (!committed.ok) return { integrated: false, reason: `commit-failed: ${committed.stderr.trim()}`, runId, baseRef, stages, evidenceRoot };
-    stages.commit = { committed: true, head: git(wt, ["rev-parse", "HEAD"]).stdout.trim(), stat: staged };
+      // local-patch leaves its own worktree on disk (by design — "kept for
+      // inspection" once real content has been written into it); the
+      // pipeline is the one place that knows to clean it back up.
+      if (patchResult.worktreePath) {
+        const leftoverWorktree = patchResult.worktreePath;
+        cleanup = () => {
+          git(repo, ["worktree", "remove", "--force", leftoverWorktree]);
+          rmSync(path.dirname(leftoverWorktree), { recursive: true, force: true });
+        };
+      }
 
-    if (check) {
-      const [checkCommand, ...checkArgs] = check.split(" ").filter(Boolean);
-      const resolved = resolvePathCommand(checkCommand, { env });
-      if (!resolved) return { integrated: false, reason: `validator-unresolvable: ${checkCommand}`, runId, baseRef, stages, evidenceRoot };
-      const validated = await superviseProcess({ command: resolved, args: checkArgs, cwd: wt, prompt: null, timeoutMs: 10 * 60_000, env });
-      stages.validator = { command: check, exitCode: validated.exitCode, timedOut: validated.timedOut, stdoutTail: validated.stdout.slice(-2000), stderrTail: validated.stderr.slice(-2000) };
-      if (validated.exitCode !== 0) {
-        return { integrated: false, reason: `validator-failed (exit ${validated.exitCode})`, runId, baseRef, stages, evidenceRoot };
+      if (patchResult.receipt.status !== "completed") {
+        return { integrated: false, reason: `worker-${patchResult.receipt.status}`, runId, baseRef, stages, evidenceRoot };
+      }
+
+      // local-patch commits on its OWN branch name; the pipeline's
+      // integration contract is a `workerBranch` ref, so point one at the
+      // exact commit local-patch just made (a real object already in this
+      // repository's object store — worktrees share it).
+      const branched = git(repo, ["branch", workerBranch, patchResult.headCommit]);
+      if (!branched.ok) throw new Error(`could not create workerBranch from the local-patch commit: ${branched.stderr.trim()}`);
+      stages.commit = {
+        committed: true,
+        head: patchResult.headCommit,
+        stat: git(repo, ["diff", "--stat", baseRef, workerBranch]).stdout,
+      };
+    } else {
+      // subprocess and acp: the pipeline owns one isolated worktree the
+      // worker edits in. Everything below this point (worktree creation,
+      // add/commit, optional --check, cleanup) is UNCHANGED for the
+      // subprocess lane and shared as-is by the acp lane — only the actual
+      // worker call differs between the two.
+      const worktree = mkdtempSync(path.join(os.tmpdir(), `dh-run-${runId}-`));
+      const wt = path.join(worktree, "wt");
+      const added = git(repo, ["worktree", "add", "-b", workerBranch, wt, baseRef]);
+      if (!added.ok) throw new Error(`could not create worker worktree: ${added.stderr.trim()}`);
+      cleanup = () => {
+        git(repo, ["worktree", "remove", "--force", wt]);
+        rmSync(worktree, { recursive: true, force: true });
+      };
+
+      const workerResult = lane === "acp"
+        ? await d.runAcpWorker({
+            taskId: runId,
+            provider,
+            adapterCommand,
+            model,
+            prompt,
+            cwd: wt,
+            runsRoot: evidenceRoot,
+            permissionMode: "allow-edits",
+            timeoutMs,
+            env,
+          })
+        : await d.runWorker({
+            taskId: runId,
+            provider,
+            model,
+            prompt,
+            cwd: wt,
+            runsRoot: evidenceRoot,
+            sandbox: "workspace-write",
+            permissionMode: "acceptEdits",
+            allowedTools: ["Read", "Edit", "Write"],
+            timeoutMs,
+            env,
+          });
+      stages.worker = { status: workerResult.receipt.status, receiptDir: workerResult.runDir, usage: workerResult.receipt.usage };
+      if (workerResult.receipt.status !== "completed") {
+        return { integrated: false, reason: `worker-${workerResult.receipt.status}`, runId, baseRef, stages, evidenceRoot };
+      }
+
+      git(wt, ["add", "-A"]);
+      const staged = git(wt, ["diff", "--cached", "--stat"]).stdout.trim();
+      if (!staged) {
+        stages.commit = { committed: false };
+        return { integrated: false, reason: "worker-empty-diff", runId, baseRef, stages, evidenceRoot };
+      }
+      const committed = git(wt, ["commit", "-m", `devharmonics ${runId}: ${provider}${model ? `:${model}` : ""}`]);
+      if (!committed.ok) return { integrated: false, reason: `commit-failed: ${committed.stderr.trim()}`, runId, baseRef, stages, evidenceRoot };
+      stages.commit = { committed: true, head: git(wt, ["rev-parse", "HEAD"]).stdout.trim(), stat: staged };
+
+      if (check) {
+        const { command: checkCommand, args: checkArgs } = splitCheck(check);
+        const resolved = resolvePathCommand(checkCommand, { env });
+        if (!resolved) return { integrated: false, reason: `validator-unresolvable: ${checkCommand}`, runId, baseRef, stages, evidenceRoot };
+        const validated = await superviseProcess({ command: resolved, args: checkArgs, cwd: wt, prompt: null, timeoutMs: 10 * 60_000, env });
+        stages.validator = { command: check, exitCode: validated.exitCode, timedOut: validated.timedOut, stdoutTail: validated.stdout.slice(-2000), stderrTail: validated.stderr.slice(-2000) };
+        if (validated.exitCode !== 0) {
+          return { integrated: false, reason: `validator-failed (exit ${validated.exitCode})`, runId, baseRef, stages, evidenceRoot };
+        }
       }
     }
 
-    const integration = await integrateWorkerBranch({
+    const integration = await d.integrateWorkerBranch({
       repository: repo,
       integrationBranch,
       workerBranch,
@@ -169,8 +300,7 @@ ${(stages.validator.stdoutTail || "").slice(-800)}`
       integrationHead: integration.integrationHead, stages, evidenceRoot,
     };
   } finally {
-    git(repo, ["worktree", "remove", "--force", wt]);
-    rmSync(worktree, { recursive: true, force: true });
+    cleanup();
   }
 }
 
@@ -193,7 +323,11 @@ function parseReviewerSpec(spec, config) {
 }
 
 export async function runCommandCli(argv, { write = (t) => process.stdout.write(t) } = {}) {
-  const options = { repository: null, prompt: null, provider: null, model: null, check: null, reviewer: null, taskId: null, asJson: false, timeoutMinutes: 15 };
+  const options = {
+    repository: null, prompt: null, provider: null, model: null, check: null,
+    reviewer: null, taskId: null, asJson: false, timeoutMinutes: 15,
+    lane: "subprocess", files: null, adapter: "claude-code-acp", baseUrl: null,
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const next = () => { i += 1; return argv[i]; };
     switch (argv[i]) {
@@ -205,12 +339,27 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
       case "--reviewer": options.reviewer = next(); break;
       case "--task-id": options.taskId = next(); break;
       case "--timeout-minutes": options.timeoutMinutes = Number(next()); break;
+      case "--lane": options.lane = next(); break;
+      case "--files": options.files = next(); break;
+      case "--adapter": options.adapter = next(); break;
+      case "--base-url": options.baseUrl = next(); break;
       case "--json": options.asJson = true; break;
       default: throw new Error(`Unknown run option: ${argv[i]}`);
     }
   }
   if (!options.repository || !options.prompt) throw new Error("--repository and --prompt are required");
-  if (!SUBPROCESS_PROVIDERS.includes(options.provider)) throw new Error(`--provider must be one of ${SUBPROCESS_PROVIDERS.join(", ")}`);
+  if (!options.provider) throw new Error("--provider is required");
+  if (options.lane === "subprocess" && !SUBPROCESS_PROVIDERS.includes(options.provider)) {
+    throw new Error(`--provider must be one of ${SUBPROCESS_PROVIDERS.join(", ")}`);
+  }
+
+  const { config } = loadConfig();
+  const files = options.files ? options.files.split(",").map((s) => s.trim()).filter(Boolean) : null;
+  let baseUrl = options.baseUrl;
+  if (options.lane === "http" && !baseUrl) {
+    baseUrl = config?.endpoints?.[options.provider]?.baseUrl ?? null;
+    if (!baseUrl) throw new Error(`--base-url is required for the http lane (no endpoints.${options.provider}.baseUrl in config either)`);
+  }
 
   const result = await runPipeline({
     repository: options.repository,
@@ -218,15 +367,20 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
     provider: options.provider,
     model: options.model,
     check: options.check,
-    reviewer: options.reviewer ? parseReviewerSpec(options.reviewer, loadConfig().config) : null,
+    reviewer: options.reviewer ? parseReviewerSpec(options.reviewer, config) : null,
     taskId: options.taskId,
     timeoutMs: Math.round(options.timeoutMinutes * 60_000),
+    lane: options.lane,
+    files,
+    adapterCommand: options.adapter,
+    baseUrl,
   });
 
   if (options.asJson) {
     write(`${JSON.stringify(result, null, 2)}\n`);
   } else {
     write(`run:         ${result.runId} (base ${result.baseRef?.slice(0, 8)})\n`);
+    write(`lane:        ${options.lane}\n`);
     write(`outcome:     ${result.integrated ? "INTEGRATED" : "REFUSED"} — ${result.reason}\n`);
     if (result.stages?.review) {
       const r = result.stages.review;

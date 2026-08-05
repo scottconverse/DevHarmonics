@@ -470,6 +470,68 @@ test("integrateSet: --reviewer reviews each candidate; one NOT_READY blocks the 
   }
 }));
 
+// A4-6 / decision C: readiness is always qualified by the evidence that actually
+// ran, and a demanded floor refuses it outright when that evidence is absent.
+test("integrateSet: assurance is reported, and --require-evidence refuses a set that lacks it", () => withTemps(2, async ({ repos, evidenceRoot, fixtureDir }) => {
+  fakeClean(fixtureDir);
+  const [repoA, repoB] = repos;
+  branchFrom(repoA, "worker-a", "main", "line1\nline2\nCHANGED-A\n");
+  branchFrom(repoB, "worker-b", "main", "line1\nline2\nCHANGED-B\n");
+  const mkPlan = (s) => planIntegrationSet({
+    members: [
+      { repositoryId: "repoA", repository: repoA, workerBranch: "worker-a", integrationBranch: `devharmonics/integration/ev-a-${s}` },
+      { repositoryId: "repoB", repository: repoB, workerBranch: "worker-b", integrationBranch: `devharmonics/integration/ev-b-${s}` },
+    ],
+  });
+  const base = { env: pathOnlyEnv(fixtureDir), timeoutMs: 20_000 };
+
+  // Gates only: integrates, but says so honestly.
+  const gatesOnly = await integrateSet({ set: mkPlan("g"), evidenceRoot: path.join(evidenceRoot, "g"), ...base });
+  assert.equal(gatesOnly.setReady, true);
+  for (const m of gatesOnly.members) assert.equal(m.assurance, "gates-only");
+
+  // Same run, but the operator demands a validator that never ran -> refused,
+  // and because it fails during prepare, nothing advances anywhere.
+  const floored = await integrateSet({
+    set: mkPlan("f"), evidenceRoot: path.join(evidenceRoot, "f"), ...base,
+    requireEvidence: ["validator"],
+  });
+  assert.equal(floored.setReady, false, JSON.stringify(floored));
+  assert.deepEqual(floored.blockedBy.sort(), ["repoA", "repoB"]);
+  for (const m of floored.members) {
+    assert.equal(m.assurance, "gates-only");
+    assert.deepEqual(m.missingEvidence, ["validator"]);
+    assert.match(m.reason, /insufficient-evidence \(missing: validator\)/);
+    const dir = m.repositoryId === "repoA" ? repoA : repoB;
+    assert.equal(git(dir, ["rev-parse", m.integrationBranch]).trim(), m.baseCommit, "an unmet evidence floor must advance nothing");
+  }
+
+  // Supply the validator and the same floor is satisfied.
+  const satisfied = await integrateSet({
+    set: mkPlan("s"), evidenceRoot: path.join(evidenceRoot, "s"), ...base,
+    check: { command: "node", args: ["-e", "process.exit(0)"] }, checkTimeoutMs: 30_000,
+    requireEvidence: ["validator"],
+  });
+  assert.equal(satisfied.setReady, true, JSON.stringify(satisfied));
+  for (const m of satisfied.members) {
+    assert.equal(m.assurance, "validated");
+    assert.deepEqual(m.missingEvidence, []);
+    assert.ok(m.integrationHead);
+  }
+
+  // Demanding a review that never ran also refuses, even with a passing validator.
+  const needsReview = await integrateSet({
+    set: mkPlan("r"), evidenceRoot: path.join(evidenceRoot, "r"), ...base,
+    check: { command: "node", args: ["-e", "process.exit(0)"] }, checkTimeoutMs: 30_000,
+    requireEvidence: ["validator", "review"],
+  });
+  assert.equal(needsReview.setReady, false);
+  for (const m of needsReview.members) {
+    assert.equal(m.assurance, "validated");
+    assert.deepEqual(m.missingEvidence, ["review"]);
+  }
+}));
+
 test("integrateSet: empty-diff member -> refused empty-diff, set not ready, set.json written", () => withTemps(2, async ({ repos, evidenceRoot, fixtureDir }) => {
   fakeClean(fixtureDir);
   const [repoA, repoB] = repos;

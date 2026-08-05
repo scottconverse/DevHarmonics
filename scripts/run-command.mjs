@@ -14,6 +14,7 @@ import { superviseProcess } from "./supervise.mjs";
 import { resolvePathCommand } from "./path-resolve.mjs";
 import { SUBPROCESS_PROVIDERS } from "./providers.mjs";
 import { workerEnv } from "./worker-env.mjs";
+import { assuranceFor, missingEvidence, parseRequireEvidence, describeAssurance } from "./assurance.mjs";
 import { loadConfig } from "./config.mjs";
 
 /**
@@ -83,6 +84,10 @@ export async function runPipeline({
   model = null,
   check = null,          // "command arg arg..." — validator (subprocess/acp) or local-patch's check (http)
   reviewer = null,       // { lane, provider, model } — independent review after integration
+  // Evidence floor: ["validator"], ["review"], or both. Readiness is REFUSED when
+  // demanded evidence is absent (A4-6). Empty by default — the level is still always
+  // reported, so the honest case needs no flag and the strict case is one flag away.
+  requireEvidence = [],
   taskId = null,
   timeoutMs = 15 * 60_000,
   env = process.env,
@@ -311,9 +316,32 @@ ${(stages.validator.stdoutTail || "").slice(-800)}`
       }
     }
 
+    // Assurance (A4-6): report readiness qualified by the evidence that actually
+    // ran, never as a bare "READY", and refuse it outright if the operator demanded
+    // evidence that is absent. Derived from what passed, not from what was asked for.
+    const validatorPassed = stages.validator?.exitCode === 0;
+    const reviewPassed = stages.review?.verdict === "READY";
+    const assurance = assuranceFor({ validatorPassed, reviewPassed });
+    const missing = missingEvidence(requireEvidence, { validatorPassed, reviewPassed });
+    if (missing.length > 0) {
+      return {
+        integrated: true,
+        reviewed: reviewPassed,
+        assurance,
+        requiredEvidence: requireEvidence,
+        missingEvidence: missing,
+        reason: `insufficient-evidence (missing: ${missing.join(", ")})`,
+        runId, baseRef, integrationBranch,
+        integrationHead: integration.integrationHead, stages, evidenceRoot,
+      };
+    }
+
     return {
       integrated: true,
       reviewed: Boolean(reviewer),
+      assurance,
+      requiredEvidence: requireEvidence,
+      missingEvidence: [],
       reason: "ready-for-owner-review",
       runId, baseRef, integrationBranch,
       integrationHead: integration.integrationHead, stages, evidenceRoot,
@@ -344,7 +372,7 @@ export function parseReviewerSpec(spec, config) {
 export async function runCommandCli(argv, { write = (t) => process.stdout.write(t) } = {}) {
   const options = {
     repository: null, prompt: null, provider: null, model: null, check: null,
-    reviewer: null, taskId: null, asJson: false, timeoutMinutes: 15,
+    reviewer: null, requireEvidence: null, taskId: null, asJson: false, timeoutMinutes: 15,
     lane: "subprocess", files: null, adapter: "claude-code-acp", baseUrl: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -356,6 +384,7 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
       case "--model": options.model = next(); break;
       case "--check": options.check = next(); break;
       case "--reviewer": options.reviewer = next(); break;
+      case "--require-evidence": options.requireEvidence = next(); break;
       case "--task-id": options.taskId = next(); break;
       case "--timeout-minutes": options.timeoutMinutes = Number(next()); break;
       case "--lane": options.lane = next(); break;
@@ -387,6 +416,7 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
     model: options.model,
     check: options.check,
     reviewer: options.reviewer ? parseReviewerSpec(options.reviewer, config) : null,
+    requireEvidence: parseRequireEvidence(options.requireEvidence),
     taskId: options.taskId,
     timeoutMs: Math.round(options.timeoutMinutes * 60_000),
     lane: options.lane,
@@ -407,6 +437,12 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
       write(`review:      ${r.verdict} (${r.findings} finding(s), ${divergenceText})
 `);
     }
+    if (result.assurance) {
+      write(`assurance:   ${describeAssurance(result.assurance, result.requiredEvidence)}\n`);
+    }
+    if (result.missingEvidence?.length) {
+      write(`             REFUSED for missing evidence: ${result.missingEvidence.join(", ")}\n`);
+    }
     if (result.integrated && result.reason === "ready-for-owner-review") {
       write(`branch:      ${result.integrationBranch} @ ${result.integrationHead?.slice(0, 8)}\n`);
       write(`\nSTOPPED at the owner approval boundary. Nothing was pushed.\n`);
@@ -414,5 +450,7 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
     }
     write(`evidence:    ${result.evidenceRoot}\n`);
   }
-  return result.integrated ? 0 : 1;
+  // A run that integrated but failed the operator's evidence floor is NOT a success:
+  // the demanded proof is absent, so it exits refused.
+  return result.integrated && !(result.missingEvidence?.length > 0) ? 0 : 1;
 }

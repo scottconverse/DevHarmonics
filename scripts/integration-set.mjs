@@ -10,6 +10,7 @@ import {
   rollbackIntegrationRef,
 } from "./integrate.mjs";
 import { runReview } from "./review.mjs";
+import { assuranceFor, missingEvidence } from "./assurance.mjs";
 
 /**
  * Multi-repo extension of scripts/integrate.mjs (design contract:
@@ -182,6 +183,9 @@ export async function integrateSet({
   // NOT_READY review blocks the whole set with nothing advanced anywhere.
   reviewer = null,
   goal = null,
+  // Evidence floor for the SET (A4-6). A set whose members lack demanded evidence
+  // does not reach setReady, so nothing advances anywhere.
+  requireEvidence = [],
   deps = {},
 }) {
   if (!set || typeof set !== "object") failIntegrate("set must be an object (from planIntegrationSet)");
@@ -235,14 +239,51 @@ export async function integrateSet({
   const reviewByRepositoryId = new Map();
   if (reviewer && gatesPassed) {
     const { runReview: reviewFn = runReview } = deps;
+
+    // Cross-repo context, found necessary by live-fire (2026-08-05): a reviewer
+    // that sees ONE repository while being judged against a SET-WIDE goal
+    // concludes its sibling's half is missing and refuses. A real reviewer said
+    // exactly that — "client.py calls get_user(include_email=...) but api.py shows
+    // zero changes" — so every coordinated change would have been blocked. Each
+    // member's reviewer is now told the scope of its own review and shown the
+    // sibling members' diffstats. Diffstats are ARTIFACTS, not worker narration,
+    // so this respects the artifact-lens rule.
+    const memberDiffStats = new Map();
     for (const { member, outcome } of attempts) {
+      const stat = git(member.repository, ["diff", "--stat", member.baseCommit, outcome.candidateHead]);
+      memberDiffStats.set(member.repositoryId, stat.ok ? stat.stdout.trim() : "(diffstat unavailable)");
+    }
+
+    for (const { member, outcome } of attempts) {
+      const siblings = attempts
+        .filter(({ member: other }) => other.repositoryId !== member.repositoryId)
+        .map(({ member: other }) => `--- ${other.repositoryId} (reviewed separately) ---\n${memberDiffStats.get(other.repositoryId)}`)
+        .join("\n\n");
+      const scopedGoal = [
+        goal ?? `integration set ${set.setId}`,
+        "",
+        `SCOPE: you are reviewing ONLY the repository "${member.repositoryId}" of a ${attempts.length}-repository coordinated set.`,
+        "The other repositories are reviewed independently by their own reviews, and the set is all-or-nothing:",
+        "it advances only if every repository passes. Do NOT refuse this repository because a change that belongs to",
+        "a sibling repository is absent from this diff — judge only this repository's own correctness and coherence.",
+        siblings ? `\nSibling repositories in this set, for context only:\n\n${siblings}` : "",
+      ].join("\n");
+
+      // Thread the validator's real result through, so the reviewer is not left
+      // refusing for "no proof the tests ran" when a check actually ran.
+      const v = outcome.gates?.validator;
+      const checkReceiptsSummary = v && v.status !== "skipped"
+        ? `Validator: ${v.command}\nexit code: ${v.exitCode}${v.timedOut ? " (timed out)" : ""}\nstatus: ${v.status}\n${(v.stdoutTail || "").slice(-800)}`
+        : "No validator was configured for this set, so no executed check receipts exist for it.";
+
       try {
         const review = await reviewFn({
           repository: member.repository,
           // Review the CANDIDATE, not the branch: the branch has not moved yet.
           integrationBranch: outcome.candidateRef,
           baseRef: member.baseCommit,
-          goal: goal ?? `integration set ${set.setId}, member ${member.repositoryId}`,
+          goal: scopedGoal,
+          checkReceiptsSummary,
           reviewer,
           evidenceRoot: path.join(evidenceRoot, "members", member.repositoryId),
           env,
@@ -268,7 +309,19 @@ export async function integrateSet({
     }
   }
   const reviewsPassed = !reviewer || [...reviewByRepositoryId.values()].every((r) => r.verdict === "READY");
-  const allPrepared = gatesPassed && reviewsPassed;
+
+  // Evidence floor, per member: absent evidence is missing evidence (fail closed).
+  const missingByRepositoryId = new Map();
+  for (const { member, outcome } of attempts) {
+    const validatorPassed = outcome?.gates?.validator?.status === "pass";
+    const reviewPassed = reviewByRepositoryId.get(member.repositoryId)?.verdict === "READY";
+    missingByRepositoryId.set(member.repositoryId, {
+      assurance: assuranceFor({ validatorPassed, reviewPassed }),
+      missing: missingEvidence(requireEvidence, { validatorPassed, reviewPassed }),
+    });
+  }
+  const evidenceSatisfied = [...missingByRepositoryId.values()].every((e) => e.missing.length === 0);
+  const allPrepared = gatesPassed && reviewsPassed && evidenceSatisfied;
   const abandonAll = () => {
     for (const { member, outcome } of attempts) {
       if (outcome?.candidateRef) abandonIntegrationCandidate({ repository: member.repository, candidateRef: outcome.candidateRef });
@@ -315,19 +368,25 @@ export async function integrateSet({
     // half-applied change the operator has to remember to avoid.
     const review = reviewByRepositoryId.get(member.repositoryId) ?? null;
     const reviewBlocked = review !== null && review.verdict !== "READY";
-    const gatedButBlocked = outcome?.prepared === true && !reviewBlocked && !setReady;
+    const evidence = missingByRepositoryId.get(member.repositoryId) ?? { assurance: "gates-only", missing: [] };
+    const evidenceBlocked = evidence.missing.length > 0;
+    const gatedButBlocked = outcome?.prepared === true && !reviewBlocked && !evidenceBlocked && !setReady;
     return {
       repositoryId: member.repositoryId,
       integrated: setReady,
       prepared: outcome?.prepared === true,
+      assurance: evidence.assurance,
+      ...(requireEvidence.length > 0 ? { requiredEvidence: requireEvidence, missingEvidence: evidence.missing } : {}),
       ...(review ? { review } : {}),
       reason: setReady
         ? null
         : reviewBlocked
           ? "review-not-ready"
-          : gatedButBlocked
-            ? "set-blocked-not-advanced"
-            : (outcome?.reason ?? null),
+          : evidenceBlocked
+            ? `insufficient-evidence (missing: ${evidence.missing.join(", ")})`
+            : gatedButBlocked
+              ? "set-blocked-not-advanced"
+              : (outcome?.reason ?? null),
       integrationHead: setReady ? (outcome.candidateHead ?? null) : null,
       evidencePath: outcome?.evidencePath ?? null,
       baseCommit: member.baseCommit,
@@ -344,7 +403,9 @@ export async function integrateSet({
   // A member blocks the set if it failed to prepare OR its own review refused it;
   // a member that was gated and reviewed fine is not itself a blocker.
   const blockedBy = members
-    .filter((m) => m.prepared !== true || m.reason === "review-not-ready")
+    .filter((m) => m.prepared !== true
+      || m.reason === "review-not-ready"
+      || (m.missingEvidence?.length ?? 0) > 0)
     .map((m) => m.repositoryId);
   if (finalizeFailure && !blockedBy.includes(finalizeFailure.member.repositoryId)) {
     blockedBy.push(finalizeFailure.member.repositoryId);

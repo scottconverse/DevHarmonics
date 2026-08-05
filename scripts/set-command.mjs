@@ -5,6 +5,7 @@ import process from "node:process";
 import { planIntegrationSet, integrateSet } from "./integration-set.mjs";
 import { parseReviewerSpec } from "./run-command.mjs";
 import { loadConfig } from "./config.mjs";
+import { parseRequireEvidence, describeAssurance } from "./assurance.mjs";
 
 /**
  * CLI surface for a cross-repo integration SET (scripts/integration-set.mjs).
@@ -82,7 +83,7 @@ export async function setCommand(argv, {
 } = {}) {
   const { planIntegrationSet: planFn = planIntegrationSet, integrateSet: integrateFn = integrateSet } = deps;
 
-  const options = { members: [], bases: [], evidenceRoot: null, asJson: false, check: null, reviewer: null, goal: null };
+  const options = { members: [], bases: [], evidenceRoot: null, asJson: false, check: null, reviewer: null, goal: null, requireEvidence: null };
   for (let i = 0; i < argv.length; i += 1) {
     const next = () => { i += 1; return argv[i]; };
     switch (argv[i]) {
@@ -92,6 +93,7 @@ export async function setCommand(argv, {
       case "--check": options.check = next(); break;
       case "--reviewer": options.reviewer = next(); break;
       case "--goal": options.goal = next(); break;
+      case "--require-evidence": options.requireEvidence = next(); break;
       case "--json": options.asJson = true; break;
       default: throw new Error(`Unknown set option: ${argv[i]}`);
     }
@@ -119,7 +121,10 @@ export async function setCommand(argv, {
   const check = checkCommand ? { command: checkCommand, args: checkArgs } : null;
   // Same reviewer grammar as `run`: "provider:model" or "http:provider:model".
   const reviewer = options.reviewer ? parseReviewerSpec(options.reviewer, loadConfig()) : null;
-  const result = await integrateFn({ set: plan, evidenceRoot, env, check, reviewer, goal: options.goal });
+  const result = await integrateFn({
+    set: plan, evidenceRoot, env, check, reviewer, goal: options.goal,
+    requireEvidence: parseRequireEvidence(options.requireEvidence),
+  });
 
   printResult(result, options.asJson, write);
   return result.setReady ? 0 : 1;

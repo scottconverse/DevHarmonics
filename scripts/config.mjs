@@ -15,7 +15,11 @@ export function defaultConfig() {
     endpoints: {
       ollama: { baseUrl: "http://127.0.0.1:11434" },
       lmstudio: { baseUrl: "http://127.0.0.1:1234" },
-      litellm: { baseUrl: "http://127.0.0.1:4000" },
+      // litellm was removed from the defaults 2026-08-06 (owner decision): it
+      // described a proxy this machine no longer runs, guaranteeing a FAIL
+      // doctor row on every fresh box. OpenAI-format-only backends still
+      // connect through a translating proxy — the operator adds the endpoint
+      // to the (self-materializing) project config; see the manual.
     },
     clis: {
       codex: { command: "codex" },

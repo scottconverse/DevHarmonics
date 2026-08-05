@@ -135,3 +135,41 @@ load, green in isolation).
   the diff) is untested end-to-end because the subprocess lane emits no such
   manifest — the gate is now honestly reported as "not checked" rather than fed a
   self-comparison (finding M-1).
+
+## Third pass — 2026-08-05, independent adversarial agents (round 2)
+
+Two independent agents attacked the round-1 fixes and the surfaces the first gate
+never touched, against a frozen clone; every finding was reproduced by the
+coordinator before being accepted. Two real holes in the round-1 fixes were
+found and closed:
+
+| # | Attack | Result before | Disposition |
+|---|---|---|---|
+| B-2b | Committed symlink to a not-yet-existing file in an *existing* outside dir | **Escaped** — `existsSync` follows the link, so a dangling link was skipped, containment wrongly passed, and a file was written outside the worktree ("empty diff" reported) | Fixed — lstat-based existence, fails closed |
+| M-1b | `run-command.mjs` passes `claimedPaths:null`, but `review.mjs` returned `[]` not `null` | **False green persisted** — pipeline still printed "0 divergence" despite round 1 claiming "not checked" | Fixed — return `null`; verified end-to-end the pipeline prints "not checked" |
+
+Hardening also closed: agy argv-prompt to a `.cmd` shim (fail closed);
+up-front `taskId` validation in the worker and integration layers (no
+run-then-crash-with-no-receipt, no evidence-path escape); tampercheck env
+stripped for consistency; the opt-in tampercheck version pin made exact (a
+substring let `12.1.0` satisfy `2.1.0`); ACP `allow-edits` refuses an edit whose
+location escapes cwd; more credential names stripped; a negative ledger
+reservation rejected in the sum.
+
+**Held under this pass** (reproduced, surface stood): the per-repository
+integration lock (3 concurrent OS processes, no interleave); `acquireWorkerSlot`
+(20 processes for 4 slots, never exceeded, no double-occupancy, dead-PID reclaim
+TOCTOU); 27 distinct receipt-forgery shapes (all refused); the ACP permission
+*core* (19 scenarios via a hand-rolled hostile adapter); the empty-diff gate
+against `--allow-empty`/whitespace/mode-only tricks; and the
+hardlink/junction/directory-symlink-in-prefix/traversal matrix.
+
+### Still not covered (named, not claimed)
+
+- A malicious ACP adapter beyond the `allow-edits` path check (the operator
+  installs the adapter; the location check is best-effort on the declared ACP
+  `locations` and does not cover an adapter that omits them).
+- `reconcilePaidUsage` accepting a terminal charge with no matching reservation
+  (the admission ledger library is not wired into any command today).
+- Receipt cross-field usage consistency (each field is well-typed; the sum is
+  not checked against the parts).

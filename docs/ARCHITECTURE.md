@@ -264,9 +264,13 @@ directory), plus nested-session markers (`CLAUDECODE`, `CLAUDE_CODE_*`,
 It is explicitly not a sandbox — the module's own comment says so — it closes
 the *ambient inheritance* path that hands a worker every shell secret for free;
 real shell access can still read credentials from disk or a keychain. The
-boundary now covers the worker and its validator; `tampercheck` itself, a
-trusted pinned binary that reads the diff rather than executing worker code,
-still runs with the ordinary environment.
+boundary now covers the worker, its validator, and the `tampercheck` gate — all
+three run with cwd inside the untrusted worktree, so all three are
+credential-stripped (a later adversarial audit closed the earlier inconsistency
+of tampercheck alone keeping the full environment). Only `git` plumbing keeps
+the ordinary environment: it never executes worktree-tracked content as code
+(hooks live in the shared `.git/hooks`, unreachable from committed content), so
+there is no exfiltration path there.
 
 For multi-repository work, `integration-set.mjs`'s `integrateSet` always
 writes `set.json` at its evidence root — for every outcome, including a

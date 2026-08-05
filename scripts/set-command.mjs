@@ -50,12 +50,21 @@ function renderMemberTable(members) {
   if (members.length === 0) return "(no members)";
   const idWidth = Math.max(12, ...members.map((m) => m.repositoryId.length));
   const reasonWidth = Math.max(6, ...members.map((m) => (m.reason ?? "-").length));
-  const header = `${"repositoryId".padEnd(idWidth)}  ${"ready".padEnd(5)}  ${"reason".padEnd(reasonWidth)}  integrationHead`;
+  const assuranceWidth = Math.max(9, ...members.map((m) => (m.assurance ?? "-").length));
+  const header = `${"repositoryId".padEnd(idWidth)}  ${"ready".padEnd(5)}  ${"assurance".padEnd(assuranceWidth)}  ${"reason".padEnd(reasonWidth)}  integrationHead`;
   const rows = members.map((m) => {
     const head = m.integrationHead ? m.integrationHead.slice(0, 10) : "-";
-    return `${m.repositoryId.padEnd(idWidth)}  ${String(m.integrated).padEnd(5)}  ${(m.reason ?? "-").padEnd(reasonWidth)}  ${head}`;
+    return `${m.repositoryId.padEnd(idWidth)}  ${String(m.integrated).padEnd(5)}  ${(m.assurance ?? "-").padEnd(assuranceWidth)}  ${(m.reason ?? "-").padEnd(reasonWidth)}  ${head}`;
   });
   return [header, ...rows].join("\n");
+}
+
+/** The set is only as well-evidenced as its weakest member. */
+function weakestAssurance(members) {
+  const order = ["gates-only", "validated", "reviewed", "validated+reviewed"];
+  const present = members.map((m) => m.assurance).filter(Boolean);
+  if (present.length === 0) return null;
+  return present.reduce((worst, a) => (order.indexOf(a) < order.indexOf(worst) ? a : worst), present[0]);
 }
 
 function printResult(result, asJson, write) {
@@ -72,6 +81,15 @@ function printResult(result, asJson, write) {
   write(`DevHarmonics integration set: ${result.setId}\n\n`);
   write(`${renderMemberTable(result.members)}\n`);
   write(`\nset:       ${result.setReady ? "READY" : "NOT READY"}\n`);
+  // Never a bare READY: say what evidence backs it, as `run` does. The set is only
+  // as well-evidenced as its weakest member, so that is what is reported.
+  const assurance = weakestAssurance(result.members);
+  if (assurance) {
+    const required = result.members.find((m) => m.requiredEvidence)?.requiredEvidence ?? [];
+    write(`assurance: ${describeAssurance(assurance, required)}\n`);
+    const missing = [...new Set(result.members.flatMap((m) => m.missingEvidence ?? []))];
+    if (missing.length) write(`           REFUSED for missing evidence: ${missing.join(", ")}\n`);
+  }
   if (!result.setReady) write(`blockedBy: ${result.blockedBy.join(", ")}\n`);
   write(`evidence:  ${result.evidencePath}\n`);
 }

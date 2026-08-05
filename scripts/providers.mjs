@@ -40,6 +40,9 @@ export function buildInvocation({
   permissionMode = "dontAsk",
   allowedTools = ["Read"],
   maxTurns = 30,
+  // Optional USD spend ceiling for providers that support one (claude).
+  // null = no cap emitted, which is the pre-existing behavior.
+  maxBudgetUsd = null,
   reasoningEffort = "low",
 }) {
   if (!SUBPROCESS_PROVIDERS.includes(provider)) {
@@ -100,6 +103,13 @@ export function buildInvocation({
         allowedTools.join(","),
         "--add-dir",
         cwd,
+        // Spend ceiling. SPEC §2.2 listed --max-budget-usd among claude's
+        // verified flags, but buildInvocation never emitted it — the same
+        // spec-claims-what-code-lacks class as the §2.5 credential gap,
+        // caught by the gauntlet's docs audit. A bounded worker with no
+        // spend ceiling is exactly the runaway the factory exists to
+        // prevent, so the flag is emitted whenever a cap is configured.
+        ...(maxBudgetUsd != null ? ["--max-budget-usd", String(maxBudgetUsd)] : []),
       ],
       // Deliberately NOT --bare: --bare forces API-key auth, and the factory
       // is subscription-first — non-bare uses the claude.ai subscription

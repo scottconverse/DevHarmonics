@@ -4,7 +4,7 @@
 
 DevHarmonics is a set of plain Node.js command-line scripts that let an AI coding agent make one bounded, gated change to a git repository on your own machine, using accounts you already have — there is no DevHarmonics server and no DevHarmonics account. Work is driven through one of three worker lanes: subprocess (a supervised call to a signed-in subscription CLI — Codex, Claude Code, or Antigravity's `agy`), HTTP (one Anthropic-Messages-API client pointed at a local model server or, only if you opt in, the real Claude API), and ACP (the Agent Client Protocol, driven by an installed ACP adapter over stdio). All three lanes are reachable today from the command line, standalone (`devharmonics worker`, `devharmonics acp`) or as the worker inside the full gated pipeline (`devharmonics run --lane subprocess|http|acp`). A change only reaches a local integration branch after clearing an empty-diff check and a `tampercheck` integrity scan, and it is never pushed anywhere or merged into your own branch — the tool always stops at a point where you, the owner, decide what happens next. Every attempt, whether it succeeds, is refused, or never even starts, leaves a written receipt.
 
-DevHarmonics has seven commands: `doctor`, `onboard`, `qualify`, `worker`, `acp`, `run`, and `set`. The last one plans and integrates a change across more than one repository at once, judged all-or-nothing.
+DevHarmonics has eight commands: `doctor`, `onboard`, `qualify`, `worker`, `acp`, `run`, `set`, and `config`. `set` plans and integrates a change across more than one repository at once, judged all-or-nothing; `config` shows the configuration in effect and where it came from.
 
 ## 2. Requirements
 
@@ -48,7 +48,7 @@ Separately, a **live-fire lane** exists for proving the pipeline against real to
 
 ## 4. Commands
 
-DevHarmonics has seven commands: `doctor`, `onboard`, `qualify`, `worker`, `acp`, `run`, and `set`. There is no per-command `--help` — every subcommand's argument parser treats an unrecognized flag (including `--help`) as an error and exits with code 2; this was verified live for all seven. Run `devharmonics --help`, `devharmonics -h`, or `devharmonics` with no arguments to see the built-in usage summary:
+DevHarmonics has eight commands: `doctor`, `onboard`, `qualify`, `worker`, `acp`, `run`, `set`, and `config`. There is no per-command `--help` — every subcommand's argument parser treats an unrecognized flag (including `--help`) as an error and exits with code 2. Run `devharmonics --help`, `devharmonics -h`, or `devharmonics` with no arguments to see the built-in usage summary:
 
 ```
 Usage:
@@ -57,6 +57,8 @@ Usage:
                        [--candidate <substring>] [--skip-current]
                        [--work-root <dir>] [--state-root <dir>]
   devharmonics onboard <repo> [--apply] [--force] [--json]
+  devharmonics config show [--config <file>] [--json]
+  devharmonics config path
   devharmonics run --repository <repo> --prompt <text> --provider <p>
                    [--model m (required: codex, claude)] [--check "cmd args"]
                    [--task-id t] [--lane subprocess|http|acp] [--files a,b,c]
@@ -82,7 +84,7 @@ Usage:
                    [--config <file>] [--json]
 ```
 
-Every command except `onboard` accepts `--config <file>` (deep-merged over the built-in defaults — the local Ollama/LM Studio/LiteLLM endpoints, the `codex`/`claude`/`agy` CLI names, and the fan-out `budgets`). Without it, a command uses the built-in defaults; there is no default config *file* location, so nothing is read implicitly.
+**Configuration finds you — you never author it from scratch.** The first time any command touches a project, `.devharmonics/config.json` **materializes automatically** in that project, pre-filled with the defaults and a short built-in explanation (`run` uses the `--repository` repo; `worker`/`acp` use their `--cwd`; `set`, `doctor`, `qualify`, and `config` use the current directory). Edit that file to change endpoints, CLIs, and budgets; every command reads it automatically and **announces its config source in its output** (`config: <path>`), so implicit never means invisible. Precedence: an explicit `--config <file>` (accepted by every command except `onboard`) beats the project file, which beats the built-in defaults; files deep-merge over the defaults, and an invalid file is a loud error, never a silent fallback. `devharmonics config show` prints the effective configuration and its source; `devharmonics config path` prints where the current directory's config lives.
 
 ### `doctor`
 
@@ -124,7 +126,7 @@ PASS    rigor:skill-parity  v0.7.0 on claude, codex
 SKIPPED repo:governance     no repository in scope
 
 6 PASS, 2 FAIL, 1 SKIPPED
-(config: defaults)
+(config: C:\Users\scott\Desktop\Code\DevHarmonics\.devharmonics\config.json)
 ```
 
 ### `onboard`
@@ -154,6 +156,17 @@ missing  readme-badge            Append a one-line "verification: tampercheck" n
 
 Run with --apply to write them (add --force to rewrite steps that differ from the template).
 ```
+
+### `config`
+
+Shows the configuration in effect and where it came from — the command for answering "what will my next run actually use?" without reading source code.
+
+```
+devharmonics config show [--config <file>] [--json]
+devharmonics config path
+```
+
+`show` resolves configuration exactly the way every other command does (explicit `--config` > the current directory's `.devharmonics/config.json`, created now if absent > built-in defaults) and prints the effective settings with their source. Safe to print and share: the configuration stores environment-variable *names* for credentials, never credential values. `path` prints where the current directory's config file lives. **Exit codes:** 0 = shown; 2 = a bad flag or an unreadable/invalid config file.
 
 ### `qualify`
 

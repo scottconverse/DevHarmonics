@@ -71,7 +71,7 @@ export async function doctorCommand(argv) {
     else if (argv[i] === "--repository") { repository = argv[i + 1]; i += 1; }
     else throw new Error(`Unknown doctor option: ${argv[i]}`);
   }
-  const { config, source } = loadConfig(configPath);
+  const { config, source, created } = loadConfig(configPath, { projectPath: process.cwd() });
   // Progress rides stderr so it never pollutes --json's stdout: each check
   // prints the moment it completes, so a slow probe reads as "still working
   // on the others", never as a frozen command.
@@ -81,6 +81,6 @@ export async function doctorCommand(argv) {
     onProgress: (check) => process.stderr.write(`probe ${check.status.padEnd(7)} ${check.id}\n`),
   });
   report.configSource = source;
-  process.stdout.write(asJson ? `${JSON.stringify(report, null, 2)}\n` : `${renderDoctorReport(report)}\n(config: ${source})\n`);
+  process.stdout.write(asJson ? `${JSON.stringify(report, null, 2)}\n` : `${renderDoctorReport(report)}\n(config: ${source}${created ? " — created now with the defaults" : ""})\n`);
   return 0;
 }

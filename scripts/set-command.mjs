@@ -67,9 +67,10 @@ function weakestAssurance(members) {
   return present.reduce((worst, a) => (order.indexOf(a) < order.indexOf(worst) ? a : worst), present[0]);
 }
 
-function printResult(result, asJson, write) {
+function printResult(result, asJson, write, configInfo = null) {
   if (asJson) {
     write(`${JSON.stringify({
+      configSource: configInfo?.source ?? null,
       setId: result.setId,
       setReady: result.setReady,
       blockedBy: result.blockedBy,
@@ -78,7 +79,9 @@ function printResult(result, asJson, write) {
     }, null, 2)}\n`);
     return;
   }
-  write(`DevHarmonics integration set: ${result.setId}\n\n`);
+  write(`DevHarmonics integration set: ${result.setId}\n`);
+  if (configInfo?.source) write(`config:      ${configInfo.source}${configInfo.created ? " (created now with the defaults)" : ""}\n`);
+  write("\n");
   write(`${renderMemberTable(result.members)}\n`);
   write(`\nset:         ${result.setReady ? "READY" : "NOT READY"}\n`);
   // One environment, one binary, one identity posture — report it once, from the
@@ -159,7 +162,7 @@ export async function setCommand(argv, {
   // QA-001 (audit): this used to pass loadConfig()'s {config, source} WRAPPER
   // where parseReviewerSpec expects the config itself, so every http reviewer
   // spec was refused even against the built-in default endpoints.
-  const { config } = loadConfig(options.configPath);
+  const { config, source: configSource, created: configCreated } = loadConfig(options.configPath, { projectPath: process.cwd() });
   // Same reviewer grammar as `run`: "provider:model" or "http:provider:model".
   const reviewer = options.reviewer ? parseReviewerSpec(options.reviewer, config) : null;
   const result = await integrateFn({
@@ -172,6 +175,6 @@ export async function setCommand(argv, {
     admission: { budgets: config.budgets },
   });
 
-  printResult(result, options.asJson, write);
+  printResult(result, options.asJson, write, { source: configSource, created: configCreated });
   return result.setReady ? 0 : 1;
 }

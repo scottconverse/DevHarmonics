@@ -369,7 +369,11 @@ test("workerCommand in-process: --runs-root is honored -- the receipt lands wher
 
     const { receipt } = readSoleReceipt(customRunsRoot);
     assert.equal(receipt.status, "completed");
-    assert.equal(existsSync(path.join(cwd, ".devharmonics")), false, "the default runs-root under cwd must not be touched when --runs-root is given");
+    // The project config now MATERIALIZES at <cwd>/.devharmonics/config.json
+    // on first touch (v1 port) — that file is expected. What must NOT exist is
+    // any RUN state at the default location when --runs-root pointed elsewhere.
+    assert.equal(existsSync(path.join(cwd, ".devharmonics", "runs")), false, "the default runs-root under cwd must not be touched when --runs-root is given");
+    assert.equal(existsSync(path.join(cwd, ".devharmonics", "config.json")), true, "the project config materializes on first touch");
   } finally {
     for (const d of [fixture, cwd, customRunsRoot]) rmSync(d, { recursive: true, force: true });
   }

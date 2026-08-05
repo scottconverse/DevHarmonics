@@ -8,6 +8,8 @@ const USAGE = `Usage:
                        [--candidate <substring>] [--skip-current]
                        [--work-root <dir>] [--state-root <dir>]
   devharmonics onboard <repo> [--apply] [--force] [--json]
+  devharmonics config show [--config <file>] [--json]
+  devharmonics config path
   devharmonics run --repository <repo> --prompt <text> --provider <p>
                    [--model m (required: codex, claude)] [--check "cmd args"]
                    [--task-id t] [--lane subprocess|http|acp] [--files a,b,c]
@@ -47,6 +49,10 @@ Commands:
   onboard  Make a repository governed: install the pinned tampercheck CI
            workflow and the private state exclude. Dry run by default;
            --apply writes. Idempotent; --force rewrites a differing pin.
+  config   Show the effective configuration and where it came from
+           (explicit --config > the project's .devharmonics/config.json,
+           auto-created on first use > built-in defaults). Never contains
+           credential values — only environment-variable names.
   run      One bounded task through the full pipeline: clean-tree intake,
            isolated worker (subprocess, http, or acp lane), optional
            --check validator, empty-diff + tampercheck gates, serial
@@ -96,6 +102,10 @@ async function main() {
   if (command === "onboard") {
     const { onboardCommand } = await import("./onboard-command.mjs");
     return onboardCommand(rest);
+  }
+  if (command === "config") {
+    const { configCommand } = await import("./config-command.mjs");
+    return configCommand(rest);
   }
   throw new Error(`Unknown command: ${command}\n${USAGE}`);
 }

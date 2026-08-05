@@ -617,7 +617,7 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
   // command could consume — the refusal message's own remedy was impossible.
   // Every spawning command now takes --config and threads its budgets to the
   // admission gate (workers AND the reviewer).
-  const { config } = loadConfig(options.configPath);
+  const { config, source: configSource, created: configCreated } = loadConfig(options.configPath, { projectPath: options.repository });
   const files = options.files ? options.files.split(",").map((s) => s.trim()).filter(Boolean) : null;
   let baseUrl = options.baseUrl;
   let apiKeyEnvVar = null;
@@ -664,10 +664,11 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
   }
 
   if (options.asJson) {
-    write(`${JSON.stringify(result, null, 2)}\n`);
+    write(`${JSON.stringify({ configSource, ...result }, null, 2)}\n`);
   } else {
     write(`run:         ${result.runId} (base ${result.baseRef?.slice(0, 8)})\n`);
     write(`lane:        ${options.lane}\n`);
+    write(`config:      ${configSource}${configCreated ? " (created now with the defaults — edit it to change endpoints and budgets)" : ""}\n`);
     write(`outcome:     ${result.integrated ? "INTEGRATED" : "REFUSED"} — ${result.reason}\n`);
     write(describeTampercheckIdentity(result.stages?.integration?.gates?.tampercheckBinary));
     if (result.stages?.review) {

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -97,13 +97,69 @@ export function validateConfig(config) {
   return { ok: errors.length === 0, errors };
 }
 
-export function loadConfig(configPath = null) {
+/** The project-scoped config file's path (v1's `configPath` pattern). */
+export function projectConfigPath(projectPath) {
+  return path.join(path.resolve(projectPath), ".devharmonics", "config.json");
+}
+
+/**
+ * Ported from devharmonics-v1's `initializeProject` (src/config.ts), per the
+ * owner's direction: the audience is a technical product manager, not a
+ * programmer, so the config file MATERIALIZES on first touch — pre-filled
+ * with the defaults, in a well-known place inside the project — rather than
+ * being hand-authored against a schema doc. Never overwrites an existing
+ * file; keeps the state dir out of the project's shared .gitignore via the
+ * private .git/info/exclude (silently skipped when the directory is not a
+ * git repository, exactly as v1 tolerated it).
+ */
+export function initializeProjectConfig(projectPath) {
+  const destination = projectConfigPath(projectPath);
+  if (existsSync(destination)) return { path: destination, created: false };
+  mkdirSync(path.dirname(destination), { recursive: true });
+  const seeded = {
+    _readme: [
+      "DevHarmonics configuration — created automatically with the defaults on first use.",
+      "Edit values and save; every command reads this file and announces it as its config source.",
+      "A --config <file> flag overrides this file for one invocation.",
+      "endpoints.<name>.apiKeyEnvVar names an environment variable holding a REAL credential — that makes the endpoint PAID and requires budgets.maxPaidTokens.",
+      "See docs/USER_MANUAL.md for every field.",
+    ],
+    ...defaultConfig(),
+  };
+  writeFileSync(destination, `${JSON.stringify(seeded, null, 2)}\n`, "utf8");
+  try {
+    const exclude = path.join(path.resolve(projectPath), ".git", "info", "exclude");
+    const current = existsSync(exclude) ? readFileSync(exclude, "utf8") : null;
+    if (current !== null && !current.includes(".devharmonics/")) {
+      appendFileSync(exclude, "\n.devharmonics/\n");
+    }
+  } catch { /* not a git repository — fine, v1 tolerated exactly this */ }
+  return { path: destination, created: true };
+}
+
+/**
+ * Precedence (owner decision, 2026-08-05 night): an explicit --config file >
+ * the project's own .devharmonics/config.json (auto-created on first touch
+ * when `projectPath` is supplied) > built-in defaults. Whatever loads, the
+ * SOURCE is returned so every command can announce it — implicit must never
+ * mean invisible.
+ */
+export function loadConfig(configPath = null, { projectPath = null } = {}) {
   const base = defaultConfig();
-  if (!configPath) {
-    return { config: base, source: "defaults" };
+  let resolved = null;
+  let created = false;
+  if (configPath) {
+    resolved = path.resolve(configPath);
+    if (!existsSync(resolved)) throw new Error(`Config file not found: ${resolved}`);
+  } else if (projectPath && existsSync(path.resolve(projectPath))) {
+    // Only an EXISTING directory materializes a config — a mistyped
+    // --repository/--cwd must never conjure directories out of thin air.
+    const initialized = initializeProjectConfig(projectPath);
+    resolved = initialized.path;
+    created = initialized.created;
+  } else {
+    return { config: base, source: "defaults", created: false };
   }
-  const resolved = path.resolve(configPath);
-  if (!existsSync(resolved)) throw new Error(`Config file not found: ${resolved}`);
   let parsed;
   try {
     parsed = JSON.parse(readFileSync(resolved, "utf8"));
@@ -115,5 +171,5 @@ export function loadConfig(configPath = null) {
   if (!validation.ok) {
     throw new Error(`Invalid config ${resolved}: ${validation.errors.join("; ")}`);
   }
-  return { config: merged, source: resolved };
+  return { config: merged, source: resolved, created };
 }

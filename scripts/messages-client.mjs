@@ -82,7 +82,7 @@ export async function sendMessages({
         toolUses: [],
         usage: null,
         resolvedModel: null,
-        error: `paid-budget-unconfigured: this call carries a real credential for ${baseUrl}, but no paid budget is configured. Set budgets.maxPaidTokens in a config file passed via --config (and keep it deliberate — this is the ceiling on real API spend).`,
+        error: `paid-budget-unconfigured: this call carries a real credential for ${baseUrl}, but no paid budget is configured. Set budgets.maxPaidTokens in the project's .devharmonics/config.json (see: devharmonics config show) — keep it deliberate; this is the ceiling on real API spend.`,
         raw: null,
       };
     }

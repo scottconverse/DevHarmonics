@@ -180,7 +180,7 @@ export async function qualifyCommand(argv, { write = (text) => { process.stdout.
     throw new Error(`--role must be one of ${Object.keys(QUALIFICATION_HARNESSES).join(", ")}`);
   }
 
-  const { config } = loadConfig(options.configPath);
+  const { config, source: configSource } = loadConfig(options.configPath, { projectPath: process.cwd() });
   const stateRoot = path.resolve(options.stateRoot ?? path.join(process.cwd(), ".devharmonics"));
   const qualificationsPath = path.join(stateRoot, "qualifications.jsonl");
   // Qualification fixtures MUST live outside any enclosing git repository.

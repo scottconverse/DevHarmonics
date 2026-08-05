@@ -57,7 +57,7 @@ export async function acpCommand(argv, {
   const cwd = path.resolve(options.cwd);
   const runsRoot = path.resolve(options.runsRoot ?? path.join(cwd, ".devharmonics", "runs"));
   // ENG-001 (audit): thread the operator's budgets to the admission gate.
-  const { config } = loadConfig(options.configPath);
+  const { config, source: configSource, created: configCreated } = loadConfig(options.configPath, { projectPath: cwd });
 
   const { receipt, runDir, events, permissionRequests } = await runAcpWorkerFn({
     taskId: options.taskId,
@@ -72,12 +72,13 @@ export async function acpCommand(argv, {
   });
 
   if (options.asJson) {
-    write(`${JSON.stringify({ receipt, runDir, eventsCount: events.length, permissionRequests }, null, 2)}\n`);
+    write(`${JSON.stringify({ configSource, receipt, runDir, eventsCount: events.length, permissionRequests }, null, 2)}\n`);
   } else {
     const usage = receipt.usage
       ? Object.entries(receipt.usage).filter(([, v]) => v != null).map(([k, v]) => `${k}=${v}`).join(" ") || "none reported"
       : "none reported";
     write([
+      `config:      ${configSource}${configCreated ? " (created now with the defaults)" : ""}`,
       `status:      ${receipt.status}`,
       `adapter:     ${options.adapter} (requested ${receipt.requestedModel}, resolved ${receipt.resolvedModel ?? "unverified"})`,
       `usage:       ${usage}`,

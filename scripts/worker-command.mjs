@@ -59,7 +59,7 @@ export async function workerCommand(argv) {
   const runsRoot = path.resolve(options.runsRoot ?? path.join(cwd, ".devharmonics", "runs"));
   // ENG-001 (audit): thread the operator's budgets to the admission gate; the
   // state root stays derived from runsRoot so ledger placement is unchanged.
-  const { config } = loadConfig(options.configPath);
+  const { config, source: configSource, created: configCreated } = loadConfig(options.configPath, { projectPath: cwd });
 
   const { receipt, runDir } = await runWorker({
     taskId: options.taskId,
@@ -76,12 +76,13 @@ export async function workerCommand(argv) {
   });
 
   if (options.asJson) {
-    process.stdout.write(`${JSON.stringify({ receipt, runDir }, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ configSource, receipt, runDir }, null, 2)}\n`);
   } else {
     const usage = receipt.usage
       ? Object.entries(receipt.usage).filter(([, v]) => v != null).map(([k, v]) => `${k}=${v}`).join(" ") || "none reported"
       : "none reported";
     process.stdout.write([
+      `config:      ${configSource}${configCreated ? " (created now with the defaults)" : ""}`,
       `status:      ${receipt.status}`,
       `provider:    ${receipt.provider} (requested ${receipt.requestedModel}, resolved ${receipt.resolvedModel ?? "unverified"})`,
       `usage:       ${usage}`,

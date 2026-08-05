@@ -259,7 +259,7 @@ export async function admitWorker({ stateRoot, taskId, lane, budgets, metadata =
         workers,
         tokens,
         ledgerPath,
-        reason: `fanout-workers-exceeded: ${workers} of ${maxWorkers} workers already admitted in the last ${windowHours}h (ledger: ${ledgerPath}). Raise budgets.maxWorkers in a config file passed via --config, rotate the ledger file deliberately, or wait for the window to pass.`,
+        reason: `fanout-workers-exceeded: ${workers} of ${maxWorkers} workers already admitted in the last ${windowHours}h (ledger: ${ledgerPath}). Raise budgets.maxWorkers in the project's .devharmonics/config.json (see: devharmonics config show), rotate the ledger file deliberately, or wait for the window to pass.`,
       };
     }
     if (tokens >= maxTotalTokens) {
@@ -268,7 +268,7 @@ export async function admitWorker({ stateRoot, taskId, lane, budgets, metadata =
         workers,
         tokens,
         ledgerPath,
-        reason: `fanout-tokens-exceeded: ${tokens} of ${maxTotalTokens} tokens already spent in the last ${windowHours}h (ledger: ${ledgerPath}). Raise budgets.maxTotalTokens in a config file passed via --config, rotate the ledger file deliberately, or wait for the window to pass.`,
+        reason: `fanout-tokens-exceeded: ${tokens} of ${maxTotalTokens} tokens already spent in the last ${windowHours}h (ledger: ${ledgerPath}). Raise budgets.maxTotalTokens in the project's .devharmonics/config.json (see: devharmonics config show), rotate the ledger file deliberately, or wait for the window to pass.`,
       };
     }
     const invocationId = createInvocationId();

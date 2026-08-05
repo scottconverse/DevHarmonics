@@ -17,6 +17,14 @@ npm ci
 node scripts/cli.mjs doctor
 ```
 
+To actually integrate a change you also need **`tampercheck` on your `PATH`** — it *is* the integrity gate, and it is not bundled (this repo has one runtime dependency and ships no verification code of its own):
+
+```
+pip install tampercheck==0.1.1
+```
+
+Without it, `run` and `set` refuse with `tampercheck-unavailable` rather than passing — fail-closed, but nothing reaches an integration branch until it is installed.
+
 `doctor` probes every capability the factory depends on — provider CLIs, local model endpoints, the tampercheck integrity gate — and reports PASS/FAIL/SKIPPED for each, honestly, even on a machine with nothing installed yet. See [docs/USER_MANUAL.md](docs/USER_MANUAL.md) for the full command reference, including how to put a `devharmonics` command on your `PATH` with `npm link`.
 
 ## Status

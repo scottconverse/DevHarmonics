@@ -5,8 +5,32 @@ import path from "node:path";
 import process from "node:process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { runAcpWorker } from "../scripts/acp-worker.mjs";
+import { runAcpWorker, choosePermissionOption } from "../scripts/acp-worker.mjs";
 import { validateReceipt } from "../scripts/receipts.mjs";
+
+// GAUNTLET (Agent B): under allow-edits the grant is no longer kind-only — an
+// edit whose declared file location escapes the workspace cwd is refused.
+test("allow-edits grants an in-workspace edit but refuses one whose location escapes cwd", () => {
+  const cwd = process.platform === "win32" ? "C:\\ws" : "/ws";
+  const opts = [{ optionId: "a", kind: "allow_once" }, { optionId: "r", kind: "reject_once" }];
+  const mk = (locations) => ({ options: opts, toolCall: { kind: "edit", locations } });
+
+  // in-workspace relative + absolute-inside -> allowed
+  const inside = choosePermissionOption(mk([{ path: "src/app.js" }]), "allow-edits", cwd);
+  assert.equal(inside?.kind, "allow_once");
+  // escaping location (traversal) -> refused, even though kind is "edit"
+  const escape = choosePermissionOption(mk([{ path: "../../etc/passwd" }]), "allow-edits", cwd);
+  assert.equal(escape?.kind, "reject_once", "an edit targeting outside cwd must be refused");
+  // absolute path elsewhere -> refused
+  const abs = choosePermissionOption(mk([{ path: process.platform === "win32" ? "C:\\Windows\\x" : "/etc/x" }]), "allow-edits", cwd);
+  assert.equal(abs?.kind, "reject_once");
+  // one good + one escaping -> refused (all must be inside)
+  const mixed = choosePermissionOption(mk([{ path: "ok.js" }, { path: "../out.js" }]), "allow-edits", cwd);
+  assert.equal(mixed?.kind, "reject_once");
+  // a non-edit kind is still refused; deny still refuses an in-workspace edit
+  assert.equal(choosePermissionOption({ options: opts, toolCall: { kind: "delete", locations: [{ path: "src/app.js" }] } }, "allow-edits", cwd)?.kind, "reject_once");
+  assert.equal(choosePermissionOption(mk([{ path: "src/app.js" }]), "deny", cwd)?.kind, "reject_once");
+});
 
 /**
  * Hermetic, real-protocol tests: the worker under test spawns

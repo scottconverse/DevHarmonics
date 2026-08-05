@@ -42,6 +42,14 @@ test("duplicate terminal reconciliation charges only the latest record for an in
   assert.equal(summarizeLedger(ledger, true), 30);
 });
 
+test("a hand-forged ledger line with a NEGATIVE reservation fails closed, never subtracts from the running total (GAUNTLET)", () => {
+  const ledger = [
+    '{"stage":"reserved","invocationId":"a","taskId":"t","paid":true,"reservedTokens":900000}',
+    '{"stage":"reserved","invocationId":"b","taskId":"t","paid":true,"reservedTokens":-500000}',
+  ].join("\n");
+  assert.throws(() => summarizeLedger(ledger, true), /invalid reservation/i);
+});
+
 test("latest duplicate terminal with unknown paid usage still fails closed", () => {
   const ledger = [
     '{"stage":"reserved","invocationId":"inv-one","taskId":"one","paid":true,"reservedTokens":60}',

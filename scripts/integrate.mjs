@@ -7,6 +7,7 @@ import process from "node:process";
 import { acquireFileLock } from "./slots.mjs";
 import { resolvePathCommand, runResolved } from "./path-resolve.mjs";
 import { superviseProcess } from "./supervise.mjs";
+import { workerEnv } from "./worker-env.mjs";
 
 /**
  * The single-repo integration engine: a completed worker branch enters the
@@ -79,6 +80,17 @@ function validateInputs(input) {
   assertNonEmptyString(input.workerBranch, "workerBranch");
   assertNonEmptyString(input.baseRef, "baseRef");
   assertNonEmptyString(input.taskId, "taskId");
+  // Path-SAFETY (not the worker's strict lowercase slug): taskId flows into the
+  // evidence directory name (`${taskId}-${uuid}`) and the lock metadata, so a
+  // path separator, `..` traversal, drive colon, or Windows-illegal character
+  // would escape evidenceRoot to an arbitrary disk location, or crash the
+  // evidence write with no record at all (GAUNTLET, Agent B). But the
+  // integration layer legitimately receives composite, mixed-case ids like
+  // `${setId}-${repositoryId}`, so allow ordinary letters/digits/._- and only
+  // forbid the dangerous shapes — enforcing the worker slug here breaks sets.
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(input.taskId) || input.taskId.includes("..")) {
+    throw new Error(`integrateWorkerBranch: taskId must be a path-safe id (letters, digits, ._- ; no separators, no "..", no drive colon), got: ${JSON.stringify(input.taskId)}`);
+  }
   assertNonEmptyString(input.evidenceRoot, "evidenceRoot");
 }
 
@@ -259,7 +271,10 @@ export async function integrateWorkerBranch({
     // CI install (see docs/INTEGRATION-SETS.md's sibling, `devharmonics
     // onboard`) remains the independent second copy of this defense.
     if (requireTampercheckIdentity || expectedTampercheckVersion) {
-      const identity = runResolved(resolvedTampercheck, ["--version"], { env, timeoutMs: 20_000 });
+      // C-2 consistency (GAUNTLET, Agent A): tampercheck runs with cwd inside
+      // the untrusted worktree, so strip credentials from its env like every
+      // other spawn — PATH survives, so it still resolves and runs.
+      const identity = runResolved(resolvedTampercheck, ["--version"], { env: workerEnv(env).env, timeoutMs: 20_000 });
       const reported = `${identity.stdout}${identity.stderr}`.trim().split(/\r?\n/)[0] ?? "";
       // A real CLI answers --version with a bare semantic version. An
       // echo-a-sentence stub does not. Shape, not exact value: version
@@ -267,7 +282,12 @@ export async function integrateWorkerBranch({
       // different tampercheck release while adding no security, since a stub
       // author can print whatever string is expected.
       const looksLikeVersion = /^v?\d+\.\d+\.\d+/.test(reported);
-      const versionMatches = !expectedTampercheckVersion || reported.includes(expectedTampercheckVersion);
+      // Extract the semver token and compare EXACTLY. A substring `includes`
+      // let "12.1.0" satisfy a pin of "2.1.0" (also "2.1.0.99", "0.2.1.0") —
+      // GAUNTLET, Agent B. Pinning stays off by default; when on it must not be
+      // trivially bypassable by a superstring.
+      const reportedVersion = (reported.match(/\d+\.\d+\.\d+(?:\.\d+)*/) ?? [])[0] ?? null;
+      const versionMatches = !expectedTampercheckVersion || reportedVersion === String(expectedTampercheckVersion).trim();
       if (!identity.ok || !looksLikeVersion || !versionMatches) {
         gates.tampercheck = {
           status: "refused",
@@ -290,7 +310,7 @@ export async function integrateWorkerBranch({
         args: ["--from", mergeBase, "--to", workerHead],
         cwd: tcWorktree.worktreePath,
         timeoutMs,
-        env,
+        env: workerEnv(env).env,
       });
     } finally {
       removeWorktree(repository, tcWorktree.worktreePath, tcWorktree.parent);

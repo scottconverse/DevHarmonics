@@ -74,7 +74,13 @@ export function summarizeLedger(ledgerText, paid) {
 
   const charge = (entry) => {
     if (entry.stage === "reserved") {
-      if (!Number.isSafeInteger(entry.reservedTokens)) throw new Error("Usage ledger contains an invalid reservation");
+      // Reject a NEGATIVE reserved amount too (GAUNTLET, Agent B): a hand-forged
+      // ledger line with a negative reservation would otherwise subtract from the
+      // running total and mask real spend, defeating the budget cap. The write
+      // path (reservePaidUsage) already refuses <= 0; the read/sum path must too.
+      if (!Number.isSafeInteger(entry.reservedTokens) || entry.reservedTokens < 0) {
+        throw new Error("Usage ledger contains an invalid reservation");
+      }
       return entry.reservedTokens;
     }
     if (!Number.isSafeInteger(entry.usage?.total_tokens)) {

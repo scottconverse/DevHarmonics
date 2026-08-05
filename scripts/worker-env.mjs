@@ -65,6 +65,8 @@ const EXACT_STRIP = new Set([
   "REDIS_URL",
   "MONGODB_URI",
   "SENTRY_DSN",
+  // base64 registry credentials — carries no credential word (GAUNTLET, Agent A)
+  "DOCKER_AUTH_CONFIG",
 ]);
 
 /**
@@ -88,6 +90,7 @@ const SHAPE_MARKERS = [
   "_PASS", "_PWD",
   "CREDENTIAL",
   "PRIVATE_KEY", "PRIVATEKEY",
+  "WEBHOOK", // a webhook URL is a post-as-me capability secret (GAUNTLET, Agent A)
 ];
 const SHAPE_ALLOW = new Set([
   "SSH_AUTH_SOCK",       // a socket path, not a secret

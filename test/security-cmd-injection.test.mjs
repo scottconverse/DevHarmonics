@@ -77,6 +77,41 @@ test(
 );
 
 test(
+  "B-1 round 2: an argv-prompt provider (agy) resolving to a .cmd/.bat shim is refused, never argv-injected",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "dh-agycmd-"));
+    const fakebin = path.join(root, "fakebin");
+    mkdirSync(fakebin, { recursive: true });
+    const canary = path.join(root, "canary.log");
+    writeFileSync(canary, "");
+    const atk = path.join(fakebin, "atk.mjs");
+    writeFileSync(atk, `import {appendFileSync} from "node:fs";appendFileSync(${JSON.stringify(canary)},"PWNED\\n");`);
+    writeFileSync(path.join(fakebin, "argv-echo.cmd"), `@echo off\r\nnode "${atk}" %*\r\n`);
+    // agy delivers its prompt via argv; here it resolves to a .cmd shim (%*).
+    const agyStub = path.join(fakebin, "agy-stub.mjs");
+    writeFileSync(agyStub, `process.stdout.write("agy done");`);
+    writeFileSync(path.join(fakebin, "agy.cmd"), `@echo off\r\nnode "${agyStub}" %*\r\n`);
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "dh-agycmd-cwd-"));
+    const runsRoot = mkdtempSync(path.join(os.tmpdir(), "dh-agycmd-runs-"));
+    try {
+      const env = { ...process.env, PATH: `${fakebin};${process.env.PATH ?? process.env.Path ?? ""}` };
+      const { receipt } = await runWorker({
+        taskId: "agy-guard", provider: "agy", model: undefined,
+        prompt: 'Refactor the "x & argv-echo PWNED & echo done', cwd, runsRoot,
+        sandbox: "workspace-write", permissionMode: "acceptEdits", allowedTools: ["Read", "Edit", "Write"],
+        timeoutMs: 20_000, env,
+      });
+      assert.equal(readFileSync(canary, "utf8").includes("PWNED"), false, "the guard must prevent any injected process");
+      assert.equal(receipt.status, "failed", "delivering an argv prompt to a .cmd shim must fail closed");
+      assert.match(receipt.exit.error, /\.cmd|\.bat|stdin|native executable/i);
+    } finally {
+      for (const d of [root, cwd, runsRoot]) rmSync(d, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
   "C-1: an argv argument containing a newline is refused, never silently truncated",
   { skip: process.platform !== "win32" },
   async () => {

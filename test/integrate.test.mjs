@@ -254,6 +254,30 @@ test("seeded gate-weakening: tampercheck exit 1 -> refused, findings preserved, 
   assert.notEqual(exists.status, 0);
 }));
 
+test("tampercheck version pin is EXACT, not substring: a superstring version is refused (GAUNTLET, Agent B)", () => withTemps(async ({ repo, evidenceRoot, fixtureDir }) => {
+  fakeClean(fixtureDir); // fixture tampercheck answers --version with "0.1.1"
+  branchFrom(repo, "worker-v", "main", "line1\nline2\nCHANGED\n");
+  const call = (expected, suffix) => integrateWorkerBranch({
+    repository: repo,
+    integrationBranch: `devharmonics/integration/ver-${suffix}`,
+    workerBranch: "worker-v",
+    baseRef: "main",
+    taskId: "task-ver",
+    evidenceRoot,
+    tampercheckCommand: "tampercheck",
+    expectedTampercheckVersion: expected,
+    env: pathOnlyEnv(fixtureDir),
+    timeoutMs: 20_000,
+  });
+  // "0.1.1" is reported; a substring pin of "1.1" must NOT satisfy it now.
+  const bad = await call("1.1", "bad");
+  assert.equal(bad.integrated, false);
+  assert.equal(bad.reason, "tampercheck-unavailable", "a superstring version pin must be refused");
+  // The exact version still passes.
+  const good = await call("0.1.1", "good");
+  assert.equal(good.integrated, true, JSON.stringify(good));
+}));
+
 test("tampercheck exit 2 -> refused tampercheck-unavailable, never a pass", () => withTemps(async ({ repo, evidenceRoot, fixtureDir }) => {
   fakeCrash(fixtureDir);
   branchFrom(repo, "worker-c", "main", "line1\nline2\nline3\nCHANGED\n");

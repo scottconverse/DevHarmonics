@@ -354,9 +354,14 @@ export async function runReview({
 
   // Divergence gate: computed unconditionally against the real diff, before
   // the model reviewer is even asked — the model's opinion never overrides it.
+  // null (NOT []) when no claims manifest was supplied: the gate was not run and
+  // must report as "not checked", never a reassuring "0". The earlier M-1 fix
+  // returned [] here, so run-command.mjs's `divergence === null` check was dead
+  // and the pipeline still printed "0 divergence" — the exact false green this
+  // project exists to catch, shipped by us. Now genuinely null when unchecked.
   const divergence = claimedPaths !== null
     ? claimsArtifactDivergence({ claimedPaths, diffPaths })
-    : [];
+    : null;
 
   const reviewId = `review-${randomUUID().split("-")[0]}`;
   const evidenceDir = path.join(evidenceRoot, reviewId);
@@ -420,7 +425,7 @@ export async function runReview({
     modelReview = interpretHttpResult(response, identity);
   }
 
-  const divergenceOpen = divergence.some((finding) => finding.disposition === "open");
+  const divergenceOpen = (divergence ?? []).some((finding) => finding.disposition === "open");
   const verdict = modelReview.verdict === "READY" && !divergenceOpen ? "READY" : "NOT_READY";
   const finishedAt = new Date().toISOString();
 

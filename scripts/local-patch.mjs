@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
@@ -159,9 +159,20 @@ function resolveCheckCommand(command, env) {
  * created tail, and require the result to stay inside the worktree.
  */
 function realPathInsideWorktree(worktreeReal, abs) {
+  // lstat, NOT existsSync: existsSync FOLLOWS symlinks, so a committed symlink
+  // whose target does not resolve (dangling, or a not-yet-created file in an
+  // existing outside dir) reads as "absent" and is silently skipped — the walk
+  // then lands on the worktree root and wrongly passes, and writeFileSync
+  // follows the link OUTSIDE the worktree while the receipt reports "empty
+  // diff" (GAUNTLET B-2, round 2 — reproduced: an out-of-repo file was created).
+  // lstat sees the link ENTRY itself, so the walk stops at it and realpathSync
+  // below throws on the broken target, failing closed.
+  const entryExists = (p) => {
+    try { lstatSync(p); return true; } catch { return false; }
+  };
   let existing = abs;
   const tail = [];
-  while (!existsSync(existing)) {
+  while (!entryExists(existing)) {
     tail.unshift(path.basename(existing));
     const parent = path.dirname(existing);
     if (parent === existing) break;

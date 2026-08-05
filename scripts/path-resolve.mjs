@@ -73,18 +73,24 @@ export function lookupEnv(env, name) {
  *
  * Two GAUNTLET-2026-08-05 findings are fixed here:
  *
- * B-1 (command injection). escapeCmdArg is only ever reached for a .cmd/.bat
- * target (spawnPlan's wrap condition below), so every argument is parsed by
- * cmd.exe TWICE — once for the `cmd /c` line, and AGAIN when the batch shim
- * re-expands its `%star` / `%1` arguments (npm-generated shims all end in a
- * `%star` forward-all). A single caret
- * escape survives only the first parse; the metacharacter goes live in the
- * second. This is the BatBadBut / CVE-2024-27980 class, reproduced live: a
- * prompt with an odd number of `"` before an `&` launched a second,
- * attacker-chosen process. The fix is to caret-escape the metacharacters
- * TWICE so they survive both passes as inert literals — exactly cross-spawn's
- * `doubleEscapeMetaChars` mode, which this codepath ALWAYS needs because it
- * always targets a batch shim.
+ * B-1 (command injection) is NOT fixed by escaping — read this before "hardening"
+ * the caret logic. escapeCmdArg is only ever reached for a .cmd/.bat target
+ * (spawnPlan's wrap below), which cmd.exe parses TWICE: once for the `cmd /c`
+ * line, then again when the batch shim re-expands its `%star`/`%1` (npm shims
+ * forward `%star`). A single caret survives only the first parse; the
+ * metacharacter goes live in the second (the BatBadBut / CVE-2024-27980 class —
+ * reproduced live: a prompt with an odd number of `"` before an `&` launched a
+ * second process). Double-escaping WOULD survive both passes, but it is
+ * incompatible with the `%~1` de-quoting idiom real batch tools and the test
+ * fixtures use, and adopting it broke ~17-20 fixture tests (measured). So the
+ * caret stays SINGLE here, and B-1 is closed a different way: untrusted content
+ * never reaches a .cmd command line at all. claude and codex deliver their
+ * prompt over stdin (providers.mjs), and run-worker.mjs fails closed if any
+ * argv-delivered prompt would resolve to a .cmd/.bat shim (the agy case). The
+ * single caret below is correct for the ONE cmd parse of the trusted,
+ * internally-built arguments that legitimately flow here; it is deliberately
+ * NOT relied on as a defense against untrusted argv content, which is kept off
+ * argv instead.
  *
  * C-1 (silent newline truncation). cmd.exe terminates its command line at the
  * first CR/LF, so an argument carrying an embedded newline is truncated there

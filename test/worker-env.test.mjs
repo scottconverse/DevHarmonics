@@ -49,12 +49,14 @@ test("M-3: undelimited and connection-string credential names are stripped, beni
     DATABASE_URL: "postgres://u:p@h/db",
     REDIS_URL: "redis://u:p@h",
     SENTRY_DSN: "https://k@sentry.io/1",
+    DOCKER_AUTH_CONFIG: "eyJhdXRocyI6e30=",
+    SLACK_WEBHOOK_URL: "https://hooks.slack.com/services/T/B/x",
     // Benign: must survive — a working directory is not a secret.
     PWD: "/home/scott/project",
     OLDPWD: "/home/scott",
     COMPASS_HOME: "/opt/compass",
   });
-  for (const gone of ["DBPASSWORD", "SESSIONTOKEN", "STRIPESECRETKEY", "SERVICECREDENTIALS", "DB_PASS", "MYSQL_PWD", "PRIVATE_KEY", "DATABASE_URL", "REDIS_URL", "SENTRY_DSN"]) {
+  for (const gone of ["DBPASSWORD", "SESSIONTOKEN", "STRIPESECRETKEY", "SERVICECREDENTIALS", "DB_PASS", "MYSQL_PWD", "PRIVATE_KEY", "DATABASE_URL", "REDIS_URL", "SENTRY_DSN", "DOCKER_AUTH_CONFIG", "SLACK_WEBHOOK_URL"]) {
     assert.equal(env[gone], undefined, `${gone} must be stripped`);
   }
   assert.equal(env.PWD, "/home/scott/project", "PWD is the working directory, never a secret");

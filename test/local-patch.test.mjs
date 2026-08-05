@@ -316,6 +316,39 @@ test(
 );
 
 test(
+  "B-2 dangling: a committed symlink to a not-yet-existing outside file cannot be written through (round 2)",
+  { skip: !SYMLINKS && "symlink creation not permitted on this host" },
+  async () => {
+    // The escape Agent A found: existsSync FOLLOWS the symlink, so a dangling
+    // link reads as 'absent', gets skipped, containment wrongly passes, and
+    // writeFileSync CREATES the target OUTSIDE the worktree — reported as
+    // "empty diff / nothing changed". Target's parent exists; only the leaf is new.
+    const outsideDir = mkdtempSync(path.join(os.tmpdir(), "dh-lp-outside2-"));
+    const outsideTarget = path.join(outsideDir, "escaped-newfile.txt"); // does NOT exist
+    const dir = mkdtempSync(path.join(os.tmpdir(), "dh-lp-repo-"));
+    git(dir, ["init", "-q", "-b", "main"]);
+    git(dir, ["config", "core.symlinks", "true"]);
+    git(dir, ["config", "user.email", "test@example.com"]);
+    git(dir, ["config", "user.name", "Test User"]);
+    writeFileSync(path.join(dir, "normal.txt"), "n\n");
+    symlinkSync(outsideTarget, path.join(dir, "link.txt"), "file");
+    git(dir, ["add", "-A"]);
+    git(dir, ["commit", "-q", "-m", "init with dangling-leaf symlink"]);
+    const runsRoot = mkdtempSync(path.join(os.tmpdir(), "dh-lp-runs-"));
+    try {
+      const client = async () => ({ ok: true, contentText: JSON.stringify({ files: [{ path: "link.txt", content: "PWNED\n" }] }) });
+      const task = baseTask(dir, { readPaths: ["normal.txt"], writePaths: ["link.txt"] });
+      const result = await runLocalPatch({ task, client, runsRoot });
+      assert.equal(result.accepted, false, "must not accept a write through a dangling symlink");
+      assert.equal(existsSync(outsideTarget), false, "no file may be created outside the worktree");
+      assert.match(result.detail.message, /symlink|escap|outside/i);
+    } finally {
+      for (const d of [dir, outsideDir, runsRoot]) rmSync(d, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
   "B-2 write: a committed symlink in writePaths does not let the model overwrite an out-of-repo file",
   { skip: !SYMLINKS && "symlink creation not permitted on this host" },
   async () => {

@@ -339,6 +339,66 @@ test("integrateSet: repo B trips tampercheck -> ATOMIC: setReady false, blockedB
   assert.equal(bundle.members[1].reason, "tampercheck-findings");
 }));
 
+// A2-6 / A4-6: `set` had no validator at all, so a cross-repo change got LESS
+// scrutiny than a single-repo one. The validator runs against each member's MERGED
+// candidate, and a failure blocks the whole set without advancing anything.
+test("integrateSet: --check runs per member against the merged candidate; a failure blocks the set and advances nothing", () => withTemps(2, async ({ repos, evidenceRoot, fixtureDir }) => {
+  fakeClean(fixtureDir);
+  const [repoA, repoB] = repos;
+  branchFrom(repoA, "worker-a", "main", "line1\nline2\nCHANGED-A\n");
+  branchFrom(repoB, "worker-b", "main", "line1\nline2\nCHANGED-B\n");
+
+  const plan = planIntegrationSet({
+    members: [
+      { repositoryId: "repoA", repository: repoA, workerBranch: "worker-a" },
+      { repositoryId: "repoB", repository: repoB, workerBranch: "worker-b" },
+    ],
+  });
+
+  // A validator that always fails, so both members are refused at the check.
+  const failing = await integrateSet({
+    set: plan,
+    evidenceRoot,
+    env: pathOnlyEnv(fixtureDir),
+    timeoutMs: 20_000,
+    check: { command: "node", args: ["-e", "process.exit(1)"] },
+    checkTimeoutMs: 30_000,
+  });
+
+  assert.equal(failing.setReady, false, JSON.stringify(failing));
+  for (const m of failing.members) {
+    assert.equal(m.integrated, false);
+    assert.equal(m.prepared, false, "a member whose validator failed did not prepare");
+    assert.equal(m.reason, "validator-failed");
+    assert.equal(m.gates.validator.status, "refused");
+    assert.ok(m.gates.validator.candidateHead, "the validator ran against a real merged candidate");
+    // Nothing advanced: the integration branch is still at the pinned base.
+    const head = git(m.repositoryId === "repoA" ? repoA : repoB, ["rev-parse", m.integrationBranch]).trim();
+    assert.equal(head, m.baseCommit, "a failed validator must leave the integration ref at its base");
+  }
+
+  // And a passing validator still integrates the whole set.
+  const plan2 = planIntegrationSet({
+    members: [
+      { repositoryId: "repoA", repository: repoA, workerBranch: "worker-a", integrationBranch: "devharmonics/integration/pass-a" },
+      { repositoryId: "repoB", repository: repoB, workerBranch: "worker-b", integrationBranch: "devharmonics/integration/pass-b" },
+    ],
+  });
+  const passing = await integrateSet({
+    set: plan2,
+    evidenceRoot: path.join(evidenceRoot, "pass"),
+    env: pathOnlyEnv(fixtureDir),
+    timeoutMs: 20_000,
+    check: { command: "node", args: ["-e", "process.exit(0)"] },
+    checkTimeoutMs: 30_000,
+  });
+  assert.equal(passing.setReady, true, JSON.stringify(passing));
+  for (const m of passing.members) {
+    assert.equal(m.gates.validator.status, "pass");
+    assert.ok(m.integrationHead);
+  }
+}));
+
 test("integrateSet: empty-diff member -> refused empty-diff, set not ready, set.json written", () => withTemps(2, async ({ repos, evidenceRoot, fixtureDir }) => {
   fakeClean(fixtureDir);
   const [repoA, repoB] = repos;

@@ -169,7 +169,7 @@ export function planIntegrationSet({ members }) {
  * rather than faked as either a full success or an atomic rollback this
  * factory does not have (docs/INTEGRATION-SETS.md).
  */
-export async function integrateSet({ set, evidenceRoot, env, timeoutMs }) {
+export async function integrateSet({ set, evidenceRoot, env, timeoutMs, check = null, checkTimeoutMs = undefined }) {
   if (!set || typeof set !== "object") failIntegrate("set must be an object (from planIntegrationSet)");
   if (!Array.isArray(set.members) || set.members.length === 0) failIntegrate("set.members must be a non-empty array");
   if (typeof set.setId !== "string" || set.setId.trim().length === 0) failIntegrate("set.setId must be a non-empty string");
@@ -188,6 +188,10 @@ export async function integrateSet({ set, evidenceRoot, env, timeoutMs }) {
         taskId: `${set.setId}-${member.repositoryId}`,
         evidenceRoot: memberEvidenceRoot,
         deferRefUpdate: true,
+        // Every member gets the same validator, run against its own merged
+        // candidate. A set that cannot pass its checks never advances any member.
+        check,
+        ...(checkTimeoutMs === undefined ? {} : { checkTimeoutMs }),
         env,
         timeoutMs,
       });

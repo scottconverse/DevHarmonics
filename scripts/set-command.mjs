@@ -80,16 +80,20 @@ export async function setCommand(argv, {
 } = {}) {
   const { planIntegrationSet: planFn = planIntegrationSet, integrateSet: integrateFn = integrateSet } = deps;
 
-  const options = { members: [], bases: [], evidenceRoot: null, asJson: false };
+  const options = { members: [], bases: [], evidenceRoot: null, asJson: false, check: null };
   for (let i = 0; i < argv.length; i += 1) {
     const next = () => { i += 1; return argv[i]; };
     switch (argv[i]) {
       case "--member": options.members.push(next()); break;
       case "--base": options.bases.push(next()); break;
       case "--evidence-root": options.evidenceRoot = next(); break;
+      case "--check": options.check = next(); break;
       case "--json": options.asJson = true; break;
       default: throw new Error(`Unknown set option: ${argv[i]}`);
     }
+  }
+  if (options.check !== null && String(options.check).trim().length === 0) {
+    throw new Error('--check must be a non-empty command, e.g. --check "npm test"');
   }
   if (options.members.length < 2) {
     throw new Error("--member must be given at least twice (an integration set needs 2+ repositories)");
@@ -105,7 +109,11 @@ export async function setCommand(argv, {
   const evidenceRoot = path.resolve(options.evidenceRoot ?? mkdtempSync(path.join(os.tmpdir(), "devharmonics-set-")));
 
   const plan = planFn({ members });
-  const result = await integrateFn({ set: plan, evidenceRoot, env });
+  // Split on plain spaces, the same shape `run --check` uses. An argument that
+  // itself needs a space cannot be expressed this way — a known, documented limit.
+  const [checkCommand, ...checkArgs] = String(options.check ?? "").split(" ").filter(Boolean);
+  const check = checkCommand ? { command: checkCommand, args: checkArgs } : null;
+  const result = await integrateFn({ set: plan, evidenceRoot, env, check });
 
   printResult(result, options.asJson, write);
   return result.setReady ? 0 : 1;

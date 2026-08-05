@@ -52,6 +52,9 @@ const REASONS = Object.freeze([
   "final-artifact-findings",
   "final-artifact-unavailable",
   "merge-conflict",
+  // The task's own validator, run against the merged candidate.
+  "validator-failed",
+  "validator-unresolvable",
   // The integration branch ref could not be advanced (e.g. it is checked out in
   // the owner's own working tree) — refuse rather than yank it from under them.
   "integration-ref-locked",
@@ -205,6 +208,12 @@ export async function integrateWorkerBranch({
   // integration candidate is built and parked under a ref, but the integration
   // BRANCH is not moved — the caller finalizes only once all members passed, so a
   // blocked set leaves nothing advanced anywhere.
+  // Optional validator: {command, args}. Run against the MERGED candidate — the
+  // artifact actually being delivered — not the worker's pre-merge tree. `set` had
+  // no validator at all (audit A2-6/A4-6), so a cross-repo change received LESS
+  // scrutiny than a single-repo one.
+  check = null,
+  checkTimeoutMs = 10 * 60_000,
   deferRefUpdate = false,
   tampercheckPath = null,
   expectedTampercheckSha256 = null,
@@ -229,6 +238,7 @@ export async function integrateWorkerBranch({
     // The gate that scans the commit actually delivered, not just the worker's
     // own tree — see the candidate-first merge below.
     finalArtifact: { status: "skipped", detail: "not reached" },
+    validator: { status: "skipped", detail: "no validator configured" },
   };
   let workerHead = null;
   let mergeBase = null;
@@ -583,6 +593,45 @@ export async function integrateWorkerBranch({
         timedOut: false,
         stdout: finalRun.stdout,
       };
+
+      // Optional validator, against the merged candidate. Runs after tampercheck
+      // (cheap diff scan first, slow test suite second) and with a
+      // credential-stripped environment, since it executes code from the tree the
+      // untrusted worker just contributed to.
+      if (check && typeof check.command === "string" && check.command.length > 0) {
+        const checkEnv = workerEnv(env).env;
+        const resolvedCheck = resolvePathCommand(check.command, { env: checkEnv });
+        if (!resolvedCheck) {
+          gates.validator = { status: "refused", detail: `validator command not found on PATH: "${check.command}"`, exitCode: null, timedOut: false };
+          reason = "validator-unresolvable";
+          return { integrated: false, reason, integrationHead: null, gates, evidencePath: writeEvidence() };
+        }
+        const validated = await superviseProcess({
+          command: resolvedCheck,
+          args: check.args ?? [],
+          cwd: mergeWorktree.worktreePath,
+          prompt: null,
+          timeoutMs: checkTimeoutMs,
+          env: checkEnv,
+        });
+        const failed = validated.timedOut || Boolean(validated.error) || validated.exitCode !== 0;
+        gates.validator = {
+          status: failed ? "refused" : "pass",
+          detail: failed
+            ? (validated.timedOut ? "validator timed out on the merged candidate" : `validator exited ${validated.exitCode} on the merged candidate`)
+            : "validator passed against the merged candidate",
+          command: [check.command, ...(check.args ?? [])].join(" "),
+          candidateHead,
+          exitCode: validated.exitCode,
+          timedOut: validated.timedOut,
+          stdoutTail: (validated.stdout ?? "").slice(-2000),
+          stderrTail: (validated.stderr ?? "").slice(-2000),
+        };
+        if (failed) {
+          reason = "validator-failed";
+          return { integrated: false, reason, integrationHead: null, gates, evidencePath: writeEvidence() };
+        }
+      }
 
       // Two-phase mode (multi-repo sets): stop here with a fully gated candidate
       // and let the caller decide whether EVERY member passed before any ref in

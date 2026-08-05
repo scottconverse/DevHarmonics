@@ -12,24 +12,36 @@ import { probeCli, probeMessagesEndpoint, probeRepoGovernance, probeSkillParity 
  * assessment COMPLETED (even with FAILs in it); exit 2 means doctor itself
  * could not run. A crashed assessment must never be mistaken for a clean one.
  */
-export async function runDoctor({ config, probeTimeoutMs = 45_000, repository = null } = {}) {
-  const checks = [];
+export async function runDoctor({ config, probeTimeoutMs = 45_000, repository = null, onProgress = null } = {}) {
+  const report = (check) => {
+    try { onProgress?.(check); } catch { /* a progress listener never breaks the assessment */ }
+    return check;
+  };
 
-  for (const [name, cli] of Object.entries(config.clis)) {
-    checks.push(probeCli(`cli:${name}`, cli.command));
-  }
+  // A4-7 (audit): the endpoint probes used to be awaited one at a time, so a
+  // 3-endpoint doctor run cost the SUM of its probe times (worst case the sum
+  // of its timeouts) and looked frozen while doing it. The network probes are
+  // independent — start them all first, concurrently, so the run costs roughly
+  // the slowest probe instead. The CLI probes are bounded synchronous child
+  // processes (real --version runs); they execute while the network waits.
+  const endpointPromises = Object.entries(config.endpoints).map(([name, endpoint]) =>
+    probeMessagesEndpoint(`http:${name}`, endpoint.baseUrl, { timeoutMs: probeTimeoutMs }).then(report),
+  );
 
-  for (const [name, endpoint] of Object.entries(config.endpoints)) {
-    checks.push(await probeMessagesEndpoint(`http:${name}`, endpoint.baseUrl, { timeoutMs: probeTimeoutMs }));
-  }
+  const cliChecks = Object.entries(config.clis).map(([name, cli]) => report(probeCli(`cli:${name}`, cli.command)));
+  const endpointChecks = await Promise.all(endpointPromises);
 
-  checks.push(probeCli("rigor:tampercheck", config.rigor.tampercheckCommand));
-  checks.push(probeSkillParity("rigor:skill-parity", config.rigor.skillHosts, config.rigor.skillName));
+  const checks = [
+    ...cliChecks,
+    ...endpointChecks,
+    report(probeCli("rigor:tampercheck", config.rigor.tampercheckCommand)),
+    report(probeSkillParity("rigor:skill-parity", config.rigor.skillHosts, config.rigor.skillName)),
+  ];
 
   // Only in scope when a target repository was named: doctor's no-repo
   // behavior must stay exactly as it was before onboarding existed.
   if (repository) {
-    checks.push(probeRepoGovernance("repo:governance", repository, { pinnedVersion: TAMPERCHECK_PINNED_VERSION }));
+    checks.push(report(probeRepoGovernance("repo:governance", repository, { pinnedVersion: TAMPERCHECK_PINNED_VERSION })));
   }
 
   const counts = { PASS: 0, FAIL: 0, SKIPPED: 0 };
@@ -58,7 +70,14 @@ export async function doctorCommand(argv) {
     else throw new Error(`Unknown doctor option: ${argv[i]}`);
   }
   const { config, source } = loadConfig(configPath);
-  const report = await runDoctor({ config, repository: repository ? path.resolve(repository) : null });
+  // Progress rides stderr so it never pollutes --json's stdout: each check
+  // prints the moment it completes, so a slow probe reads as "still working
+  // on the others", never as a frozen command.
+  const report = await runDoctor({
+    config,
+    repository: repository ? path.resolve(repository) : null,
+    onProgress: (check) => process.stderr.write(`probe ${check.status.padEnd(7)} ${check.id}\n`),
+  });
   report.configSource = source;
   process.stdout.write(asJson ? `${JSON.stringify(report, null, 2)}\n` : `${renderDoctorReport(report)}\n(config: ${source})\n`);
   return 0;

@@ -101,15 +101,17 @@ What it actually checks: each configured CLI (`codex`, `claude`, `agy`) by resol
 - `rigor:skill-parity` FAIL — **not blocking at all.** `dev-rigor-stack-lite` is coordinator discipline written in Markdown for whichever agent app drives DevHarmonics; **no command reads it at runtime.** A fresh install with none of it present reports FAIL and every command still works. It is reported as FAIL rather than SKIPPED on purpose: if you drive the same project from more than one host, versions drifting apart (or missing entirely) means the two sessions follow different rules, which is a real bug class worth seeing. If you are not using those skills, this line is informational — it does not mean your install is broken.
 - `repo:governance` SKIPPED — simply means no `--repository` was in scope.
 
-Real output, captured on this machine:
+The endpoint probes run **concurrently** (a doctor run costs roughly its slowest probe, not the sum of them), and each check prints a one-line progress entry to **stderr** the moment it completes — so a slow probe reads as "still working on the others", never as a frozen command, and `--json`'s stdout stays clean.
+
+Real output, captured on this machine (the whole run took 1.6 seconds; progress lines omitted):
 ```
 DevHarmonics doctor
 
 PASS    cli:codex           codex-cli 0.145.0
 PASS    cli:claude          2.1.220 (Claude Code)
-FAIL    cli:agy             "agy" not found on PATH
-PASS    http:ollama         Messages OK via qwen2.5vl:3b (discovered via /api/tags) in 339ms
-PASS    http:lmstudio       Messages OK via gemma-4-12b-it-qat@q4_k_xl (discovered via /v1/models) in 410ms
+PASS    cli:agy             1.1.10
+PASS    http:ollama         Messages OK via gemma4:e4b (discovered via /api/tags) in 716ms
+FAIL    http:lmstudio       endpoint did not list any available model (server down, or no model loaded)
 FAIL    http:litellm        endpoint did not list any available model (server down, or no model loaded)
 PASS    rigor:tampercheck   0.1.1
 PASS    rigor:skill-parity  v0.7.0 on claude, codex

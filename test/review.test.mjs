@@ -200,7 +200,7 @@ test("runReview: fake runWorker returns READY + empty findings -> READY, receipt
 
   assert.equal(result.verdict, "READY");
   assert.deepEqual(result.findings, []);
-  assert.deepEqual(result.divergence, []);
+  assert.equal(result.divergence, null, "no claims manifest supplied -> divergence is 'not checked' (null), not an empty-array 0");
   assert.ok(existsSync(result.reviewReceiptPath));
 
   const bundle = readReceipt(result.reviewReceiptPath);
@@ -215,6 +215,31 @@ test("runReview: fake runWorker returns READY + empty findings -> READY, receipt
   assert.equal(existsSync(capturedCwd), false);
   const worktrees = git(repo, ["worktree", "list"]).trim().split("\n").filter(Boolean);
   assert.equal(worktrees.length, 1);
+}));
+
+// GAUNTLET M-1 (Agent B): when NO claims manifest is supplied (claimedPaths:
+// null, exactly what run-command.mjs passes), the gate was not run and must
+// report as null ("not checked"), never [] — which had made the pipeline print
+// a reassuring "0 divergence" (a false green). This pins the honest signal.
+test("runReview: claimedPaths null -> divergence is null (not checked), never an empty-array '0'", () => withTemps(async ({ repo, evidenceRoot }) => {
+  const runWorkerFake = async () => ({
+    receipt: { status: "completed", resolvedModel: "fake-model-resolved" },
+    parsed: { finalText: 'READY\n\nNo issues found.\n\n```json\n{"findings":[]}\n```' },
+  });
+  const result = await runReview({
+    repository: repo,
+    integrationBranch: "feature",
+    baseRef: "main",
+    goal: "Make the change",
+    reviewer: BASE_REVIEWER,
+    claimedPaths: null,
+    evidenceRoot,
+    deps: { runWorker: runWorkerFake },
+  });
+  assert.equal(result.divergence, null, "divergence must be null when no claims manifest was supplied");
+  assert.equal(result.verdict, "READY", "a null (unchecked) divergence must not force NOT_READY");
+  const bundle = readReceipt(result.reviewReceiptPath);
+  assert.equal(bundle.divergence, null, "the review receipt must also record divergence as null");
 }));
 
 test("runReview: claimedPaths names an unmade change -> NOT_READY on divergence even when the model reviewer says READY", () => withTemps(async ({ repo, evidenceRoot }) => {
@@ -269,7 +294,7 @@ test("runReview: fake reviewer returns NOT_READY with a finding -> propagated, r
   assert.equal(result.findings.length, 1);
   assert.equal(result.findings[0].id, "cov-1");
   assert.equal(result.findings[0].rationale, "No test covers the new line.");
-  assert.deepEqual(result.divergence, []);
+  assert.equal(result.divergence, null, "no claims manifest supplied -> divergence is 'not checked' (null), not an empty-array 0");
 
   const bundle = readReceipt(result.reviewReceiptPath);
   assert.equal(bundle.verdict, "NOT_READY");

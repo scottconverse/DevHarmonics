@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
@@ -249,3 +249,125 @@ test("check.command with a path separator is rejected at validation", async () =
     for (const d of [repo, runsRoot]) rmSync(d, { recursive: true, force: true });
   }
 });
+
+// --- GAUNTLET-2026-08-05 B-2: committed symlink escape (read AND write) ---
+// assertRelativeRepoPath validated path STRINGS only; a git-committed symlink
+// (mode 120000) whose target is outside the worktree was followed by
+// readFileSync (outside content into the model prompt) and by writeFileSync
+// (the model's content overwrote an arbitrary out-of-repo host file, while the
+// receipt reported "empty diff / nothing changed"). Both reproduced live.
+// Skipped only where the host cannot create symlinks at all (unprivileged
+// Windows); on POSIX CI they always run.
+function symlinksSupported() {
+  const probe = mkdtempSync(path.join(os.tmpdir(), "dh-lp-slprobe-"));
+  try {
+    symlinkSync(path.join(probe, "target"), path.join(probe, "link"), "file");
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(probe, { recursive: true, force: true });
+  }
+}
+const SYMLINKS = symlinksSupported();
+
+function initRepoWithOutsideSymlink(linkName) {
+  const outsideDir = mkdtempSync(path.join(os.tmpdir(), "dh-lp-outside-"));
+  const victim = path.join(outsideDir, "secret.txt");
+  writeFileSync(victim, "OUTSIDE-SECRET-must-neither-leak-nor-change\n");
+  const dir = mkdtempSync(path.join(os.tmpdir(), "dh-lp-repo-"));
+  git(dir, ["init", "-q", "-b", "main"]);
+  git(dir, ["config", "core.symlinks", "true"]);
+  git(dir, ["config", "user.email", "test@example.com"]);
+  git(dir, ["config", "user.name", "Test User"]);
+  writeFileSync(path.join(dir, "normal.txt"), "normal\n");
+  symlinkSync(victim, path.join(dir, linkName), "file");
+  git(dir, ["add", "-A"]);
+  git(dir, ["commit", "-q", "-m", "init with outside symlink"]);
+  return { dir, outsideDir, victim };
+}
+
+test(
+  "B-2 read: a committed symlink in readPaths is not followed out of the worktree into the model prompt",
+  { skip: !SYMLINKS && "symlink creation not permitted on this host" },
+  async () => {
+    const { dir, outsideDir, victim } = initRepoWithOutsideSymlink("escape-link.txt");
+    const runsRoot = mkdtempSync(path.join(os.tmpdir(), "dh-lp-runs-"));
+    try {
+      let capturedPrompt = null;
+      const client = async ({ messages }) => {
+        capturedPrompt = messages.map((m) => m.content).join("\n");
+        return { ok: false, error: "short-circuit after prompt capture" };
+      };
+      const task = baseTask(dir, { readPaths: ["escape-link.txt"], writePaths: ["normal.txt"] });
+      const result = await runLocalPatch({ task, client, runsRoot });
+
+      assert.equal(result.accepted, false, "must not accept a symlink-escaping read");
+      assert.equal(
+        capturedPrompt === null || !capturedPrompt.includes("OUTSIDE-SECRET"),
+        true,
+        `outside content must never reach the model prompt; got: ${capturedPrompt}`,
+      );
+      assert.match(result.detail.message, /symlink|outside|escap/i);
+    } finally {
+      for (const d of [dir, outsideDir, runsRoot]) rmSync(d, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "B-2 dangling: a committed symlink to a not-yet-existing outside file cannot be written through (round 2)",
+  { skip: !SYMLINKS && "symlink creation not permitted on this host" },
+  async () => {
+    // The escape Agent A found: existsSync FOLLOWS the symlink, so a dangling
+    // link reads as 'absent', gets skipped, containment wrongly passes, and
+    // writeFileSync CREATES the target OUTSIDE the worktree — reported as
+    // "empty diff / nothing changed". Target's parent exists; only the leaf is new.
+    const outsideDir = mkdtempSync(path.join(os.tmpdir(), "dh-lp-outside2-"));
+    const outsideTarget = path.join(outsideDir, "escaped-newfile.txt"); // does NOT exist
+    const dir = mkdtempSync(path.join(os.tmpdir(), "dh-lp-repo-"));
+    git(dir, ["init", "-q", "-b", "main"]);
+    git(dir, ["config", "core.symlinks", "true"]);
+    git(dir, ["config", "user.email", "test@example.com"]);
+    git(dir, ["config", "user.name", "Test User"]);
+    writeFileSync(path.join(dir, "normal.txt"), "n\n");
+    symlinkSync(outsideTarget, path.join(dir, "link.txt"), "file");
+    git(dir, ["add", "-A"]);
+    git(dir, ["commit", "-q", "-m", "init with dangling-leaf symlink"]);
+    const runsRoot = mkdtempSync(path.join(os.tmpdir(), "dh-lp-runs-"));
+    try {
+      const client = async () => ({ ok: true, contentText: JSON.stringify({ files: [{ path: "link.txt", content: "PWNED\n" }] }) });
+      const task = baseTask(dir, { readPaths: ["normal.txt"], writePaths: ["link.txt"] });
+      const result = await runLocalPatch({ task, client, runsRoot });
+      assert.equal(result.accepted, false, "must not accept a write through a dangling symlink");
+      assert.equal(existsSync(outsideTarget), false, "no file may be created outside the worktree");
+      assert.match(result.detail.message, /symlink|escap|outside/i);
+    } finally {
+      for (const d of [dir, outsideDir, runsRoot]) rmSync(d, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "B-2 write: a committed symlink in writePaths does not let the model overwrite an out-of-repo file",
+  { skip: !SYMLINKS && "symlink creation not permitted on this host" },
+  async () => {
+    const { dir, outsideDir, victim } = initRepoWithOutsideSymlink("write-escape-link.txt");
+    const runsRoot = mkdtempSync(path.join(os.tmpdir(), "dh-lp-runs-"));
+    const before = readFileSync(victim, "utf8");
+    try {
+      const client = async () => ({
+        ok: true,
+        contentText: JSON.stringify({ files: [{ path: "write-escape-link.txt", content: "PWNED-OUTSIDE\n" }] }),
+      });
+      const task = baseTask(dir, { readPaths: ["normal.txt"], writePaths: ["write-escape-link.txt"] });
+      const result = await runLocalPatch({ task, client, runsRoot });
+
+      assert.equal(result.accepted, false, "must not accept a symlink-escaping write");
+      assert.equal(readFileSync(victim, "utf8"), before, "the out-of-repo file must be byte-for-byte unchanged");
+      assert.match(result.detail.message, /symlink|outside|escap/i);
+    } finally {
+      for (const d of [dir, outsideDir, runsRoot]) rmSync(d, { recursive: true, force: true });
+    }
+  },
+);

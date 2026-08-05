@@ -8,6 +8,10 @@ import { superviseProcess } from "./supervise.mjs";
 import { createReceipt, writeReceipt } from "./receipts.mjs";
 import { workerEnv } from "./worker-env.mjs";
 
+// Duplicated from receipts.mjs (which does not export it), same as
+// local-patch.mjs. Keep in sync if receipts.mjs ever changes its pattern.
+const TASK_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
 /**
  * Run one bounded subprocess-lane worker and leave a receipt — ALWAYS a
  * receipt, including for attempts that never spawned. An attempt that leaves
@@ -33,6 +37,15 @@ export async function runWorker({
   timeoutMs = 10 * 60_000,
   env = process.env,
 }) {
+  // Validate the task-id UP FRONT, before anything is spawned. A malformed id
+  // cannot back a valid receipt (createReceipt refuses it), so validating only
+  // at receipt-write time meant the worker ran real work and THEN threw with no
+  // evidence written (GAUNTLET, Agent B) — the opposite of the always-leave-a-
+  // receipt rule. Like local-patch.mjs, malformed task input throws before an
+  // attempt ever starts, so nothing was created that a receipt would document.
+  if (!TASK_ID_PATTERN.test(taskId ?? "")) {
+    throw new Error(`runWorker: taskId must match ${TASK_ID_PATTERN}, got: ${JSON.stringify(taskId)}`);
+  }
   const receiptId = randomUUID();
   const startedAt = new Date().toISOString();
   const stamp = startedAt.replaceAll(":", "-").replace(/\.\d+/, "");
@@ -81,6 +94,21 @@ export async function runWorker({
   const command = resolvePathCommand(invocation.commandName, { env: childEnv });
   if (!command) {
     return finish({ status: "failed", exit: { error: `"${invocation.commandName}" not found on PATH`, args: invocation.args } });
+  }
+  // GAUNTLET B-1 (round 2): never deliver a prompt via argv to a .cmd/.bat shim.
+  // cmd.exe re-parses batch arguments (the double-parse), so an argv-delivered
+  // prompt is a command-injection vector — proven for the agy lane when `agy`
+  // resolves to a shim (agy's prompt is argv by design; claude/codex ride
+  // stdin). agy is a native .exe on verified installs, but "safe by accident of
+  // install" is not safe: fail closed rather than hand cmd.exe untrusted content.
+  if (invocation.promptDelivery === "argv" && /\.(cmd|bat)$/i.test(command)) {
+    return finish({
+      status: "failed",
+      exit: {
+        error: `refusing to deliver a prompt via argv to a .cmd/.bat shim ("${path.basename(command)}"): cmd.exe re-parses batch arguments, making an argv-delivered prompt a command-injection vector (GAUNTLET B-1). This provider must resolve to a native executable, or deliver its prompt over stdin.`,
+        args: invocation.args,
+      },
+    });
   }
 
   const supervised = await superviseProcess({

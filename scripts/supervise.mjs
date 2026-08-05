@@ -33,7 +33,28 @@ export async function superviseProcess({
 }) {
   const startedAt = new Date();
   const platform = process.platform;
-  const { spawnCommand, spawnArgs, verbatim } = spawnPlan(command, args, { platform, env });
+  // spawnPlan can refuse an argument up front (e.g. an embedded newline that
+  // cmd.exe would silently truncate — GAUNTLET C-1). Fold that into the same
+  // fail-closed shape as a spawn ENOENT: this function must never throw, so a
+  // caller Promise.all-ing many workers cannot lose all of them to one bad arg.
+  let spawnCommand;
+  let spawnArgs;
+  let verbatim;
+  try {
+    ({ spawnCommand, spawnArgs, verbatim } = spawnPlan(command, args, { platform, env }));
+  } catch (err) {
+    const finishedAt = new Date();
+    return {
+      exitCode: null,
+      stdout: "",
+      stderr: "",
+      timedOut: false,
+      error: String(err?.message ?? err),
+      startedAt: startedAt.toISOString(),
+      finishedAt: finishedAt.toISOString(),
+      durationMs: finishedAt.getTime() - startedAt.getTime(),
+    };
+  }
 
   return new Promise((resolve) => {
     let stdout = "";
@@ -160,8 +181,10 @@ export async function superviseProcess({
     // fix was never carried back here, to the more heavily used sibling. It is
     // now: "exit" plus a bounded drain deadline guarantees settlement.
     let exited = false;
+    let exitEventCode = null;
     child.on("exit", (code) => {
       exited = true;
+      exitEventCode = code;
       drainTimer = setTimeout(() => {
         // stdio never drained — settle on the exit code we already have
         // rather than waiting on a pipe a descendant may hold forever.
@@ -171,9 +194,12 @@ export async function superviseProcess({
     });
 
     child.on("close", (code) => {
-      // Normal path: stdio drained. Prefer close's code, falling back to the
-      // exit code when close reports null (killed-by-signal).
-      finish(code ?? (exited ? code : null));
+      // Normal path: stdio drained. Prefer close's code; fall back to the code
+      // the "exit" event already reported if close's is null. (The previous
+      // form referenced this handler's own null `code` in the fallback, so it
+      // could never actually fall back — a no-op dressed as one. `exited` is
+      // still tracked for clarity of intent even though exit precedes close.)
+      finish(code ?? (exited ? exitEventCode : null));
     });
   });
 }

@@ -168,7 +168,7 @@ flowchart TD
     MergeOk -- yes --> ReviewerGiven{"--reviewer given?"}
     ReviewerGiven -- no --> Stop
     ReviewerGiven -- yes --> Review["independent reviewer sees the diff + validator receipt,<br/>never the worker's own narration"]
-    Review --> Divergence["deterministic claims-vs-diff divergence check<br/>runs regardless of the model's verdict"]
+    Review --> Divergence["claims-vs-diff divergence check<br/>(the pipeline supplies no worker-claims manifest today,<br/>so this is reported 'not checked' — finding M-1)"]
     Divergence --> Verdict{"model said READY AND<br/>no open divergence finding?"}
     Verdict -- no --> R11["review-not-ready — still INTEGRATED (exit 0);<br/>the owner must read the review evidence"]
     Verdict -- yes --> Stop
@@ -195,6 +195,17 @@ integrated as a result. The fix (`expectedTampercheckVersion`) is implemented
 in `integrate.mjs` but is **off by default and not passed by
 `run-command.mjs` or `integration-set.mjs`** — using it today means calling
 `integrateWorkerBranch` directly as a library function.
+
+The `Divergence` node is likewise deliberately inert in the pipeline today
+(finding M-1). `claimsArtifactDivergence` in `review.mjs` is sound and tested,
+but it needs a manifest of what the *worker claimed* it changed, kept separate
+from the diff. The subprocess/acp worker emits only freeform narration, and a
+prior build fed the diff back in as the "claims" — a self-comparison that could
+never find anything, yet reported a reassuring "0 divergence". `run-command.mjs`
+now passes `claimedPaths: null`, so the gate is honestly reported as "not
+checked" rather than faking a pass; the model reviewer (which judges the real
+diff) remains the active review gate, and the divergence gate stays fully wired
+for any caller able to supply a real claims manifest.
 
 ## 5. Evidence model
 
@@ -231,21 +242,35 @@ prompt as an ongoing project session). The rule underneath all of this,
 stated directly in `run-worker.mjs` and `acp-worker.mjs`: an attempt that
 leaves no evidence must be indistinguishable from one that never happened.
 
-The `strippedEnv` field only has content where the worker-env boundary
-(`worker-env.mjs`'s `workerEnv()`) is actually called — exactly two places in
-the whole codebase: `run-worker.mjs` (subprocess) and `acp-worker.mjs` (ACP).
-It strips an explicit list of provider API keys and cloud credentials, plus
-anything shape-matching `_API_KEY`/`_SECRET`/`_TOKEN`/`_PASSWORD`/
-`_CREDENTIALS` (with an allowlist for benign lookalikes like `SSH_AUTH_SOCK`),
-plus nested-session markers (`CLAUDECODE`, `CLAUDE_CODE_*`, `CODEX_SESSION_*`)
-that otherwise make a nested provider CLI refuse to launch. It is explicitly
-not a sandbox — the module's own comment says so — it closes the *ambient
-inheritance* path that hands a worker every shell secret for free; real shell
-access can still read credentials from disk or a keychain. The `--check`
-validator command `run-command.mjs` spawns directly, and the check command
-`local-patch.mjs` runs in its own worktree, both receive the caller's
-environment **unstripped** — the boundary covers the worker child process
-itself, not every process the pipeline spawns.
+The worker-env boundary (`worker-env.mjs`'s `workerEnv()`) is called in four
+places: the two worker spawns — `run-worker.mjs` (subprocess) and
+`acp-worker.mjs` (ACP) — and, since GAUNTLET-2026-08-05 finding C-2, the two
+`--check` validator spawns as well: `run-command.mjs`'s subprocess/acp
+validator and `local-patch.mjs`'s http-lane check. The validators run *inside
+the worktree the untrusted worker just committed to*, so a planted test line or
+`pretest` hook must not inherit the operator's credentials; earlier builds ran
+them with the full environment. The `strippedEnv` *receipt field* is still
+populated only by the two worker spawns (the validators use the stripped
+environment but do not emit their own receipt). `workerEnv()` strips an explicit
+list of provider API keys, cloud credentials, and secret-bearing connection
+strings (`DATABASE_URL`, `REDIS_URL`, `MONGODB_URI`, `SENTRY_DSN`), plus any
+name *containing* a credential word — `API_KEY`/`APIKEY`, `SECRET`, `TOKEN`,
+`PASSWORD`/`PASSWD`, `CREDENTIAL`, `PRIVATE_KEY`, or an underscore-delimited
+`_PASS`/`_PWD` (finding M-3 broadened this from the earlier underscore-only
+markers, which missed undelimited names like `DBPASSWORD`) — with an allowlist
+for benign lookalikes (`SSH_AUTH_SOCK`, a socket path; `PWD`, a working
+directory), plus nested-session markers (`CLAUDECODE`, `CLAUDE_CODE_*`,
+`CODEX_SESSION_*`) that otherwise make a nested provider CLI refuse to launch.
+It is explicitly not a sandbox — the module's own comment says so — it closes
+the *ambient inheritance* path that hands a worker every shell secret for free;
+real shell access can still read credentials from disk or a keychain. The
+boundary now covers the worker, its validator, and the `tampercheck` gate — all
+three run with cwd inside the untrusted worktree, so all three are
+credential-stripped (a later adversarial audit closed the earlier inconsistency
+of tampercheck alone keeping the full environment). Only `git` plumbing keeps
+the ordinary environment: it never executes worktree-tracked content as code
+(hooks live in the shared `.git/hooks`, unreachable from committed content), so
+there is no exfiltration path there.
 
 For multi-repository work, `integration-set.mjs`'s `integrateSet` always
 writes `set.json` at its evidence root — for every outcome, including a
@@ -311,6 +336,7 @@ failure — not designed in the abstract.
 |---|---|
 | PATHEXT-before-bare-name resolution (`path-resolve.mjs`) | A global npm install commonly leaves both a POSIX shim and a `.cmd` shim in the same PATH directory; only the `.cmd` one is natively spawnable by Windows. Trying every PATHEXT suffix before the bare extensionless name avoids resolving to a file `CreateProcess` cannot launch — found live against the real Codex CLI, 2026-08-04. |
 | ComSpec wrap + cmd-safe quoting (`path-resolve.mjs`) | Node cannot spawn `.cmd`/`.bat` directly on Windows (throws EINVAL) and `shell:true` with an args array draws deprecation DEP0190. The fix is an explicit `ComSpec /d /s /c` wrap with hand-escaped, verbatim arguments — found live against `claude.cmd`, whose argv-delivered prompt was shredded into word-per-token tokens without it. |
+| Untrusted prompt rides stdin, not argv, for `claude` (`providers.mjs`) | On Windows `claude` resolves to `claude.CMD`, an npm `%*`-forwarding shim, so cmd.exe parses each argument twice (the `cmd /c` line, then the shim's `%*` re-expansion). GAUNTLET-2026-08-05 reproduced two live consequences of putting the prompt in argv: a prompt with an odd `"` count before a metacharacter launched a second, attacker-chosen process (finding B-1, the BatBadBut/CVE-2024-27980 class), and a multi-line prompt was truncated at the first newline (finding C-1). No cmd-arg escaping can be both injection-safe for a `%*` shim and compatible with the `%~1` idiom the tampercheck fixtures use, so the fix keeps untrusted content off the command line entirely: `buildInvocation` now sets `promptDelivery: "stdin"` for `claude` (verified live: `claude -p --output-format json` reads its prompt from stdin, including through the ComSpec wrap). `codex` already used stdin; `agy` is a native `.exe` that never takes the wrap. As defense in depth, `escapeCmdArg` also refuses any argument containing a raw newline rather than letting cmd.exe silently truncate the command line. |
 | Per-provider write-prompt differences (`qualify.mjs`) | The same "do not run any commands" clause is *required* for `agy` (its headless command permission auto-denies without it and aborts the whole run) but *breaks* `codex` (whose sandbox reads that clause as forbidding the file edit itself); `claude` tolerates either wording. Found live 2026-08-04 by isolating the prompt text per provider. |
 | `agy`'s `--add-dir` requirement (`providers.mjs`) | Headless `agy` does not treat its own process's working directory as its workspace. One apparent successful run without `--add-dir` turned out to be `agy` silently editing its own scratch directory while still reporting success — luck, not behavior. |
 | `CLAUDECODE` stripping (`worker-env.mjs`, `acp-worker.mjs`) | A nested Claude Code adapter refuses to start inside another Claude Code session, and the marker leaks through ordinary environment inheritance. Stripped at the worker boundary alongside credentials, since a worker is a deliberately separate workload from its coordinating session. |

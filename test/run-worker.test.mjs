@@ -5,6 +5,26 @@ import path from "node:path";
 import test from "node:test";
 import { runWorker } from "../scripts/run-worker.mjs";
 
+// GAUNTLET (Agent B): a malformed taskId is refused UP FRONT, before any worker
+// is spawned. Validating only at receipt-write time meant the worker ran real
+// work and then threw with no evidence — breaking the always-leave-a-receipt rule.
+test("runWorker refuses a malformed taskId before spawning, leaving no run behind", async () => {
+  const cwd = mkdtempSync(path.join(os.tmpdir(), "dh-rw-cwd-"));
+  const runsRoot = mkdtempSync(path.join(os.tmpdir(), "dh-rw-runs-"));
+  try {
+    for (const bad of ["Task.With.Dots", "UPPER", "has space", "../evil", 'a"; & echo x']) {
+      await assert.rejects(
+        () => runWorker({ taskId: bad, provider: "codex", model: "x", prompt: "p", cwd, runsRoot }),
+        /taskId must match/,
+        `taskId ${JSON.stringify(bad)} must be rejected before spawning`,
+      );
+    }
+    assert.equal(readdirSync(runsRoot).length, 0, "a rejected taskId must create no run dir at all");
+  } finally {
+    for (const d of [cwd, runsRoot]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
 /**
  * Full-path tests through a FAKE codex on PATH: a .cmd/.sh shim delegating to
  * a Node script that honors the real contract (JSONL events on stdout, writes

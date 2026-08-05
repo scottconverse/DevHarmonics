@@ -53,7 +53,7 @@ test("codex build defaults sandbox to read-only when not given", () => {
   assert.ok(result.args.includes("read-only"));
 });
 
-test("claude build: prompt is in args after -p, --bare is never present, subscription-first", () => {
+test("claude build: prompt rides STDIN (never argv), --bare is never present, subscription-first", () => {
   const result = buildInvocation(baseArgs({
     provider: "claude",
     model: "claude-sonnet-5",
@@ -62,14 +62,19 @@ test("claude build: prompt is in args after -p, --bare is never present, subscri
     allowedTools: ["Read", "Grep"],
   }));
   assert.equal(result.commandName, "claude");
-  assert.equal(result.promptDelivery, "argv");
-  const dashPIndex = result.args.indexOf("-p");
-  assert.ok(dashPIndex >= 0, "-p flag must be present");
-  assert.equal(result.args[dashPIndex + 1], "Implement add(a, b).");
+  // GAUNTLET-2026-08-05 B-1/C-1: on Windows `claude` resolves to claude.CMD (an
+  // npm %*-forwarding shim), so an argv-delivered prompt is parsed by cmd.exe
+  // twice — a live command-injection and a newline-truncation vector. The
+  // prompt now rides stdin, keeping untrusted content off the command line.
+  assert.equal(result.promptDelivery, "stdin");
+  assert.ok(result.args.includes("-p"), "--print flag must still be present");
+  assert.ok(
+    !result.args.includes("Implement add(a, b)."),
+    "the prompt must NOT appear anywhere in argv — that was the injection surface",
+  );
   assert.ok(!result.args.includes("--bare"), "--bare would force API-key auth, not subscription OAuth");
   assert.deepEqual(result.args, [
     "-p",
-    "Implement add(a, b).",
     "--output-format",
     "json",
     "--model",

@@ -71,11 +71,34 @@ function isBareCommand(command) {
  * Returns null if the agent didn't offer a matching option at all, in which
  * case the caller reports the request as cancelled rather than guessing.
  */
-function choosePermissionOption(request, permissionMode) {
+/**
+ * True only if every file location the tool call declares resolves INSIDE the
+ * workspace cwd. Under allow-edits the kind check alone was not enough: a
+ * hostile adapter could issue an "edit" whose location pointed outside the
+ * workspace and have it granted (GAUNTLET, Agent B). An escaping (absolute
+ * elsewhere, or `..`-traversing) location downgrades the grant to a refusal.
+ * `locations` is the documented ACP field for the files a tool touches; if the
+ * adapter declares none, there is nothing to verify here — a residual noted in
+ * the ACP-lane docs, bounded by the fact that an adapter is operator-installed.
+ */
+export function editLocationsInsideCwd(toolCall, cwd) {
+  if (!cwd) return true;
+  const locations = Array.isArray(toolCall?.locations) ? toolCall.locations : [];
+  const cwdAbs = path.resolve(cwd);
+  return locations.every((loc) => {
+    const p = typeof loc?.path === "string" ? loc.path : null;
+    if (!p) return true;
+    const rel = path.relative(cwdAbs, path.resolve(cwdAbs, p));
+    return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  });
+}
+
+export function choosePermissionOption(request, permissionMode, cwd) {
   const options = request.options ?? [];
   const findKind = (kind) => options.find((option) => option.kind === kind);
   const isEdit = request.toolCall?.kind === "edit";
-  const wantAllow = permissionMode === "allow-edits" && isEdit;
+  const wantAllow = permissionMode === "allow-edits" && isEdit
+    && editLocationsInsideCwd(request.toolCall, cwd);
   const chosen = wantAllow
     ? (findKind("allow_once") ?? findKind("allow_always"))
     : (findKind("reject_once") ?? findKind("reject_always"));
@@ -282,7 +305,7 @@ export async function runAcpWorker({
     acp.methods.client.session.requestPermission,
     (ctx) => {
       const request = ctx.params;
-      const chosen = choosePermissionOption(request, permissionMode);
+      const chosen = choosePermissionOption(request, permissionMode, cwd);
       const response = chosen
         ? { outcome: { outcome: "selected", optionId: chosen.optionId } }
         : { outcome: { outcome: "cancelled" } };

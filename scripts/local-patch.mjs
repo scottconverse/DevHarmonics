@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { resolvePathCommand } from "./path-resolve.mjs";
 import { superviseProcess } from "./supervise.mjs";
+import { workerEnv } from "./worker-env.mjs";
 import { createReceipt, writeReceipt } from "./receipts.mjs";
 
 /**
@@ -145,6 +146,49 @@ function resolveCheckCommand(command, env) {
   return resolvePathCommand(command, { env });
 }
 
+/**
+ * String validation (assertRelativeRepoPath) proves a path LOOKS contained; it
+ * cannot prove the real filesystem target is. A git-committed symlink (mode
+ * 120000) is a legitimate repo object whose target may point anywhere, and
+ * both readFileSync and writeFileSync follow it transparently — the read side
+ * leaked outside content into the model prompt, the write side overwrote an
+ * arbitrary host file while the receipt reported "empty diff / nothing
+ * changed" (GAUNTLET-2026-08-05 B-2, both reproduced live). Resolve the real
+ * location: realpath the deepest existing prefix (collapsing every symlink,
+ * including an intermediate directory symlink) then re-append any not-yet-
+ * created tail, and require the result to stay inside the worktree.
+ */
+function realPathInsideWorktree(worktreeReal, abs) {
+  // lstat, NOT existsSync: existsSync FOLLOWS symlinks, so a committed symlink
+  // whose target does not resolve (dangling, or a not-yet-created file in an
+  // existing outside dir) reads as "absent" and is silently skipped — the walk
+  // then lands on the worktree root and wrongly passes, and writeFileSync
+  // follows the link OUTSIDE the worktree while the receipt reports "empty
+  // diff" (GAUNTLET B-2, round 2 — reproduced: an out-of-repo file was created).
+  // lstat sees the link ENTRY itself, so the walk stops at it and realpathSync
+  // below throws on the broken target, failing closed.
+  const entryExists = (p) => {
+    try { lstatSync(p); return true; } catch { return false; }
+  };
+  let existing = abs;
+  const tail = [];
+  while (!entryExists(existing)) {
+    tail.unshift(path.basename(existing));
+    const parent = path.dirname(existing);
+    if (parent === existing) break;
+    existing = parent;
+  }
+  let realExisting;
+  try {
+    realExisting = realpathSync(existing);
+  } catch {
+    return false;
+  }
+  const finalReal = tail.length ? path.join(realExisting, ...tail) : realExisting;
+  const rel = path.relative(worktreeReal, finalReal);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
 export async function runLocalPatch({ task, client, runsRoot, env = process.env }) {
   validateTask(task);
 
@@ -213,6 +257,9 @@ export async function runLocalPatch({ task, client, runsRoot, env = process.env 
     });
   }
   worktreePath = candidateWorktreePath;
+  // Canonical worktree root, resolved once, for the symlink-containment check
+  // below (B-2). realpath here so the comparison is real-path vs real-path.
+  const worktreeReal = realpathSync(worktreePath);
 
   // Only worth keeping a worktree around once real file content has been
   // written and staged into it (steps 6+) — before that, on any failure,
@@ -233,6 +280,12 @@ export async function runLocalPatch({ task, client, runsRoot, env = process.env 
   const readSections = [];
   for (const readPath of task.readPaths) {
     const abs = path.join(worktreePath, readPath);
+    // B-2: refuse a path whose real target escapes the worktree (a committed
+    // symlink), BEFORE readFileSync would transparently follow it outside.
+    if (!realPathInsideWorktree(worktreeReal, abs)) {
+      removeWorktree();
+      return finish({ status: "failed", accepted: false, detail: { message: `readPath escapes the worktree via a symlink or link: "${readPath}"` } });
+    }
     let stat;
     try {
       stat = statSync(abs);
@@ -344,11 +397,24 @@ export async function runLocalPatch({ task, client, runsRoot, env = process.env 
   // false-green rule from receipts.mjs's own house style.
   for (const { target, content } of writtenFiles) {
     const abs = path.join(worktreePath, target);
+    // B-2: refuse a writePath whose real target escapes the worktree (a
+    // committed symlink) BEFORE writeFileSync follows it and overwrites an
+    // arbitrary out-of-repo host file — the escape the receipt then reported
+    // as "empty diff / nothing changed".
+    if (!realPathInsideWorktree(worktreeReal, abs)) {
+      removeWorktree();
+      return finish({
+        status: "failed",
+        accepted: false,
+        detail: { message: `writePath escapes the worktree via a symlink or link: "${target}"`, parseNotes },
+      });
+    }
     mkdirSync(path.dirname(abs), { recursive: true });
     writeFileSync(abs, content);
   }
   const addRes = spawnSync("git", ["-C", worktreePath, "add", "-A"], { encoding: "utf8" });
   if (addRes.status !== 0) {
+    removeWorktree();
     return finish({
       status: "failed",
       accepted: false,
@@ -357,6 +423,9 @@ export async function runLocalPatch({ task, client, runsRoot, env = process.env 
   }
   const diffStat = spawnSync("git", ["-C", worktreePath, "diff", "--cached", "--stat"], { encoding: "utf8" });
   if (!diffStat.stdout.trim()) {
+    // Nothing to inspect in an unchanged worktree — remove it rather than leak
+    // a temp dir on every empty-diff failure (the re-accumulating dh-* dirs).
+    removeWorktree();
     return finish({
       status: "failed",
       accepted: false,
@@ -368,7 +437,15 @@ export async function runLocalPatch({ task, client, runsRoot, env = process.env 
 
   // Step 7: run the declared check inside the worktree. The command and its
   // args come only from the task, never the model.
-  const resolvedCommand = resolveCheckCommand(task.check.command, env);
+  //
+  // C-2 (GAUNTLET-2026-08-05): the check executes INSIDE the worktree the
+  // untrusted model just wrote to, so it must not inherit the operator's
+  // credentials — one planted line in a checked file (or a pretest hook) would
+  // otherwise run with every API key on the box, and the leak then propagated
+  // into the receipt. Strip credential-shaped vars exactly as the worker lane
+  // does; PATH survives, so the command still resolves and runs.
+  const { env: checkEnv } = workerEnv(env);
+  const resolvedCommand = resolveCheckCommand(task.check.command, checkEnv);
   if (!resolvedCommand) {
     return finish({
       status: "failed",
@@ -381,7 +458,7 @@ export async function runLocalPatch({ task, client, runsRoot, env = process.env 
     args: task.check.args ?? [],
     cwd: worktreePath,
     timeoutMs,
-    env,
+    env: checkEnv,
   });
   if (checked.timedOut || checked.error || checked.exitCode !== 0) {
     return finish({

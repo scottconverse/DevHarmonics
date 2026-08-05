@@ -36,6 +36,34 @@ test("shape-based stripping catches the long tail no fixed list can enumerate", 
   assert.equal(env.EDITOR, "vim");
 });
 
+test("M-3: undelimited and connection-string credential names are stripped, benign short lookalikes are not", () => {
+  const { env } = workerEnv({
+    // Previously slipped through because the markers required a leading "_".
+    DBPASSWORD: "x",
+    SESSIONTOKEN: "x",
+    STRIPESECRETKEY: "x",
+    SERVICECREDENTIALS: "x",
+    DB_PASS: "x",
+    MYSQL_PWD: "x",
+    PRIVATE_KEY: "x",
+    DATABASE_URL: "postgres://u:p@h/db",
+    REDIS_URL: "redis://u:p@h",
+    SENTRY_DSN: "https://k@sentry.io/1",
+    DOCKER_AUTH_CONFIG: "eyJhdXRocyI6e30=",
+    SLACK_WEBHOOK_URL: "https://hooks.slack.com/services/T/B/x",
+    // Benign: must survive — a working directory is not a secret.
+    PWD: "/home/scott/project",
+    OLDPWD: "/home/scott",
+    COMPASS_HOME: "/opt/compass",
+  });
+  for (const gone of ["DBPASSWORD", "SESSIONTOKEN", "STRIPESECRETKEY", "SERVICECREDENTIALS", "DB_PASS", "MYSQL_PWD", "PRIVATE_KEY", "DATABASE_URL", "REDIS_URL", "SENTRY_DSN", "DOCKER_AUTH_CONFIG", "SLACK_WEBHOOK_URL"]) {
+    assert.equal(env[gone], undefined, `${gone} must be stripped`);
+  }
+  assert.equal(env.PWD, "/home/scott/project", "PWD is the working directory, never a secret");
+  assert.equal(env.OLDPWD, "/home/scott");
+  assert.equal(env.COMPASS_HOME, "/opt/compass", "PASS-inside-a-word must not be swept up");
+});
+
 test("benign lookalikes are NOT stripped — a path is not a secret", () => {
   const { env } = workerEnv({ SSH_AUTH_SOCK: "/tmp/ssh-agent.sock", GPG_TTY: "/dev/tty1" });
   assert.equal(env.SSH_AUTH_SOCK, "/tmp/ssh-agent.sock");

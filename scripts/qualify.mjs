@@ -130,6 +130,8 @@ async function httpTextRoundtrip({ candidate, deps, timeoutMs, prompt, maxTokens
     messages: [{ role: "user", content: prompt }],
     maxTokens,
     timeoutMs,
+    apiKeyEnvVar: candidate.apiKeyEnvVar ?? null,
+    paidBudget: candidate.paidBudget,
   });
 }
 
@@ -284,6 +286,9 @@ async function runStructuredWriteHttp({ candidate, workRoot, env, timeoutMs, dep
     check: { command: "python", args: ["test_add.py"] },
     commitMessage: "qualify: fix add.py",
     timeoutMs,
+    // Paid lane pass-through: only set for credentialed candidates.
+    apiKeyEnvVar: candidate.apiKeyEnvVar ?? null,
+    paidBudget: candidate.paidBudget,
   };
   const result = await deps.runLocalPatch({ task, client: deps.sendMessages, runsRoot, env });
 

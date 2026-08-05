@@ -51,9 +51,9 @@ Commands:
            isolated worker (subprocess, http, or acp lane), optional
            --check validator, empty-diff + tampercheck gates, serial
            integration — then STOP at the owner approval boundary.
-           Exit 0 = integrated; 1 = refused; 2 = error, including
-           refusals of malformed/ineligible requests (bad flags, dirty
-           tree, reused task-id) where nothing was attempted.
+           Exit 0 = integrated; 1 = refused — including state refusals
+           (dirty tracked tree, reused task-id); 2 = error (bad flags or
+           unreadable config: nothing was attempted).
   set      Plan and integrate a cross-repo integration SET: one worker
            branch per repository, judged all-or-nothing. Exit 0 = every
            member integrated; 1 = the set was blocked; 2 = runner error.`;

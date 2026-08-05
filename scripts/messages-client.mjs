@@ -42,6 +42,15 @@ export async function sendMessages({
   // written into a receipt — receipts record the endpoint, never the credential.
   apiKey = null,
   apiKeyEnvVar = null,
+  // PAID-LANE BUDGET (owner correction, 2026-08-05 night): the money half of
+  // admission.mjs was nearly deleted on an inference the owner never made.
+  // It is now the live guard for every call that carries a REAL credential:
+  // { stateRoot, maxPaidTokens } — reservation before the request, terminal
+  // reconciliation with the response's real usage after, "unknown paid usage
+  // closes the paid lane" enforced by the ledger itself. Key-less local
+  // endpoints are unpaid and unaffected.
+  paidBudget = undefined,
+  deps = {},
   env = process.env,
 }) {
   const resolvedApiKey = apiKey
@@ -57,6 +66,75 @@ export async function sendMessages({
       resolvedModel: null,
     };
   }
+
+  // A call is PAID exactly when a real credential rides with it. Fail closed:
+  // no configured budget means no paid call — a metered endpoint must never
+  // be reachable un-metered.
+  const isPaid = resolvedApiKey !== "local";
+  let paidReservation = null;
+  if (isPaid) {
+    if (!paidBudget || !Number.isSafeInteger(paidBudget.maxPaidTokens) || paidBudget.maxPaidTokens <= 0 || typeof paidBudget.stateRoot !== "string" || !paidBudget.stateRoot) {
+      return {
+        ok: false,
+        httpStatus: null,
+        stopReason: null,
+        contentText: null,
+        toolUses: [],
+        usage: null,
+        resolvedModel: null,
+        error: `paid-budget-unconfigured: this call carries a real credential for ${baseUrl}, but no paid budget is configured. Set budgets.maxPaidTokens in a config file passed via --config (and keep it deliberate — this is the ceiling on real API spend).`,
+        raw: null,
+      };
+    }
+    // Reserve BEFORE the request: estimate = the response ceiling we asked for
+    // plus a conservative estimate of the prompt we are sending (~4 chars per
+    // token). Reconciliation replaces the estimate with the real usage.
+    const promptChars = JSON.stringify(messages).length + (system ? JSON.stringify(system).length : 0);
+    const reservedTokens = maxTokens + Math.ceil(promptChars / 4);
+    try {
+      const reserveFn = deps.reservePaidUsage ?? (await import("./admission.mjs")).reservePaidUsage;
+      paidReservation = await reserveFn({
+        stateRoot: paidBudget.stateRoot,
+        aggregateLimit: paidBudget.maxPaidTokens,
+        reservedTokens,
+        taskId: paidBudget.taskId ?? "messages-call",
+        metadata: { baseUrl, model },
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        httpStatus: null,
+        stopReason: null,
+        contentText: null,
+        toolUses: [],
+        usage: null,
+        resolvedModel: null,
+        error: `paid-budget-exceeded: ${error.message} (ledger: ${paidBudget.stateRoot}). Raise budgets.maxPaidTokens deliberately, or wait/reconcile — the request was never sent.`,
+        raw: null,
+      };
+    }
+  }
+  // Close out the reservation with the response's REAL usage. A paid response
+  // whose usage cannot be trusted is reconciled as usage:null, which the
+  // ledger's own fail-closed rule then treats as "unknown paid usage" —
+  // closing the paid lane until the owner reconciles it deliberately.
+  const reconcilePaid = async (usage) => {
+    if (!paidReservation) return;
+    try {
+      const reconcileFn = deps.reconcilePaidUsage ?? (await import("./admission.mjs")).reconcilePaidUsage;
+      const total = Number.isSafeInteger(usage?.inputTokens) && Number.isSafeInteger(usage?.outputTokens)
+        ? usage.inputTokens + usage.outputTokens
+        : null;
+      await reconcileFn({
+        stateRoot: paidBudget.stateRoot,
+        invocationId: paidReservation.invocationId,
+        taskId: paidBudget.taskId ?? "messages-call",
+        usage: total !== null ? { total_tokens: total } : null,
+        metadata: { baseUrl, model },
+      });
+    } catch { /* the reservation stays counted — errs toward the ceiling */ }
+  };
+
   const body = { model, max_tokens: maxTokens, messages };
   if (system !== null) body.system = system;
   if (tools !== null) body.tools = tools;
@@ -77,6 +155,10 @@ export async function sendMessages({
     });
     text = await response.text();
   } catch (error) {
+    // A request that MAY have reached a paid endpoint reconciles as unknown
+    // usage — the ledger's fail-closed rule then closes the paid lane until
+    // the owner reconciles deliberately (never silently charged zero).
+    await reconcilePaid(null);
     return {
       ok: false,
       httpStatus: null,
@@ -99,6 +181,9 @@ export async function sendMessages({
 
   if (response.status !== 200) {
     const reason = parsed?.error?.message ?? text.slice(0, 200) ?? "(no body)";
+    await reconcilePaid(parsed?.usage
+      ? { inputTokens: parsed.usage.input_tokens ?? null, outputTokens: parsed.usage.output_tokens ?? null }
+      : null);
     return {
       ok: false,
       httpStatus: response.status,
@@ -128,6 +213,7 @@ export async function sendMessages({
       }
     : null;
 
+  await reconcilePaid(usage);
   return {
     ok: true,
     httpStatus: response.status,

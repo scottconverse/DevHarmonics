@@ -63,6 +63,8 @@ export function validateConfig(config) {
     for (const [name, endpoint] of Object.entries(config.endpoints)) {
       if (!isPlainObject(endpoint) || typeof endpoint.baseUrl !== "string" || !/^https?:\/\//.test(endpoint.baseUrl)) {
         errors.push(`endpoints.${name}.baseUrl must be an http(s) URL`);
+      } else if ("apiKeyEnvVar" in endpoint && (typeof endpoint.apiKeyEnvVar !== "string" || !endpoint.apiKeyEnvVar.trim())) {
+        errors.push(`endpoints.${name}.apiKeyEnvVar must be a nonempty environment-variable name when present`);
       }
     }
   }
@@ -84,6 +86,12 @@ export function validateConfig(config) {
     }
     if (!Number.isSafeInteger(b.maxTotalTokens) || b.maxTotalTokens <= 0) errors.push("budgets.maxTotalTokens must be a positive integer");
     if (!Number.isFinite(b.windowHours) || b.windowHours <= 0) errors.push("budgets.windowHours must be a positive number");
+    // PAID lane (owner decision, 2026-08-05 night): optional because the paid
+    // lane itself is opt-in — but once any endpoint carries a credential, a
+    // missing maxPaidTokens refuses the call (fail closed in sendMessages).
+    if ("maxPaidTokens" in b && (!Number.isSafeInteger(b.maxPaidTokens) || b.maxPaidTokens <= 0)) {
+      errors.push("budgets.maxPaidTokens must be a positive integer when present");
+    }
     if ("maxWorkerMinutes" in b) errors.push("budgets.maxWorkerMinutes was removed — use --timeout-minutes on the command instead");
   }
   return { ok: errors.length === 0, errors };

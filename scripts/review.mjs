@@ -423,6 +423,9 @@ export async function runReview({
         model: reviewer.model,
         messages: [{ role: "user", content: `${basePrompt}${diffSection}` }],
         timeoutMs,
+        apiKeyEnvVar: reviewer.apiKeyEnvVar ?? null,
+        paidBudget: reviewer.paidBudget,
+        env,
       });
     } catch (error) {
       response = { ok: false, error: `client threw: ${error.message}` };

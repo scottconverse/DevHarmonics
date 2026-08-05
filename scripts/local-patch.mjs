@@ -316,6 +316,11 @@ export async function runLocalPatch({ task, client, runsRoot, env = process.env 
       messages: [{ role: "user", content: userText }],
       maxTokens: maxOutputTokens,
       timeoutMs,
+      // Paid lane: threaded when the endpoint carries a credential; unset for
+      // key-less local servers (the default), which stay unpaid and unmetered.
+      apiKeyEnvVar: task.apiKeyEnvVar ?? null,
+      paidBudget: task.paidBudget,
+      env,
     });
   } catch (error) {
     removeWorktree();

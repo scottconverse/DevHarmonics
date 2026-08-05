@@ -43,6 +43,17 @@ import { loadConfig } from "./config.mjs";
 
 const LANES = Object.freeze(["subprocess", "http", "acp"]);
 
+/** QA-008 (owner decision): a refusal of the repository's STATE (dirty tree,
+ * reused task-id) is a refusal — exit 1 — not a usage error. Bad flags and
+ * unreadable config stay exit 2: nothing was attempted. */
+export class RefusalError extends Error {
+  constructor(reason, message) {
+    super(message);
+    this.name = "RefusalError";
+    this.reason = reason;
+  }
+}
+
 function git(repository, args) {
   const result = spawnSync("git", ["-C", repository, ...args], { encoding: "utf8", windowsHide: true });
   return { ok: result.status === 0, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
@@ -54,7 +65,7 @@ function assertCleanTrackedTree(repository) {
   if (!status.ok) throw new Error(`not a usable git repository: ${repository}: ${status.stderr.trim()}`);
   const dirty = status.stdout.split(/\r?\n/).filter((line) => line.trim() && !line.startsWith("??"));
   if (dirty.length) {
-    throw new Error(`repository has tracked uncommitted changes; commit or stash them first:\n${dirty.slice(0, 10).join("\n")}`);
+    throw new RefusalError("dirty-tracked-tree", `repository has tracked uncommitted changes; commit or stash them first:\n${dirty.slice(0, 10).join("\n")}`);
   }
 }
 
@@ -96,6 +107,12 @@ export async function runPipeline({
   // the state root defaults to the repository's own .devharmonics so caps
   // accumulate where the work happens.
   admission = undefined,
+  // PAID lane (owner decision, 2026-08-05 night): when the http endpoint
+  // carries a credential (endpoints.<name>.apiKeyEnvVar in config), the model
+  // call is metered against budgets.maxPaidTokens via the admission ledger's
+  // money half — reservation before the request, reconciliation after. Keyless
+  // local endpoints are unpaid and unaffected.
+  apiKeyEnvVar = null,   // http lane only: env var naming the endpoint credential
   taskId = null,
   timeoutMs = 15 * 60_000,
   env = process.env,
@@ -135,6 +152,12 @@ export async function runPipeline({
   assertCleanTrackedTree(repo);
   ensureExcluded(repo);
 
+  // SPEC §2.4: worker prompts state that the diff will be tamperchecked —
+  // stated to every write worker on every lane, so the gate is never a
+  // surprise and legitimate work is shaped accordingly.
+  const gateNotice = "\n\n[DevHarmonics] Your diff will be integrity-scanned by tampercheck before integration. Weakening, skipping, or deleting tests to make checks pass will be detected and the change refused.";
+  const gatedPrompt = `${prompt}${gateNotice}`;
+
   // The repository's .devharmonics is the canonical meter for this pipeline's
   // worker AND its reviewer; a caller-supplied stateRoot still wins.
   const workerAdmission = admission
@@ -162,7 +185,8 @@ export async function runPipeline({
   const existingIntegration = git(repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${integrationBranch}`]).ok;
   if (existingWorker || existingIntegration) {
     const which = [existingWorker ? workerBranch : null, existingIntegration ? integrationBranch : null].filter(Boolean);
-    throw new Error(
+    throw new RefusalError(
+      "task-id-already-used",
       `task-id "${runId}" has already been used in this repository: ${which.join(" and ")} ${which.length > 1 ? "already exist" : "already exists"}. `
       + "This pipeline has no resume — it keeps no resumable state, so reusing these refs could blend a new attempt into an old one's history. "
       + `Either choose a different --task-id, or delete the previous refs once you have finished with them (git branch -D ${which.join(" ")}).`,
@@ -186,7 +210,7 @@ export async function runPipeline({
         base: baseRef,
         model: model ?? "unspecified",
         baseUrl,
-        instructions: prompt,
+        instructions: gatedPrompt,
         readPaths: files,
         writePaths: files,
         check: { command, args },
@@ -195,6 +219,10 @@ export async function runPipeline({
         // hard-coded 5 minutes no matter what the operator asked for.
         timeoutMs,
         commitMessage: `devharmonics ${runId}: ${provider}${model ? `:${model}` : ""}`,
+        apiKeyEnvVar,
+        paidBudget: apiKeyEnvVar
+          ? { stateRoot: path.join(repo, ".devharmonics"), maxPaidTokens: admission?.budgets?.maxPaidTokens, taskId: runId }
+          : undefined,
       };
       const patchResult = await d.runLocalPatch({ task, client: d.sendMessages, runsRoot: evidenceRoot, env });
       stages.worker = {
@@ -260,45 +288,58 @@ export async function runPipeline({
         rmSync(worktree, { recursive: true, force: true });
       };
 
-      const workerResult = lane === "acp"
-        ? await d.runAcpWorker({
-            taskId: runId,
-            provider,
-            adapterCommand,
-            model,
-            prompt,
-            cwd: wt,
-            runsRoot: evidenceRoot,
-            permissionMode: "allow-edits",
-            timeoutMs,
-            admission: workerAdmission,
-            env,
-          })
-        : await d.runWorker({
-            taskId: runId,
-            provider,
-            model,
-            prompt,
-            cwd: wt,
-            runsRoot: evidenceRoot,
-            sandbox: "workspace-write",
-            permissionMode: "acceptEdits",
-            allowedTools: ["Read", "Edit", "Write"],
-            timeoutMs,
-            maxBudgetUsd,
-            admission: workerAdmission,
-            env,
-          });
-      stages.worker = { status: workerResult.receipt.status, receiptDir: workerResult.runDir, usage: workerResult.receipt.usage };
-      if (workerResult.receipt.status !== "completed") {
-        return { integrated: false, reason: `worker-${workerResult.receipt.status}`, runId, baseRef, stages, evidenceRoot };
+      // SPEC §2.3: an empty diff gets ONE bounded retry, with the fact stated
+      // plainly to the worker. A model that whiffs transiently (returns
+      // nothing) recovers; a model that genuinely cannot do the task still
+      // refuses after attempt 2, with both attempts' receipts on disk.
+      let workerResult;
+      let staged = "";
+      let attempts = 0;
+      const MAX_WORKER_ATTEMPTS = 2;
+      let attemptPrompt = gatedPrompt;
+      for (;;) {
+        attempts += 1;
+        workerResult = lane === "acp"
+          ? await d.runAcpWorker({
+              taskId: runId,
+              provider,
+              adapterCommand,
+              model,
+              prompt: attemptPrompt,
+              cwd: wt,
+              runsRoot: evidenceRoot,
+              permissionMode: "allow-edits",
+              timeoutMs,
+              admission: workerAdmission,
+              env,
+            })
+          : await d.runWorker({
+              taskId: runId,
+              provider,
+              model,
+              prompt: attemptPrompt,
+              cwd: wt,
+              runsRoot: evidenceRoot,
+              sandbox: "workspace-write",
+              permissionMode: "acceptEdits",
+              allowedTools: ["Read", "Edit", "Write"],
+              timeoutMs,
+              maxBudgetUsd,
+              admission: workerAdmission,
+              env,
+            });
+        stages.worker = { status: workerResult.receipt.status, receiptDir: workerResult.runDir, usage: workerResult.receipt.usage, attempts };
+        if (workerResult.receipt.status !== "completed") {
+          return { integrated: false, reason: `worker-${workerResult.receipt.status}`, runId, baseRef, stages, evidenceRoot };
+        }
+        git(wt, ["add", "-A"]);
+        staged = git(wt, ["diff", "--cached", "--stat"]).stdout.trim();
+        if (staged || attempts >= MAX_WORKER_ATTEMPTS) break;
+        attemptPrompt = `${gatedPrompt}\n\n[DevHarmonics] Your previous attempt completed but changed no files (empty diff). This is your second and final attempt: make the requested change, or state clearly why it cannot be made.`;
       }
-
-      git(wt, ["add", "-A"]);
-      const staged = git(wt, ["diff", "--cached", "--stat"]).stdout.trim();
       if (!staged) {
         stages.commit = { committed: false };
-        return { integrated: false, reason: "worker-empty-diff", runId, baseRef, stages, evidenceRoot };
+        return { integrated: false, reason: `worker-empty-diff (after ${attempts} attempts)`, runId, baseRef, stages, evidenceRoot };
       }
       const committed = git(wt, ["commit", "-m", `devharmonics ${runId}: ${provider}${model ? `:${model}` : ""}`]);
       if (!committed.ok) return { integrated: false, reason: `commit-failed: ${committed.stderr.trim()}`, runId, baseRef, stages, evidenceRoot };
@@ -360,12 +401,16 @@ export async function runPipeline({
       // null ("not checked") until a structured worker-claims source exists.
       // The artifact-lens reviewer still judges the real diff, so the actual
       // protection is unchanged.
+      // Paid http reviewer: same metering as the http worker call.
+      const pipelineReviewer = reviewer?.lane === "http" && reviewer.apiKeyEnvVar
+        ? { ...reviewer, paidBudget: { stateRoot: path.join(repo, ".devharmonics"), maxPaidTokens: admission?.budgets?.maxPaidTokens, taskId: runId } }
+        : reviewer;
       const review = await runReview({
         repository: repo,
         integrationBranch,
         baseRef,
         goal: prompt,
-        reviewer,
+        reviewer: pipelineReviewer,
         claimedPaths: null,
         checkReceiptsSummary: stages.validator
           ? `Validator: ${stages.validator.command}
@@ -488,9 +533,12 @@ export function parseReviewerSpec(spec, config) {
     // endpoint now comes from config by provider name.
     if (parts.length < 3) throw new Error('--reviewer http form is "http:provider:model"');
     const provider = parts[1];
-    const baseUrl = config?.endpoints?.[provider]?.baseUrl;
+    const endpoint = config?.endpoints?.[provider];
+    const baseUrl = endpoint?.baseUrl;
     if (!baseUrl) throw new Error(`--reviewer http:${provider}: no endpoints.${provider}.baseUrl in config`);
-    return { lane: "http", provider, model: parts.slice(2).join(":"), baseUrl };
+    // A credentialed endpoint's reviewer call is a PAID call: carry the env-var
+    // name so the client meters it (the caller attaches the paid budget).
+    return { lane: "http", provider, model: parts.slice(2).join(":"), baseUrl, apiKeyEnvVar: endpoint?.apiKeyEnvVar ?? null };
   }
   if (parts.length < 2) throw new Error('--reviewer must be "provider:model" or "http:provider:model"');
   return { lane: "subprocess", provider: parts[0], model: parts.slice(1).join(":") };
@@ -572,12 +620,22 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
   const { config } = loadConfig(options.configPath);
   const files = options.files ? options.files.split(",").map((s) => s.trim()).filter(Boolean) : null;
   let baseUrl = options.baseUrl;
+  let apiKeyEnvVar = null;
   if (options.lane === "http" && !baseUrl) {
-    baseUrl = config?.endpoints?.[options.provider]?.baseUrl ?? null;
+    const endpoint = config?.endpoints?.[options.provider];
+    baseUrl = endpoint?.baseUrl ?? null;
     if (!baseUrl) throw new Error(`--base-url is required for the http lane (no endpoints.${options.provider}.baseUrl in config either)`);
+    // A config endpoint carrying apiKeyEnvVar is the PAID lane opt-in; an
+    // explicit --base-url stays keyless (no way to name a credential for it).
+    apiKeyEnvVar = endpoint?.apiKeyEnvVar ?? null;
   }
 
-  const result = await runPipeline({
+  // QA-008 (owner decision): state refusals (dirty tree, reused task-id) are
+  // REFUSED — exit 1 with the refusal printed — not usage errors. Everything
+  // else that throws stays a genuine error (exit 2 via cli.mjs).
+  let result;
+  try {
+    result = await runPipeline({
     repository: options.repository,
     prompt: options.prompt,
     provider: options.provider,
@@ -589,13 +647,21 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
     tampercheckPath: options.tampercheckPath,
     expectedTampercheckSha256: options.expectedTampercheckSha256,
     admission: { budgets: config.budgets },
+    apiKeyEnvVar,
     taskId: options.taskId,
     timeoutMs: Math.round(options.timeoutMinutes * 60_000),
     lane: options.lane,
     files,
     adapterCommand: options.adapter,
     baseUrl,
-  });
+    });
+  } catch (error) {
+    if (error instanceof RefusalError) {
+      write(`outcome:     REFUSED — ${error.reason}\n${error.message}\n`);
+      return 1;
+    }
+    throw error;
+  }
 
   if (options.asJson) {
     write(`${JSON.stringify(result, null, 2)}\n`);

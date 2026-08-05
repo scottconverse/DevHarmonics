@@ -259,3 +259,126 @@ test("system/tools/tool_choice are included in the request body when provided", 
   assert.equal(capturedBody.tools[0].name, "t");
   assert.deepEqual(capturedBody.tool_choice, { type: "auto" });
 });
+
+// --- PAID-LANE BUDGET (owner decision 2026-08-05 night) ---------------------
+// A call carrying a real credential must be metered by the money half of the
+// admission ledger, fail closed without a configured budget, reserve before
+// the request, and reconcile with the response's real usage after.
+
+import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+const OK_MESSAGE = {
+  type: "message",
+  model: "claude-test",
+  stop_reason: "end_turn",
+  content: [{ type: "text", text: "ok" }],
+  usage: { input_tokens: 40, output_tokens: 10 },
+};
+
+test("paid: a credentialed call WITHOUT a configured budget is refused before any request is sent", async (t) => {
+  let requests = 0;
+  const result = await withServer(
+    jsonHandler(() => { requests += 1; return { body: OK_MESSAGE }; }),
+    (baseUrl) => sendMessages({
+      baseUrl,
+      model: "claude-test",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "sk-real-credential",
+    }),
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.error, /^paid-budget-unconfigured/);
+  assert.equal(requests, 0, "the metered endpoint must never be reached un-metered");
+});
+
+test("paid: reservation before the request, reconciliation with REAL usage after — replayable from the ledger", async (t) => {
+  const stateRoot = mkdtempSync(path.join(tmpdir(), "dh-paid-"));
+  t.after(() => rmSync(stateRoot, { recursive: true, force: true }));
+  const result = await withServer(
+    jsonHandler(() => ({ body: OK_MESSAGE })),
+    (baseUrl) => sendMessages({
+      baseUrl,
+      model: "claude-test",
+      messages: [{ role: "user", content: "hi" }],
+      maxTokens: 64,
+      apiKey: "sk-real-credential",
+      paidBudget: { stateRoot, maxPaidTokens: 10_000, taskId: "paid-ok" },
+    }),
+  );
+  assert.equal(result.ok, true, result.error);
+  const ledger = readFileSync(path.join(stateRoot, "usage.jsonl"), "utf8").split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l));
+  assert.equal(ledger.length, 2, "one reservation + one terminal");
+  assert.equal(ledger[0].stage, "reserved");
+  assert.equal(ledger[0].paid, true);
+  assert.deepEqual(ledger[1].usage, { total_tokens: 50 }, "reconciled with the response's REAL 40+10 tokens, not the estimate");
+});
+
+test("paid: a budget that cannot cover the reservation refuses — the request is never sent", async (t) => {
+  const stateRoot = mkdtempSync(path.join(tmpdir(), "dh-paid-over-"));
+  t.after(() => rmSync(stateRoot, { recursive: true, force: true }));
+  let requests = 0;
+  const result = await withServer(
+    jsonHandler(() => { requests += 1; return { body: OK_MESSAGE }; }),
+    (baseUrl) => sendMessages({
+      baseUrl,
+      model: "claude-test",
+      messages: [{ role: "user", content: "hi" }],
+      maxTokens: 64,
+      apiKey: "sk-real-credential",
+      paidBudget: { stateRoot, maxPaidTokens: 10, taskId: "paid-over" },
+    }),
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.error, /^paid-budget-exceeded/);
+  assert.equal(requests, 0);
+});
+
+test("paid: a failed request reconciles as UNKNOWN usage, which closes the paid lane until reconciled deliberately", async (t) => {
+  const stateRoot = mkdtempSync(path.join(tmpdir(), "dh-paid-unknown-"));
+  t.after(() => rmSync(stateRoot, { recursive: true, force: true }));
+  // Server returns a 500 with no usage: the spend is unknowable.
+  await withServer(
+    jsonHandler(() => ({ status: 500, body: { error: { message: "boom" } } })),
+    (baseUrl) => sendMessages({
+      baseUrl,
+      model: "claude-test",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "sk-real-credential",
+      paidBudget: { stateRoot, maxPaidTokens: 10_000, taskId: "paid-boom" },
+    }),
+  );
+  // The next paid call must be refused: the ledger now contains a paid
+  // terminal with unknown usage, and summarizeLedger throws on it (the
+  // "unknown paid usage closes the paid lane" rule).
+  const next = await withServer(
+    jsonHandler(() => ({ body: OK_MESSAGE })),
+    (baseUrl) => sendMessages({
+      baseUrl,
+      model: "claude-test",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "sk-real-credential",
+      paidBudget: { stateRoot, maxPaidTokens: 10_000, taskId: "paid-after-boom" },
+    }),
+  );
+  assert.equal(next.ok, false);
+  assert.match(next.error, /paid-budget-exceeded/);
+  assert.match(next.error, /without trustworthy token usage/);
+});
+
+test("unpaid: key-less local calls are untouched — no budget required, no ledger written", async (t) => {
+  const stateRoot = mkdtempSync(path.join(tmpdir(), "dh-unpaid-"));
+  t.after(() => rmSync(stateRoot, { recursive: true, force: true }));
+  const result = await withServer(
+    jsonHandler(() => ({ body: OK_MESSAGE })),
+    (baseUrl) => sendMessages({
+      baseUrl,
+      model: "local-model",
+      messages: [{ role: "user", content: "hi" }],
+      paidBudget: { stateRoot, maxPaidTokens: 10_000, taskId: "unpaid" },
+    }),
+  );
+  assert.equal(result.ok, true);
+  assert.equal(existsSync(path.join(stateRoot, "usage.jsonl")), false, "an unpaid call writes nothing to the money ledger");
+});

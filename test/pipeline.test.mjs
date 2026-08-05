@@ -114,10 +114,12 @@ function buildEnv(...fixtureDirs) {
 // The write action varies by mode so each pipeline scenario gets exactly the
 // worker behavior it needs to exercise.
 
-function providerImplSource({ writeFile, content, exitCode }) {
-  const writeStatement = writeFile
-    ? `writeFileSync(path.join(process.cwd(), ${JSON.stringify(writeFile)}), ${JSON.stringify(content)});`
-    : "";
+function providerImplSource({ writeFile, content, exitCode, retryAware = false }) {
+  const writeStatement = retryAware
+    ? `if (stdin.includes("second and final attempt")) writeFileSync(path.join(process.cwd(), "add.mjs"), "export function add(a, b) {\\n  return a + b;\\n}\\n");`
+    : writeFile
+      ? `writeFileSync(path.join(process.cwd(), ${JSON.stringify(writeFile)}), ${JSON.stringify(content)});`
+      : "";
   return `import { writeFileSync } from "node:fs";
 import path from "node:path";
 const args = process.argv.slice(2);
@@ -142,6 +144,9 @@ const PROVIDER_MODES = Object.freeze({
   noop: { writeFile: null, content: null, exitCode: 0 },
   // Exits nonzero, changes nothing (worker-failed case).
   fail: { writeFile: null, content: null, exitCode: 7 },
+  // Whiffs on attempt 1 (no write), fixes on attempt 2 — but ONLY when the
+  // prompt carries the pipeline's empty-diff retry notice (SPEC 2.3 test).
+  retryfix: { writeFile: null, content: null, exitCode: 0, retryAware: true },
 });
 
 function fakeProviderDir(mode) {
@@ -293,7 +298,7 @@ test("worker produced nothing: fake CLI exits 0 with no file written -> worker-e
     });
 
     assert.equal(result.integrated, false, JSON.stringify(result));
-    assert.equal(result.reason, "worker-empty-diff");
+    assert.match(result.reason, /^worker-empty-diff \(after 2 attempts\)/);
     assert.equal(result.stages.commit.committed, false);
 
     // QA-005: a worker branch that never advanced past baseRef has provably
@@ -601,7 +606,7 @@ test("cli run: refused pipeline exits 1", () => {
     assert.equal(run.status, 1, `stdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
     const result = JSON.parse(run.stdout);
     assert.equal(result.integrated, false, JSON.stringify(result));
-    assert.equal(result.reason, "worker-empty-diff");
+    assert.match(result.reason, /^worker-empty-diff \(after 2 attempts\)/);
     assertWorktreeHygiene(repo, result.runId);
   } finally {
     for (const d of [repo, providerDir]) rmSync(d, { recursive: true, force: true });
@@ -717,4 +722,38 @@ test("TEST-006/QA-009: run's --tampercheck-sha256 parse errors — bad hex exits
   const missing = spawnSync(process.execPath, [CLI, "run", "--repository", ".", "--prompt", "p", "--provider", "codex", "--tampercheck-sha256"], { encoding: "utf8", timeout: 30_000 });
   assert.equal(missing.status, 2);
   assert.match(missing.stderr, /got: missing value/);
+});
+
+
+test("SPEC 2.3: an empty first attempt gets ONE bounded retry with the fact stated — and a retry-aware worker succeeds on it", async () => {
+  const repo = initFixtureRepo();
+  const providerDir = fakeProviderDir("retryfix");
+  const tampercheckDir = fakeTampercheckDir("clean");
+  try {
+    const result = await runPipeline({
+      repository: repo,
+      prompt: "fix add()",
+      provider: "codex",
+      model: "fake-model-9b",
+      taskId: "retry1",
+      env: buildEnv(providerDir, tampercheckDir),
+      timeoutMs: 20_000,
+    });
+    assert.equal(result.integrated, true, JSON.stringify(result));
+    assert.equal(result.stages.worker.attempts, 2, "the second, notice-carrying attempt must be the one that landed");
+  } finally {
+    for (const d of [repo, providerDir, tampercheckDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("QA-008: a dirty tracked tree is a REFUSAL through the real CLI — exit 1, not a usage error", () => {
+  const repo = initFixtureRepo();
+  try {
+    writeFileSync(path.join(repo, "add.mjs"), `${BUGGY_ADD}// dirty\n`);
+    const run = spawnSync(process.execPath, [CLI, "run", "--repository", repo, "--prompt", "p", "--provider", "codex", "--model", "m"], { encoding: "utf8", timeout: 30_000 });
+    assert.equal(run.status, 1, run.stderr || run.stdout);
+    assert.match(run.stdout, /REFUSED — dirty-tracked-tree/);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
 });

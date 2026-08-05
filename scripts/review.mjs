@@ -318,6 +318,10 @@ export async function runReview({
   evidenceRoot,
   env = process.env,
   timeoutMs = 10 * 60_000,
+  // D1 fan-out ceilings: reviewers are workers too. Threaded through to the
+  // subprocess reviewer's runWorker call so a reviewer meters against the
+  // caller's state root and budgets, never a throwaway default.
+  admission = undefined,
   deps = {},
 }) {
   assertGitRoot(repository);
@@ -402,6 +406,7 @@ export async function runReview({
         sandbox: "read-only",
         allowedTools: ["Read"],
         timeoutMs,
+        admission,
         env,
       });
       modelReview = interpretWorkerResult(runResult, identity);

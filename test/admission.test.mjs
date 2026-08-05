@@ -246,3 +246,24 @@ test("deriveStateRoot finds the enclosing .devharmonics, else meters in a .fanou
   const outside = path.join(tmpdir(), "loose-runs");
   assert.equal(deriveStateRoot(outside), path.join(path.resolve(outside), ".fanout"));
 });
+
+test("TEST-004: a reservation the meter cannot date counts toward the cap, never out of it", async (t) => {
+  // Missing and malformed startedAt both count as always-in-window.
+  const missing = '{"stage":"reserved","kind":"worker","invocationId":"inv-m","taskId":"m","paid":false,"reservedTokens":0}';
+  const malformed = '{"stage":"reserved","kind":"worker","invocationId":"inv-g","taskId":"g","paid":false,"reservedTokens":0,"startedAt":"not-a-date"}';
+  const summary = summarizeFanout([missing, malformed].join("\n"), { since: Date.now() });
+  assert.deepEqual(summary, { workers: 2, tokens: 0 }, "undateable reservations must fail toward the cap");
+});
+
+test("TEST-005: concurrent admits race the same lock and never oversubscribe the worker ceiling", async (t) => {
+  const root = tempRoot(t, "dh-fanout-race-");
+  const budgets = { maxWorkers: 2, maxTotalTokens: 1_000_000, windowHours: 24 };
+  const verdicts = await Promise.all(
+    ["r1", "r2", "r3", "r4", "r5"].map((id) => admitWorker({ stateRoot: root, taskId: id, lane: "subprocess", budgets })),
+  );
+  const admitted = verdicts.filter((v) => v.admitted);
+  const refused = verdicts.filter((v) => !v.admitted);
+  assert.equal(admitted.length, 2, JSON.stringify(verdicts));
+  assert.equal(refused.length, 3);
+  for (const r of refused) assert.match(r.reason, /fanout-workers-exceeded/);
+});

@@ -470,3 +470,60 @@ test("runPipeline: lane subprocess (default) with injected deps.runWorker still 
 
   assert.equal(worktreeCount(repo), 1, "no leftover worktrees after a subprocess-lane run");
 }));
+
+// --- Audit fix-pass: QA-001 set http reviewer + TEST-006 set option threading --
+
+test("QA-001: set --reviewer http:provider:model resolves the default endpoint (the config wrapper bug is dead)", async () => {
+  let captured = null;
+  const code = await setCommand(
+    [
+      "--member", "a=/tmp/fake-a:wb",
+      "--member", "b=/tmp/fake-b:wb",
+      "--reviewer", "http:ollama:somemodel",
+      "--json",
+    ],
+    {
+      write: () => {},
+      deps: {
+        planIntegrationSet: () => ({ setId: "s", members: [] }),
+        integrateSet: async (args) => {
+          captured = args;
+          return { setId: "s", setReady: true, blockedBy: [], members: [], evidencePath: "x" };
+        },
+      },
+    },
+  );
+  assert.equal(code, 0);
+  assert.ok(captured.reviewer, "the reviewer spec must have parsed");
+  assert.equal(captured.reviewer.lane, "http");
+  assert.equal(captured.reviewer.baseUrl, "http://127.0.0.1:11434",
+    "the default ollama endpoint must resolve — passing loadConfig()'s wrapper broke this deterministically");
+});
+
+test("TEST-006/ENG-001: set threads the tampercheck pin AND the operator budgets into integrateSet", async () => {
+  let captured = null;
+  const digest = "ab".repeat(32);
+  const code = await setCommand(
+    [
+      "--member", "a=/tmp/fake-a:wb",
+      "--member", "b=/tmp/fake-b:wb",
+      "--tampercheck-sha256", digest,
+      "--tampercheck-path", "C:/tools/tampercheck.EXE",
+      "--json",
+    ],
+    {
+      write: () => {},
+      deps: {
+        planIntegrationSet: () => ({ setId: "s", members: [] }),
+        integrateSet: async (args) => {
+          captured = args;
+          return { setId: "s", setReady: true, blockedBy: [], members: [], evidencePath: "x" };
+        },
+      },
+    },
+  );
+  assert.equal(code, 0);
+  assert.equal(captured.expectedTampercheckSha256, digest, "the pin must reach the engine from the CLI");
+  assert.equal(captured.tampercheckPath, "C:/tools/tampercheck.EXE");
+  assert.ok(captured.admission?.budgets?.maxWorkers > 0, "the operator budgets must reach the set's reviewers");
+});

@@ -196,6 +196,15 @@ export async function reservePaidUsage({
 export function summarizeFanout(ledgerText, { since = 0 } = {}) {
   const latestByInvocation = new Map();
   const admittedAt = new Map();
+  // TEST-004/ENG-006 (audit): a record the meter cannot DATE counts as always
+  // in-window — it errs toward the cap, never out of it. The old `|| 0` mapped
+  // a garbage timestamp to the epoch, which every rolling window then excluded
+  // as ancient: a fail-open hole in a fail-closed cap (and the old `?? 0`
+  // after Date.parse was dead — NaN is not nullish).
+  const dateOrInfinity = (value) => {
+    const parsed = Date.parse(value ?? "");
+    return Number.isFinite(parsed) ? parsed : Infinity;
+  };
   for (const [index, line] of ledgerText.split(/\r?\n/).entries()) {
     if (!line) continue;
     let entry;
@@ -206,13 +215,13 @@ export function summarizeFanout(ledgerText, { since = 0 } = {}) {
     }
     if (entry.kind !== "worker") continue;
     if (!entry.invocationId) throw new Error(`fan-out ledger line ${index + 1} has no invocationId`);
-    if (entry.stage === "reserved") admittedAt.set(entry.invocationId, Date.parse(entry.startedAt ?? "") || 0);
+    if (entry.stage === "reserved") admittedAt.set(entry.invocationId, dateOrInfinity(entry.startedAt));
     latestByInvocation.set(entry.invocationId, entry);
   }
   let workers = 0;
   let tokens = 0;
   for (const [invocationId, entry] of latestByInvocation) {
-    const startedAt = admittedAt.get(invocationId) ?? Date.parse(entry.startedAt ?? entry.finishedAt ?? "") ?? 0;
+    const startedAt = admittedAt.get(invocationId) ?? dateOrInfinity(entry.startedAt ?? entry.finishedAt);
     if (startedAt < since) continue;
     workers += 1;
     const total = entry.usage?.total_tokens;
@@ -246,7 +255,7 @@ export async function admitWorker({ stateRoot, taskId, lane, budgets, metadata =
         workers,
         tokens,
         ledgerPath,
-        reason: `fanout-workers-exceeded: ${workers} of ${maxWorkers} workers already admitted in the last ${windowHours}h (ledger: ${ledgerPath}). Raise budgets.maxWorkers deliberately, or wait for the window to pass.`,
+        reason: `fanout-workers-exceeded: ${workers} of ${maxWorkers} workers already admitted in the last ${windowHours}h (ledger: ${ledgerPath}). Raise budgets.maxWorkers in a config file passed via --config, rotate the ledger file deliberately, or wait for the window to pass.`,
       };
     }
     if (tokens >= maxTotalTokens) {
@@ -255,7 +264,7 @@ export async function admitWorker({ stateRoot, taskId, lane, budgets, metadata =
         workers,
         tokens,
         ledgerPath,
-        reason: `fanout-tokens-exceeded: ${tokens} of ${maxTotalTokens} tokens already spent in the last ${windowHours}h (ledger: ${ledgerPath}). Raise budgets.maxTotalTokens deliberately, or wait for the window to pass.`,
+        reason: `fanout-tokens-exceeded: ${tokens} of ${maxTotalTokens} tokens already spent in the last ${windowHours}h (ledger: ${ledgerPath}). Raise budgets.maxTotalTokens in a config file passed via --config, rotate the ledger file deliberately, or wait for the window to pass.`,
       };
     }
     const invocationId = createInvocationId();

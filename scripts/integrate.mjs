@@ -363,7 +363,12 @@ export async function integrateWorkerBranch({
       path: resolvedTampercheck,
       sha256: tampercheckSha256,
       source: tampercheckPath ? "configured-absolute-path" : "PATH-resolved",
+      // QA-002 (audit): `pinned` records that a pin was REQUESTED; `verified`
+      // records that the comparison actually PASSED. The old single flag made
+      // a refused mismatch print "sha256 verified" — the failed strict mode
+      // must never look like the succeeded strict mode.
       pinned: Boolean(expectedTampercheckSha256),
+      verified: false,
     };
 
     // Checksum pin: the only local check a stub author cannot satisfy by
@@ -381,6 +386,7 @@ export async function integrateWorkerBranch({
         reason = "tampercheck-unavailable";
         return { integrated: false, reason, integrationHead: null, gates, evidencePath: writeEvidence() };
       }
+      gates.tampercheckBinary.verified = true;
     }
 
     // Identity check before trusting the gate (falsification finding F-1,

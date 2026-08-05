@@ -87,13 +87,18 @@ function printResult(result, asJson, write) {
   if (fingerprinted) write(describeTampercheckIdentity(fingerprinted.gates.tampercheckBinary));
   // Never a bare READY: say what evidence backs it, as `run` does. The set is only
   // as well-evidenced as its weakest member, so that is what is reported.
-  const assurance = weakestAssurance(result.members);
+  // QA-002 (audit): only a READY set gets the "gates passed" assurance sentence —
+  // a blocked set's story is its member reasons and blockedBy, and printing
+  // "deterministic gates passed" under NOT READY was false when gates refused.
+  const assurance = result.setReady ? weakestAssurance(result.members) : null;
   if (assurance) {
     const required = result.members.find((m) => m.requiredEvidence)?.requiredEvidence ?? [];
     write(`assurance: ${describeAssurance(assurance, required)}\n`);
-    const missing = [...new Set(result.members.flatMap((m) => m.missingEvidence ?? []))];
-    if (missing.length) write(`           REFUSED for missing evidence: ${missing.join(", ")}\n`);
   }
+  // The missing-evidence disclosure prints for BLOCKED sets too — an
+  // insufficient-evidence refusal should name what was missing right here.
+  const missing = [...new Set(result.members.flatMap((m) => m.missingEvidence ?? []))];
+  if (missing.length) write(`${assurance ? "           " : "missing:   "}REFUSED for missing evidence: ${missing.join(", ")}\n`);
   if (!result.setReady) write(`blockedBy: ${result.blockedBy.join(", ")}\n`);
   write(`evidence:  ${result.evidencePath}\n`);
 }
@@ -105,7 +110,7 @@ export async function setCommand(argv, {
 } = {}) {
   const { planIntegrationSet: planFn = planIntegrationSet, integrateSet: integrateFn = integrateSet } = deps;
 
-  const options = { members: [], bases: [], evidenceRoot: null, asJson: false, check: null, reviewer: null, goal: null, requireEvidence: null, tampercheckPath: null, expectedTampercheckSha256: null };
+  const options = { members: [], bases: [], evidenceRoot: null, asJson: false, check: null, reviewer: null, goal: null, requireEvidence: null, tampercheckPath: null, expectedTampercheckSha256: null, configPath: null };
   for (let i = 0; i < argv.length; i += 1) {
     const next = () => { i += 1; return argv[i]; };
     switch (argv[i]) {
@@ -116,6 +121,7 @@ export async function setCommand(argv, {
       case "--reviewer": options.reviewer = next(); break;
       case "--goal": options.goal = next(); break;
       case "--require-evidence": options.requireEvidence = next(); break;
+      case "--config": options.configPath = next(); break;
       case "--tampercheck-path": options.tampercheckPath = next(); break;
       case "--tampercheck-sha256": {
         const raw = next();
@@ -150,13 +156,20 @@ export async function setCommand(argv, {
   // itself needs a space cannot be expressed this way — a known, documented limit.
   const [checkCommand, ...checkArgs] = String(options.check ?? "").split(" ").filter(Boolean);
   const check = checkCommand ? { command: checkCommand, args: checkArgs } : null;
+  // QA-001 (audit): this used to pass loadConfig()'s {config, source} WRAPPER
+  // where parseReviewerSpec expects the config itself, so every http reviewer
+  // spec was refused even against the built-in default endpoints.
+  const { config } = loadConfig(options.configPath);
   // Same reviewer grammar as `run`: "provider:model" or "http:provider:model".
-  const reviewer = options.reviewer ? parseReviewerSpec(options.reviewer, loadConfig()) : null;
+  const reviewer = options.reviewer ? parseReviewerSpec(options.reviewer, config) : null;
   const result = await integrateFn({
     set: plan, evidenceRoot, env, check, reviewer, goal: options.goal,
     requireEvidence: parseRequireEvidence(options.requireEvidence),
     tampercheckPath: options.tampercheckPath,
     expectedTampercheckSha256: options.expectedTampercheckSha256,
+    // ENG-001/ENG-003 (audit): the operator's budgets reach every member's
+    // reviewer; each reviewer meters against its own member repository.
+    admission: { budgets: config.budgets },
   });
 
   printResult(result, options.asJson, write);

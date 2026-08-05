@@ -299,11 +299,11 @@ test("flag validation: missing --cwd rejects", async () => {
 test("flag validation: --timeout-minutes must be a positive number -- zero and non-numeric both rejected", async () => {
   await assert.rejects(
     () => workerCommand(["--provider", "codex", "--prompt", "p", "--cwd", "unused", "--timeout-minutes", "0"]),
-    /--timeout-minutes must be a positive number/,
+    /--timeout-minutes must be a positive finite number/,
   );
   await assert.rejects(
     () => workerCommand(["--provider", "codex", "--prompt", "p", "--cwd", "unused", "--timeout-minutes", "not-a-number"]),
-    /--timeout-minutes must be a positive number/,
+    /--timeout-minutes must be a positive finite number/,
   );
 });
 
@@ -404,4 +404,53 @@ test("workerCommand in-process: a failed run (nonzero fake exit) resolves 1, and
   } finally {
     for (const d of [fixture, cwd, runsRoot]) rmSync(d, { recursive: true, force: true });
   }
+});
+
+// --- Audit fix-pass: ENG-001 per-surface budgets + QA-007 sandbox enum ------
+
+test("ENG-001: a --config budget of maxWorkers:1 is ENFORCED by the worker CLI — the second invocation refuses", async () => {
+  const fixture = fakeCodexDir(0);
+  const runsRoot = mkdtempSync(path.join(os.tmpdir(), "dh-workercmd-budget-"));
+  const cwd = mkdtempSync(path.join(os.tmpdir(), "dh-workercmd-budget-cwd-"));
+  const configDir = mkdtempSync(path.join(os.tmpdir(), "dh-workercmd-budget-cfg-"));
+  const configFile = path.join(configDir, "tight.json");
+  writeFileSync(configFile, JSON.stringify({ budgets: { maxWorkers: 1 } }));
+  const restorePath = process.env.PATH;
+  const restorePath2 = process.env.Path;
+  process.env.PATH = `${fixture}${path.delimiter}${restorePath ?? ""}`;
+  process.env.Path = process.env.PATH;
+  try {
+    const first = await workerCommand([
+      "--provider", "codex", "--model", "fake-model-9b", "--prompt", "p",
+      "--cwd", cwd, "--runs-root", runsRoot, "--config", configFile, "--json",
+    ]);
+    assert.equal(first, 0, "first worker under the cap must complete");
+    const second = await workerCommand([
+      "--provider", "codex", "--model", "fake-model-9b", "--prompt", "p",
+      "--cwd", cwd, "--runs-root", runsRoot, "--config", configFile, "--json",
+    ]);
+    assert.equal(second, 1, "second worker must be refused by the operator's cap");
+    const ledger = readFileSync(path.join(runsRoot, ".fanout", "usage.jsonl"), "utf8").split(/\r?\n/).filter(Boolean);
+    assert.equal(ledger.length, 2, "one reservation + one terminal; the refusal writes nothing");
+    const receipts = readdirSync(runsRoot).filter((n) => n !== ".fanout");
+    assert.equal(receipts.length, 2, "both attempts leave receipts");
+  } finally {
+    process.env.PATH = restorePath;
+    process.env.Path = restorePath2;
+    for (const d of [fixture, runsRoot, cwd, configDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("QA-007: worker --sandbox validates its advertised enum instead of forwarding garbage", async () => {
+  await assert.rejects(
+    () => workerCommand(["--provider", "codex", "--model", "m", "--prompt", "p", "--cwd", ".", "--sandbox", "utterly-bogus"]),
+    /--sandbox must be "read-only" or "workspace-write", got: "utterly-bogus"/,
+  );
+});
+
+test("UX-011: worker --timeout-minutes quotes the offending value like run's sibling flag", async () => {
+  await assert.rejects(
+    () => workerCommand(["--provider", "codex", "--model", "m", "--prompt", "p", "--cwd", ".", "--timeout-minutes", "nope"]),
+    /--timeout-minutes must be a positive finite number, got: "nope"/,
+  );
 });

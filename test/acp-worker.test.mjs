@@ -224,3 +224,38 @@ test("spawn failure (adapter command not found): failed receipt, never a throw",
     for (const d of [runsRoot, cwd, emptyDir]) rmSync(d, { recursive: true, force: true });
   }
 });
+
+// --- Audit fix-pass TEST-002: the ACP lane's D1 admission is enforced too ----
+
+test("TEST-002: an over-ceiling ACP worker is refused with an honest failed receipt and never spawns the adapter", async () => {
+  const { admitWorker } = await import("../scripts/admission.mjs");
+  const runsRoot = tmp("dh-acp-fanout-runs-");
+  const cwd = tmp("dh-acp-fanout-cwd-");
+  const stateRoot = tmp("dh-acp-fanout-state-");
+  const budgets = { maxWorkers: 1, maxConcurrentWorkers: 3, maxTotalTokens: 1_000_000, windowHours: 24 };
+  try {
+    // Consume the single worker unit directly, then ask the ACP lane for one more.
+    const seed = await admitWorker({ stateRoot, taskId: "squatter", lane: "acp", budgets });
+    assert.equal(seed.admitted, true);
+
+    const { receipt, runDir, events } = await runAcpWorker({
+      taskId: "acp-over-ceiling",
+      provider: "claude",
+      adapterCommand: process.execPath,
+      adapterArgs: [fixture],
+      prompt: "p",
+      cwd,
+      runsRoot,
+      timeoutMs: 30_000,
+      admission: { stateRoot, budgets },
+    });
+    assert.equal(receipt.status, "failed");
+    assert.match(receipt.exit.error, /fanout-workers-exceeded: 1 of 1/);
+    assert.equal(events.length, 0, "a refused ACP worker must never have spawned its adapter");
+    assert.equal(existsSync(path.join(runDir, "receipt.json")), true, "the refusal still leaves a receipt");
+    const ledger = readFileSync(path.join(stateRoot, "usage.jsonl"), "utf8").split(/\r?\n/).filter(Boolean);
+    assert.equal(ledger.length, 1, "only the seed reservation — the refused attempt writes nothing");
+  } finally {
+    for (const d of [runsRoot, cwd, stateRoot]) rmSync(d, { recursive: true, force: true });
+  }
+});

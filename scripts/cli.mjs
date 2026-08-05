@@ -3,32 +3,34 @@ import process from "node:process";
 import { doctorCommand } from "./doctor.mjs";
 
 const USAGE = `Usage:
-  devharmonics doctor [--json] [--config <file>]
-  devharmonics qualify [--execute] [--json] [--lane L] [--role R] [--skip-current]
+  devharmonics doctor [--json] [--config <file>] [--repository <repo>]
+  devharmonics qualify [--execute] [--json] [--config <file>] [--lane L] [--role R]
+                       [--candidate <substring>] [--skip-current]
+                       [--work-root <dir>] [--state-root <dir>]
   devharmonics onboard <repo> [--apply] [--force] [--json]
   devharmonics run --repository <repo> --prompt <text> --provider <p>
-                   [--model m] [--check "cmd args"] [--task-id t]
-                   [--lane subprocess|http|acp] [--files a,b,c]
+                   [--model m (required: codex, claude)] [--check "cmd args"]
+                   [--task-id t] [--lane subprocess|http|acp] [--files a,b,c]
                    [--adapter <cmd>] [--base-url <url>]
                    [--reviewer <spec>] [--require-evidence validator,review]
                    [--timeout-minutes <n>] [--max-budget-usd <n>]
                    [--tampercheck-path <abs>] [--tampercheck-sha256 <hex64>]
-                   [--json]
+                   [--config <file>] [--json]
   devharmonics worker --provider <codex|claude|agy> --prompt <text> --cwd <dir>
-                      [--model <id>] [--task-id <id>] [--runs-root <dir>]
-                      [--sandbox read-only|workspace-write]
+                      [--model <id> (required: codex, claude)] [--task-id <id>]
+                      [--runs-root <dir>] [--sandbox read-only|workspace-write]
                       [--permission-mode <mode>] [--allowed-tools a,b,c]
-                      [--timeout-minutes <n>] [--json]
+                      [--timeout-minutes <n>] [--config <file>] [--json]
   devharmonics acp --prompt <text> --cwd <dir> [--adapter <cmd>]
                    [--task-id <id>] [--runs-root <dir>]
                    [--permission-mode deny|allow-edits]
-                   [--timeout-minutes <n>] [--json]
+                   [--timeout-minutes <n>] [--config <file>] [--json]
   devharmonics set --member "<repositoryId>=<repoPath>:<workerBranch>" (2+)
                    [--base "<repositoryId>=<ref>"] [--evidence-root <dir>]
                    [--check "cmd args"] [--reviewer <spec>] [--goal <text>]
                    [--require-evidence validator,review]
                    [--tampercheck-path <abs>] [--tampercheck-sha256 <hex64>]
-                   [--json]
+                   [--config <file>] [--json]
 
 Commands:
   doctor   Probe every capability the factory depends on and report

@@ -427,3 +427,46 @@ test("qualifyCommand rejects an unknown flag, an unknown --lane, and an unknown 
   await assert.rejects(() => qualifyCommand(["--lane", "acp"]), /--lane must be/);
   await assert.rejects(() => qualifyCommand(["--role", "not_a_role"]), /--role must be one of/);
 });
+
+// --- Audit fix-pass TEST-008: the sweep's admission threading is real --------
+
+test("TEST-008: executeQualification threads admission (defaulting to the qualifications dir) into runWorker", async (t) => {
+  const dir = tmp("dh-qualify-admission-");
+  try {
+    const qualificationsPath = path.join(dir, "qualifications.jsonl");
+    const workRoot = path.join(dir, "work");
+    let captured = null;
+    const capturingRunWorker = async (args) => {
+      captured = args.admission;
+      return {
+        receipt: { status: "completed", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, receiptId: "r" },
+        runDir: path.join(dir, "rd"),
+        parsed: { finalText: "DEVHARMONICS_ANALYSIS_QUALIFIED" },
+      };
+    };
+    await executeQualification({
+      candidate: subprocessCandidate,
+      role: "analysis",
+      workRoot,
+      qualificationsPath,
+      deps: { runWorker: capturingRunWorker },
+    });
+    assert.ok(captured, "runWorker must receive an admission argument");
+    assert.equal(captured.stateRoot, path.dirname(qualificationsPath),
+      "a sweep meters against ONE ledger — the qualifications dir — not per-fixture roots");
+
+    // And an explicit admission (qualify-command threads config budgets) wins verbatim.
+    const explicit = { stateRoot: path.join(dir, "custom"), budgets: { maxWorkers: 7, maxConcurrentWorkers: 2, maxTotalTokens: 9, windowHours: 1 } };
+    await executeQualification({
+      candidate: subprocessCandidate,
+      role: "analysis",
+      workRoot,
+      qualificationsPath,
+      admission: explicit,
+      deps: { runWorker: capturingRunWorker },
+    });
+    assert.deepEqual(captured, explicit);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

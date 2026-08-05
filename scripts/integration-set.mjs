@@ -191,6 +191,11 @@ export async function integrateSet({
   // operator environment, one binary, one pin.
   tampercheckPath = null,
   expectedTampercheckSha256 = null,
+  // ENG-001/ENG-003 (audit): { budgets? } — the operator's fan-out budgets for
+  // this set's reviewers. Each member's reviewer meters against that MEMBER
+  // repository's own .devharmonics, so a set's reviewer spend accumulates in
+  // the same ledger as that repo's `run` workers — never a throwaway temp dir.
+  admission = undefined,
   deps = {},
 }) {
   if (!set || typeof set !== "object") failIntegrate("set must be an object (from planIntegrationSet)");
@@ -295,6 +300,7 @@ export async function integrateSet({
           evidenceRoot: path.join(evidenceRoot, "members", member.repositoryId),
           env,
           timeoutMs,
+          admission: { stateRoot: path.join(member.repository, ".devharmonics"), ...(admission ?? {}) },
           deps,
         });
         reviewByRepositoryId.set(member.repositoryId, {

@@ -91,6 +91,11 @@ export async function runPipeline({
   // REACHABLE — these were library-only knobs no CLI caller could set.
   tampercheckPath = null,          // absolute path — never consult PATH at all
   expectedTampercheckSha256 = null, // content pin; mismatch refuses the gate
+  // D1 fan-out ceilings (audit ENG-001): { stateRoot?, budgets? } — the
+  // operator's budgets, threaded to every worker AND the reviewer. When set,
+  // the state root defaults to the repository's own .devharmonics so caps
+  // accumulate where the work happens.
+  admission = undefined,
   taskId = null,
   timeoutMs = 15 * 60_000,
   env = process.env,
@@ -129,6 +134,12 @@ export async function runPipeline({
   const repo = path.resolve(repository);
   assertCleanTrackedTree(repo);
   ensureExcluded(repo);
+
+  // The repository's .devharmonics is the canonical meter for this pipeline's
+  // worker AND its reviewer; a caller-supplied stateRoot still wins.
+  const workerAdmission = admission
+    ? { stateRoot: path.join(repo, ".devharmonics"), ...admission }
+    : undefined;
 
   const runId = (taskId ?? `run-${randomUUID().slice(0, 8)}`).toLowerCase();
   const baseRef = git(repo, ["rev-parse", "HEAD"]).stdout.trim();
@@ -260,6 +271,7 @@ export async function runPipeline({
             runsRoot: evidenceRoot,
             permissionMode: "allow-edits",
             timeoutMs,
+            admission: workerAdmission,
             env,
           })
         : await d.runWorker({
@@ -274,6 +286,7 @@ export async function runPipeline({
             allowedTools: ["Read", "Edit", "Write"],
             timeoutMs,
             maxBudgetUsd,
+            admission: workerAdmission,
             env,
           });
       stages.worker = { status: workerResult.receipt.status, receiptDir: workerResult.runDir, usage: workerResult.receipt.usage };
@@ -362,16 +375,15 @@ ${(stages.validator.stdoutTail || "").slice(-800)}`
         evidenceRoot,
         env,
         timeoutMs,
+        admission: workerAdmission,
       });
       const divergenceCount = review.divergence === null ? null : review.divergence.length;
       stages.review = { verdict: review.verdict, findings: review.findings?.length ?? 0, divergence: divergenceCount, receipt: review.reviewReceiptPath };
-      if (review.verdict !== "READY") {
-        const divergenceNote = divergenceCount === null ? "divergence not checked" : `${divergenceCount} divergence`;
-        return {
-          integrated: true, reviewed: false, reason: `review-not-ready (${review.findings?.length ?? 0} finding(s), ${divergenceNote})`,
-          runId, baseRef, integrationBranch, integrationHead: integration.integrationHead, stages, evidenceRoot,
-        };
-      }
+      // Deliberately NO early return on a NOT_READY verdict (audit DOC-004): the
+      // old early return skipped the evidence floor below, so
+      // `--require-evidence review` exited 0 on the exact case it exists for —
+      // a reviewer that ran and refused. The floor and the assurance ladder now
+      // see every review outcome; `set` always worked this way.
     }
 
     // Assurance (A4-6): report readiness qualified by the evidence that actually
@@ -391,9 +403,26 @@ ${(stages.validator.stdoutTail || "").slice(-800)}`
         integrated: true,
         reviewed: reviewPassed,
         assurance,
+        suiteQualification,
         requiredEvidence: requireEvidence,
         missingEvidence: missing,
         reason: `insufficient-evidence (missing: ${missing.join(", ")})`,
+        runId, baseRef, integrationBranch,
+        integrationHead: integration.integrationHead, stages, evidenceRoot,
+      };
+    }
+
+    if (reviewer && !reviewPassed) {
+      const d = stages.review?.divergence;
+      const divergenceNote = d === null || d === undefined ? "divergence not checked" : `${d} divergence`;
+      return {
+        integrated: true,
+        reviewed: false,
+        assurance,
+        suiteQualification,
+        requiredEvidence: requireEvidence,
+        missingEvidence: [],
+        reason: `review-not-ready (${stages.review?.findings ?? 0} finding(s), ${divergenceNote})`,
         runId, baseRef, integrationBranch,
         integrationHead: integration.integrationHead, stages, evidenceRoot,
       };
@@ -423,8 +452,13 @@ ${(stages.validator.stdoutTail || "").slice(-800)}`
  */
 export function describeTampercheckIdentity(binary) {
   if (!binary || !binary.path) return "";
-  if (binary.pinned) {
+  // QA-002 (audit): three states, never conflated — a REQUESTED pin whose
+  // comparison failed must not read as a verified one.
+  if (binary.pinned && binary.verified) {
     return `tampercheck: identity pinned — sha256 verified (${binary.path})\n`;
+  }
+  if (binary.pinned) {
+    return `tampercheck: identity pin REQUESTED but MISMATCHED — the gate refused (${binary.path} is sha256 ${binary.sha256 ?? "(unreadable)"})\n`;
   }
   const hint = binary.sha256 ? ` — pin with --tampercheck-sha256 ${binary.sha256}` : "";
   return `tampercheck: identity version-shape only (unpinned${hint})\n`;
@@ -451,7 +485,7 @@ export function parseReviewerSpec(spec, config) {
 export async function runCommandCli(argv, { write = (t) => process.stdout.write(t) } = {}) {
   const options = {
     repository: null, prompt: null, provider: null, model: null, check: null,
-    reviewer: null, requireEvidence: null, maxBudgetUsd: null, tampercheckPath: null, expectedTampercheckSha256: null, taskId: null, asJson: false, timeoutMinutes: 15,
+    reviewer: null, requireEvidence: null, maxBudgetUsd: null, tampercheckPath: null, expectedTampercheckSha256: null, configPath: null, taskId: null, asJson: false, timeoutMinutes: 15,
     lane: "subprocess", files: null, adapter: "claude-code-acp", baseUrl: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -491,6 +525,7 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
       case "--files": options.files = next(); break;
       case "--adapter": options.adapter = next(); break;
       case "--base-url": options.baseUrl = next(); break;
+      case "--config": options.configPath = next(); break;
       case "--tampercheck-path": options.tampercheckPath = next(); break;
       case "--tampercheck-sha256": {
         const raw = next();
@@ -506,11 +541,21 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
   }
   if (!options.repository || !options.prompt) throw new Error("--repository and --prompt are required");
   if (!options.provider) throw new Error("--provider is required");
+  // QA-004 (audit): a PROVIDED --check that trims to empty (e.g. an unset shell
+  // variable) used to silently downgrade the run to gates-only; `set` already
+  // refuses this. An omitted --check stays legal.
+  if (options.check !== null && String(options.check).trim().length === 0) {
+    throw new Error('--check must be a non-empty command, e.g. --check "npm test"');
+  }
   if (options.lane === "subprocess" && !SUBPROCESS_PROVIDERS.includes(options.provider)) {
     throw new Error(`--provider must be one of ${SUBPROCESS_PROVIDERS.join(", ")}`);
   }
 
-  const { config } = loadConfig();
+  // ENG-001 (audit): the fan-out budgets were validated config that no spawning
+  // command could consume — the refusal message's own remedy was impossible.
+  // Every spawning command now takes --config and threads its budgets to the
+  // admission gate (workers AND the reviewer).
+  const { config } = loadConfig(options.configPath);
   const files = options.files ? options.files.split(",").map((s) => s.trim()).filter(Boolean) : null;
   let baseUrl = options.baseUrl;
   if (options.lane === "http" && !baseUrl) {
@@ -529,6 +574,7 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
     maxBudgetUsd: options.maxBudgetUsd,
     tampercheckPath: options.tampercheckPath,
     expectedTampercheckSha256: options.expectedTampercheckSha256,
+    admission: { budgets: config.budgets },
     taskId: options.taskId,
     timeoutMs: Math.round(options.timeoutMinutes * 60_000),
     lane: options.lane,

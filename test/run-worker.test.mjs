@@ -201,3 +201,30 @@ test("D1: a worker over the fan-out ceiling is refused with an honest failed rec
     for (const d of [fixture, runsRoot, cwd, stateRoot]) rmSync(d, { recursive: true, force: true });
   }
 });
+
+test("TEST-005: a full slot house refuses with fanout-concurrency after the bounded wait — never oversubscribes", async () => {
+  const fixture = fakeCodexDir("ok");
+  const runsRoot = mkdtempSync(path.join(os.tmpdir(), "dh-runs-slots-"));
+  const cwd = mkdtempSync(path.join(os.tmpdir(), "dh-cwd-slots-"));
+  const stateRoot = mkdtempSync(path.join(os.tmpdir(), "dh-state-slots-"));
+  const budgets = { maxWorkers: 10, maxConcurrentWorkers: 1, maxTotalTokens: 1_000_000, windowHours: 24 };
+  const { acquireWorkerSlot } = await import("../scripts/slots.mjs");
+  const held = acquireWorkerSlot(stateRoot, 1, { taskId: "squatter" });
+  try {
+    const refused = await runWorker({
+      taskId: "slot-starved", provider: "codex", model: "fake-model-9b", prompt: "p",
+      cwd, runsRoot, timeoutMs: 1_500, env: envWith(fixture),
+      admission: { stateRoot, budgets },
+    });
+    assert.equal(refused.receipt.status, "failed");
+    assert.match(refused.receipt.exit.error, /fanout-concurrency/);
+    assert.equal(existsSync(path.join(refused.runDir, "stdout.log")), false, "a slot-starved worker must not have spawned");
+    // The admitted-but-never-ran reservation reconciles as failed with 0 tokens.
+    const ledger = readFileSync(path.join(stateRoot, "usage.jsonl"), "utf8").split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l));
+    assert.equal(ledger.length, 2);
+    assert.equal(ledger[1].status, "failed");
+  } finally {
+    held.release();
+    for (const d of [fixture, runsRoot, cwd, stateRoot]) rmSync(d, { recursive: true, force: true });
+  }
+});

@@ -443,6 +443,8 @@ test("tampercheck pin: a wrong sha256 refuses tampercheck-unavailable; the match
     assert.equal(refused.reason, "tampercheck-unavailable");
     assert.match(refused.stages.integration.gates.tampercheck.detail, /checksum mismatch/);
     assert.equal(refused.stages.integration.gates.tampercheckBinary.pinned, true);
+    // QA-002: requested ≠ verified — a refused mismatch must record verified:false.
+    assert.equal(refused.stages.integration.gates.tampercheckBinary.verified, false);
 
     // Right pin: integrates, and the evidence says the identity was pinned.
     const pinned = await runPipeline({
@@ -457,21 +459,26 @@ test("tampercheck pin: a wrong sha256 refuses tampercheck-unavailable; the match
     });
     assert.equal(pinned.integrated, true, JSON.stringify(pinned));
     assert.equal(pinned.stages.integration.gates.tampercheckBinary.pinned, true);
+    assert.equal(pinned.stages.integration.gates.tampercheckBinary.verified, true);
     assert.equal(pinned.stages.integration.gates.tampercheckBinary.sha256, realDigest);
   } finally {
     for (const d of [repo, providerDir, tampercheckDir]) rmSync(d, { recursive: true, force: true });
   }
 });
 
-test("describeTampercheckIdentity: loose mode never reads like strict mode, and vice versa", () => {
+test("describeTampercheckIdentity: verified, mismatched, and unpinned states can never be confused", () => {
   assert.equal(describeTampercheckIdentity(null), "");
   assert.equal(describeTampercheckIdentity({ path: null }), "");
-  const unpinned = describeTampercheckIdentity({ path: "C:/tools/tampercheck.EXE", sha256: "ab".repeat(32), pinned: false });
+  const unpinned = describeTampercheckIdentity({ path: "C:/tools/tampercheck.EXE", sha256: "ab".repeat(32), pinned: false, verified: false });
   assert.match(unpinned, /version-shape only \(unpinned/);
   assert.match(unpinned, /--tampercheck-sha256 abab/);
-  const pinned = describeTampercheckIdentity({ path: "C:/tools/tampercheck.EXE", sha256: "ab".repeat(32), pinned: true });
+  const pinned = describeTampercheckIdentity({ path: "C:/tools/tampercheck.EXE", sha256: "ab".repeat(32), pinned: true, verified: true });
   assert.match(pinned, /identity pinned — sha256 verified/);
-  assert.doesNotMatch(pinned, /unpinned/);
+  assert.doesNotMatch(pinned, /unpinned|MISMATCHED/);
+  // QA-002: a REQUESTED pin whose comparison failed must never print "verified".
+  const mismatched = describeTampercheckIdentity({ path: "C:/tools/tampercheck.EXE", sha256: "cd".repeat(32), pinned: true, verified: false });
+  assert.match(mismatched, /pin REQUESTED but MISMATCHED — the gate refused/);
+  assert.doesNotMatch(mismatched, /sha256 verified/);
 });
 
 // ---------------------------------------------------------------------------
@@ -614,4 +621,88 @@ test("cli run: bad provider exits 2", () => {
   ], { encoding: "utf8", timeout: 30_000 });
   assert.equal(run.status, 2, `stdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
   assert.match(run.stderr, /--provider must be one of/);
+});
+
+// ---------------------------------------------------------------------------
+// Audit fix-pass coverage: DOC-004 evidence floor + ENG-001 budgets threading
+// ---------------------------------------------------------------------------
+
+test("DOC-004: --require-evidence review refuses (insufficient-evidence) when the reviewer runs and says NOT_READY", async () => {
+  const repo = initFixtureRepo();
+  const providerDir = fakeProviderDir("fix");
+  const tampercheckDir = fakeTampercheckDir("clean");
+  try {
+    // The fake codex doubles as the reviewer; its "FAKE DONE" final text carries
+    // no READY token, which interprets as NOT_READY — a reviewer that ran and refused.
+    const result = await runPipeline({
+      repository: repo,
+      prompt: "fix it",
+      provider: "codex",
+      model: "fake-model-9b",
+      taskId: "evfloor1",
+      reviewer: { lane: "subprocess", provider: "codex", model: "fake-model-9b" },
+      requireEvidence: ["review"],
+      env: buildEnv(providerDir, tampercheckDir),
+      timeoutMs: 20_000,
+    });
+    assert.equal(result.integrated, true, JSON.stringify(result));
+    assert.match(result.reason, /^insufficient-evidence \(missing: review\)/);
+    assert.deepEqual(result.missingEvidence, ["review"]);
+    assert.ok(result.assurance, "the refused-floor path must still report its assurance level");
+    assert.equal(result.stages.review.verdict !== "READY", true);
+  } finally {
+    for (const d of [repo, providerDir, tampercheckDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("DOC-004 companion: with no evidence floor, a NOT_READY review still reports review-not-ready WITH assurance", async () => {
+  const repo = initFixtureRepo();
+  const providerDir = fakeProviderDir("fix");
+  const tampercheckDir = fakeTampercheckDir("clean");
+  try {
+    const result = await runPipeline({
+      repository: repo,
+      prompt: "fix it",
+      provider: "codex",
+      model: "fake-model-9b",
+      taskId: "evfloor2",
+      reviewer: { lane: "subprocess", provider: "codex", model: "fake-model-9b" },
+      env: buildEnv(providerDir, tampercheckDir),
+      timeoutMs: 20_000,
+    });
+    assert.equal(result.integrated, true, JSON.stringify(result));
+    assert.match(result.reason, /^review-not-ready/);
+    assert.ok(result.assurance, "review-not-ready must carry the assurance field (old early return dropped it)");
+  } finally {
+    for (const d of [repo, providerDir, tampercheckDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("ENG-001: budgets passed to runPipeline are ENFORCED — two runs against one repo share the repo's meter", async () => {
+  const repo = initFixtureRepo();
+  const providerDir = fakeProviderDir("fix");
+  const tampercheckDir = fakeTampercheckDir("clean");
+  const budgets = { maxWorkers: 1, maxConcurrentWorkers: 3, maxTotalTokens: 1_000_000, windowHours: 24 };
+  try {
+    const first = await runPipeline({
+      repository: repo, prompt: "fix it", provider: "codex", model: "fake-model-9b",
+      taskId: "budget1", admission: { budgets },
+      env: buildEnv(providerDir, tampercheckDir), timeoutMs: 20_000,
+    });
+    assert.equal(first.integrated, true, JSON.stringify(first));
+
+    const second = await runPipeline({
+      repository: repo, prompt: "fix it again", provider: "codex", model: "fake-model-9b",
+      taskId: "budget2", admission: { budgets },
+      env: buildEnv(providerDir, tampercheckDir), timeoutMs: 20_000,
+    });
+    assert.equal(second.integrated, false, JSON.stringify(second));
+    assert.equal(second.reason, "worker-failed");
+    // Both runs metered the same canonical root: one reservation + one terminal
+    // from run 1, nothing from the refused run 2.
+    const ledger = readFileSync(path.join(repo, ".devharmonics", "usage.jsonl"), "utf8").split(/\r?\n/).filter(Boolean);
+    assert.equal(ledger.length, 2, ledger.join("\n"));
+  } finally {
+    for (const d of [repo, providerDir, tampercheckDir]) rmSync(d, { recursive: true, force: true });
+  }
 });

@@ -1,6 +1,7 @@
 import path from "node:path";
 import process from "node:process";
 import { runAcpWorker } from "./acp-worker.mjs";
+import { loadConfig } from "./config.mjs";
 
 /**
  * CLI surface for one bounded ACP-lane worker run (Agent Client Protocol
@@ -22,7 +23,7 @@ export async function acpCommand(argv, {
   const options = {
     adapter: "claude-code-acp", prompt: null, cwd: null,
     taskId: "adhoc", runsRoot: null, permissionMode: "deny",
-    timeoutMinutes: 10, asJson: false,
+    timeoutMinutes: 10, asJson: false, configPath: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const next = () => { i += 1; return argv[i]; };
@@ -33,7 +34,18 @@ export async function acpCommand(argv, {
       case "--task-id": options.taskId = next(); break;
       case "--runs-root": options.runsRoot = next(); break;
       case "--permission-mode": options.permissionMode = next(); break;
-      case "--timeout-minutes": options.timeoutMinutes = Number(next()); break;
+      case "--timeout-minutes": {
+        // UX-011 (audit): same stricter validation as run/worker — quote the
+        // value, reject non-finite.
+        const raw = next();
+        const parsed = Number(raw);
+        if (!Number.isFinite(parsed) || parsed <= 0) {
+          throw new Error(`--timeout-minutes must be a positive finite number, got: ${JSON.stringify(raw)}`);
+        }
+        options.timeoutMinutes = parsed;
+        break;
+      }
+      case "--config": options.configPath = next(); break;
       case "--json": options.asJson = true; break;
       default: throw new Error(`Unknown acp option: ${argv[i]}`);
     }
@@ -42,11 +54,10 @@ export async function acpCommand(argv, {
   if (!["deny", "allow-edits"].includes(options.permissionMode)) {
     throw new Error('--permission-mode must be "deny" or "allow-edits"');
   }
-  if (!Number.isFinite(options.timeoutMinutes) || options.timeoutMinutes <= 0) {
-    throw new Error("--timeout-minutes must be a positive number");
-  }
   const cwd = path.resolve(options.cwd);
   const runsRoot = path.resolve(options.runsRoot ?? path.join(cwd, ".devharmonics", "runs"));
+  // ENG-001 (audit): thread the operator's budgets to the admission gate.
+  const { config } = loadConfig(options.configPath);
 
   const { receipt, runDir, events, permissionRequests } = await runAcpWorkerFn({
     taskId: options.taskId,
@@ -57,6 +68,7 @@ export async function acpCommand(argv, {
     runsRoot,
     permissionMode: options.permissionMode,
     timeoutMs: Math.round(options.timeoutMinutes * 60_000),
+    admission: { budgets: config.budgets },
   });
 
   if (options.asJson) {

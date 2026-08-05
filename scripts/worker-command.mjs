@@ -2,6 +2,7 @@ import path from "node:path";
 import process from "node:process";
 import { runWorker } from "./run-worker.mjs";
 import { SUBPROCESS_PROVIDERS } from "./providers.mjs";
+import { loadConfig } from "./config.mjs";
 
 /**
  * CLI surface for one bounded worker run. Exit semantics mirror doctor's
@@ -15,7 +16,7 @@ export async function workerCommand(argv) {
     provider: null, model: null, prompt: null, cwd: null,
     taskId: "adhoc", runsRoot: null, sandbox: "read-only",
     permissionMode: "dontAsk", allowedTools: ["Read"],
-    timeoutMinutes: 10, asJson: false,
+    timeoutMinutes: 10, asJson: false, configPath: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const next = () => { i += 1; return argv[i]; };
@@ -29,7 +30,18 @@ export async function workerCommand(argv) {
       case "--sandbox": options.sandbox = next(); break;
       case "--permission-mode": options.permissionMode = next(); break;
       case "--allowed-tools": options.allowedTools = next().split(",").map((s) => s.trim()).filter(Boolean); break;
-      case "--timeout-minutes": options.timeoutMinutes = Number(next()); break;
+      case "--timeout-minutes": {
+        // UX-011 (audit): quote the offending value and say "finite", matching
+        // run's stricter sibling of this same flag.
+        const raw = next();
+        const parsed = Number(raw);
+        if (!Number.isFinite(parsed) || parsed <= 0) {
+          throw new Error(`--timeout-minutes must be a positive finite number, got: ${JSON.stringify(raw)}`);
+        }
+        options.timeoutMinutes = parsed;
+        break;
+      }
+      case "--config": options.configPath = next(); break;
       case "--json": options.asJson = true; break;
       default: throw new Error(`Unknown worker option: ${argv[i]}`);
     }
@@ -38,11 +50,16 @@ export async function workerCommand(argv) {
     throw new Error(`--provider must be one of ${SUBPROCESS_PROVIDERS.join(", ")}`);
   }
   if (!options.prompt || !options.cwd) throw new Error("--prompt and --cwd are required");
-  if (!Number.isFinite(options.timeoutMinutes) || options.timeoutMinutes <= 0) {
-    throw new Error("--timeout-minutes must be a positive number");
+  // QA-007 (audit): the usage text advertises an enum; validate it like acp's
+  // --permission-mode instead of forwarding garbage to the provider.
+  if (options.sandbox !== "read-only" && options.sandbox !== "workspace-write") {
+    throw new Error(`--sandbox must be "read-only" or "workspace-write", got: ${JSON.stringify(options.sandbox)}`);
   }
   const cwd = path.resolve(options.cwd);
   const runsRoot = path.resolve(options.runsRoot ?? path.join(cwd, ".devharmonics", "runs"));
+  // ENG-001 (audit): thread the operator's budgets to the admission gate; the
+  // state root stays derived from runsRoot so ledger placement is unchanged.
+  const { config } = loadConfig(options.configPath);
 
   const { receipt, runDir } = await runWorker({
     taskId: options.taskId,
@@ -55,6 +72,7 @@ export async function workerCommand(argv) {
     permissionMode: options.permissionMode,
     allowedTools: options.allowedTools,
     timeoutMs: Math.round(options.timeoutMinutes * 60_000),
+    admission: { budgets: config.budgets },
   });
 
   if (options.asJson) {

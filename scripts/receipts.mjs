@@ -85,6 +85,16 @@ export function validateReceipt(receipt) {
     if (usage?.costUsd !== undefined && usage.costUsd !== null) {
       need(Number.isFinite(usage.costUsd) && usage.costUsd >= 0, "usage.costUsd must be a nonnegative number");
     }
+    // A2-5 (independent audit): every field was type-checked in isolation, so
+    // {inputTokens:10, outputTokens:5, totalTokens:100} validated cleanly. Each
+    // number was well-formed and the set of them was nonsense, which weakens a
+    // receipt precisely where it is later used as evidence of spend. Only checked
+    // when all three are present — a provider that reports a subset (or reports
+    // nothing) stays valid, since absent is honestly absent.
+    const { inputTokens: i, outputTokens: o, totalTokens: t } = usage ?? {};
+    if (Number.isSafeInteger(i) && Number.isSafeInteger(o) && Number.isSafeInteger(t)) {
+      need(i + o === t, `usage.totalTokens (${t}) must equal inputTokens + outputTokens (${i} + ${o} = ${i + o})`);
+    }
   }
   return { ok: errors.length === 0, errors };
 }

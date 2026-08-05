@@ -17,7 +17,9 @@
  * @param {Array|null} [params.tools]
  * @param {object|null} [params.toolChoice]
  * @param {number} [params.timeoutMs]
- * @param {string} [params.apiKey]
+ * @param {string|null} [params.apiKey] explicit credential; prefer apiKeyEnvVar
+ * @param {string|null} [params.apiKeyEnvVar] name of an env var holding the credential
+ * @param {object} [params.env]
  */
 export async function sendMessages({
   baseUrl,
@@ -28,8 +30,33 @@ export async function sendMessages({
   tools = null,
   toolChoice = null,
   timeoutMs = 120_000,
-  apiKey = "local",
+  // A1-5 (independent audit): this defaulted to the literal string "local" and the
+  // http pipeline never supplied anything else, so an authenticated endpoint — the
+  // opt-in real Claude API that SPEC §2.2 lists — always received `x-api-key: local`
+  // and rejected it. There was no way to provide the real credential through the
+  // call chain at all.
+  //
+  // Resolution order: an explicit apiKey argument, else a NAMED environment variable
+  // the caller nominates (apiKeyEnvVar), else "local" for key-less local servers.
+  // The key is read from the environment at call time and never returned, logged, or
+  // written into a receipt — receipts record the endpoint, never the credential.
+  apiKey = null,
+  apiKeyEnvVar = null,
+  env = process.env,
 }) {
+  const resolvedApiKey = apiKey
+    ?? (apiKeyEnvVar ? env[apiKeyEnvVar] : undefined)
+    ?? "local";
+  if (apiKeyEnvVar && !env[apiKeyEnvVar]) {
+    return {
+      ok: false,
+      status: null,
+      error: `apiKeyEnvVar "${apiKeyEnvVar}" was requested but is not set in the environment — refusing to send a placeholder credential to ${baseUrl}`,
+      contentText: null,
+      usage: null,
+      resolvedModel: null,
+    };
+  }
   const body = { model, max_tokens: maxTokens, messages };
   if (system !== null) body.system = system;
   if (tools !== null) body.tools = tools;
@@ -42,7 +69,7 @@ export async function sendMessages({
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-api-key": apiKey,
+        "x-api-key": resolvedApiKey,
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify(body),

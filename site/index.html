@@ -470,7 +470,7 @@
       <div class="cmp-row"><div class="lab">Secrets</div><div class="n">full environment inherited</div><div class="y"><b>credential-stripped</b> worker + validator</div></div>
       <div class="cmp-row"><div class="lab">Blast radius</div><div class="n">edits your checkout directly</div><div class="y"><b>isolated worktree</b>, stops before your branch</div></div>
     </div>
-    <p class="muted" style="margin-top:20px;font-size:.9rem;max-width:var(--prose)">Emdash is the intended human cockpit — its diff, branch, and PR review already work on the worktrees and integration branches DevHarmonics produces. Verification is handled entirely by the separate, pinned rigor-suite (<a href="https://github.com/scottconverse/DevHarmonics/blob/main/docs/ARCHITECTURE.md">architecture</a>), so the factory writes no integrity code of its own.</p>
+    <p class="muted" style="margin-top:20px;font-size:.9rem;max-width:var(--prose)">Emdash is the intended human cockpit — its diff, branch, and PR review already work on the worktrees and integration branches DevHarmonics produces. The deterministic gates above are DevHarmonics' own code; the integrity scan is not — it is <code>tampercheck</code>, a separate tool resolved from your <code>PATH</code> (optionally bound to an absolute path and checksum), so the thing being judged never owns the judge (<a href="https://github.com/scottconverse/DevHarmonics/blob/main/docs/ARCHITECTURE.md">architecture</a>).</p>
   </div>
 </section>
 
@@ -480,7 +480,7 @@
     <div>
       <p class="eyebrow">Quick start</p>
       <h2 style="font-size:clamp(1.7rem,3.4vw,2.45rem)">Install from source and probe your machine.</h2>
-      <p class="muted" style="margin-top:1rem">Requires <b>Node.js 24+</b> and <b>Git</b>. There's no published package yet — install from source. <code>npm ci</code> pulls the single runtime dependency; <code>npm link</code> puts a global <code>devharmonics</code> on your PATH.</p>
+      <p class="muted" style="margin-top:1rem">Requires <b>Node.js 24+</b>, <b>Git</b>, and <b><code>tampercheck</code></b> on your PATH — the integrity gate is a separate Python tool, deliberately not bundled, and without it a run refuses rather than integrating. There's no published package yet — install from source. <code>npm ci</code> pulls the single runtime dependency; <code>npm link</code> puts a global <code>devharmonics</code> on your PATH.</p>
       <p class="muted">To make a change, add a lane and a repository — a signed-in <code>claude</code>/<code>codex</code>/<code>agy</code>, or a local Ollama / LM Studio server. <code>doctor</code> tells you, from real attempts, exactly what's reachable.</p>
       <div class="cta-row" style="margin-top:1.5rem">
         <a class="btn" href="https://github.com/scottconverse/DevHarmonics/blob/main/docs/USER_MANUAL.md">Read the manual ↗</a>
@@ -493,16 +493,20 @@
 <span class="prompt">$</span> git clone https://github.com/scottconverse/DevHarmonics.git
 <span class="prompt">$</span> cd DevHarmonics && npm ci && npm link
 
-<span class="cmt"># 2 — see what your machine can actually do</span>
+<span class="cmt"># 2 — the integrity gate is a separate tool, not bundled</span>
+<span class="prompt">$</span> pip install tampercheck==0.1.1
+
+<span class="cmt"># 3 — see what your machine can actually do</span>
 <span class="prompt">$</span> devharmonics doctor
 
-<span class="cmt"># 3 — make one gated change</span>
+<span class="cmt"># 4 — make one gated change (--model is required for codex/claude)</span>
 <span class="prompt">$</span> devharmonics run \
     --repository ../my-project \
-    --provider codex \
+    --provider codex --model <span class="ok">gpt-5.6-luna</span> \
     --prompt <span class="ok">"Add input validation to /signup"</span> \
     --check <span class="ok">"npm test"</span> \
-    --reviewer claude:sonnet</pre>
+    --reviewer claude:sonnet \
+    --require-evidence validator,review</pre>
     </div>
   </div>
 </section>

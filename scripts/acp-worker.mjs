@@ -200,6 +200,13 @@ export async function runAcpWorker({
     appendFileSync(eventsPath, `${JSON.stringify(event)}\n`);
   };
 
+  // A2-3 (independent audit): this lane strips credentials correctly but used to
+  // DISCARD the list, so every ACP receipt read `strippedEnv: null` even though real
+  // stripping had happened — a security boundary that was present but invisible in
+  // the evidence the rest of the system is built on. Captured here so the receipt,
+  // which may be written before or after the spawn, can always report it.
+  let strippedEnvNames = null;
+
   // Every attempt leaves a receipt, spawn failures included — the
   // run-worker.mjs precedent this lane must not break.
   const finish = ({
@@ -235,6 +242,9 @@ export async function runAcpWorker({
       usage,
       artifactPath: finalText != null ? path.join(runDir, "final-text.txt") : null,
       eventsPath,
+      // Null only when the failure happened before the child env was even built;
+      // otherwise the real list, so the boundary is checkable and not just claimed.
+      strippedEnv: strippedEnvNames,
     });
     writeReceipt(runsRoot, receipt);
     return { receipt, runDir, events, permissionRequests };
@@ -258,7 +268,8 @@ export async function runAcpWorker({
   // credential stripping at the worker boundary.
   // Shared boundary (scripts/worker-env.mjs): credential stripping plus the
   // nested-session markers this lane originally discovered.
-  const { env: childEnv } = workerEnv(env);
+  const { env: childEnv, stripped } = workerEnv(env);
+  strippedEnvNames = stripped;
   const { spawnCommand, spawnArgs, verbatim } = spawnPlan(resolvedCommand, adapterArgs, { platform, env: childEnv });
 
   let child;

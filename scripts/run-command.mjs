@@ -85,6 +85,7 @@ export async function runPipeline({
   model = null,
   check = null,          // "command arg arg..." — validator (subprocess/acp) or local-patch's check (http)
   reviewer = null,       // { lane, provider, model } — independent review after integration
+  maxBudgetUsd = null,   // spend ceiling forwarded to a provider that supports one (claude)
   // Evidence floor: ["validator"], ["review"], or both. Readiness is REFUSED when
   // demanded evidence is absent (A4-6). Empty by default — the level is still always
   // reported, so the honest case needs no flag and the strict case is one flag away.
@@ -103,6 +104,13 @@ export async function runPipeline({
   }
   if (lane === "http" && (!Array.isArray(files) || files.length === 0)) {
     throw new Error("runPipeline: the http lane requires a non-empty files list (--files, comma-separated repo-relative paths)");
+  }
+  // A1-4 / A2-4b: --check was advertised as optional, but the http lane's task
+  // validation throws on a missing check.command AFTER setup, surfacing as an opaque
+  // exit 2. Stated up front instead, alongside the --files requirement — and after
+  // it, so the more fundamental missing-files case still reports first.
+  if (lane === "http" && (check === null || String(check).trim().length === 0)) {
+    throw new Error('runPipeline: the http lane requires --check (e.g. --check "npm test") — its structured-write mode commits only when a declared check passes, so there is no no-validator mode for this lane');
   }
 
   // Real modules by default; a caller (tests) may inject any subset via
@@ -129,6 +137,26 @@ export async function runPipeline({
   const workerBranch = `devharmonics/task/${runId}`;
   const integrationBranch = `devharmonics/integration/${runId}`;
 
+  // A1-7 (independent audit): branch names are derived deterministically from
+  // --task-id, and a stable task id is exactly what an operator reuses when
+  // retrying interrupted work. The second run died inside `git worktree add -b`
+  // with a raw "a branch named ... already exists", which reads like a bug in the
+  // tool rather than a decision the operator has to make.
+  //
+  // There is no resume: the pipeline keeps no resumable state, so silently reusing
+  // the branch could mix a new attempt into an old one's commits. Refuse up front,
+  // name the branch, and state the two honest ways forward.
+  const existingWorker = git(repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${workerBranch}`]).ok;
+  const existingIntegration = git(repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${integrationBranch}`]).ok;
+  if (existingWorker || existingIntegration) {
+    const which = [existingWorker ? workerBranch : null, existingIntegration ? integrationBranch : null].filter(Boolean);
+    throw new Error(
+      `task-id "${runId}" has already been used in this repository: ${which.join(" and ")} ${which.length > 1 ? "already exist" : "already exists"}. `
+      + "This pipeline has no resume — it keeps no resumable state, so reusing these refs could blend a new attempt into an old one's history. "
+      + `Either choose a different --task-id, or delete the previous refs once you have finished with them (git branch -D ${which.join(" ")}).`,
+    );
+  }
+
   const stages = { worker: null, commit: null, validator: null, integration: null, review: null };
 
   // Whatever worktree the lane created (the pipeline's own, for
@@ -150,6 +178,10 @@ export async function runPipeline({
         readPaths: files,
         writePaths: files,
         check: { command, args },
+        // A2-4a: --timeout-minutes was parsed and then never handed to the http
+        // lane, so the model call and the check silently used local-patch's own
+        // hard-coded 5 minutes no matter what the operator asked for.
+        timeoutMs,
         commitMessage: `devharmonics ${runId}: ${provider}${model ? `:${model}` : ""}`,
       };
       const patchResult = await d.runLocalPatch({ task, client: d.sendMessages, runsRoot: evidenceRoot, env });
@@ -159,6 +191,29 @@ export async function runPipeline({
         usage: patchResult.receipt.usage,
         detail: patchResult.detail,
       };
+      // A2-4c: local-patch runs the check ITSELF, so the pipeline never populated
+      // stages.validator for this lane and any reviewer was told "No check receipts
+      // were supplied" even though a real check had run and its result was known.
+      // Surface it in the same shape the subprocess lane uses.
+      if (patchResult.receipt.status === "completed") {
+        stages.validator = {
+          command: [command, ...args].join(" "),
+          exitCode: 0,
+          timedOut: false,
+          stdoutTail: "(ran inside local-patch; it commits only when the check passes)",
+          stderrTail: "",
+          ranInsideLocalPatch: true,
+        };
+      } else if (patchResult.detail?.exitCode !== undefined && patchResult.detail?.message === "check failed") {
+        stages.validator = {
+          command: [command, ...args].join(" "),
+          exitCode: patchResult.detail.exitCode ?? null,
+          timedOut: Boolean(patchResult.detail.timedOut),
+          stdoutTail: "",
+          stderrTail: (patchResult.detail.stderrTail ?? "").slice(-2000),
+          ranInsideLocalPatch: true,
+        };
+      }
 
       // local-patch leaves its own worktree on disk (by design — "kept for
       // inspection" once real content has been written into it); the
@@ -225,6 +280,7 @@ export async function runPipeline({
             permissionMode: "acceptEdits",
             allowedTools: ["Read", "Edit", "Write"],
             timeoutMs,
+            maxBudgetUsd,
             env,
           });
       stages.worker = { status: workerResult.receipt.status, receiptDir: workerResult.runDir, usage: workerResult.receipt.usage };
@@ -379,7 +435,7 @@ export function parseReviewerSpec(spec, config) {
 export async function runCommandCli(argv, { write = (t) => process.stdout.write(t) } = {}) {
   const options = {
     repository: null, prompt: null, provider: null, model: null, check: null,
-    reviewer: null, requireEvidence: null, taskId: null, asJson: false, timeoutMinutes: 15,
+    reviewer: null, requireEvidence: null, maxBudgetUsd: null, taskId: null, asJson: false, timeoutMinutes: 15,
     lane: "subprocess", files: null, adapter: "claude-code-acp", baseUrl: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -393,7 +449,28 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
       case "--reviewer": options.reviewer = next(); break;
       case "--require-evidence": options.requireEvidence = next(); break;
       case "--task-id": options.taskId = next(); break;
-      case "--timeout-minutes": options.timeoutMinutes = Number(next()); break;
+      case "--timeout-minutes": {
+        // A1-6: a bare Number() accepted "nope", "-1" and "Infinity", which reached
+        // the timeout APIs as NaN / negative / infinite. Reject before anything is
+        // created, so an invalid operational limit never produces a branch, an
+        // evidence directory, a worktree, or a subprocess.
+        const raw = next();
+        const parsed = Number(raw);
+        if (!Number.isFinite(parsed) || parsed <= 0) {
+          throw new Error(`--timeout-minutes must be a positive finite number, got: ${JSON.stringify(raw)}`);
+        }
+        options.timeoutMinutes = parsed;
+        break;
+      }
+      case "--max-budget-usd": {
+        const raw = next();
+        const parsed = Number(raw);
+        if (!Number.isFinite(parsed) || parsed <= 0) {
+          throw new Error(`--max-budget-usd must be a positive finite number, got: ${JSON.stringify(raw)}`);
+        }
+        options.maxBudgetUsd = parsed;
+        break;
+      }
       case "--lane": options.lane = next(); break;
       case "--files": options.files = next(); break;
       case "--adapter": options.adapter = next(); break;
@@ -424,6 +501,7 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
     check: options.check,
     reviewer: options.reviewer ? parseReviewerSpec(options.reviewer, config) : null,
     requireEvidence: parseRequireEvidence(options.requireEvidence),
+    maxBudgetUsd: options.maxBudgetUsd,
     taskId: options.taskId,
     timeoutMs: Math.round(options.timeoutMinutes * 60_000),
     lane: options.lane,

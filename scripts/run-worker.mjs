@@ -33,6 +33,12 @@ export async function runWorker({
   permissionMode = "dontAsk",
   allowedTools = ["Read"],
   maxTurns = 30,
+  // A2-7a (independent audit): providers.mjs accepted maxBudgetUsd and emitted
+  // --max-budget-usd, but runWorker never took the parameter, so the flag could
+  // never actually be emitted by any caller — an implemented spend ceiling that was
+  // unreachable. I had previously reported this as merely "unexercised", which
+  // understated it. Threaded through now.
+  maxBudgetUsd = null,
   reasoningEffort = "low",
   timeoutMs = 10 * 60_000,
   env = process.env,
@@ -86,7 +92,7 @@ export async function runWorker({
 
   let invocation;
   try {
-    invocation = buildInvocation({ provider, model, prompt, cwd, outputDir: runDir, sandbox, permissionMode, allowedTools, maxTurns, reasoningEffort });
+    invocation = buildInvocation({ provider, model, prompt, cwd, outputDir: runDir, sandbox, permissionMode, allowedTools, maxTurns, maxBudgetUsd, reasoningEffort });
   } catch (error) {
     return finish({ status: "failed", exit: { error: `invocation: ${error.message}` } });
   }

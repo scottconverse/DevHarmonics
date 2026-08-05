@@ -56,3 +56,82 @@ The factory-side check and the repo-side check would both have to be defeated.
 
 These are named rather than silently omitted. They are the next falsification
 pass, not a claim of coverage.
+
+## Second pass — 2026-08-05 (the GauntletGate blockers, reproduced and closed)
+
+The GauntletGate run (`docs/GAUNTLET-2026-08-05.md`) raised four blocking
+findings via a subagent whose reproductions the coordinator never re-ran. This
+pass reproduced each one against the real, unmodified modules — then fixed it and
+re-verified the fix against a frozen clone of the committed code. Every result
+below was executed, not reasoned about; the runnable scripts live outside the
+repo at `Desktop\Code\devharmonics-sec-audit-evidence\`.
+
+| # | Attack | Result before | Disposition |
+|---|---|---|---|
+| B-1 | Odd-quote-parity `&` in a `claude` prompt, delivered via argv through `claude.CMD` (an npm `%*` shim), to launch a second process | **Gate deceived** — a second, attacker-chosen process ran from one `-p <prompt>` argument, through the real `runWorker`→`superviseProcess` path (RCE) | Fixed — prompt moved to stdin |
+| B-2r | Committed mode-`120000` symlink in `readPaths`, target outside the worktree | **Escaped** — outside file content reached the model prompt | Fixed — realpath containment |
+| B-2w | Committed symlink in `writePaths`, target outside the worktree | **Escaped** — an out-of-repo host file was overwritten while the receipt reported "empty diff / nothing changed" | Fixed — realpath containment |
+| C-2 | A worker plants a file the `--check` validator executes; does the validator see the operator's credentials? | **Leaked** — a fake `OPENAI_API_KEY` appeared in `stages.validator.stdoutTail` and the run reached `ready-for-owner-review` | Fixed — validator env stripped |
+| C-1 | Embedded newline in an argv argument | Silently truncated the command line at the first CR/LF (dropping trailing safety flags) — but **failed closed**, no RCE or bypass, and it *masked* the B-1 worker→review capstone | Fixed (fail-loud refusal) + re-characterized to a reliability defect |
+
+### B-1 in detail
+
+`escapeCmdArg` is the cross-spawn recipe with a **single** caret pass, and it is
+only ever reached for a `.cmd`/`.bat` target — which cmd.exe parses **twice**
+(the `cmd /c` line, then the shim's `%*` re-expansion). A single caret survives
+only the first parse; the metacharacter goes live in the second (the BatBadBut /
+CVE-2024-27980 class). An empirical harness proved there is **no** cmd-arg
+escaping that is both injection-safe for a `%*` shim and compatible with the
+`%~1` de-quoting idiom the tampercheck fixtures use — double-escaping the
+arguments broke 20 fixture tests. So the fix does not fight the escaping: it
+keeps untrusted content off the command line entirely. `claude`'s prompt now
+rides **stdin** (verified live: `claude -p --output-format json` reads its prompt
+from stdin, including through the ComSpec wrap). `agy` is a native `.exe` that
+never takes the wrap; `codex` already delivered via stdin. As defense in depth,
+`escapeCmdArg` now refuses any argument containing a raw newline rather than
+letting cmd.exe silently truncate the line (C-1).
+
+### B-2 in detail
+
+`assertRelativeRepoPath` validated path *strings* only — it never resolved the
+real filesystem target, so a git-committed symlink (a legitimate mode-`120000`
+object) was followed transparently by both `readFileSync` and `writeFileSync`.
+The write side is the dangerous one: the write lands on the outside target
+*before* the empty-diff check runs, and because git tracks the unchanged symlink
+object rather than the resolved target, `git diff --cached` sees nothing — an
+out-of-repo write reported as "nothing happened", exactly the false negative this
+product exists to prevent. Verified live on Windows that `git worktree add`
+materialises the committed symlink as a real NTFS symlink here (admin +
+`core.symlinks=true`). Fix: `local-patch.mjs` resolves the real path of the
+deepest existing prefix (collapsing every symlink, including intermediate
+directory symlinks) plus any not-yet-created tail, and refuses anything that
+lands outside the worktree — before reading and before writing.
+
+### C-2 in detail
+
+`workerEnv()` was correctly wired for the worker child and the ACP adapter, but
+**not** for the `--check` validator in either lane. The validator executes inside
+the very worktree the untrusted worker just committed to, so one planted line in
+a test file (or a `pretest` hook) ran with every credential on the box, and the
+leak propagated into `stdoutTail` → the receipt → the reviewer prompt. Fix: route
+the validator's environment through `workerEnv()` in both `run-command.mjs` and
+`local-patch.mjs`; `PATH` survives so the command still resolves and runs.
+
+### Re-verification method
+
+All fixes were re-verified against a **frozen clone** at commit `76a0576` in a
+separate directory (`git clone` + checkout, so HEAD could not move underneath the
+audit — the methodology weakness the first gate honestly flagged). A
+self-contained script built fresh fixtures, imported only the clone's modules,
+and re-ran all four attacks: all four reported BLOCKED. The full test suite is
+green in the clone (bar one flaky ~50s real-probe `doctor` timeout under parallel
+load, green in isolation).
+
+### What this pass still did not cover
+
+- No attempt against the ACP permission policy from a hostile adapter (still the
+  next pass, as in the first pass above).
+- The divergence gate's *positive* direction (a real worker-claims manifest vs
+  the diff) is untested end-to-end because the subprocess lane emits no such
+  manifest — the gate is now honestly reported as "not checked" rather than fed a
+  self-comparison (finding M-1).

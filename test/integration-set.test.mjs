@@ -399,6 +399,77 @@ test("integrateSet: --check runs per member against the merged candidate; a fail
   }
 }));
 
+// A2-6 / A4-6, review half: a NOT_READY review on ANY member blocks the whole set,
+// and because review happens on the gated CANDIDATE during the prepare phase,
+// nothing has advanced anywhere when it does.
+test("integrateSet: --reviewer reviews each candidate; one NOT_READY blocks the set and advances nothing", () => withTemps(2, async ({ repos, evidenceRoot, fixtureDir }) => {
+  fakeClean(fixtureDir);
+  const [repoA, repoB] = repos;
+  branchFrom(repoA, "worker-a", "main", "line1\nline2\nCHANGED-A\n");
+  branchFrom(repoB, "worker-b", "main", "line1\nline2\nCHANGED-B\n");
+
+  const mkPlan = (suffix) => planIntegrationSet({
+    members: [
+      { repositoryId: "repoA", repository: repoA, workerBranch: "worker-a", integrationBranch: `devharmonics/integration/rev-a-${suffix}` },
+      { repositoryId: "repoB", repository: repoB, workerBranch: "worker-b", integrationBranch: `devharmonics/integration/rev-b-${suffix}` },
+    ],
+  });
+  const reviewer = { lane: "subprocess", provider: "claude", model: "fake" };
+
+  // repoB's reviewer says NOT READY. The reviewed ref must be the parked candidate.
+  const reviewedRefs = [];
+  const blockingReview = async ({ repository, integrationBranch }) => {
+    reviewedRefs.push(integrationBranch);
+    const isB = path.resolve(repository) === path.resolve(repoB);
+    return {
+      verdict: isB ? "NOT_READY" : "READY",
+      findings: isB ? [{ id: "f1", severity: "high", disposition: "open" }] : [],
+      divergence: null,
+      reviewReceiptPath: null,
+    };
+  };
+
+  const blocked = await integrateSet({
+    set: mkPlan("block"), evidenceRoot, env: pathOnlyEnv(fixtureDir), timeoutMs: 20_000,
+    reviewer, goal: "coordinated change", deps: { runReview: blockingReview },
+  });
+
+  assert.equal(blocked.setReady, false, JSON.stringify(blocked));
+  assert.deepEqual(blocked.blockedBy, ["repoB"]);
+  const [bA, bB] = blocked.members;
+  assert.equal(bA.prepared, true, "repoA's gates and review both passed");
+  assert.equal(bA.review.verdict, "READY");
+  assert.equal(bA.reason, "set-blocked-not-advanced");
+  assert.equal(bA.integrated, false);
+  assert.equal(bB.review.verdict, "NOT_READY");
+  assert.equal(bB.reason, "review-not-ready");
+  // Reviews ran against the parked CANDIDATE refs, not the branches.
+  assert.ok(reviewedRefs.every((r) => String(r).startsWith("refs/devharmonics/candidate/")), `reviewed refs: ${reviewedRefs}`);
+  // Nothing advanced anywhere.
+  assert.equal(git(repoA, ["rev-parse", bA.integrationBranch]).trim(), bA.baseCommit);
+  assert.equal(git(repoB, ["rev-parse", bB.integrationBranch]).trim(), bB.baseCommit);
+
+  // A crashed reviewer is never a pass.
+  const crashed = await integrateSet({
+    set: mkPlan("crash"), evidenceRoot: path.join(evidenceRoot, "crash"), env: pathOnlyEnv(fixtureDir), timeoutMs: 20_000,
+    reviewer, deps: { runReview: async () => { throw new Error("reviewer exploded"); } },
+  });
+  assert.equal(crashed.setReady, false);
+  assert.equal(crashed.members[0].review.verdict, "NOT_READY");
+  assert.match(crashed.members[0].review.threw, /exploded/);
+
+  // All-READY integrates the whole set.
+  const ready = await integrateSet({
+    set: mkPlan("ready"), evidenceRoot: path.join(evidenceRoot, "ready"), env: pathOnlyEnv(fixtureDir), timeoutMs: 20_000,
+    reviewer, deps: { runReview: async () => ({ verdict: "READY", findings: [], divergence: null, reviewReceiptPath: null }) },
+  });
+  assert.equal(ready.setReady, true, JSON.stringify(ready));
+  for (const m of ready.members) {
+    assert.equal(m.review.verdict, "READY");
+    assert.ok(m.integrationHead);
+  }
+}));
+
 test("integrateSet: empty-diff member -> refused empty-diff, set not ready, set.json written", () => withTemps(2, async ({ repos, evidenceRoot, fixtureDir }) => {
   fakeClean(fixtureDir);
   const [repoA, repoB] = repos;

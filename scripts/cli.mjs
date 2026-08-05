@@ -21,7 +21,8 @@ const USAGE = `Usage:
                    [--timeout-minutes <n>] [--json]
   devharmonics set --member "<repositoryId>=<repoPath>:<workerBranch>" (2+)
                    [--base "<repositoryId>=<ref>"] [--evidence-root <dir>]
-                   [--check "cmd args"] [--json]
+                   [--check "cmd args"] [--reviewer <spec>] [--goal <text>]
+                   [--json]
 
 Commands:
   doctor   Probe every capability the factory depends on and report

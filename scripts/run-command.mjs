@@ -324,7 +324,7 @@ ${(stages.validator.stdoutTail || "").slice(-800)}`
 }
 
 /** --reviewer "provider:model" (subprocess lane) or "http:provider:model". */
-function parseReviewerSpec(spec, config) {
+export function parseReviewerSpec(spec, config) {
   const parts = spec.split(":");
   if (parts[0] === "http") {
     // Found by the slice-8 manual audit: this form parsed but could never

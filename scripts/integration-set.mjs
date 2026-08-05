@@ -9,6 +9,7 @@ import {
   abandonIntegrationCandidate,
   rollbackIntegrationRef,
 } from "./integrate.mjs";
+import { runReview } from "./review.mjs";
 
 /**
  * Multi-repo extension of scripts/integrate.mjs (design contract:
@@ -169,7 +170,20 @@ export function planIntegrationSet({ members }) {
  * rather than faked as either a full success or an atomic rollback this
  * factory does not have (docs/INTEGRATION-SETS.md).
  */
-export async function integrateSet({ set, evidenceRoot, env, timeoutMs, check = null, checkTimeoutMs = undefined }) {
+export async function integrateSet({
+  set,
+  evidenceRoot,
+  env,
+  timeoutMs,
+  check = null,
+  checkTimeoutMs = undefined,
+  // Independent review per member (audit A2-6/A4-6). Runs on each member's GATED
+  // CANDIDATE during the prepare phase — before anything is finalized — so a
+  // NOT_READY review blocks the whole set with nothing advanced anywhere.
+  reviewer = null,
+  goal = null,
+  deps = {},
+}) {
   if (!set || typeof set !== "object") failIntegrate("set must be an object (from planIntegrationSet)");
   if (!Array.isArray(set.members) || set.members.length === 0) failIntegrate("set.members must be a non-empty array");
   if (typeof set.setId !== "string" || set.setId.trim().length === 0) failIntegrate("set.setId must be a non-empty string");
@@ -211,7 +225,50 @@ export async function integrateSet({ set, evidenceRoot, env, timeoutMs, check = 
     }
   }));
 
-  const allPrepared = attempts.every(({ outcome }) => outcome.prepared === true);
+  const gatesPassed = attempts.every(({ outcome }) => outcome.prepared === true);
+
+  // PHASE 1b — independent review of each gated candidate. Sequential: reviewers
+  // are model calls, and stampeding them buys nothing. A member whose review is
+  // not READY is treated exactly like a failed gate, so the set blocks and phase 2
+  // never runs. Findings are attributed to a single member via scopeFinding; an
+  // unattributable finding is left unscoped rather than guessed at.
+  const reviewByRepositoryId = new Map();
+  if (reviewer && gatesPassed) {
+    const { runReview: reviewFn = runReview } = deps;
+    for (const { member, outcome } of attempts) {
+      try {
+        const review = await reviewFn({
+          repository: member.repository,
+          // Review the CANDIDATE, not the branch: the branch has not moved yet.
+          integrationBranch: outcome.candidateRef,
+          baseRef: member.baseCommit,
+          goal: goal ?? `integration set ${set.setId}, member ${member.repositoryId}`,
+          reviewer,
+          evidenceRoot: path.join(evidenceRoot, "members", member.repositoryId),
+          env,
+          timeoutMs,
+          deps,
+        });
+        reviewByRepositoryId.set(member.repositoryId, {
+          verdict: review?.verdict ?? "NOT_READY",
+          findings: review?.findings?.length ?? 0,
+          divergence: review?.divergence === null || review?.divergence === undefined ? null : review.divergence.length,
+          receipt: review?.reviewReceiptPath ?? null,
+        });
+      } catch (error) {
+        // A crashed reviewer is never a pass — same rule as a crashed gate.
+        reviewByRepositoryId.set(member.repositoryId, {
+          verdict: "NOT_READY",
+          findings: 0,
+          divergence: null,
+          receipt: null,
+          threw: error?.message ?? String(error),
+        });
+      }
+    }
+  }
+  const reviewsPassed = !reviewer || [...reviewByRepositoryId.values()].every((r) => r.verdict === "READY");
+  const allPrepared = gatesPassed && reviewsPassed;
   const abandonAll = () => {
     for (const { member, outcome } of attempts) {
       if (outcome?.candidateRef) abandonIntegrationCandidate({ repository: member.repository, candidateRef: outcome.candidateRef });
@@ -256,16 +313,21 @@ export async function integrateSet({ set, evidenceRoot, env, timeoutMs, check = 
     // A member that passed every gate but whose set was blocked is reported as
     // gated-but-deliberately-not-advanced — not as a success, and not as a
     // half-applied change the operator has to remember to avoid.
-    const gatedButBlocked = outcome?.prepared === true && !setReady;
+    const review = reviewByRepositoryId.get(member.repositoryId) ?? null;
+    const reviewBlocked = review !== null && review.verdict !== "READY";
+    const gatedButBlocked = outcome?.prepared === true && !reviewBlocked && !setReady;
     return {
       repositoryId: member.repositoryId,
       integrated: setReady,
       prepared: outcome?.prepared === true,
+      ...(review ? { review } : {}),
       reason: setReady
         ? null
-        : gatedButBlocked
-          ? "set-blocked-not-advanced"
-          : (outcome?.reason ?? null),
+        : reviewBlocked
+          ? "review-not-ready"
+          : gatedButBlocked
+            ? "set-blocked-not-advanced"
+            : (outcome?.reason ?? null),
       integrationHead: setReady ? (outcome.candidateHead ?? null) : null,
       evidencePath: outcome?.evidencePath ?? null,
       baseCommit: member.baseCommit,
@@ -279,9 +341,11 @@ export async function integrateSet({ set, evidenceRoot, env, timeoutMs, check = 
     };
   });
 
-  // Only members that failed to PREPARE actually block the set; a member that was
-  // gated fine is not itself a blocker.
-  const blockedBy = members.filter((m) => m.prepared !== true).map((m) => m.repositoryId);
+  // A member blocks the set if it failed to prepare OR its own review refused it;
+  // a member that was gated and reviewed fine is not itself a blocker.
+  const blockedBy = members
+    .filter((m) => m.prepared !== true || m.reason === "review-not-ready")
+    .map((m) => m.repositoryId);
   if (finalizeFailure && !blockedBy.includes(finalizeFailure.member.repositoryId)) {
     blockedBy.push(finalizeFailure.member.repositoryId);
   }

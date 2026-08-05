@@ -42,6 +42,10 @@ export function createReceipt(input) {
     usage: input.usage ?? null,
     artifactPath: input.artifactPath ?? null,
     eventsPath: input.eventsPath ?? null,
+    // What the worker-env boundary removed from this child's environment.
+    // Recorded so the §2.5 protection is auditable evidence, not just
+    // behavior a reader has to take on faith.
+    strippedEnv: input.strippedEnv ?? null,
   };
 }
 

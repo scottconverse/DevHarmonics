@@ -6,6 +6,7 @@ import process from "node:process";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import { resolvePathCommand, spawnPlan } from "./path-resolve.mjs";
+import { workerEnv } from "./worker-env.mjs";
 import { createReceipt, writeReceipt } from "./receipts.mjs";
 
 /**
@@ -232,10 +233,9 @@ export async function runAcpWorker({
   // is a deliberately separate bounded workload in its own workspace, so
   // session markers must not leak into it — the same principle as v1's
   // credential stripping at the worker boundary.
-  const childEnv = { ...env };
-  for (const key of Object.keys(childEnv)) {
-    if (key === "CLAUDECODE" || key.startsWith("CLAUDE_CODE_")) delete childEnv[key];
-  }
+  // Shared boundary (scripts/worker-env.mjs): credential stripping plus the
+  // nested-session markers this lane originally discovered.
+  const { env: childEnv } = workerEnv(env);
   const { spawnCommand, spawnArgs, verbatim } = spawnPlan(resolvedCommand, adapterArgs, { platform, env: childEnv });
 
   let child;

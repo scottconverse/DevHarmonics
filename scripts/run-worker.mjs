@@ -6,6 +6,7 @@ import { resolvePathCommand } from "./path-resolve.mjs";
 import { buildInvocation, parseWorkerOutput } from "./providers.mjs";
 import { superviseProcess } from "./supervise.mjs";
 import { createReceipt, writeReceipt } from "./receipts.mjs";
+import { workerEnv } from "./worker-env.mjs";
 
 /**
  * Run one bounded subprocess-lane worker and leave a receipt — ALWAYS a
@@ -38,6 +39,11 @@ export async function runWorker({
   const runDir = path.join(runsRoot, `${stamp}-${receiptId}`);
   mkdirSync(runDir, { recursive: true });
 
+  // SPEC §2.5, implemented (was claimed-but-absent until 2026-08-05, proven
+  // by a live leak test): the worker child receives a credential-stripped
+  // environment. PATH survives, so resolution is unaffected; API keys do not.
+  const { env: childEnv, stripped } = workerEnv(env);
+
   const finish = ({ status, exit, supervised = null, parsed = null }) => {
     const finishedAt = new Date().toISOString();
     const receipt = createReceipt({
@@ -58,6 +64,7 @@ export async function runWorker({
       usage: parsed?.usage ?? null,
       artifactPath: parsed?.finalText != null ? path.join(runDir, "final-text.txt") : null,
       eventsPath: supervised ? path.join(runDir, "stdout.log") : null,
+      strippedEnv: stripped,
     });
     if (parsed?.finalText != null) writeFileSync(path.join(runDir, "final-text.txt"), parsed.finalText);
     writeReceipt(runsRoot, receipt);
@@ -71,7 +78,7 @@ export async function runWorker({
     return finish({ status: "failed", exit: { error: `invocation: ${error.message}` } });
   }
 
-  const command = resolvePathCommand(invocation.commandName, { env });
+  const command = resolvePathCommand(invocation.commandName, { env: childEnv });
   if (!command) {
     return finish({ status: "failed", exit: { error: `"${invocation.commandName}" not found on PATH`, args: invocation.args } });
   }
@@ -82,7 +89,7 @@ export async function runWorker({
     cwd,
     prompt: invocation.promptDelivery === "stdin" ? prompt : null,
     timeoutMs,
-    env,
+    env: childEnv,
   });
   writeFileSync(path.join(runDir, "stdout.log"), supervised.stdout);
   writeFileSync(path.join(runDir, "stderr.log"), supervised.stderr);

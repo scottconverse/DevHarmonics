@@ -717,3 +717,29 @@ test("ENG-005: the integration lock path is repository-scoped, identical across 
     rmSync(repo, { recursive: true, force: true });
   }
 });
+
+// TEST-009: a validator that HANGS on the merged candidate refuses
+// validator-failed with the timeout named — never a silent pass or a hang.
+test("TEST-009: validator timeout on the merged candidate refuses validator-failed", async () => {
+  await withTemps(async ({ repo, evidenceRoot, fixtureDir }) => {
+    const baseRef = git(repo, ["rev-parse", "HEAD"]).trim();
+    branchFrom(repo, "worker-slow", "main", "line1\nCHANGED\n");
+    fakeClean(fixtureDir);
+    const result = await integrateWorkerBranch({
+      repository: repo,
+      integrationBranch: "devharmonics/integration/slowcheck",
+      workerBranch: "worker-slow",
+      baseRef,
+      taskId: "task-slow-check",
+      evidenceRoot,
+      check: { command: "node", args: ["-e", "setTimeout(() => process.exit(0), 60000)"] },
+      checkTimeoutMs: 1_500,
+      env: pathOnlyEnv(fixtureDir),
+      timeoutMs: 20_000,
+    });
+    assert.equal(result.integrated, false);
+    assert.equal(result.reason, "validator-failed");
+    assert.equal(result.gates.validator.timedOut, true);
+    assert.match(result.gates.validator.detail, /timed out on the merged candidate/);
+  });
+});

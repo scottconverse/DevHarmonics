@@ -267,3 +267,10 @@ test("TEST-005: concurrent admits race the same lock and never oversubscribe the
   assert.equal(refused.length, 3);
   for (const r of refused) assert.match(r.reason, /fanout-workers-exceeded/);
 });
+
+test("TEST-009: the window boundary is inclusive — a reservation at exactly `since` counts", () => {
+  const at = Date.now() - 1000;
+  const ledger = `{"stage":"reserved","kind":"worker","invocationId":"inv-b","taskId":"b","paid":false,"reservedTokens":0,"startedAt":"${new Date(at).toISOString()}"}`;
+  assert.deepEqual(summarizeFanout(ledger, { since: at }), { workers: 1, tokens: 0 });
+  assert.deepEqual(summarizeFanout(ledger, { since: at + 1 }), { workers: 0, tokens: 0 });
+});

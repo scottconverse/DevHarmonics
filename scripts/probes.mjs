@@ -190,6 +190,52 @@ export function probeRepoGovernance(id, repository, { pinnedVersion } = {}) {
   return { id, status: "PASS", detail: `tampercheck workflow present, pinned to ${pinnedVersion}: ${filePath}`, repository, path: filePath };
 }
 
+/**
+ * Paid-setup check (v1 port (c), owner's audience ruling): for every endpoint
+ * the config marks as credentialed (`apiKeyEnvVar`), say IN PLAIN LANGUAGE
+ * whether a paid call would actually work — before the operator finds out
+ * from a refused run. Never touches the network and never reads the key's
+ * value; it checks presence of the env var and the budget only.
+ */
+export function probePaidBudget(id, endpointName, endpoint, budgets, env = process.env) {
+  const envVar = endpoint.apiKeyEnvVar;
+  if (!env[envVar]) {
+    return {
+      id,
+      status: "FAIL",
+      detail: `endpoint "${endpointName}" is credentialed but the environment variable ${envVar} is not set — every paid call will refuse before sending. Set ${envVar} in the environment you run DevHarmonics from.`,
+      endpointName,
+      apiKeyEnvVar: envVar,
+      budgetConfigured: Number.isSafeInteger(budgets?.maxPaidTokens) && budgets.maxPaidTokens > 0,
+    };
+  }
+  if (!Number.isSafeInteger(budgets?.maxPaidTokens) || budgets.maxPaidTokens <= 0) {
+    return {
+      id,
+      status: "FAIL",
+      detail: `endpoint "${endpointName}" is credentialed (${envVar} is set) but budgets.maxPaidTokens is not configured — every paid call will refuse before sending. Set budgets.maxPaidTokens in the project config (devharmonics config show) to open the paid lane deliberately.`,
+      endpointName,
+      apiKeyEnvVar: envVar,
+      budgetConfigured: false,
+    };
+  }
+  const tokens = budgets.maxPaidTokens;
+  // A human-meaningful translation, clearly labeled an estimate: Claude API
+  // pricing spans roughly $1-$25 per million tokens across models (2025-era);
+  // the enforced unit stays tokens because tokens are what the API reports.
+  const low = (tokens / 1_000_000) * 1;
+  const high = (tokens / 1_000_000) * 25;
+  return {
+    id,
+    status: "PASS",
+    detail: `endpoint "${endpointName}" credentialed (${envVar} set); paid ceiling ${tokens.toLocaleString("en-US")} tokens (≈ $${low.toFixed(0)}–$${high.toFixed(0)} at typical per-model API prices — an estimate, not the enforced unit)`,
+    endpointName,
+    apiKeyEnvVar: envVar,
+    budgetConfigured: true,
+    maxPaidTokens: tokens,
+  };
+}
+
 /** Enumerate installed skills per host root, for the doctor's information section. */
 export function listSkills(hostRoot) {
   if (!existsSync(hostRoot)) return null;

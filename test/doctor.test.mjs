@@ -105,3 +105,43 @@ test("cli with an unknown command exits 2 with usage", () => {
   assert.equal(run.status, 2);
   assert.match(run.stderr, /Unknown command/);
 });
+
+// --- v1 port (c): the paid-setup check catches misconfiguration in the
+// diagnostic, not in a refused run --------------------------------------------
+
+function paidFixtureConfig() {
+  const config = fixtureConfig();
+  config.endpoints = { anthropic: { baseUrl: "http://127.0.0.1:1", apiKeyEnvVar: "DH_TEST_PAID_KEY" } };
+  return config;
+}
+
+test("paid rows appear ONLY for credentialed endpoints, and name each failure's remedy in plain language", async () => {
+  // No credentialed endpoints (the base fixture): zero paid rows.
+  const noneReport = await runDoctor({ config: fixtureConfig(), probeTimeoutMs: 3_000, env: {} });
+  assert.equal(noneReport.checks.some((c) => c.id.startsWith("paid:")), false);
+
+  // Credentialed, env var NOT set: FAIL telling you to set it.
+  const unsetReport = await runDoctor({ config: paidFixtureConfig(), probeTimeoutMs: 3_000, env: {} });
+  const unset = unsetReport.checks.find((c) => c.id === "paid:anthropic");
+  assert.equal(unset?.status, "FAIL");
+  assert.match(unset.detail, /DH_TEST_PAID_KEY is not set/);
+  assert.match(unset.detail, /Set DH_TEST_PAID_KEY/);
+
+  // Env var set, NO budget: FAIL telling you every call will refuse.
+  const noBudgetConfig = paidFixtureConfig();
+  delete noBudgetConfig.budgets.maxPaidTokens;
+  const noBudgetReport = await runDoctor({ config: noBudgetConfig, probeTimeoutMs: 3_000, env: { DH_TEST_PAID_KEY: "sk-x" } });
+  const noBudget = noBudgetReport.checks.find((c) => c.id === "paid:anthropic");
+  assert.equal(noBudget?.status, "FAIL");
+  assert.match(noBudget.detail, /budgets\.maxPaidTokens is not configured/);
+  assert.match(noBudget.detail, /every paid call will refuse/);
+
+  // Both configured: PASS with the ceiling stated in tokens AND a labeled dollar estimate.
+  const okConfig = paidFixtureConfig();
+  okConfig.budgets.maxPaidTokens = 2_000_000;
+  const okReport = await runDoctor({ config: okConfig, probeTimeoutMs: 3_000, env: { DH_TEST_PAID_KEY: "sk-x" } });
+  const ok = okReport.checks.find((c) => c.id === "paid:anthropic");
+  assert.equal(ok?.status, "PASS", ok?.detail);
+  assert.match(ok.detail, /2,000,000 tokens/);
+  assert.match(ok.detail, /estimate, not the enforced unit/);
+});

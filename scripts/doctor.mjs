@@ -2,7 +2,7 @@ import path from "node:path";
 import process from "node:process";
 import { loadConfig } from "./config.mjs";
 import { TAMPERCHECK_PINNED_VERSION } from "./onboard.mjs";
-import { probeCli, probeMessagesEndpoint, probeRepoGovernance, probeSkillParity } from "./probes.mjs";
+import { probeCli, probeMessagesEndpoint, probePaidBudget, probeRepoGovernance, probeSkillParity } from "./probes.mjs";
 
 /**
  * Doctor: probe every capability the factory depends on and report only what
@@ -12,7 +12,7 @@ import { probeCli, probeMessagesEndpoint, probeRepoGovernance, probeSkillParity 
  * assessment COMPLETED (even with FAILs in it); exit 2 means doctor itself
  * could not run. A crashed assessment must never be mistaken for a clean one.
  */
-export async function runDoctor({ config, probeTimeoutMs = 45_000, repository = null, onProgress = null } = {}) {
+export async function runDoctor({ config, probeTimeoutMs = 45_000, repository = null, onProgress = null, env = process.env } = {}) {
   const report = (check) => {
     try { onProgress?.(check); } catch { /* a progress listener never breaks the assessment */ }
     return check;
@@ -39,6 +39,16 @@ export async function runDoctor({ config, probeTimeoutMs = 45_000, repository = 
     report(probeCli("rigor:tampercheck", config.rigor.tampercheckCommand, { sha256: true })),
     report(probeSkillParity("rigor:skill-parity", config.rigor.skillHosts, config.rigor.skillName)),
   ];
+
+  // Paid-setup rows (v1 port (c)): one per credentialed endpoint, and only
+  // then — a default keyless setup gets zero extra noise. Catches "the env
+  // var isn't set" and "no paid budget configured" here, in the diagnostic,
+  // instead of in a refused run.
+  for (const [name, endpoint] of Object.entries(config.endpoints)) {
+    if (endpoint?.apiKeyEnvVar) {
+      checks.push(report(probePaidBudget(`paid:${name}`, name, endpoint, config.budgets, env)));
+    }
+  }
 
   // DOC-002 (audit): the probe itself has an honest SKIPPED branch for a null
   // repository — surface it instead of omitting the row, so the report shows

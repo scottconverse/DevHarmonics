@@ -79,7 +79,7 @@ All three lanes emit **one receipt schema**: requested model, resolved model (or
 From **codex-factory** (`factory-fleet.mjs`, `factory-admission.mjs`, `factory-slots.mjs`, `factory-process.mjs` — Scott's code, Apache-2.0, live-fire tested this week):
 
 - **Qualification:** SHA-256 fingerprint over candidate ID + runtime/adapter versions + capabilities + model digest + tier + reasoning effort + versioned role-harness ID. Role-scoped (analysis / benchmark / structured_write / workspace_write). A write role requires *both* its own harness pass *and* the reasoning benchmark (the gemma4:e4b lesson: passing one narrow test ≠ trustworthy). Fingerprint change ⇒ stale ⇒ requalify. Fail closed.
-- **Admission:** append-only `usage.jsonl`, reservation before spawn, terminal reconciliation after, unknown paid usage closes the paid lane, `reconcilePaidUsage` (never hand-editing) for honest corrections. Local models: wall-time/concurrency caps; tokens are telemetry, not budget.
+- **Admission:** append-only `usage.jsonl`, reservation before spawn, terminal reconciliation after, unknown paid usage closes the paid lane, `reconcilePaidUsage` (never hand-editing) for honest corrections. The same ledger carries **two guards** (owner decisions, 2026-08-05): the **money half** meters credentialed paid calls, and the **fan-out half** meters worker spawning itself — total workers, concurrency, and cumulative reported tokens per state root within a rolling window, reservation before any spawn, fail closed (the 255-agent / 300M-token incident is the design case). For unpaid local models, wall-time and concurrency remain the caps and reported tokens still count toward the fan-out ceiling. Budget contract details: §2.6.
 - **Slots & supervision:** file-lock worker slots, single-use task IDs, owned process trees, wall-clock timeout, dead-PID reclaim only.
 - **Windows lessons (all three found live this week, fixes specified in the codex-factory directive):** real PATH+PATHEXT resolution with extensions-before-bare-name ordering; `.cmd`/`.bat` spawn needs the explicit `ComSpec /d /s /c` wrap (not `shell:true` — DEP0190); per-CLI trust flags like `--skip-git-repo-check` for scratch fixtures. **Every lane gets live-fire testing on Windows before it's called supported. Shims lie.**
 
@@ -91,7 +91,7 @@ From **DevHarmonics** (frozen, private, Scott's code — port the *designs*):
 
 ### 2.4 Conscience (rigor-suite — zero new build)
 
-- **tampercheck** (PyPI 0.1.1, pinned): runs at every integration boundary — `tampercheck --from <base>`; exit 1 blocks acceptance and routes findings to fixer/reviewer; **exit 2 never counts as a pass**. Also pinned into each target repo's CI as a promotable required check, so the gate holds even when the factory is bypassed entirely. Worker prompts state that the diff will be tamperchecked; legitimate test removals are self-justified inline (`tampercheck: allow <file> <reason>`) and the justification flows into the receipt.
+- **tampercheck** (PyPI 0.1.1, pinned): runs at every integration boundary — `tampercheck --from <base>`; exit 1 blocks acceptance and routes findings to fixer/reviewer; **exit 2 never counts as a pass**. Also pinned into each target repo's CI as a promotable required check, so the gate holds even when the factory is bypassed entirely. Worker prompts state that the diff will be tamperchecked. (An inline self-justification protocol — `tampercheck: allow <file> <reason>` — was considered and **descoped by owner decision 2026-08-06**: it would hand workers a lever against the very gate that constrains them. A legitimate test removal is argued to the reviewer and the owner, never self-excused.)
 - **deterministic-detector** (0.4.0): qualifies target *repos* the way the factory qualifies models — randomized order, pollution detection, diff-scoped mutation. A repo whose suite hasn't been proven sensitive gets its validator-green labeled accordingly in receipts.
 - **dev-rigor-stack-lite**: the coordinator's operating discipline (lanes, gates, receipts), installed per host. **Doctor asserts skill-version parity across all coordinator hosts** — the `.claude` 0.4.3 vs `.codex` 0.5.1 drift is a known live bug class.
 - **rigor-suite installer**: the repo-onboarding ceremony for every new portfolio member (CivicSuite modules, CivicNewspaper, CivicLibrary).
@@ -104,6 +104,13 @@ From **DevHarmonics** (frozen, private, Scott's code — port the *designs*):
 - Credential-shaped env vars stripped from worker child processes; provider auth stays provider-owned.
 - Evidence over confidence: `process_completed` ≠ acceptance; a reviewer's READY ≠ merge; only the owner closes a loop.
 - Fail closed on missing evidence, always. A crashed check is never a passed check.
+
+### 2.6 Budgets and money (owner decisions, 2026-08-05/06 — binding contract)
+
+- **Fan-out ceilings** (`budgets.maxWorkers`, `maxConcurrentWorkers`, `maxTotalTokens`, `windowHours`): every spawning surface passes the admission gate before anything spawns; refusals are honest failed receipts naming the ceiling and the ledger. No off switch — only deliberately raised limits or deliberate ledger rotation.
+- **Paid API use is a double opt-in**: an endpoint carries a credential (`endpoints.<name>.apiKeyEnvVar` *or* `endpoints.<name>.credential` — exactly one) **and** `budgets.allowPaidApi: true`. Either alone refuses before any request is sent. `budgets.maxPaidTokens` is the enforced token ceiling: reservation before the request, reconciliation with real reported usage after, unknown paid usage closes the lane.
+- **Dollar ceilings are enforced on verifiable cost only — never a price table.** `perRunLimitUsd` and `monthlyLimitUsd` come as a pair, both positive. Per-run rides the provider's own enforced stop (claude `--max-budget-usd`; the lower of flag and config wins). Monthly sums *reported* cost over a rolling 30 days on the admission ledger and refuses the next worker at the limit. Runs that report no cost contribute $0, stated honestly; the token ceilings are the universal floor.
+- **Credentials travel as names, never values**: env-var names or DPAPI-store names in config, receipts, and logs; the secret resolves only at send time. The store (`devharmonics credential set|list|delete`) encrypts at rest (DPAPI CurrentUser), takes the secret on stdin only, and has no `show`.
 
 ---
 
@@ -174,3 +181,6 @@ rigor-suite install as the intake ceremony for unonboarded repos; doctor asserts
 - **rigor-suite as the verification plane, no new verification code** — it shipped, it's pinned, it's factory-independent; building a second integrity layer inside the factory would recreate the DevHarmonics welding mistake.
 - **Qualification ≠ routing** — admission gates are cheap and fail-closed; ranking engines are the documented failure mode of two products reviewed this week.
 - **Spec stays this size** — DevHarmonics' spec hit 482 normative rows and became the reason "done" receded; this one fits in a sitting and changes only by trade or owner decision.
+- **Fan-out ceilings AND money guards, not either/or** — a prior session inferred "fan-out replaced dollars" from the 255-agent incident; the owner never decided that. Both halves are live and binding (§2.6).
+- **No `tampercheck: allow`** — a worker-writable escape from the integrity gate inverts the gate; descoped 2026-08-06, the notice half stands.
+- **Dollars only where dollars are reported** — enforcing estimated cost from a price table would be a guess wearing a guard's uniform; tokens are the universal floor, USD binds where providers report real cost.

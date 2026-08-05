@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
@@ -42,9 +42,19 @@ import { workerEnv } from "./worker-env.mjs";
 
 const REASONS = Object.freeze([
   "empty-diff",
+  // The recorded base is not an ancestor of the worker branch (audit 2026-08-05):
+  // without this, the "pinned base" is not enforced and the delivered merge can
+  // combine changes nobody gated.
+  "stale-worker-base",
   "tampercheck-findings",
   "tampercheck-unavailable",
+  // The post-merge scan of the exact commit being offered to the owner.
+  "final-artifact-findings",
+  "final-artifact-unavailable",
   "merge-conflict",
+  // The integration branch ref could not be advanced (e.g. it is checked out in
+  // the owner's own working tree) — refuse rather than yank it from under them.
+  "integration-ref-locked",
 ]);
 
 function fail(message) {
@@ -175,6 +185,18 @@ export async function integrateWorkerBranch({
   //
   // Set expectedTampercheckVersion to a string to ALSO require that exact
   // version; set requireTampercheckIdentity false to disable the check.
+  // Trust root (audit 2026-08-05): three independent auditors defeated the
+  // identity check with a script named `tampercheck` that printed a
+  // semver-shaped string and exited 0. A version *shape* cannot establish
+  // identity, because the attacker writes the string. These bind the gate to a
+  // specific artifact instead of to whatever PATH resolves:
+  //   tampercheckPath           - an absolute path, skipping PATH resolution
+  //   expectedTampercheckSha256 - pin the binary's content
+  // Both are opt-in, but the resolved path AND its checksum are ALWAYS recorded
+  // in the evidence, so a receipt can say which binary actually answered — the
+  // thing it previously could not.
+  tampercheckPath = null,
+  expectedTampercheckSha256 = null,
   expectedTampercheckVersion = null,
   requireTampercheckIdentity = true,
   env = process.env,
@@ -190,8 +212,12 @@ export async function integrateWorkerBranch({
   const lock = await acquireFileLock(lockPath, { taskId, repository }, { timeoutMs: 60_000, retryMs: 25 });
 
   const gates = {
+    baseAncestry: { status: "pending", detail: null },
     emptyDiff: { status: "pending", detail: null },
     tampercheck: { status: "skipped", detail: "not invoked" },
+    // The gate that scans the commit actually delivered, not just the worker's
+    // own tree — see the candidate-first merge below.
+    finalArtifact: { status: "skipped", detail: "not reached" },
   };
   let workerHead = null;
   let mergeBase = null;
@@ -239,6 +265,37 @@ export async function integrateWorkerBranch({
     if (!workerHeadRes.ok) fail(`could not resolve workerBranch "${workerBranch}": ${workerHeadRes.stderr.trim()}`);
     workerHead = workerHeadRes.stdout.trim();
 
+    const baseHeadRes = git(repository, ["rev-parse", baseRef]);
+    if (!baseHeadRes.ok) fail(`could not resolve baseRef "${baseRef}": ${baseHeadRes.stderr.trim()}`);
+    const baseHead = baseHeadRes.stdout.trim();
+
+    // Gate 0: base ancestry. Found by an independent audit (2026-08-05) and
+    // reproduced: a worker branch that does NOT descend from the recorded base
+    // was accepted and merged. That makes the "pinned base" a label rather than
+    // a constraint — the merge then silently combines the worker's tree with
+    // whatever the base has since gained, producing a delivered tree that no
+    // gate ever saw. `set` is the sharp edge here: it takes operator-supplied
+    // worker branches and never checked them at all.
+    //
+    // Exact-base semantics: the base must be an ancestor of the worker branch
+    // AND the merge-base must equal the base, so "pinned to this commit" means
+    // the work genuinely started there.
+    const isAncestor = git(repository, ["merge-base", "--is-ancestor", baseRef, workerBranch]).ok;
+    if (!isAncestor || mergeBase !== baseHead) {
+      gates.baseAncestry = {
+        status: "refused",
+        detail: !isAncestor
+          ? `worker branch "${workerBranch}" (${workerHead.slice(0, 12)}) does not descend from the recorded base ${baseHead.slice(0, 12)} — the pinned base is not the branch's actual starting point`
+          : `merge-base(${baseHead.slice(0, 12)}, ${workerBranch}) is ${mergeBase.slice(0, 12)}, not the recorded base — the branch has diverged from its pin`,
+        baseHead,
+        workerHead,
+        mergeBase,
+      };
+      reason = "stale-worker-base";
+      return { integrated: false, reason, integrationHead: null, gates, evidencePath: writeEvidence() };
+    }
+    gates.baseAncestry = { status: "pass", detail: `worker branch descends from the recorded base ${baseHead.slice(0, 12)} with merge-base equal to it`, baseHead, workerHead };
+
     // Gate 1: empty-diff. A validator that finds no fault with an empty diff
     // is not evidence of success — refuse before tampercheck is ever asked.
     const diffStatRes = git(repository, ["diff", "--stat", mergeBase, workerBranch]);
@@ -253,11 +310,56 @@ export async function integrateWorkerBranch({
     // Gate 2: tampercheck. Exit 0 is the only passing outcome; a crashed or
     // missing integrity gate NEVER counts as a pass (disclosed, not implied
     // green — and at this boundary, disclosed means refused).
-    const resolvedTampercheck = resolvePathCommand(tampercheckCommand, { env });
-    if (!resolvedTampercheck) {
-      gates.tampercheck = { status: "refused", detail: `tampercheck command not found on PATH: "${tampercheckCommand}"`, exitCode: null, timedOut: false };
-      reason = "tampercheck-unavailable";
-      return { integrated: false, reason, integrationHead: null, gates, evidencePath: writeEvidence() };
+    let resolvedTampercheck;
+    if (tampercheckPath) {
+      // An explicitly configured artifact: never consult PATH at all, so a
+      // shadow binary earlier on PATH is structurally irrelevant.
+      if (!path.isAbsolute(tampercheckPath) || !existsSync(tampercheckPath)) {
+        gates.tampercheck = { status: "refused", detail: `tampercheckPath must be an existing absolute path, got: "${tampercheckPath}"`, exitCode: null, timedOut: false };
+        reason = "tampercheck-unavailable";
+        return { integrated: false, reason, integrationHead: null, gates, evidencePath: writeEvidence() };
+      }
+      resolvedTampercheck = tampercheckPath;
+    } else {
+      resolvedTampercheck = resolvePathCommand(tampercheckCommand, { env });
+      if (!resolvedTampercheck) {
+        gates.tampercheck = { status: "refused", detail: `tampercheck command not found on PATH: "${tampercheckCommand}"`, exitCode: null, timedOut: false };
+        reason = "tampercheck-unavailable";
+        return { integrated: false, reason, integrationHead: null, gates, evidencePath: writeEvidence() };
+      }
+    }
+
+    // ALWAYS fingerprint the binary that is about to be trusted, pinned or not.
+    // This is the evidence the old receipts could not provide: which artifact
+    // answered. Unreadable is recorded as null rather than guessed.
+    let tampercheckSha256 = null;
+    try {
+      tampercheckSha256 = createHash("sha256").update(readFileSync(resolvedTampercheck)).digest("hex");
+    } catch {
+      tampercheckSha256 = null;
+    }
+    gates.tampercheckBinary = {
+      path: resolvedTampercheck,
+      sha256: tampercheckSha256,
+      source: tampercheckPath ? "configured-absolute-path" : "PATH-resolved",
+      pinned: Boolean(expectedTampercheckSha256),
+    };
+
+    // Checksum pin: the only local check a stub author cannot satisfy by
+    // printing the expected string. Enforced independently of the shape check,
+    // so pinning works even with requireTampercheckIdentity disabled.
+    if (expectedTampercheckSha256) {
+      const want = String(expectedTampercheckSha256).trim().toLowerCase();
+      if (!tampercheckSha256 || tampercheckSha256 !== want) {
+        gates.tampercheck = {
+          status: "refused",
+          detail: `tampercheck checksum mismatch: ${resolvedTampercheck} is sha256 ${tampercheckSha256 ?? "(unreadable)"}, expected ${want}`,
+          exitCode: null,
+          timedOut: false,
+        };
+        reason = "tampercheck-unavailable";
+        return { integrated: false, reason, integrationHead: null, gates, evidencePath: writeEvidence() };
+      }
     }
 
     // Identity check before trusting the gate (falsification finding F-1,
@@ -298,7 +400,18 @@ export async function integrateWorkerBranch({
         reason = "tampercheck-unavailable";
         return { integrated: false, reason, integrationHead: null, gates, evidencePath: writeEvidence() };
       }
-      gates.tampercheckIdentity = { status: "pass", detail: `verified ${reported} at ${resolvedTampercheck}` };
+      gates.tampercheckIdentity = {
+        status: "pass",
+        // Say exactly what was and was NOT established. A semver shape is not an
+        // identity; only the checksum pin is. Overstating this in the receipt is
+        // what let three auditors call the gate deceptive.
+        detail: expectedTampercheckSha256
+          ? `verified ${reported} at ${resolvedTampercheck} (checksum-pinned)`
+          : `${resolvedTampercheck} reported ${reported} — version SHAPE only, not a verified identity; set expectedTampercheckSha256 (or tampercheckPath) to bind the gate to a specific artifact`,
+        resolvedPath: resolvedTampercheck,
+        sha256: tampercheckSha256,
+        identityEstablished: Boolean(expectedTampercheckSha256),
+      };
     }
 
     const tcWorktree = addWorktree(repository, workerHead, { detach: true });
@@ -364,24 +477,35 @@ export async function integrateWorkerBranch({
       return { integrated: false, reason, integrationHead: null, gates, evidencePath: writeEvidence() };
     }
 
-    // Both gates passed: merge. Create integrationBranch at baseRef if it
-    // does not already exist in the repository, then merge inside a
-    // temporary worktree checked out on that branch — never the user's own
-    // checkout — so the branch ref itself advances only on a clean merge.
+    // Both worker-side gates passed. Now build the integration CANDIDATE
+    // WITHOUT moving any ref, gate the candidate itself, and advance the branch
+    // only if that gate passes.
+    //
+    // Why candidate-first (audit 2026-08-05, reproduced): the previous flow
+    // checked out the integration branch and merged into it, so the ref advanced
+    // the moment the merge succeeded — and the only thing tampercheck had ever
+    // scanned was the WORKER's tree. Whenever the integration branch sat ahead of
+    // the base, git's clean auto-merge produced a combined tree that no gate had
+    // seen, and it was handed to the owner as gated. Building the merge in a
+    // DETACHED worktree makes the ref update the last action, which is both the
+    // fix here and the shape multi-repo two-phase readiness needs.
     const branchExists = git(repository, ["rev-parse", "--verify", "--quiet", `refs/heads/${integrationBranch}`]).ok;
     if (!branchExists) {
       const createBranch = git(repository, ["branch", integrationBranch, baseRef]);
       if (!createBranch.ok) fail(`could not create integration branch "${integrationBranch}": ${createBranch.stderr.trim()}`);
     }
+    const preMergeRes = git(repository, ["rev-parse", integrationBranch]);
+    if (!preMergeRes.ok) fail(`could not resolve integration branch "${integrationBranch}": ${preMergeRes.stderr.trim()}`);
+    const preMergeHead = preMergeRes.stdout.trim();
 
-    const mergeWorktree = addWorktree(repository, integrationBranch, { detach: false });
-    if (!mergeWorktree.ok) fail(`could not create worktree for integration branch "${integrationBranch}": ${mergeWorktree.stderr}`);
+    const mergeWorktree = addWorktree(repository, preMergeHead, { detach: true });
+    if (!mergeWorktree.ok) fail(`could not create worktree for integration candidate: ${mergeWorktree.stderr}`);
     try {
       const mergeRes = gitIn(mergeWorktree.worktreePath, ["merge", "--no-ff", workerBranch, "-m", `integrate ${taskId}`]);
       if (!mergeRes.ok) {
         conflictPaths = conflictingPaths(mergeWorktree.worktreePath);
-        // No automatic conflict repair — abort back to the pre-merge state
-        // so the integration branch is left exactly as it was.
+        // No automatic conflict repair. Nothing to undo on the branch itself:
+        // the ref was never moved, so aborting the worktree merge is enough.
         gitIn(mergeWorktree.worktreePath, ["merge", "--abort"]);
         reason = "merge-conflict";
         return {
@@ -393,8 +517,77 @@ export async function integrateWorkerBranch({
           evidencePath: writeEvidence(),
         };
       }
-      const headRes = gitIn(mergeWorktree.worktreePath, ["rev-parse", "HEAD"]);
-      integrationHead = headRes.stdout.trim();
+      const candidateRes = gitIn(mergeWorktree.worktreePath, ["rev-parse", "HEAD"]);
+      if (!candidateRes.ok) fail(`could not resolve the integration candidate commit: ${candidateRes.stderr.trim()}`);
+      const candidateHead = candidateRes.stdout.trim();
+
+      // FINAL-ARTIFACT GATE: scan the exact commit being offered, measured from
+      // the base the owner pinned — "everything you are being asked to accept,
+      // relative to where you started". Deliberately conservative: on a reused
+      // integration branch this re-scans previously integrated work too, which
+      // can refuse again rather than assume earlier passes still hold. Fail
+      // closed is the house rule.
+      const finalRun = await superviseProcess({
+        command: resolvedTampercheck,
+        args: ["--from", baseHead, "--to", candidateHead],
+        cwd: mergeWorktree.worktreePath,
+        timeoutMs,
+        env: workerEnv(env).env,
+      });
+      tampercheckOutput = `${tampercheckOutput ?? ""}\n--- final artifact (${candidateHead.slice(0, 12)}) ---\n${finalRun.stdout ?? ""}${finalRun.stderr ? `\n--- stderr ---\n${finalRun.stderr}` : ""}`;
+
+      // timedOut/error before exitCode — a taskkill'd tree reports 1 on Windows,
+      // which would otherwise read as "findings" instead of "never finished".
+      if (finalRun.timedOut || finalRun.error) {
+        gates.finalArtifact = {
+          status: "refused",
+          detail: finalRun.timedOut ? "final-artifact tampercheck timed out" : `final-artifact tampercheck failed to run: ${finalRun.error}`,
+          candidateHead,
+          exitCode: finalRun.exitCode,
+          timedOut: finalRun.timedOut,
+        };
+        reason = "final-artifact-unavailable";
+        return { integrated: false, reason, integrationHead: null, gates, evidencePath: writeEvidence() };
+      }
+      if (finalRun.exitCode !== 0) {
+        gates.finalArtifact = {
+          status: "refused",
+          detail: finalRun.exitCode === 1
+            ? "final-artifact tampercheck reported findings on the merged commit — the delivered tree differs from the worker tree that passed"
+            : `final-artifact tampercheck exited ${finalRun.exitCode}`,
+          candidateHead,
+          exitCode: finalRun.exitCode,
+          timedOut: false,
+          stdout: finalRun.stdout,
+          stderr: finalRun.stderr,
+        };
+        reason = finalRun.exitCode === 1 ? "final-artifact-findings" : "final-artifact-unavailable";
+        return { integrated: false, reason, integrationHead: null, gates, evidencePath: writeEvidence() };
+      }
+      gates.finalArtifact = {
+        status: "pass",
+        detail: `the delivered commit itself passed tampercheck (scanned ${baseHead.slice(0, 12)}..${candidateHead.slice(0, 12)})`,
+        candidateHead,
+        exitCode: 0,
+        timedOut: false,
+        stdout: finalRun.stdout,
+      };
+
+      // Only now advance the ref — the last action, after every gate. Fails if
+      // the owner has this branch checked out; refuse rather than move it.
+      const update = git(repository, ["branch", "-f", integrationBranch, candidateHead]);
+      if (!update.ok) {
+        gates.finalArtifact.detail += " (but the branch ref could not be advanced)";
+        reason = "integration-ref-locked";
+        return {
+          integrated: false,
+          reason,
+          integrationHead: null,
+          gates,
+          evidencePath: writeEvidence(),
+        };
+      }
+      integrationHead = candidateHead;
       integrated = true;
       reason = null;
       return { integrated, reason, integrationHead, gates, evidencePath: writeEvidence() };

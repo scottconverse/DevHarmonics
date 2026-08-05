@@ -254,6 +254,111 @@ test("seeded gate-weakening: tampercheck exit 1 -> refused, findings preserved, 
   assert.notEqual(exists.status, 0);
 }));
 
+// Independent audit 2026-08-05, reproduced: a worker branch that does not
+// descend from the recorded base was accepted and merged, so the "pinned base"
+// constrained nothing and the delivered merge combined ungated changes.
+test("base ancestry: a worker branch that does not descend from the recorded base is refused before any gate or merge", () => withTemps(async ({ repo, evidenceRoot, fixtureDir }) => {
+  fakeClean(fixtureDir);
+  const oldBase = git(repo, ["rev-parse", "HEAD"]).trim();
+  branchFrom(repo, "worker-stale", oldBase, "worker change\n");
+  // main advances independently, so the recorded base is no longer an ancestor
+  writeFileSync(path.join(repo, "other.txt"), "main moved on\n");
+  git(repo, ["add", "-A"]);
+  git(repo, ["commit", "-q", "-m", "main advances"]);
+  const newBase = git(repo, ["rev-parse", "HEAD"]).trim();
+
+  const result = await integrateWorkerBranch({
+    repository: repo,
+    integrationBranch: "devharmonics/integration/stale",
+    workerBranch: "worker-stale",
+    baseRef: newBase,
+    taskId: "task-stale",
+    evidenceRoot,
+    tampercheckCommand: "tampercheck",
+    env: pathOnlyEnv(fixtureDir),
+    timeoutMs: 20_000,
+  });
+
+  assert.equal(result.integrated, false, JSON.stringify(result));
+  assert.equal(result.reason, "stale-worker-base");
+  assert.equal(result.gates.baseAncestry.status, "refused");
+  assert.equal(result.gates.tampercheck.status, "skipped", "must refuse before tampercheck is even asked");
+  const branchExists = spawnSync("git", ["-C", repo, "rev-parse", "--verify", "--quiet", "refs/heads/devharmonics/integration/stale"]).status === 0;
+  assert.equal(branchExists, false, "no integration branch may be created for a refused ancestry check");
+}));
+
+// The case that survives the ancestry fix: the worker legitimately descends from
+// the base, but a REUSED integration branch sits ahead of it, so git's clean
+// auto-merge yields a combined tree the worker-side scan never saw. The gate must
+// scan the commit actually delivered, and must not advance the ref when it fails.
+test("final-artifact gate: a reused integration branch ahead of base cannot deliver a tree the worker scan never saw", async () => {
+  const repo = tempDir("dh-int-repo-");
+  const evidenceRoot = tempDir("dh-int-evidence-");
+  const fixtureDir = tempDir("dh-int-fixtures-");
+  const INTEGRATION = "devharmonics/integration/reused";
+  try {
+    git(repo, ["init", "-q", "-b", "main"]);
+    git(repo, ["config", "user.email", "test@example.com"]);
+    git(repo, ["config", "user.name", "Test User"]);
+    writeFileSync(path.join(repo, "config.txt"), "api=v1\n");
+    writeFileSync(path.join(repo, "client.txt"), "client=v1\n");
+    git(repo, ["add", "-A"]);
+    git(repo, ["commit", "-q", "-m", "base"]);
+    const baseRef = git(repo, ["rev-parse", "HEAD"]).trim();
+
+    // worker cut from the pinned base (ancestry VALID) — touches client only
+    git(repo, ["branch", "worker-reused", baseRef]);
+    let wt = tempDir("dh-int-wt-");
+    git(repo, ["worktree", "add", "-q", wt, "worker-reused"]);
+    writeFileSync(path.join(wt, "client.txt"), "client=v1-feature\n");
+    git(wt, ["add", "-A"]);
+    git(wt, ["commit", "-q", "-m", "worker feature"]);
+    git(repo, ["worktree", "remove", "--force", wt]);
+
+    // a reused integration branch already AHEAD of base — touches config only
+    git(repo, ["branch", INTEGRATION, baseRef]);
+    wt = tempDir("dh-int-wt-");
+    git(repo, ["worktree", "add", "-q", wt, INTEGRATION]);
+    writeFileSync(path.join(wt, "config.txt"), "api=v2\n");
+    git(wt, ["add", "-A"]);
+    git(wt, ["commit", "-q", "-m", "prior integration advanced the branch"]);
+    git(repo, ["worktree", "remove", "--force", wt]);
+    const preMergeHead = git(repo, ["rev-parse", INTEGRATION]).trim();
+
+    // content-aware fake gate: CLEAN on the worker tree, FINDING on the combination
+    writeFakeTampercheck(fixtureDir, {
+      win: 'findstr /C:"api=v2" config.txt >nul 2>&1\r\nif errorlevel 1 goto clean\r\nfindstr /C:"client=v1-feature" client.txt >nul 2>&1\r\nif errorlevel 1 goto clean\r\necho TAMPERCHECK FINDINGS: forbidden combination\r\nexit /b 1\r\n:clean\r\necho TAMPERCHECK CLEAN\r\nexit /b 0',
+      posix: 'if grep -q "api=v2" config.txt 2>/dev/null && grep -q "client=v1-feature" client.txt 2>/dev/null; then echo "TAMPERCHECK FINDINGS: forbidden combination"; exit 1; fi\necho TAMPERCHECK CLEAN\nexit 0',
+    });
+
+    const result = await integrateWorkerBranch({
+      repository: repo,
+      integrationBranch: INTEGRATION,
+      workerBranch: "worker-reused",
+      baseRef,
+      taskId: "task-final-artifact",
+      evidenceRoot,
+      tampercheckCommand: "tampercheck",
+      env: pathOnlyEnv(fixtureDir),
+      timeoutMs: 20_000,
+    });
+
+    assert.equal(result.gates.baseAncestry.status, "pass", "ancestry is legitimately valid here");
+    assert.equal(result.gates.tampercheck.status, "pass", "the worker's own tree really is clean");
+    assert.equal(result.gates.finalArtifact.status, "refused", "the delivered merge commit must itself be scanned");
+    assert.equal(result.reason, "final-artifact-findings");
+    assert.equal(result.integrated, false);
+    assert.equal(result.integrationHead, null);
+    assert.equal(
+      git(repo, ["rev-parse", INTEGRATION]).trim(),
+      preMergeHead,
+      "the integration ref must NOT advance when the delivered artifact is refused",
+    );
+  } finally {
+    for (const d of [repo, evidenceRoot, fixtureDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
 test("tampercheck version pin is EXACT, not substring: a superstring version is refused (GAUNTLET, Agent B)", () => withTemps(async ({ repo, evidenceRoot, fixtureDir }) => {
   fakeClean(fixtureDir); // fixture tampercheck answers --version with "0.1.1"
   branchFrom(repo, "worker-v", "main", "line1\nline2\nCHANGED\n");

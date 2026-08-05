@@ -95,6 +95,15 @@ export function spawnPlan(command, args = [], { platform = process.platform, env
   };
 }
 
+/** True only if `p` exists AND is a regular file — never throws. */
+function existsAsFile(p) {
+  try {
+    return existsSync(p) && statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Synchronously run a resolved executable path safely on every platform.
  *
@@ -108,15 +117,6 @@ export function spawnPlan(command, args = [], { platform = process.platform, env
  * Callers must pass internally constructed args only; nothing here escapes
  * untrusted content for cmd.exe.
  */
-/** True only if `p` exists AND is a regular file — never throws. */
-function existsAsFile(p) {
-  try {
-    return existsSync(p) && statSync(p).isFile();
-  } catch {
-    return false;
-  }
-}
-
 export function runResolved(command, args = [], { timeoutMs = 20_000, platform = process.platform, env = process.env } = {}) {
   const { spawnCommand, spawnArgs, verbatim } = spawnPlan(command, args, { platform, env });
   const result = spawnSync(spawnCommand, spawnArgs, {

@@ -214,9 +214,14 @@ test("happy path: fake codex fixes the bug, check passes, both gates pass, integ
     assert.equal(result.integrationBranch, "devharmonics/integration/happy1");
     assert.ok(result.integrationHead, "expected an integration head commit");
 
-    // The validator really ran and really passed against the real fix.
+    // The validator really ran and really passed — against the MERGED candidate
+    // (R-5), the exact commit delivered on the integration branch, not the
+    // worker's pre-merge tree.
     assert.equal(result.stages.validator.exitCode, 0, JSON.stringify(result.stages.validator));
     assert.match(result.stages.validator.stdoutTail, /PASS: add\(2,3\) = 5/);
+    assert.equal(result.stages.validator.onMergedCandidate, true);
+    assert.equal(result.stages.validator.candidateHead, result.integrationHead,
+      "the validator must have executed against the exact commit that became the integration head");
 
     // Real merge commit on the integration branch — git plumbing, not a mock.
     const parents = git(repo, ["log", "-1", "--format=%P", result.integrationBranch]).trim();
@@ -338,6 +343,10 @@ test("worker failed: fake CLI exits nonzero -> reason starts with worker-, recei
 test("validator failure: worker writes a file but --check fails -> validator-failed, no integration branch", async () => {
   const repo = initFixtureRepo();
   const providerDir = fakeProviderDir("wrongfix");
+  // R-5: the validator now runs inside integrateWorkerBranch, against the merged
+  // candidate — which means tampercheck gates run first, so a hermetic fake
+  // tampercheck is required for the pipeline to reach the validator at all.
+  const tampercheckDir = fakeTampercheckDir("clean");
   try {
     const result = await runPipeline({
       repository: repo,
@@ -346,7 +355,7 @@ test("validator failure: worker writes a file but --check fails -> validator-fai
       model: "fake-model-9b",
       check: "node check.mjs",
       taskId: "valfail1",
-      env: buildEnv(providerDir),
+      env: buildEnv(providerDir, tampercheckDir),
       timeoutMs: 20_000,
     });
 
@@ -355,12 +364,21 @@ test("validator failure: worker writes a file but --check fails -> validator-fai
     assert.equal(result.stages.validator.exitCode, 1, JSON.stringify(result.stages.validator));
     // check.mjs writes its failure line via console.error -> stderr.
     assert.match(result.stages.validator.stderrTail, /FAIL: add\(2,3\)/);
+    // The failing check provably ran on the merged candidate, not the worker tree.
+    assert.equal(result.stages.validator.onMergedCandidate, true);
+    assert.ok(result.stages.validator.candidateHead, "the refused validator run must name the candidate commit it tested");
 
-    assert.equal(branchExists(repo, `devharmonics/integration/${result.runId}`), false, "no integration branch on a validator refusal");
+    // The integration branch is created at the pinned base before the candidate
+    // is built (candidate-first merge), but a validator refusal must never let
+    // it ADVANCE: it stays exactly at the base, with no merge commit on it.
+    const integrationRef = `devharmonics/integration/${result.runId}`;
+    assert.equal(branchExists(repo, integrationRef), true);
+    assert.equal(git(repo, ["rev-parse", integrationRef]).trim(), result.baseRef,
+      "a validator refusal must leave the integration branch un-advanced at the pinned base");
 
     assertWorktreeHygiene(repo, result.runId);
   } finally {
-    for (const d of [repo, providerDir]) rmSync(d, { recursive: true, force: true });
+    for (const d of [repo, providerDir, tampercheckDir]) rmSync(d, { recursive: true, force: true });
   }
 });
 
@@ -371,6 +389,9 @@ test("validator failure: worker writes a file but --check fails -> validator-fai
 test("validator unresolvable: --check names a tool that isn't on PATH -> validator-unresolvable", async () => {
   const repo = initFixtureRepo();
   const providerDir = fakeProviderDir("fix");
+  // R-5: same as above — the validator lives inside the integration engine now,
+  // so tampercheck must pass before the unresolvable check is even attempted.
+  const tampercheckDir = fakeTampercheckDir("clean");
   try {
     const result = await runPipeline({
       repository: repo,
@@ -379,16 +400,19 @@ test("validator unresolvable: --check names a tool that isn't on PATH -> validat
       model: "fake-model-9b",
       check: "definitely-not-a-real-tool arg",
       taskId: "unresolv1",
-      env: buildEnv(providerDir),
+      env: buildEnv(providerDir, tampercheckDir),
       timeoutMs: 20_000,
     });
 
     assert.equal(result.integrated, false, JSON.stringify(result));
-    assert.equal(result.reason, "validator-unresolvable: definitely-not-a-real-tool");
+    // The engine's reason is the bare refusal; the command it could not resolve
+    // is named in the integration evidence's validator gate detail.
+    assert.equal(result.reason, "validator-unresolvable");
+    assert.match(result.stages.integration.gates.validator.detail, /definitely-not-a-real-tool/);
 
     assertWorktreeHygiene(repo, result.runId);
   } finally {
-    for (const d of [repo, providerDir]) rmSync(d, { recursive: true, force: true });
+    for (const d of [repo, providerDir, tampercheckDir]) rmSync(d, { recursive: true, force: true });
   }
 });
 

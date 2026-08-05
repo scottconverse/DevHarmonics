@@ -10,10 +10,7 @@ import { runLocalPatch } from "./local-patch.mjs";
 import { sendMessages } from "./messages-client.mjs";
 import { integrateWorkerBranch } from "./integrate.mjs";
 import { runReview } from "./review.mjs";
-import { superviseProcess } from "./supervise.mjs";
-import { resolvePathCommand } from "./path-resolve.mjs";
 import { SUBPROCESS_PROVIDERS } from "./providers.mjs";
-import { workerEnv } from "./worker-env.mjs";
 import { assuranceFor, missingEvidence, parseRequireEvidence, describeAssurance } from "./assurance.mjs";
 import { detectSuiteQualification, describeSuiteQualification } from "./suite-qualification.mjs";
 import { loadConfig } from "./config.mjs";
@@ -191,20 +188,12 @@ export async function runPipeline({
         usage: patchResult.receipt.usage,
         detail: patchResult.detail,
       };
-      // A2-4c: local-patch runs the check ITSELF, so the pipeline never populated
-      // stages.validator for this lane and any reviewer was told "No check receipts
-      // were supplied" even though a real check had run and its result was known.
-      // Surface it in the same shape the subprocess lane uses.
-      if (patchResult.receipt.status === "completed") {
-        stages.validator = {
-          command: [command, ...args].join(" "),
-          exitCode: 0,
-          timedOut: false,
-          stdoutTail: "(ran inside local-patch; it commits only when the check passes)",
-          stderrTail: "",
-          ranInsideLocalPatch: true,
-        };
-      } else if (patchResult.detail?.exitCode !== undefined && patchResult.detail?.message === "check failed") {
+      // A2-4c: local-patch runs the check ITSELF as its commit gate. On success,
+      // stages.validator is populated below from the integration engine's own
+      // validator run against the MERGED candidate (R-5) — the authoritative
+      // result. On a check failure inside local-patch, integration never runs,
+      // so surface local-patch's own result here instead.
+      if (patchResult.detail?.exitCode !== undefined && patchResult.detail?.message === "check failed") {
         stages.validator = {
           command: [command, ...args].join(" "),
           exitCode: patchResult.detail.exitCode ?? null,
@@ -298,22 +287,12 @@ export async function runPipeline({
       if (!committed.ok) return { integrated: false, reason: `commit-failed: ${committed.stderr.trim()}`, runId, baseRef, stages, evidenceRoot };
       stages.commit = { committed: true, head: git(wt, ["rev-parse", "HEAD"]).stdout.trim(), stat: staged };
 
-      if (check) {
-        const { command: checkCommand, args: checkArgs } = splitCheck(check);
-        // C-2 (GAUNTLET-2026-08-05): the validator executes INSIDE the worktree
-        // the untrusted worker just committed to, so one planted test line or a
-        // pretest hook would run with every credential on the box and leak it
-        // into stdoutTail -> receipt -> reviewer prompt. Strip credential-shaped
-        // vars exactly as the worker lane does; PATH survives so it still runs.
-        const { env: checkEnv } = workerEnv(env);
-        const resolved = resolvePathCommand(checkCommand, { env: checkEnv });
-        if (!resolved) return { integrated: false, reason: `validator-unresolvable: ${checkCommand}`, runId, baseRef, stages, evidenceRoot };
-        const validated = await superviseProcess({ command: resolved, args: checkArgs, cwd: wt, prompt: null, timeoutMs: 10 * 60_000, env: checkEnv });
-        stages.validator = { command: check, exitCode: validated.exitCode, timedOut: validated.timedOut, stdoutTail: validated.stdout.slice(-2000), stderrTail: validated.stderr.slice(-2000) };
-        if (validated.exitCode !== 0) {
-          return { integrated: false, reason: `validator-failed (exit ${validated.exitCode})`, runId, baseRef, stages, evidenceRoot };
-        }
-      }
+      // R-5 (audit residual): the validator used to run HERE, pre-merge, in the
+      // worker's own worktree — while `set`'s ran on the merged candidate. So
+      // `run` could pass a check the delivered merge would fail. The check now
+      // rides into integrateWorkerBranch (the same machinery `set` uses) and
+      // executes against the exact merged commit offered to the owner, with the
+      // same credential-stripped env (C-2) it always had.
     }
 
     const integration = await d.integrateWorkerBranch({
@@ -323,9 +302,25 @@ export async function runPipeline({
       baseRef,
       taskId: runId,
       evidenceRoot,
+      check: check ? splitCheck(check) : null,
       env,
     });
     stages.integration = integration;
+    // The validator's authoritative result — run against the merged candidate
+    // inside integrateWorkerBranch — surfaced in the shape the reviewer prompt
+    // and the assurance ladder already consume.
+    const gateValidator = integration.gates?.validator;
+    if (gateValidator && gateValidator.status !== "skipped") {
+      stages.validator = {
+        command: gateValidator.command ?? check,
+        exitCode: gateValidator.exitCode,
+        timedOut: gateValidator.timedOut,
+        stdoutTail: gateValidator.stdoutTail ?? "",
+        stderrTail: gateValidator.stderrTail ?? "",
+        candidateHead: gateValidator.candidateHead ?? null,
+        onMergedCandidate: true,
+      };
+    }
     if (!integration.integrated) {
       return { integrated: false, reason: integration.reason, runId, baseRef, integrationBranch: null, integrationHead: null, stages, evidenceRoot };
     }

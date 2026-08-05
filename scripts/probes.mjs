@@ -119,15 +119,16 @@ export function probeSkillParity(id, skillHosts, skillName) {
   const findings = Object.entries(skillHosts).map(([host, root]) => ({ host, root, ...skillVersion(root, skillName) }));
   const present = findings.filter((f) => f.present);
   if (present.length === 0) {
-    // Deliberately still FAIL, not SKIPPED: for an owner who drives this from more
-    // than one host, a missing discipline layer everywhere is a real gap worth
-    // seeing. But it blocks NOTHING at runtime — the skills are markdown
-    // instructions for the coordinating agent, and no command reads them — so the
-    // message says so, or a fresh installer reads a red line as a broken install.
+    // SKIPPED, not FAIL. These skills are markdown discipline for whichever agent
+    // app drives DevHarmonics; NO command reads them at runtime, so their absence
+    // cannot break anything. Scoring it as a failure told every fresh installer
+    // their install was broken when it was not — the same category error as
+    // reporting the repo-governance probe FAIL when no repository is in scope.
+    // What IS a real bug class is DRIFT between hosts, and that still FAILs below.
     return {
       id,
-      status: "FAIL",
-      detail: `${skillName} not installed under any coordinator host — advisory only: this blocks no command (the skills are coordinator discipline, never read at runtime), but nothing is enforcing the operating rules on whichever host drives DevHarmonics`,
+      status: "SKIPPED",
+      detail: `${skillName} not installed under any coordinator host — nothing to compare. These skills are coordinator discipline, never read at runtime, so no command is affected; install them on the host you drive DevHarmonics from if you want the operating rules enforced there`,
       hosts: findings,
     };
   }

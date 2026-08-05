@@ -152,8 +152,15 @@ test("skill parity with a single present host is PASS with the absence disclosed
   }
 });
 
-test("skill parity with no installed hosts is FAIL — the discipline layer is missing", () => {
+test("skill parity with no installed hosts is SKIPPED, not FAIL — absence blocks nothing", () => {
+  // Changed deliberately (2026-08-05, owner call). These skills are markdown
+  // discipline for whichever agent app drives DevHarmonics; NO command reads them at
+  // runtime, so their absence cannot break anything. Scoring it FAIL told every
+  // fresh installer their install was broken — the same category error as failing
+  // the repo-governance probe when no repository is in scope. DRIFT between hosts is
+  // the real bug class, and that still FAILs (see the next test).
   const result = probeSkillParity("rigor:skill-parity", { claude: "Z:/none", codex: "Z:/nada" }, "dev-rigor-stack-lite");
-  assert.equal(result.status, "FAIL");
+  assert.equal(result.status, "SKIPPED");
   assert.match(result.detail, /not installed under any/);
+  assert.match(result.detail, /never read at runtime/, "must say why it is not a failure");
 });

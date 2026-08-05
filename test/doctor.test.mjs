@@ -21,15 +21,21 @@ function fixtureConfig() {
   return config;
 }
 
-test("doctor completes an all-dead assessment with FAILs, and the counts add up", async () => {
+test("doctor completes an all-dead assessment: operational checks FAIL, advisory skill-parity is SKIPPED, and the counts add up", async () => {
   const report = await runDoctor({ config: fixtureConfig(), probeTimeoutMs: 3_000 });
   assert.equal(report.checks.length, 4);
-  assert.equal(report.counts.FAIL, 4);
+  // 3 genuine capability failures (a missing CLI, a dead endpoint, absent
+  // tampercheck) + 1 SKIPPED: skill-parity has nothing to compare and blocks no
+  // command, so it is no longer scored as a capability failure (owner call,
+  // 2026-08-05). Drift between installed hosts still FAILs.
+  assert.equal(report.counts.FAIL, 3);
+  assert.equal(report.counts.SKIPPED, 1);
   assert.equal(report.counts.PASS + report.counts.FAIL + report.counts.SKIPPED, report.checks.length);
   const rendered = renderDoctorReport(report);
   assert.match(rendered, /FAIL\s+cli:ghost/);
   assert.match(rendered, /FAIL\s+http:deadend/);
-  assert.match(rendered, /4 FAIL/);
+  assert.match(rendered, /3 FAIL/);
+  assert.match(rendered, /SKIPPED\s+rigor:skill-parity/);
 });
 
 test("cli doctor exits 0 when the assessment completes, even full of FAILs", () => {

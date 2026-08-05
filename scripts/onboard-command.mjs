@@ -49,7 +49,13 @@ function printApply(plan, result, asJson, write) {
   write(`\n${result.applied.length} written, ${result.skipped.length} skipped, ${result.errors.length} error(s)\n`);
 }
 
-export async function onboardCommand(argv, { write = (text) => { process.stdout.write(text); } } = {}) {
+export async function onboardCommand(argv, {
+  write = (text) => { process.stdout.write(text); },
+  // Injectable so tests can be hermetic: otherwise the ci-detectors step's status
+  // depends on whether the deterministic-detector plugin happens to be installed on
+  // the machine running the suite.
+  detectorTemplateDir = undefined,
+} = {}) {
   const options = { repository: null, apply: false, force: false, asJson: false };
   const positionals = [];
   for (let i = 0; i < argv.length; i += 1) {
@@ -80,7 +86,7 @@ export async function onboardCommand(argv, { write = (text) => { process.stdout.
     throw new Error(`Not a git repository (no .git found): ${repository}`);
   }
 
-  const plan = planOnboarding({ repository });
+  const plan = planOnboarding({ repository, ...(detectorTemplateDir === undefined ? {} : { detectorTemplateDir }) });
 
   if (!options.apply) {
     printPlan(plan, options.asJson, write);

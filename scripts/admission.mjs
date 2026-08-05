@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { acquireFileLock } from "./slots.mjs";
 
@@ -173,6 +173,147 @@ export async function reservePaidUsage({
   } finally {
     lock.release();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Fan-out ceilings (owner decision D1, 2026-08-05). The exposure this guards
+// is runaway AGENT SPAWNING, not paid-API dollars — reference incident: 255
+// agents and >300,000,000 tokens in ~45 minutes. Hard, fail-closed caps on
+// the total number of workers admitted and the cumulative tokens they report,
+// per state root, within a rolling window. Reservation happens BEFORE any
+// spawn; reconciliation after; a ledger that cannot be read refuses admission
+// rather than waving the worker through.
+// ---------------------------------------------------------------------------
+
+/**
+ * Replay the ledger's `kind: "worker"` records (latest per invocation) and
+ * report how many workers were admitted since `since` (ms epoch) and the
+ * total tokens their terminal records carried. An in-flight reservation
+ * counts as a worker (that is the point — concurrent admits are spend too);
+ * its tokens count as 0 until reconciled. A malformed line throws: a budget
+ * ledger that cannot be trusted refuses, never guesses.
+ */
+export function summarizeFanout(ledgerText, { since = 0 } = {}) {
+  const latestByInvocation = new Map();
+  const admittedAt = new Map();
+  for (const [index, line] of ledgerText.split(/\r?\n/).entries()) {
+    if (!line) continue;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch (error) {
+      throw new Error(`fan-out ledger line ${index + 1} is not valid JSON: ${error.message}`);
+    }
+    if (entry.kind !== "worker") continue;
+    if (!entry.invocationId) throw new Error(`fan-out ledger line ${index + 1} has no invocationId`);
+    if (entry.stage === "reserved") admittedAt.set(entry.invocationId, Date.parse(entry.startedAt ?? "") || 0);
+    latestByInvocation.set(entry.invocationId, entry);
+  }
+  let workers = 0;
+  let tokens = 0;
+  for (const [invocationId, entry] of latestByInvocation) {
+    const startedAt = admittedAt.get(invocationId) ?? Date.parse(entry.startedAt ?? entry.finishedAt ?? "") ?? 0;
+    if (startedAt < since) continue;
+    workers += 1;
+    const total = entry.usage?.total_tokens;
+    if (Number.isSafeInteger(total) && total > 0) tokens += total;
+  }
+  return { workers, tokens };
+}
+
+/**
+ * Admit one worker against the fan-out ceilings, appending its reservation
+ * under the same exclusive lock the money paths use — two concurrent admits
+ * can never both squeeze under the same remaining headroom. Refusals return
+ * `{ admitted: false, reason }` rather than throwing: a refusal is a normal,
+ * reportable outcome the caller turns into an honest failed receipt.
+ */
+export async function admitWorker({ stateRoot, taskId, lane, budgets, metadata = {} }) {
+  const { maxWorkers, maxTotalTokens, windowHours } = budgets ?? {};
+  if (!Number.isSafeInteger(maxWorkers) || maxWorkers <= 0) throw new Error("admitWorker: budgets.maxWorkers must be a positive integer");
+  if (!Number.isSafeInteger(maxTotalTokens) || maxTotalTokens <= 0) throw new Error("admitWorker: budgets.maxTotalTokens must be a positive integer");
+  if (!Number.isFinite(windowHours) || windowHours <= 0) throw new Error("admitWorker: budgets.windowHours must be a positive number");
+  mkdirSync(stateRoot, { recursive: true });
+  const ledgerPath = path.join(stateRoot, "usage.jsonl");
+  const lock = await acquireFileLock(path.join(stateRoot, "usage.lock"), { taskId, stage: "reserved", kind: "worker" });
+  try {
+    const ledgerText = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
+    const since = Date.now() - windowHours * 3_600_000;
+    const { workers, tokens } = summarizeFanout(ledgerText, { since });
+    if (workers + 1 > maxWorkers) {
+      return {
+        admitted: false,
+        workers,
+        tokens,
+        ledgerPath,
+        reason: `fanout-workers-exceeded: ${workers} of ${maxWorkers} workers already admitted in the last ${windowHours}h (ledger: ${ledgerPath}). Raise budgets.maxWorkers deliberately, or wait for the window to pass.`,
+      };
+    }
+    if (tokens >= maxTotalTokens) {
+      return {
+        admitted: false,
+        workers,
+        tokens,
+        ledgerPath,
+        reason: `fanout-tokens-exceeded: ${tokens} of ${maxTotalTokens} tokens already spent in the last ${windowHours}h (ledger: ${ledgerPath}). Raise budgets.maxTotalTokens deliberately, or wait for the window to pass.`,
+      };
+    }
+    const invocationId = createInvocationId();
+    const record = {
+      stage: "reserved",
+      kind: "worker",
+      invocationId,
+      taskId,
+      lane: lane ?? null,
+      paid: false,
+      reservedTokens: 0,
+      startedAt: new Date().toISOString(),
+      ...metadata,
+    };
+    appendFileSync(ledgerPath, `${JSON.stringify(record)}\n`);
+    return { admitted: true, invocationId, workers: workers + 1, tokens, ledgerPath, record };
+  } finally {
+    lock.release();
+  }
+}
+
+/** Close out an admitted worker with its real reported usage (null = honestly unknown, charged 0). */
+export async function reconcileWorker({ stateRoot, invocationId, taskId, status, totalTokens = null, metadata = {} }) {
+  const ledgerPath = path.join(stateRoot, "usage.jsonl");
+  const lock = await acquireFileLock(path.join(stateRoot, "usage.lock"), { taskId, invocationId, stage: "terminal", kind: "worker" });
+  try {
+    const record = {
+      stage: "terminal",
+      kind: "worker",
+      invocationId,
+      taskId,
+      paid: false,
+      status: status ?? null,
+      usage: Number.isSafeInteger(totalTokens) && totalTokens > 0 ? { total_tokens: totalTokens } : null,
+      finishedAt: new Date().toISOString(),
+      ...metadata,
+    };
+    appendFileSync(ledgerPath, `${JSON.stringify(record)}\n`);
+    return record;
+  } finally {
+    lock.release();
+  }
+}
+
+/**
+ * Where a worker's fan-out ledger lives when the caller did not say: the
+ * nearest enclosing `.devharmonics` state directory of its runsRoot (the
+ * pipeline, the worker/acp commands, and reviewers all place runs under
+ * one), else a `.fanout` directory inside the runsRoot — so even an
+ * out-of-tree caller is metered SOMEWHERE rather than nowhere, without the
+ * meter's files masquerading as run directories.
+ */
+export function deriveStateRoot(runsRoot) {
+  const resolved = path.resolve(runsRoot);
+  const segments = resolved.split(path.sep);
+  const index = segments.lastIndexOf(".devharmonics");
+  if (index >= 0) return segments.slice(0, index + 1).join(path.sep);
+  return path.join(resolved, ".fanout");
 }
 
 /** Close out a paid reservation with the run's real (reported) usage. */

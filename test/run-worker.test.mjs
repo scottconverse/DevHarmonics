@@ -158,3 +158,46 @@ test("an invalid invocation (empty prompt) is a failed receipt, not a throw", as
     rmSync(runsRoot, { recursive: true, force: true });
   }
 });
+
+// --- D1 fan-out ceilings: enforced at the ONE place every caller passes -----
+
+test("D1: a worker over the fan-out ceiling is refused with an honest failed receipt, and never spawns", async () => {
+  const fixture = fakeCodexDir("ok");
+  const runsRoot = mkdtempSync(path.join(os.tmpdir(), "dh-runs-fanout-"));
+  const cwd = mkdtempSync(path.join(os.tmpdir(), "dh-cwd-fanout-"));
+  const stateRoot = mkdtempSync(path.join(os.tmpdir(), "dh-state-fanout-"));
+  const budgets = { maxWorkers: 1, maxConcurrentWorkers: 3, maxTotalTokens: 1_000_000, windowHours: 24 };
+  try {
+    const first = await runWorker({
+      taskId: "fanout-one", provider: "codex", model: "fake-model-9b", prompt: "p",
+      cwd, runsRoot, timeoutMs: 30_000, env: envWith(fixture),
+      admission: { stateRoot, budgets },
+    });
+    assert.equal(first.receipt.status, "completed");
+
+    const refused = await runWorker({
+      taskId: "fanout-two", provider: "codex", model: "fake-model-9b", prompt: "p",
+      cwd, runsRoot, timeoutMs: 30_000, env: envWith(fixture),
+      admission: { stateRoot, budgets },
+    });
+    assert.equal(refused.receipt.status, "failed");
+    assert.match(refused.receipt.exit.error, /fanout-workers-exceeded: 1 of 1/);
+    // Never spawned: no stdout.log means superviseProcess never ran.
+    assert.equal(existsSync(path.join(refused.runDir, "stdout.log")), false, "a refused worker must not have spawned");
+
+    // The ledger holds the full audit trail: reservation + terminal with the
+    // REAL token count the completed run reported (21 + 8 from the fake).
+    const ledger = readFileSync(path.join(stateRoot, "usage.jsonl"), "utf8").split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l));
+    assert.equal(ledger.length, 2, "one reservation + one terminal — the refused attempt writes nothing");
+    assert.equal(ledger[1].stage, "terminal");
+    assert.deepEqual(ledger[1].usage, { total_tokens: 29 });
+
+    // The worker slot was released — a fresh state root admits again.
+    const slotFiles = existsSync(path.join(stateRoot, "worker-slots"))
+      ? (await import("node:fs")).readdirSync(path.join(stateRoot, "worker-slots"))
+      : [];
+    assert.deepEqual(slotFiles, [], "the completed run must have released its slot");
+  } finally {
+    for (const d of [fixture, runsRoot, cwd, stateRoot]) rmSync(d, { recursive: true, force: true });
+  }
+});

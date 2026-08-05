@@ -49,9 +49,19 @@ test("a missing config path throws; malformed JSON throws with the path named", 
 });
 
 test("validateConfig names each failing field", () => {
-  const bad = { ...defaultConfig(), version: 2, budgets: { maxWorkerMinutes: 0 } };
+  const bad = { ...defaultConfig(), version: 2, budgets: { maxWorkers: 0, maxConcurrentWorkers: 9, maxTotalTokens: -1, windowHours: 0 } };
   const result = validateConfig(bad);
   assert.equal(result.ok, false);
   assert.ok(result.errors.some((e) => e.includes("version")));
-  assert.ok(result.errors.some((e) => e.includes("maxWorkerMinutes")));
+  assert.ok(result.errors.some((e) => e.includes("maxWorkers")));
+  assert.ok(result.errors.some((e) => e.includes("maxConcurrentWorkers")));
+  assert.ok(result.errors.some((e) => e.includes("maxTotalTokens")));
+  assert.ok(result.errors.some((e) => e.includes("windowHours")));
+});
+
+test("validateConfig rejects the deleted maxWorkerMinutes with a message naming its replacement", () => {
+  const stale = { ...defaultConfig(), budgets: { ...defaultConfig().budgets, maxWorkerMinutes: 30 } };
+  const result = validateConfig(stale);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((e) => e.includes("maxWorkerMinutes") && e.includes("--timeout-minutes")));
 });

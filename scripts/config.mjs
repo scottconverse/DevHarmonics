@@ -30,7 +30,15 @@ export function defaultConfig() {
       },
       skillName: "dev-rigor-stack-lite",
     },
-    budgets: { maxWorkerMinutes: 30 },
+    // Fan-out ceilings (owner decision D1): hard, fail-closed caps on worker
+    // spawning per state root, within a rolling window. maxWorkerMinutes was
+    // deleted (validated-but-never-read; --timeout-minutes is the real bound).
+    budgets: {
+      maxWorkers: 100,          // total workers admitted per window
+      maxConcurrentWorkers: 3,  // live at once (slots.mjs allows 1..4)
+      maxTotalTokens: 50_000_000, // cumulative reported tokens per window
+      windowHours: 24,
+    },
   };
 }
 
@@ -66,8 +74,17 @@ export function validateConfig(config) {
       }
     }
   }
-  if (!isPlainObject(config.budgets) || !Number.isSafeInteger(config.budgets.maxWorkerMinutes) || config.budgets.maxWorkerMinutes <= 0) {
-    errors.push("budgets.maxWorkerMinutes must be a positive integer");
+  if (!isPlainObject(config.budgets)) {
+    errors.push("budgets must be an object");
+  } else {
+    const b = config.budgets;
+    if (!Number.isSafeInteger(b.maxWorkers) || b.maxWorkers <= 0) errors.push("budgets.maxWorkers must be a positive integer");
+    if (!Number.isSafeInteger(b.maxConcurrentWorkers) || b.maxConcurrentWorkers < 1 || b.maxConcurrentWorkers > 4) {
+      errors.push("budgets.maxConcurrentWorkers must be an integer between 1 and 4");
+    }
+    if (!Number.isSafeInteger(b.maxTotalTokens) || b.maxTotalTokens <= 0) errors.push("budgets.maxTotalTokens must be a positive integer");
+    if (!Number.isFinite(b.windowHours) || b.windowHours <= 0) errors.push("budgets.windowHours must be a positive number");
+    if ("maxWorkerMinutes" in b) errors.push("budgets.maxWorkerMinutes was removed — use --timeout-minutes on the command instead");
   }
   return { ok: errors.length === 0, errors };
 }

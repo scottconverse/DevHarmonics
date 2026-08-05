@@ -150,9 +150,11 @@ async function withFixturePath(dir, fn) {
   }
 }
 
-/** Read the receipt out of the single run directory a call must have created. */
+/** Read the receipt out of the single run directory a call must have created.
+ * A bare runs root (no enclosing .devharmonics) also carries the fan-out
+ * meter's own `.fanout` directory (D1) — that is the meter, not a run. */
 function readSoleReceipt(runsRoot) {
-  const entries = readdirSync(runsRoot);
+  const entries = readdirSync(runsRoot).filter((name) => name !== ".fanout");
   assert.equal(entries.length, 1, `expected exactly one run directory under ${runsRoot}, got: ${entries.join(", ")}`);
   const runDir = path.join(runsRoot, entries[0]);
   const receipt = JSON.parse(readFileSync(path.join(runDir, "receipt.json"), "utf8"));

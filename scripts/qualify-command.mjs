@@ -218,6 +218,9 @@ export async function qualifyCommand(argv, { write = (text) => { process.stdout.
       role: row.role,
       workRoot: path.join(workRoot, safeDirName(row.candidate.id), safeDirName(row.role)),
       qualificationsPath,
+      // D1: the whole sweep meters against the qualify state root, with the
+      // budgets from this command's (possibly --config-overridden) config.
+      admission: { stateRoot, budgets: config.budgets },
     });
     rows.push({ ...row, result });
     if (!options.asJson) printRowResult(row, result, write);

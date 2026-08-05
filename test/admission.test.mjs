@@ -164,3 +164,85 @@ test("concurrent paid reservations against one shared ledger never both exceed b
   assert.equal(summarizeLedger(readFileSync(ledgerPath, "utf8"), true), 60);
   assert.ok(existsSync(ledgerPath));
 });
+
+// --- D1 fan-out ceilings (owner decision 2026-08-05) ------------------------
+
+import { admitWorker, reconcileWorker, summarizeFanout, deriveStateRoot } from "../scripts/admission.mjs";
+
+const FANOUT_BUDGETS = { maxWorkers: 2, maxTotalTokens: 1000, windowHours: 24 };
+
+test("admitWorker refuses fail-closed at the total-worker ceiling", async (t) => {
+  const root = tempRoot(t, "dh-fanout-workers-");
+  const one = await admitWorker({ stateRoot: root, taskId: "w1", lane: "subprocess", budgets: FANOUT_BUDGETS });
+  const two = await admitWorker({ stateRoot: root, taskId: "w2", lane: "subprocess", budgets: FANOUT_BUDGETS });
+  assert.equal(one.admitted, true);
+  assert.equal(two.admitted, true);
+  const three = await admitWorker({ stateRoot: root, taskId: "w3", lane: "subprocess", budgets: FANOUT_BUDGETS });
+  assert.equal(three.admitted, false);
+  assert.match(three.reason, /fanout-workers-exceeded: 2 of 2/);
+});
+
+test("an in-flight (unreconciled) reservation counts toward the worker ceiling — concurrency is spend", async (t) => {
+  const root = tempRoot(t, "dh-fanout-inflight-");
+  const budgets = { ...FANOUT_BUDGETS, maxWorkers: 1 };
+  const first = await admitWorker({ stateRoot: root, taskId: "w1", lane: "acp", budgets });
+  assert.equal(first.admitted, true);
+  // No terminal record yet: the second admit must still see the first.
+  const second = await admitWorker({ stateRoot: root, taskId: "w2", lane: "acp", budgets });
+  assert.equal(second.admitted, false);
+  assert.match(second.reason, /fanout-workers-exceeded/);
+});
+
+test("admitWorker refuses at the cumulative token ceiling after reconciliation", async (t) => {
+  const root = tempRoot(t, "dh-fanout-tokens-");
+  const budgets = { ...FANOUT_BUDGETS, maxWorkers: 10 };
+  const one = await admitWorker({ stateRoot: root, taskId: "w1", lane: "subprocess", budgets });
+  await reconcileWorker({ stateRoot: root, invocationId: one.invocationId, taskId: "w1", status: "completed", totalTokens: 1000 });
+  const two = await admitWorker({ stateRoot: root, taskId: "w2", lane: "subprocess", budgets });
+  assert.equal(two.admitted, false);
+  assert.match(two.reason, /fanout-tokens-exceeded: 1000 of 1000/);
+});
+
+test("workers admitted before the rolling window no longer count", async (t) => {
+  const root = tempRoot(t, "dh-fanout-window-");
+  // Hand-write an old reservation+terminal pair (2 days ago) plus nothing else.
+  const old = new Date(Date.now() - 48 * 3_600_000).toISOString();
+  const ledger = [
+    `{"stage":"reserved","kind":"worker","invocationId":"inv-old","taskId":"old","paid":false,"reservedTokens":0,"startedAt":"${old}"}`,
+    `{"stage":"terminal","kind":"worker","invocationId":"inv-old","taskId":"old","paid":false,"usage":{"total_tokens":999},"finishedAt":"${old}"}`,
+  ].join("\n");
+  const inWindow = summarizeFanout(ledger, { since: Date.now() - 24 * 3_600_000 });
+  assert.deepEqual(inWindow, { workers: 0, tokens: 0 });
+  const allTime = summarizeFanout(ledger, { since: 0 });
+  assert.deepEqual(allTime, { workers: 1, tokens: 999 });
+});
+
+test("a corrupt fan-out ledger refuses admission rather than waving the worker through", async (t) => {
+  const root = tempRoot(t, "dh-fanout-corrupt-");
+  const first = await admitWorker({ stateRoot: root, taskId: "w1", lane: "subprocess", budgets: FANOUT_BUDGETS });
+  assert.equal(first.admitted, true);
+  const { appendFileSync } = await import("node:fs");
+  appendFileSync(path.join(root, "usage.jsonl"), "{ not json\n");
+  await assert.rejects(
+    () => admitWorker({ stateRoot: root, taskId: "w2", lane: "subprocess", budgets: FANOUT_BUDGETS }),
+    /not valid JSON/,
+  );
+});
+
+test("fan-out records coexist with the money ledger without corrupting either summary", async (t) => {
+  const root = tempRoot(t, "dh-fanout-coexist-");
+  await reservePaidUsage({ stateRoot: root, aggregateLimit: 100, reservedTokens: 40, taskId: "paid1" });
+  const worker = await admitWorker({ stateRoot: root, taskId: "w1", lane: "subprocess", budgets: FANOUT_BUDGETS });
+  await reconcileWorker({ stateRoot: root, invocationId: worker.invocationId, taskId: "w1", status: "completed", totalTokens: 7 });
+  const ledgerPath = path.join(root, "usage.jsonl");
+  assert.equal(usageSpent(ledgerPath, true), 40, "paid summary must only see paid records");
+  const fanout = summarizeFanout(readFileSync(ledgerPath, "utf8"), { since: 0 });
+  assert.deepEqual(fanout, { workers: 1, tokens: 7 }, "fan-out summary must only see kind:worker records");
+});
+
+test("deriveStateRoot finds the enclosing .devharmonics, else meters in a .fanout dir inside the runsRoot", () => {
+  const inside = path.join("C:", "repo", ".devharmonics", "runs", "run-1");
+  assert.equal(deriveStateRoot(inside), path.resolve(path.join("C:", "repo", ".devharmonics")));
+  const outside = path.join(tmpdir(), "loose-runs");
+  assert.equal(deriveStateRoot(outside), path.join(path.resolve(outside), ".fanout"));
+});

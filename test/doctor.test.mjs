@@ -26,7 +26,7 @@ function fixtureConfig() {
       skillHosts: { claude: "Z:/none", codex: "Z:/nada" },
       skillName: "dev-rigor-stack-lite",
     },
-    budgets: { maxWorkerMinutes: 30 },
+    budgets: { maxWorkers: 100, maxConcurrentWorkers: 3, maxTotalTokens: 50_000_000, windowHours: 24 },
   };
 }
 

@@ -7,6 +7,9 @@ import { buildInvocation, parseWorkerOutput } from "./providers.mjs";
 import { superviseProcess } from "./supervise.mjs";
 import { createReceipt, writeReceipt } from "./receipts.mjs";
 import { workerEnv } from "./worker-env.mjs";
+import { admitWorker, reconcileWorker, deriveStateRoot } from "./admission.mjs";
+import { acquireWorkerSlot } from "./slots.mjs";
+import { defaultConfig } from "./config.mjs";
 
 // Duplicated from receipts.mjs (which does not export it), same as
 // local-patch.mjs. Keep in sync if receipts.mjs ever changes its pattern.
@@ -41,6 +44,10 @@ export async function runWorker({
   maxBudgetUsd = null,
   reasoningEffort = "low",
   timeoutMs = 10 * 60_000,
+  // D1 fan-out ceilings: { stateRoot?, budgets? }. Always enforced — when the
+  // caller says nothing, the state root is derived from runsRoot and the
+  // budgets come from the built-in defaults, so no code path spawns unmetered.
+  admission = undefined,
   env = process.env,
 }) {
   // Validate the task-id UP FRONT, before anything is spawned. A malformed id
@@ -63,7 +70,19 @@ export async function runWorker({
   // environment. PATH survives, so resolution is unaffected; API keys do not.
   const { env: childEnv, stripped } = workerEnv(env);
 
-  const finish = ({ status, exit, supervised = null, parsed = null }) => {
+  // D1 fan-out state: set once admitted; finish() reconciles and releases on
+  // every exit path, so a crashed run never leaves a slot held or a
+  // reservation dangling un-reconciled.
+  const fanoutStateRoot = admission?.stateRoot ?? deriveStateRoot(runsRoot);
+  const fanoutBudgets = admission?.budgets ?? defaultConfig().budgets;
+  let fanoutInvocationId = null;
+  let slot = null;
+
+  const finish = async ({ status, exit, supervised = null, parsed = null }) => {
+    if (slot) {
+      try { slot.release(); } catch { /* already gone */ }
+      slot = null;
+    }
     const finishedAt = new Date().toISOString();
     const receipt = createReceipt({
       receiptId,
@@ -87,6 +106,21 @@ export async function runWorker({
     });
     if (parsed?.finalText != null) writeFileSync(path.join(runDir, "final-text.txt"), parsed.finalText);
     writeReceipt(runsRoot, receipt);
+    if (fanoutInvocationId) {
+      // Reconcile with what the run really reported; a failure to write the
+      // terminal record must not eat the receipt — the reservation simply
+      // stays counted, which errs toward the ceiling, never past it.
+      try {
+        await reconcileWorker({
+          stateRoot: fanoutStateRoot,
+          invocationId: fanoutInvocationId,
+          taskId,
+          status,
+          totalTokens: receipt.usage?.totalTokens ?? null,
+        });
+      } catch { /* fail toward the cap */ }
+      fanoutInvocationId = null;
+    }
     return { receipt, runDir, parsed, supervised };
   };
 
@@ -115,6 +149,36 @@ export async function runWorker({
         args: invocation.args,
       },
     });
+  }
+
+  // D1 fan-out ceilings (owner decision, 2026-08-05): reservation BEFORE the
+  // spawn, against the total-worker and cumulative-token caps; refusal is an
+  // honest failed receipt, and an unreadable ledger refuses rather than waves
+  // the worker through. The reference incident this guards against: 255
+  // agents / >300M tokens in ~45 minutes.
+  try {
+    const verdict = await admitWorker({ stateRoot: fanoutStateRoot, taskId, lane: "subprocess", budgets: fanoutBudgets });
+    if (!verdict.admitted) {
+      return finish({ status: "failed", exit: { error: verdict.reason, args: invocation.args } });
+    }
+    fanoutInvocationId = verdict.invocationId;
+  } catch (error) {
+    return finish({ status: "failed", exit: { error: `fanout-admission-unavailable: ${error.message}`, args: invocation.args } });
+  }
+  // Concurrency cap: claim one of the live worker slots, waiting (bounded by
+  // this run's own timeout) rather than oversubscribing — a full house means
+  // work serializes, never that a fifth worker runs anyway.
+  const slotDeadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      slot = acquireWorkerSlot(fanoutStateRoot, fanoutBudgets.maxConcurrentWorkers, { taskId });
+      break;
+    } catch (error) {
+      if (Date.now() >= slotDeadline) {
+        return finish({ status: "failed", exit: { error: `fanout-concurrency: ${error.message} (waited ${timeoutMs}ms for a free worker slot under ${fanoutStateRoot})`, args: invocation.args } });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
   }
 
   const supervised = await superviseProcess({

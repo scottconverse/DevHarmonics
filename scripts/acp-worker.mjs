@@ -8,6 +8,9 @@ import * as acp from "@agentclientprotocol/sdk";
 import { resolvePathCommand, spawnPlan } from "./path-resolve.mjs";
 import { workerEnv } from "./worker-env.mjs";
 import { createReceipt, writeReceipt } from "./receipts.mjs";
+import { admitWorker, reconcileWorker, deriveStateRoot } from "./admission.mjs";
+import { acquireWorkerSlot } from "./slots.mjs";
+import { defaultConfig } from "./config.mjs";
 
 /**
  * Lane A: drive a coding agent over the Agent Client Protocol (stdio
@@ -183,6 +186,9 @@ export async function runAcpWorker({
   runsRoot,
   permissionMode = "deny",
   timeoutMs = 10 * 60_000,
+  // D1 fan-out ceilings: { stateRoot?, budgets? } — same always-on metering
+  // as run-worker.mjs; when omitted, derived from runsRoot + built-in defaults.
+  admission = undefined,
   env = process.env,
 }) {
   const receiptId = randomUUID();
@@ -207,9 +213,16 @@ export async function runAcpWorker({
   // which may be written before or after the spawn, can always report it.
   let strippedEnvNames = null;
 
+  // D1 fan-out state, mirrored from run-worker.mjs: finish() reconciles the
+  // reservation and releases the slot on every exit path.
+  const fanoutStateRoot = admission?.stateRoot ?? deriveStateRoot(runsRoot);
+  const fanoutBudgets = admission?.budgets ?? defaultConfig().budgets;
+  let fanoutInvocationId = null;
+  let slot = null;
+
   // Every attempt leaves a receipt, spawn failures included — the
   // run-worker.mjs precedent this lane must not break.
-  const finish = ({
+  const finish = async ({
     status,
     resolvedModel = null,
     resolutionVerified = false,
@@ -247,6 +260,22 @@ export async function runAcpWorker({
       strippedEnv: strippedEnvNames,
     });
     writeReceipt(runsRoot, receipt);
+    if (slot) {
+      try { slot.release(); } catch { /* already gone */ }
+      slot = null;
+    }
+    if (fanoutInvocationId) {
+      try {
+        await reconcileWorker({
+          stateRoot: fanoutStateRoot,
+          invocationId: fanoutInvocationId,
+          taskId,
+          status,
+          totalTokens: receipt.usage?.totalTokens ?? null,
+        });
+      } catch { /* fail toward the cap */ }
+      fanoutInvocationId = null;
+    }
     return { receipt, runDir, events, permissionRequests };
   };
 
@@ -255,6 +284,30 @@ export async function runAcpWorker({
     : adapterCommand;
   if (!resolvedCommand) {
     return finish({ status: "failed", error: `"${adapterCommand}" not found on PATH` });
+  }
+
+  // D1 fan-out ceilings: reservation before the adapter is spawned, then one
+  // live-worker slot (bounded wait), exactly as the subprocess lane does.
+  try {
+    const verdict = await admitWorker({ stateRoot: fanoutStateRoot, taskId, lane: "acp", budgets: fanoutBudgets });
+    if (!verdict.admitted) {
+      return finish({ status: "failed", error: verdict.reason });
+    }
+    fanoutInvocationId = verdict.invocationId;
+  } catch (error) {
+    return finish({ status: "failed", error: `fanout-admission-unavailable: ${error.message}` });
+  }
+  const slotDeadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      slot = acquireWorkerSlot(fanoutStateRoot, fanoutBudgets.maxConcurrentWorkers, { taskId });
+      break;
+    } catch (error) {
+      if (Date.now() >= slotDeadline) {
+        return finish({ status: "failed", error: `fanout-concurrency: ${error.message} (waited ${timeoutMs}ms for a free worker slot under ${fanoutStateRoot})` });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
   }
 
   const platform = process.platform;

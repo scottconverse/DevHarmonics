@@ -39,7 +39,7 @@ Every file in `scripts/` (27 as of this writing), one line each:
 |---|---|
 | `acp-command.mjs` | CLI surface for `devharmonics acp`: argument parsing and text/JSON rendering around a single `runAcpWorker` call. |
 | `acp-worker.mjs` | Lane A: drives one bounded ACP session over stdio JSON-RPC via `@agentclientprotocol/sdk`, emitting the shared receipt schema. |
-| `admission.mjs` | Append-only `usage.jsonl` ledger for paid/unpaid task attempts — reservation, replay-based summing, and reconciliation — ported from codex-factory. Not currently wired into any command. |
+| `admission.mjs` | Append-only `usage.jsonl` ledger — reservation, replay-based summing, reconciliation (ported from codex-factory), plus the **fan-out ceilings** (`admitWorker`/`reconcileWorker`/`summarizeFanout`): hard, fail-closed caps on total workers and cumulative tokens per state root within a rolling window, enforced inside both worker lanes before any spawn. |
 | `cli.mjs` | Entry point and dispatcher: parses the subcommand name, prints usage/version, and lazily imports the matching `*-command` module. |
 | `config.mjs` | Default factory configuration (endpoints, CLIs, rigor settings, budgets) plus deep-merge and fail-closed validation of an operator config file. |
 | `doctor.mjs` | Runs every configured capability probe (CLIs, HTTP endpoints, tampercheck, skill parity, optional repo governance) and tallies PASS/FAIL/SKIPPED. |
@@ -290,7 +290,11 @@ a deadline) — both file-existence locks (`open(path, "wx")`, failing if the
 file already exists) so two racing processes can never both win, and both
 reclaim a lock only after `process.kill(pid, 0)` proves the owning PID is
 actually gone, never on a timeout or a guess. `admission.mjs`'s usage ledger
-uses `acquireFileLock` directly. Neither primitive is itself the
+uses `acquireFileLock` directly, and the worker slots are claimed by both
+worker lanes (`run-worker.mjs`, `acp-worker.mjs`) before every spawn —
+`budgets.maxConcurrentWorkers` is the live-worker ceiling; a full house
+means work waits for a slot (bounded by the run's own timeout), never that
+an extra worker runs anyway. Neither primitive is itself the
 per-repository merge lock, though: `integrate.mjs`'s `integrateWorkerBranch`
 builds its own lock path by SHA-256-hashing the resolved repository path, so
 **two integrations into the same repository queue and serialize**, while two
@@ -383,7 +387,8 @@ direct reading, never inferred. In particular: `scripts/acp-command.mjs` and
 by the end (confirmed via `wc -l`, then a full read of each, plus the
 rewritten `cli.mjs` and `run-command.mjs`); the non-use of
 `expectedTampercheckVersion` and `budgets.maxWorkerMinutes` outside their own
-defining module, the exact two call sites of `workerEnv()`, the absence of
+defining module (the latter has since been deleted outright, and the
+admission ledger since wired into both worker lanes as the fan-out ceiling), the exact two call sites of `workerEnv()`, the absence of
 any `"interrupted"` status literal outside `receipts.mjs`'s schema, and that
 `local-patch.mjs` never produces a `"timeout"` status were each confirmed
 with a targeted `grep` rather than assumed.

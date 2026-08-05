@@ -133,7 +133,7 @@ async function httpTextRoundtrip({ candidate, deps, timeoutMs, prompt, maxTokens
   });
 }
 
-async function subprocessTextRoundtrip({ candidate, workRoot, env, timeoutMs, prompt, role, deps }) {
+async function subprocessTextRoundtrip({ candidate, workRoot, env, timeoutMs, prompt, role, deps, admission }) {
   const cwd = path.join(workRoot, "cwd");
   mkdirSync(cwd, { recursive: true });
   const runsRoot = path.join(workRoot, "runs");
@@ -144,6 +144,7 @@ async function subprocessTextRoundtrip({ candidate, workRoot, env, timeoutMs, pr
     prompt,
     cwd,
     runsRoot,
+    admission,
     sandbox: "read-only",
     allowedTools: ["Read"],
     maxTurns: 3,
@@ -154,7 +155,7 @@ async function subprocessTextRoundtrip({ candidate, workRoot, env, timeoutMs, pr
 
 // --- analysis ---------------------------------------------------------------
 
-async function runAnalysis({ candidate, workRoot, env, timeoutMs, deps }) {
+async function runAnalysis({ candidate, workRoot, env, timeoutMs, deps, admission }) {
   if (candidate.lane === "http") {
     const result = await httpTextRoundtrip({ candidate, deps, timeoutMs, prompt: ANALYSIS_PROMPT, maxTokens: 32 });
     if (!result.ok) {
@@ -168,7 +169,7 @@ async function runAnalysis({ candidate, workRoot, env, timeoutMs, deps }) {
       receiptRef: null,
     };
   }
-  const run = await subprocessTextRoundtrip({ candidate, workRoot, env, timeoutMs, prompt: ANALYSIS_PROMPT, role: "analysis", deps });
+  const run = await subprocessTextRoundtrip({ candidate, workRoot, env, timeoutMs, prompt: ANALYSIS_PROMPT, role: "analysis", deps, admission });
   const passed = run.receipt.status === "completed" && verdictExactMarker(run.parsed?.finalText, ANALYSIS_MARKER);
   return {
     passed,
@@ -186,7 +187,7 @@ function benchmarkDetail(passed, parsed) {
   return passed ? "minimumHours=3" : `benchmark verdict failed: ${parsed.error ?? `got minimumHours=${JSON.stringify(parsed.minimumHours)}`}`;
 }
 
-async function runBenchmark({ candidate, workRoot, env, timeoutMs, deps }) {
+async function runBenchmark({ candidate, workRoot, env, timeoutMs, deps, admission }) {
   if (candidate.lane === "http") {
     const result = await httpTextRoundtrip({ candidate, deps, timeoutMs, prompt: BENCHMARK_PROMPT, maxTokens: 128 });
     if (!result.ok) {
@@ -195,7 +196,7 @@ async function runBenchmark({ candidate, workRoot, env, timeoutMs, deps }) {
     const { passed, parsed } = benchmarkVerdict(result.contentText);
     return { passed, detail: benchmarkDetail(passed, parsed), usage: result.usage, receiptRef: null };
   }
-  const run = await subprocessTextRoundtrip({ candidate, workRoot, env, timeoutMs, prompt: BENCHMARK_PROMPT, role: "benchmark", deps });
+  const run = await subprocessTextRoundtrip({ candidate, workRoot, env, timeoutMs, prompt: BENCHMARK_PROMPT, role: "benchmark", deps, admission });
   const { passed, parsed } = run.receipt.status === "completed"
     ? benchmarkVerdict(run.parsed?.finalText)
     : { passed: false, parsed: { error: `worker status=${run.receipt.status}`, minimumHours: null } };
@@ -297,7 +298,7 @@ async function runStructuredWriteHttp({ candidate, workRoot, env, timeoutMs, dep
   };
 }
 
-async function runStructuredWriteSubprocess({ candidate, workRoot, env, timeoutMs, deps }) {
+async function runStructuredWriteSubprocess({ candidate, workRoot, env, timeoutMs, deps, admission }) {
   const repoDir = mkdtempSync(path.join(workRoot, "sw-sub-"));
   createStructuredWriteFixture(repoDir);
   const runsRoot = path.join(workRoot, "runs");
@@ -318,6 +319,7 @@ async function runStructuredWriteSubprocess({ candidate, workRoot, env, timeoutM
     prompt,
     cwd: repoDir,
     runsRoot,
+    admission,
     sandbox: "workspace-write",
     permissionMode: "acceptEdits",
     allowedTools: ["Read", "Edit", "Write"],
@@ -369,6 +371,10 @@ export async function executeQualification({
   qualificationsPath,
   env = process.env,
   timeoutMs = 180_000,
+  // D1 fan-out ceilings: a sweep's subprocess harnesses all meter against ONE
+  // state root — by default the directory qualifications.jsonl lives in — so
+  // 65 candidate/role pairs count as 65 workers, not 65 fresh ledgers.
+  admission = undefined,
   deps = {},
 }) {
   if (typeof qualificationsPath !== "string" || !qualificationsPath) {
@@ -379,22 +385,23 @@ export async function executeQualification({
     throw new Error(`executeQualification: unknown qualification role: ${role}`);
   }
   const resolvedDeps = { sendMessages, runWorker, runLocalPatch, probeToolUse, ...deps };
+  const resolvedAdmission = admission ?? { stateRoot: path.dirname(qualificationsPath) };
 
   const startedAt = Date.now();
   let outcome;
   try {
     mkdirSync(workRoot, { recursive: true });
     if (role === "analysis") {
-      outcome = await runAnalysis({ candidate, workRoot, env, timeoutMs, deps: resolvedDeps });
+      outcome = await runAnalysis({ candidate, workRoot, env, timeoutMs, deps: resolvedDeps, admission: resolvedAdmission });
     } else if (role === "benchmark") {
-      outcome = await runBenchmark({ candidate, workRoot, env, timeoutMs, deps: resolvedDeps });
+      outcome = await runBenchmark({ candidate, workRoot, env, timeoutMs, deps: resolvedDeps, admission: resolvedAdmission });
     } else if (role === "tool_use") {
       outcome = await runToolUse({ candidate, timeoutMs, deps: resolvedDeps });
     } else {
       // role === "structured_write" (the only remaining known harness)
       outcome = candidate.lane === "http"
         ? await runStructuredWriteHttp({ candidate, workRoot, env, timeoutMs, deps: resolvedDeps })
-        : await runStructuredWriteSubprocess({ candidate, workRoot, env, timeoutMs, deps: resolvedDeps });
+        : await runStructuredWriteSubprocess({ candidate, workRoot, env, timeoutMs, deps: resolvedDeps, admission: resolvedAdmission });
     }
   } catch (error) {
     outcome = { passed: false, detail: `harness threw: ${error.message}`, usage: null, receiptRef: null };

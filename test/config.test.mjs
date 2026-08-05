@@ -156,3 +156,23 @@ test("config show / config path work through the real CLI, announcing the source
   assert.equal(pathOut.status, 0);
   assert.equal(pathOut.stdout.trim(), projectConfigPath(repo));
 });
+
+test("v1 port (b): the USD limits are a PAIR — one without the other refuses at validation, non-positive values refuse, and allowPaidApi must be boolean", () => {
+  const base = defaultConfig();
+  const withBudgets = (extra) => ({ ...base, budgets: { ...base.budgets, ...extra } });
+
+  const halfPair = validateConfig(withBudgets({ perRunLimitUsd: 5 }));
+  assert.equal(halfPair.ok, false);
+  assert.match(halfPair.errors.join("; "), /configured TOGETHER/);
+
+  const negative = validateConfig(withBudgets({ perRunLimitUsd: -1, monthlyLimitUsd: 100 }));
+  assert.equal(negative.ok, false);
+  assert.match(negative.errors.join("; "), /perRunLimitUsd must be a positive number/);
+
+  const stringSwitch = validateConfig(withBudgets({ allowPaidApi: "yes" }));
+  assert.equal(stringSwitch.ok, false);
+  assert.match(stringSwitch.errors.join("; "), /allowPaidApi must be true or false/);
+
+  const fullPair = validateConfig(withBudgets({ allowPaidApi: true, maxPaidTokens: 1_000_000, perRunLimitUsd: 5, monthlyLimitUsd: 100 }));
+  assert.equal(fullPair.ok, true, fullPair.errors?.join("; "));
+});

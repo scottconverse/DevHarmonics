@@ -38,6 +38,11 @@ export function defaultConfig() {
       maxConcurrentWorkers: 3,  // live at once (slots.mjs allows 1..4)
       maxTotalTokens: 50_000_000, // cumulative reported tokens per window
       windowHours: 24,
+      // PAID lane (v1 port (b), owner decision): double opt-in like v1 —
+      // a credentialed endpoint AND allowPaidApi must both be deliberate.
+      // USD ceilings are optional but PAIRED (v1 rule: both positive or
+      // neither); dollars are enforced where cost is genuinely reported.
+      allowPaidApi: false,
     },
   };
 }
@@ -92,6 +97,23 @@ export function validateConfig(config) {
     if ("maxPaidTokens" in b && (!Number.isSafeInteger(b.maxPaidTokens) || b.maxPaidTokens <= 0)) {
       errors.push("budgets.maxPaidTokens must be a positive integer when present");
     }
+    if ("allowPaidApi" in b && typeof b.allowPaidApi !== "boolean") {
+      errors.push("budgets.allowPaidApi must be true or false");
+    }
+    // v1 rule, ported verbatim in spirit: USD spending limits come as a PAIR,
+    // both positive — a per-run cap with no monthly cap (or vice versa) is a
+    // half-configured money guard and refuses at validation time.
+    const hasPerRun = "perRunLimitUsd" in b;
+    const hasMonthly = "monthlyLimitUsd" in b;
+    if (hasPerRun !== hasMonthly) {
+      errors.push("budgets.perRunLimitUsd and budgets.monthlyLimitUsd must be configured TOGETHER (v1 rule: paid spending limits come as a pair)");
+    }
+    if (hasPerRun && (!Number.isFinite(b.perRunLimitUsd) || b.perRunLimitUsd <= 0)) {
+      errors.push("budgets.perRunLimitUsd must be a positive number when present");
+    }
+    if (hasMonthly && (!Number.isFinite(b.monthlyLimitUsd) || b.monthlyLimitUsd <= 0)) {
+      errors.push("budgets.monthlyLimitUsd must be a positive number when present");
+    }
     if ("maxWorkerMinutes" in b) errors.push("budgets.maxWorkerMinutes was removed — use --timeout-minutes on the command instead");
   }
   return { ok: errors.length === 0, errors };
@@ -121,7 +143,7 @@ export function initializeProjectConfig(projectPath) {
       "DevHarmonics configuration — created automatically with the defaults on first use.",
       "Edit values and save; every command reads this file and announces it as its config source.",
       "A --config <file> flag overrides this file for one invocation.",
-      "endpoints.<name>.apiKeyEnvVar names an environment variable holding a REAL credential — that makes the endpoint PAID and requires budgets.maxPaidTokens.",
+      "endpoints.<name>.apiKeyEnvVar names an environment variable holding a REAL credential — that makes the endpoint PAID and requires budgets.allowPaidApi: true plus budgets.maxPaidTokens (optionally budgets.perRunLimitUsd + budgets.monthlyLimitUsd, always as a pair).",
       "See docs/USER_MANUAL.md for every field.",
     ],
     ...defaultConfig(),

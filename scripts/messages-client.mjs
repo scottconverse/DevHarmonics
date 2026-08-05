@@ -73,6 +73,21 @@ export async function sendMessages({
   const isPaid = resolvedApiKey !== "local";
   let paidReservation = null;
   if (isPaid) {
+    // v1 port (b): the DOUBLE opt-in. Naming a credential opens nothing by
+    // itself — budgets.allowPaidApi must also be set true, deliberately.
+    if (paidBudget?.allowPaidApi !== true) {
+      return {
+        ok: false,
+        httpStatus: null,
+        stopReason: null,
+        contentText: null,
+        toolUses: [],
+        usage: null,
+        resolvedModel: null,
+        error: `paid-api-disabled-by-policy: this call carries a real credential for ${baseUrl}, but budgets.allowPaidApi is not true. Paid API use is a double opt-in (v1 rule): set budgets.allowPaidApi: true AND budgets.maxPaidTokens in the project config (devharmonics config show) to open the paid lane deliberately.`,
+        raw: null,
+      };
+    }
     if (!paidBudget || !Number.isSafeInteger(paidBudget.maxPaidTokens) || paidBudget.maxPaidTokens <= 0 || typeof paidBudget.stateRoot !== "string" || !paidBudget.stateRoot) {
       return {
         ok: false,

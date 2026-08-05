@@ -164,6 +164,15 @@ export async function runPipeline({
     ? { stateRoot: path.join(repo, ".devharmonics"), ...admission }
     : undefined;
 
+  // v1 port (b): budgets.perRunLimitUsd rides to the provider that enforces a
+  // real per-run dollar stop (claude's --max-budget-usd, live-fire-proven).
+  // An explicit --max-budget-usd flag composes with it — the LOWER wins, so
+  // the config ceiling can never be talked past on the command line.
+  const perRunLimitUsd = admission?.budgets?.perRunLimitUsd;
+  const effectiveMaxBudgetUsd = Number.isFinite(perRunLimitUsd)
+    ? (maxBudgetUsd != null ? Math.min(maxBudgetUsd, perRunLimitUsd) : perRunLimitUsd)
+    : maxBudgetUsd;
+
   const runId = (taskId ?? `run-${randomUUID().slice(0, 8)}`).toLowerCase();
   const baseRef = git(repo, ["rev-parse", "HEAD"]).stdout.trim();
   if (!baseRef) throw new Error("could not resolve HEAD; the repository needs at least one commit");
@@ -221,7 +230,7 @@ export async function runPipeline({
         commitMessage: `devharmonics ${runId}: ${provider}${model ? `:${model}` : ""}`,
         apiKeyEnvVar,
         paidBudget: apiKeyEnvVar
-          ? { stateRoot: path.join(repo, ".devharmonics"), maxPaidTokens: admission?.budgets?.maxPaidTokens, taskId: runId }
+          ? { stateRoot: path.join(repo, ".devharmonics"), maxPaidTokens: admission?.budgets?.maxPaidTokens, allowPaidApi: admission?.budgets?.allowPaidApi, taskId: runId }
           : undefined,
       };
       const patchResult = await d.runLocalPatch({ task, client: d.sendMessages, runsRoot: evidenceRoot, env });
@@ -324,7 +333,7 @@ export async function runPipeline({
               permissionMode: "acceptEdits",
               allowedTools: ["Read", "Edit", "Write"],
               timeoutMs,
-              maxBudgetUsd,
+              maxBudgetUsd: effectiveMaxBudgetUsd,
               admission: workerAdmission,
               env,
             });
@@ -403,7 +412,7 @@ export async function runPipeline({
       // protection is unchanged.
       // Paid http reviewer: same metering as the http worker call.
       const pipelineReviewer = reviewer?.lane === "http" && reviewer.apiKeyEnvVar
-        ? { ...reviewer, paidBudget: { stateRoot: path.join(repo, ".devharmonics"), maxPaidTokens: admission?.budgets?.maxPaidTokens, taskId: runId } }
+        ? { ...reviewer, paidBudget: { stateRoot: path.join(repo, ".devharmonics"), maxPaidTokens: admission?.budgets?.maxPaidTokens, allowPaidApi: admission?.budgets?.allowPaidApi, taskId: runId } }
         : reviewer;
       const review = await runReview({
         repository: repo,

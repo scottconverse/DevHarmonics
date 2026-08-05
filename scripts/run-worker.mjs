@@ -117,6 +117,7 @@ export async function runWorker({
           taskId,
           status,
           totalTokens: receipt.usage?.totalTokens ?? null,
+          costUsd: receipt.usage?.costUsd ?? null,
         });
       } catch { /* fail toward the cap */ }
       fanoutInvocationId = null;

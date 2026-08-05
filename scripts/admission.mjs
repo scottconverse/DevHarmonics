@@ -224,14 +224,20 @@ export function summarizeFanout(ledgerText, { since = 0 } = {}) {
   }
   let workers = 0;
   let tokens = 0;
+  let costUsd = 0;
   for (const [invocationId, entry] of latestByInvocation) {
     const startedAt = admittedAt.get(invocationId) ?? dateOrInfinity(entry.startedAt ?? entry.finishedAt);
     if (startedAt < since) continue;
     workers += 1;
     const total = entry.usage?.total_tokens;
     if (Number.isSafeInteger(total) && total > 0) tokens += total;
+    // v1 port (b): real REPORTED dollars, where a run reported them (claude's
+    // headless receipts carry total_cost_usd; local models report none and
+    // honestly contribute $0 — the token ceilings remain their guard).
+    const cost = entry.usage?.cost_usd;
+    if (Number.isFinite(cost) && cost > 0) costUsd += cost;
   }
-  return { workers, tokens };
+  return { workers, tokens, costUsd };
 }
 
 /**
@@ -242,10 +248,13 @@ export function summarizeFanout(ledgerText, { since = 0 } = {}) {
  * reportable outcome the caller turns into an honest failed receipt.
  */
 export async function admitWorker({ stateRoot, taskId, lane, budgets, metadata = {} }) {
-  const { maxWorkers, maxTotalTokens, windowHours } = budgets ?? {};
+  const { maxWorkers, maxTotalTokens, windowHours, monthlyLimitUsd } = budgets ?? {};
   if (!Number.isSafeInteger(maxWorkers) || maxWorkers <= 0) throw new Error("admitWorker: budgets.maxWorkers must be a positive integer");
   if (!Number.isSafeInteger(maxTotalTokens) || maxTotalTokens <= 0) throw new Error("admitWorker: budgets.maxTotalTokens must be a positive integer");
   if (!Number.isFinite(windowHours) || windowHours <= 0) throw new Error("admitWorker: budgets.windowHours must be a positive number");
+  if (monthlyLimitUsd !== undefined && (!Number.isFinite(monthlyLimitUsd) || monthlyLimitUsd <= 0)) {
+    throw new Error("admitWorker: budgets.monthlyLimitUsd must be a positive number when present");
+  }
   mkdirSync(stateRoot, { recursive: true });
   const ledgerPath = path.join(stateRoot, "usage.jsonl");
   const lock = await acquireFileLock(path.join(stateRoot, "usage.lock"), { taskId, stage: "reserved", kind: "worker" });
@@ -271,6 +280,24 @@ export async function admitWorker({ stateRoot, taskId, lane, budgets, metadata =
         reason: `fanout-tokens-exceeded: ${tokens} of ${maxTotalTokens} tokens already spent in the last ${windowHours}h (ledger: ${ledgerPath}). Raise budgets.maxTotalTokens in the project's .devharmonics/config.json (see: devharmonics config show), rotate the ledger file deliberately, or wait for the window to pass.`,
       };
     }
+    // v1 port (b): the monthly USD ceiling — a rolling 30 days, summed from
+    // the REPORTED cost on this ledger's worker records. It stops the NEXT
+    // worker once recorded spend reaches the limit; runs that report no cost
+    // contribute $0 (the token ceilings above are their guard — stated
+    // honestly, never estimated from a price table).
+    if (Number.isFinite(monthlyLimitUsd)) {
+      const monthly = summarizeFanout(ledgerText, { since: Date.now() - 30 * 24 * 3_600_000 });
+      if (monthly.costUsd >= monthlyLimitUsd) {
+        return {
+          admitted: false,
+          workers,
+          tokens,
+          costUsd: monthly.costUsd,
+          ledgerPath,
+          reason: `paid-monthly-usd-exceeded: $${monthly.costUsd.toFixed(2)} of the $${monthlyLimitUsd} budgets.monthlyLimitUsd already reported in the last 30 days (ledger: ${ledgerPath}). Raise the limit in the project's .devharmonics/config.json (see: devharmonics config show), rotate the ledger file deliberately, or wait for spend to age out of the window.`,
+        };
+      }
+    }
     const invocationId = createInvocationId();
     const record = {
       stage: "reserved",
@@ -291,10 +318,13 @@ export async function admitWorker({ stateRoot, taskId, lane, budgets, metadata =
 }
 
 /** Close out an admitted worker with its real reported usage (null = honestly unknown, charged 0). */
-export async function reconcileWorker({ stateRoot, invocationId, taskId, status, totalTokens = null, metadata = {} }) {
+export async function reconcileWorker({ stateRoot, invocationId, taskId, status, totalTokens = null, costUsd = null, metadata = {} }) {
   const ledgerPath = path.join(stateRoot, "usage.jsonl");
   const lock = await acquireFileLock(path.join(stateRoot, "usage.lock"), { taskId, invocationId, stage: "terminal", kind: "worker" });
   try {
+    const usage = {};
+    if (Number.isSafeInteger(totalTokens) && totalTokens > 0) usage.total_tokens = totalTokens;
+    if (Number.isFinite(costUsd) && costUsd > 0) usage.cost_usd = costUsd;
     const record = {
       stage: "terminal",
       kind: "worker",
@@ -302,7 +332,7 @@ export async function reconcileWorker({ stateRoot, invocationId, taskId, status,
       taskId,
       paid: false,
       status: status ?? null,
-      usage: Number.isSafeInteger(totalTokens) && totalTokens > 0 ? { total_tokens: totalTokens } : null,
+      usage: Object.keys(usage).length ? usage : null,
       finishedAt: new Date().toISOString(),
       ...metadata,
     };

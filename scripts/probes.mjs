@@ -219,19 +219,37 @@ export function probePaidBudget(id, endpointName, endpoint, budgets, env = proce
       budgetConfigured: false,
     };
   }
+  // v1 port (b): the double opt-in. A credential plus a budget still isn't
+  // enough — allowPaidApi is the deliberate master switch, and its being off
+  // is worth a FAIL row here because every paid call will refuse.
+  if (budgets?.allowPaidApi !== true) {
+    return {
+      id,
+      status: "FAIL",
+      detail: `endpoint "${endpointName}" is credentialed (${envVar} is set) but budgets.allowPaidApi is not true — every paid call will refuse before sending. Paid API use is a double opt-in: set budgets.allowPaidApi: true in the project config (devharmonics config show) to open the paid lane deliberately.`,
+      endpointName,
+      apiKeyEnvVar: envVar,
+      budgetConfigured: true,
+      allowPaidApi: false,
+    };
+  }
   const tokens = budgets.maxPaidTokens;
   // A human-meaningful translation, clearly labeled an estimate: Claude API
   // pricing spans roughly $1-$25 per million tokens across models (2025-era);
   // the enforced unit stays tokens because tokens are what the API reports.
   const low = (tokens / 1_000_000) * 1;
   const high = (tokens / 1_000_000) * 25;
+  const usdCeilings = Number.isFinite(budgets?.perRunLimitUsd) && Number.isFinite(budgets?.monthlyLimitUsd)
+    ? `; USD ceilings $${budgets.perRunLimitUsd}/run and $${budgets.monthlyLimitUsd}/30 days, enforced on runs that report real cost`
+    : "";
   return {
     id,
     status: "PASS",
-    detail: `endpoint "${endpointName}" credentialed (${envVar} set); paid ceiling ${tokens.toLocaleString("en-US")} tokens (≈ $${low.toFixed(0)}–$${high.toFixed(0)} at typical per-model API prices — an estimate, not the enforced unit)`,
+    detail: `endpoint "${endpointName}" credentialed (${envVar} set); paid lane OPEN (allowPaidApi), ceiling ${tokens.toLocaleString("en-US")} tokens (≈ $${low.toFixed(0)}–$${high.toFixed(0)} at typical per-model API prices — an estimate, not the enforced unit)${usdCeilings}`,
     endpointName,
     apiKeyEnvVar: envVar,
     budgetConfigured: true,
+    allowPaidApi: true,
     maxPaidTokens: tokens,
   };
 }

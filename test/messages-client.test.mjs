@@ -277,7 +277,7 @@ const OK_MESSAGE = {
   usage: { input_tokens: 40, output_tokens: 10 },
 };
 
-test("paid: a credentialed call WITHOUT a configured budget is refused before any request is sent", async (t) => {
+test("paid: a credentialed call with NOTHING configured is refused by the master switch first — the double opt-in (v1 port (b))", async (t) => {
   let requests = 0;
   const result = await withServer(
     jsonHandler(() => { requests += 1; return { body: OK_MESSAGE }; }),
@@ -286,6 +286,26 @@ test("paid: a credentialed call WITHOUT a configured budget is refused before an
       model: "claude-test",
       messages: [{ role: "user", content: "hi" }],
       apiKey: "sk-real-credential",
+    }),
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.error, /^paid-api-disabled-by-policy/);
+  assert.match(result.error, /allowPaidApi/);
+  assert.equal(requests, 0, "the metered endpoint must never be reached un-metered");
+});
+
+test("paid: allowPaidApi alone is not enough — a missing token budget still refuses before any request", async (t) => {
+  const stateRoot = mkdtempSync(path.join(tmpdir(), "dh-paid-nobudget-"));
+  t.after(() => rmSync(stateRoot, { recursive: true, force: true }));
+  let requests = 0;
+  const result = await withServer(
+    jsonHandler(() => { requests += 1; return { body: OK_MESSAGE }; }),
+    (baseUrl) => sendMessages({
+      baseUrl,
+      model: "claude-test",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "sk-real-credential",
+      paidBudget: { stateRoot, allowPaidApi: true, taskId: "paid-nobudget" },
     }),
   );
   assert.equal(result.ok, false);
@@ -304,7 +324,7 @@ test("paid: reservation before the request, reconciliation with REAL usage after
       messages: [{ role: "user", content: "hi" }],
       maxTokens: 64,
       apiKey: "sk-real-credential",
-      paidBudget: { stateRoot, maxPaidTokens: 10_000, taskId: "paid-ok" },
+      paidBudget: { stateRoot, allowPaidApi: true, maxPaidTokens: 10_000, taskId: "paid-ok" },
     }),
   );
   assert.equal(result.ok, true, result.error);
@@ -327,7 +347,7 @@ test("paid: a budget that cannot cover the reservation refuses — the request i
       messages: [{ role: "user", content: "hi" }],
       maxTokens: 64,
       apiKey: "sk-real-credential",
-      paidBudget: { stateRoot, maxPaidTokens: 10, taskId: "paid-over" },
+      paidBudget: { stateRoot, allowPaidApi: true, maxPaidTokens: 10, taskId: "paid-over" },
     }),
   );
   assert.equal(result.ok, false);
@@ -346,7 +366,7 @@ test("paid: a failed request reconciles as UNKNOWN usage, which closes the paid 
       model: "claude-test",
       messages: [{ role: "user", content: "hi" }],
       apiKey: "sk-real-credential",
-      paidBudget: { stateRoot, maxPaidTokens: 10_000, taskId: "paid-boom" },
+      paidBudget: { stateRoot, allowPaidApi: true, maxPaidTokens: 10_000, taskId: "paid-boom" },
     }),
   );
   // The next paid call must be refused: the ledger now contains a paid
@@ -359,7 +379,7 @@ test("paid: a failed request reconciles as UNKNOWN usage, which closes the paid 
       model: "claude-test",
       messages: [{ role: "user", content: "hi" }],
       apiKey: "sk-real-credential",
-      paidBudget: { stateRoot, maxPaidTokens: 10_000, taskId: "paid-after-boom" },
+      paidBudget: { stateRoot, allowPaidApi: true, maxPaidTokens: 10_000, taskId: "paid-after-boom" },
     }),
   );
   assert.equal(next.ok, false);
@@ -376,7 +396,7 @@ test("unpaid: key-less local calls are untouched — no budget required, no ledg
       baseUrl,
       model: "local-model",
       messages: [{ role: "user", content: "hi" }],
-      paidBudget: { stateRoot, maxPaidTokens: 10_000, taskId: "unpaid" },
+      paidBudget: { stateRoot, allowPaidApi: true, maxPaidTokens: 10_000, taskId: "unpaid" },
     }),
   );
   assert.equal(result.ok, true);

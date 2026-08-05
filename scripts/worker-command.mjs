@@ -72,6 +72,9 @@ export async function workerCommand(argv) {
     permissionMode: options.permissionMode,
     allowedTools: options.allowedTools,
     timeoutMs: Math.round(options.timeoutMinutes * 60_000),
+    // v1 port (b): the config's per-run USD ceiling reaches the bare worker
+    // command too — claude enforces it provider-side via --max-budget-usd.
+    maxBudgetUsd: Number.isFinite(config.budgets?.perRunLimitUsd) ? config.budgets.perRunLimitUsd : null,
     admission: { budgets: config.budgets },
   });
 

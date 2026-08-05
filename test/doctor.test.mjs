@@ -136,12 +136,35 @@ test("paid rows appear ONLY for credentialed endpoints, and name each failure's 
   assert.match(noBudget.detail, /budgets\.maxPaidTokens is not configured/);
   assert.match(noBudget.detail, /every paid call will refuse/);
 
-  // Both configured: PASS with the ceiling stated in tokens AND a labeled dollar estimate.
+  // Env var + budget set but the master switch OFF: FAIL naming the double opt-in.
+  const noSwitchConfig = paidFixtureConfig();
+  noSwitchConfig.budgets.maxPaidTokens = 2_000_000;
+  const noSwitchReport = await runDoctor({ config: noSwitchConfig, probeTimeoutMs: 3_000, env: { DH_TEST_PAID_KEY: "sk-x" } });
+  const noSwitch = noSwitchReport.checks.find((c) => c.id === "paid:anthropic");
+  assert.equal(noSwitch?.status, "FAIL");
+  assert.match(noSwitch.detail, /allowPaidApi is not true/);
+  assert.match(noSwitch.detail, /double opt-in/);
+
+  // Everything configured: PASS with the ceiling stated in tokens AND a labeled dollar estimate.
   const okConfig = paidFixtureConfig();
   okConfig.budgets.maxPaidTokens = 2_000_000;
+  okConfig.budgets.allowPaidApi = true;
   const okReport = await runDoctor({ config: okConfig, probeTimeoutMs: 3_000, env: { DH_TEST_PAID_KEY: "sk-x" } });
   const ok = okReport.checks.find((c) => c.id === "paid:anthropic");
   assert.equal(ok?.status, "PASS", ok?.detail);
   assert.match(ok.detail, /2,000,000 tokens/);
   assert.match(ok.detail, /estimate, not the enforced unit/);
+
+  // With the USD pair configured too, the PASS row states both ceilings.
+  const usdConfig = paidFixtureConfig();
+  usdConfig.budgets.maxPaidTokens = 2_000_000;
+  usdConfig.budgets.allowPaidApi = true;
+  usdConfig.budgets.perRunLimitUsd = 5;
+  usdConfig.budgets.monthlyLimitUsd = 100;
+  const usdReport = await runDoctor({ config: usdConfig, probeTimeoutMs: 3_000, env: { DH_TEST_PAID_KEY: "sk-x" } });
+  const usd = usdReport.checks.find((c) => c.id === "paid:anthropic");
+  assert.equal(usd?.status, "PASS", usd?.detail);
+  assert.match(usd.detail, /\$5\/run/);
+  assert.match(usd.detail, /\$100\/30 days/);
+  assert.match(usd.detail, /report real cost/);
 });

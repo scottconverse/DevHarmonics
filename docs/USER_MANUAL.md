@@ -89,6 +89,13 @@ What it actually checks: each configured CLI (`codex`, `claude`, `agy`) by resol
 
 **Exit codes:** 0 = the assessment completed, including a report full of FAILs. 2 = doctor itself could not run (bad flag, unreadable config file).
 
+**Which FAILs actually block work, and which don't.** `doctor` is a diagnostic, not a gate, so read it accordingly:
+
+- `rigor:tampercheck` FAIL — **blocking for `run`/`set`.** No change can reach an integration branch until it is installed (see Requirements).
+- `cli:*` and `http:*` FAILs — **blocking only for that lane.** You need at least one working worker lane; the others failing is normal (few machines run all three local endpoints).
+- `rigor:skill-parity` FAIL — **not blocking at all.** `dev-rigor-stack-lite` is coordinator discipline written in Markdown for whichever agent app drives DevHarmonics; **no command reads it at runtime.** A fresh install with none of it present reports FAIL and every command still works. It is reported as FAIL rather than SKIPPED on purpose: if you drive the same project from more than one host, versions drifting apart (or missing entirely) means the two sessions follow different rules, which is a real bug class worth seeing. If you are not using those skills, this line is informational — it does not mean your install is broken.
+- `repo:governance` SKIPPED — simply means no `--repository` was in scope.
+
 Real output, captured on this machine:
 ```
 DevHarmonics doctor

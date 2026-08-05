@@ -119,7 +119,17 @@ export function probeSkillParity(id, skillHosts, skillName) {
   const findings = Object.entries(skillHosts).map(([host, root]) => ({ host, root, ...skillVersion(root, skillName) }));
   const present = findings.filter((f) => f.present);
   if (present.length === 0) {
-    return { id, status: "FAIL", detail: `${skillName} not installed under any coordinator host`, hosts: findings };
+    // Deliberately still FAIL, not SKIPPED: for an owner who drives this from more
+    // than one host, a missing discipline layer everywhere is a real gap worth
+    // seeing. But it blocks NOTHING at runtime — the skills are markdown
+    // instructions for the coordinating agent, and no command reads them — so the
+    // message says so, or a fresh installer reads a red line as a broken install.
+    return {
+      id,
+      status: "FAIL",
+      detail: `${skillName} not installed under any coordinator host — advisory only: this blocks no command (the skills are coordinator discipline, never read at runtime), but nothing is enforcing the operating rules on whichever host drives DevHarmonics`,
+      hosts: findings,
+    };
   }
   const unparsed = present.filter((f) => f.version === null);
   if (unparsed.length) {

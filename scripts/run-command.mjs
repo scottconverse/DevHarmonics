@@ -15,6 +15,7 @@ import { resolvePathCommand } from "./path-resolve.mjs";
 import { SUBPROCESS_PROVIDERS } from "./providers.mjs";
 import { workerEnv } from "./worker-env.mjs";
 import { assuranceFor, missingEvidence, parseRequireEvidence, describeAssurance } from "./assurance.mjs";
+import { detectSuiteQualification, describeSuiteQualification } from "./suite-qualification.mjs";
 import { loadConfig } from "./config.mjs";
 
 /**
@@ -322,6 +323,11 @@ ${(stages.validator.stdoutTail || "").slice(-800)}`
     const validatorPassed = stages.validator?.exitCode === 0;
     const reviewPassed = stages.review?.verdict === "READY";
     const assurance = assuranceFor({ validatorPassed, reviewPassed });
+    // SPEC §2.4: label validator-green by whether this repo's suite was ever proven
+    // sensitive. Detection only — see suite-qualification.mjs for why enforcing
+    // deterministic-detector here would violate that tool's own contract.
+    const suiteQualification = detectSuiteQualification(repo);
+    stages.suiteQualification = suiteQualification;
     const missing = missingEvidence(requireEvidence, { validatorPassed, reviewPassed });
     if (missing.length > 0) {
       return {
@@ -340,6 +346,7 @@ ${(stages.validator.stdoutTail || "").slice(-800)}`
       integrated: true,
       reviewed: Boolean(reviewer),
       assurance,
+      suiteQualification,
       requiredEvidence: requireEvidence,
       missingEvidence: [],
       reason: "ready-for-owner-review",
@@ -439,6 +446,10 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
     }
     if (result.assurance) {
       write(`assurance:   ${describeAssurance(result.assurance, result.requiredEvidence)}\n`);
+      // Never let "validated" stand unqualified when the suite was never proven able to fail.
+      if (result.stages?.suiteQualification && result.assurance.startsWith("validated")) {
+        write(`             suite: ${describeSuiteQualification(result.stages.suiteQualification)}\n`);
+      }
     }
     if (result.missingEvidence?.length) {
       write(`             REFUSED for missing evidence: ${result.missingEvidence.join(", ")}\n`);

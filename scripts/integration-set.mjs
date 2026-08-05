@@ -11,6 +11,7 @@ import {
 } from "./integrate.mjs";
 import { runReview } from "./review.mjs";
 import { assuranceFor, missingEvidence } from "./assurance.mjs";
+import { detectSuiteQualification } from "./suite-qualification.mjs";
 
 /**
  * Multi-repo extension of scripts/integrate.mjs (design contract:
@@ -318,6 +319,9 @@ export async function integrateSet({
     missingByRepositoryId.set(member.repositoryId, {
       assurance: assuranceFor({ validatorPassed, reviewPassed }),
       missing: missingEvidence(requireEvidence, { validatorPassed, reviewPassed }),
+      // SPEC §2.4: per-repository, label validator-green by whether that repo's
+      // suite was ever proven sensitive. Detection only, never enforcement.
+      suiteQualification: detectSuiteQualification(member.repository),
     });
   }
   const evidenceSatisfied = [...missingByRepositoryId.values()].every((e) => e.missing.length === 0);
@@ -376,6 +380,7 @@ export async function integrateSet({
       integrated: setReady,
       prepared: outcome?.prepared === true,
       assurance: evidence.assurance,
+      suiteQualification: evidence.suiteQualification,
       ...(requireEvidence.length > 0 ? { requiredEvidence: requireEvidence, missingEvidence: evidence.missing } : {}),
       ...(review ? { review } : {}),
       reason: setReady

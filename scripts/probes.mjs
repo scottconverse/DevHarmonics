@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { resolvePathCommand, runResolved } from "./path-resolve.mjs";
 import { CI_WORKFLOW_RELATIVE_PATH, parseTampercheckWorkflow } from "./onboard.mjs";
+import { workerEnv } from "./worker-env.mjs";
 
 /**
  * Doctor probes. Every probe returns { id, status, detail, ...evidence } where
@@ -272,6 +273,124 @@ export function probePaidBudget(id, endpointName, endpoint, budgets, env = proce
     allowPaidApi: true,
     maxPaidTokens: tokens,
   };
+}
+
+/**
+ * Provider sign-in checks, ported from devharmonics-v1 (`src/doctor.ts`).
+ *
+ * v2 was subscription-first mechanically — worker environments have API keys
+ * stripped so a provider CLI must use the account you signed into — but it had
+ * no way to TELL you whether you were signed in. `probeCli` runs `--version`,
+ * so "installed but signed out" looked identical to "ready to work" right up
+ * until a run failed. v1 asked each CLI directly, and said so.
+ *
+ * The credential strip matters here too: with an API key in the environment,
+ * some CLIs authenticate with the key and report success even when no
+ * subscription session exists. Stripping first means this answers the question
+ * actually being asked — "is the SUBSCRIPTION signed in?"
+ *
+ * DevHarmonics never collects, stores, or types a credential. It asks the
+ * provider's own tool, and when the answer is no it tells you which command to
+ * run yourself.
+ */
+export const PROVIDER_AUTH = Object.freeze({
+  codex: {
+    label: "ChatGPT / Codex",
+    args: ["login", "status"],
+    loginCommand: "codex login",
+    steps: [
+      "Run codex login.",
+      "Finish the ChatGPT sign-in in your browser.",
+      "Return to the terminal and confirm Codex reports that you are logged in.",
+    ],
+  },
+  claude: {
+    label: "Claude",
+    args: ["auth", "status", "--text"],
+    loginCommand: "claude auth login",
+    steps: [
+      "Run claude auth login.",
+      "Finish the Claude subscription sign-in in your browser.",
+      "Run claude auth status --text to confirm the account.",
+    ],
+  },
+  agy: {
+    label: "Google / Antigravity",
+    args: ["models"],
+    loginCommand: "agy",
+    steps: [
+      "Run agy and sign in with the Google account tied to your Gemini subscription.",
+      "When the browser shows a one-time code, copy it, return to the Antigravity terminal, paste it at the authorization prompt, and press Enter. NEVER paste it into DevHarmonics, into a chat, or into any other program.",
+      "Complete the full first-run onboarding — recent Antigravity versions add several preference screens after the colour scheme.",
+      "Onboarding is done when the prompt shows your account, subscription tier, model, project path, and a > input line. Exit with Ctrl+C, then run agy models to verify the cached login.",
+    ],
+  },
+});
+
+export function probeProviderAuth(id, providerName, commandName, { env = process.env, platform = process.platform, timeoutMs = 20_000 } = {}) {
+  const spec = PROVIDER_AUTH[providerName];
+  if (!spec) return { id, status: "SKIPPED", detail: `no sign-in check is known for "${providerName}"`, provider: providerName };
+  const resolved = resolvePathCommand(commandName, { env, platform });
+  if (!resolved) {
+    // The cli:<name> row already reports the missing tool; don't double-FAIL.
+    return { id, status: "SKIPPED", detail: `${spec.label}: "${commandName}" is not installed, so there is nothing to sign in to yet`, provider: providerName };
+  }
+  // Strip session markers too (adversarial review): this output is REPORTED,
+  // and a hijacked PATH entry answering as "claude" should be handed as little
+  // as possible. The worker lanes already prove a provider CLI runs fine
+  // without them.
+  const { env: stripped } = workerEnv(env);
+  const run = runResolved(resolved, spec.args, { env: stripped, platform, timeoutMs });
+  const output = `${run.stdout ?? ""}${run.stderr ?? ""}`.trim();
+  const summary = safeSummaryLine(output);
+  // Exit code is the primary signal, but a CLI that exits 0 while SAYING it is
+  // signed out must not be reported as ready (adversarial review). Ambiguity
+  // resolves toward "not signed in" — the direction that costs a wasted check
+  // rather than a surprise mid-run failure.
+  const deniedByOutput = /\b(not (logged|signed) in|sign in required|login required|please (log|sign) in|unauthenticated|no account)\b/i.test(output);
+  if (!run.ok || deniedByOutput) {
+    const why = run.timedOut ? `the check timed out after ${timeoutMs}ms` : (summary || "the tool reported it is not signed in");
+    return {
+      id,
+      status: "FAIL",
+      detail: `${spec.label}: not signed in — ${why}. Sign in yourself with: ${spec.loginCommand} (DevHarmonics never asks for, sees, or stores your password.)`,
+      provider: providerName,
+      loginCommand: spec.loginCommand,
+      steps: spec.steps,
+    };
+  }
+  return {
+    id,
+    status: "PASS",
+    detail: `${spec.label}: signed in${summary ? ` — ${summary}` : ""}`,
+    provider: providerName,
+    account: summary || null,
+  };
+}
+
+function firstLine(text) {
+  return (text ?? "").split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? "";
+}
+
+/**
+ * A provider's own output is untrusted text that this probe REPORTS — into the
+ * terminal, and into `--json` output an operator may save or share. Today these
+ * CLIs print harmless things ("Login method: Claude Max account"), but a future
+ * version printing a token would put it in a file (adversarial review, High).
+ * So: take one line, redact anything token-shaped, and cap the length. A
+ * report is not worth a leaked credential.
+ */
+export function safeSummaryLine(text, { maxLength = 120 } = {}) {
+  let line = firstLine(text);
+  if (!line) return "";
+  line = line
+    // Common credential prefixes, whatever follows them.
+    .replace(/\b(sk-|pk-|ghp_|gho_|github_pat_|xox[abposr]-|AIza|ya29\.)[\w.-]+/gi, "[redacted]")
+    // Bearer/token/key/secret/password followed by a value.
+    .replace(/\b(bearer|token|api[_-]?key|secret|password|passwd|session)\b\s*[:=]?\s*\S+/gi, "$1 [redacted]")
+    // Any long unbroken high-entropy-looking run (base64/hex blobs).
+    .replace(/\b[A-Za-z0-9+/_-]{32,}={0,2}\b/g, "[redacted]");
+  return line.length > maxLength ? `${line.slice(0, maxLength - 1)}…` : line;
 }
 
 /** Enumerate installed skills per host root, for the doctor's information section. */

@@ -2,7 +2,7 @@ import path from "node:path";
 import process from "node:process";
 import { loadConfig } from "./config.mjs";
 import { TAMPERCHECK_PINNED_VERSION } from "./onboard.mjs";
-import { probeCli, probeMessagesEndpoint, probePaidBudget, probeRepoGovernance, probeSkillParity } from "./probes.mjs";
+import { PROVIDER_AUTH, probeCli, probeMessagesEndpoint, probePaidBudget, probeProviderAuth, probeRepoGovernance, probeSkillParity } from "./probes.mjs";
 
 /**
  * Doctor: probe every capability the factory depends on and report only what
@@ -35,10 +35,19 @@ export async function runDoctor({ config, probeTimeoutMs = 45_000, repository = 
   );
 
   const cliChecks = Object.entries(config.clis).map(([name, cli]) => report(probeCli(`cli:${name}`, cli.command)));
+
+  // Provider sign-in (ported from v1): "installed" and "signed in" are
+  // different questions, and only the second one means work can actually run.
+  // Asked with credentials stripped, so an API key in the environment cannot
+  // make a signed-OUT subscription look signed in.
+  const authChecks = Object.entries(config.clis)
+    .filter(([name]) => PROVIDER_AUTH[name])
+    .map(([name, cli]) => report(probeProviderAuth(`auth:${name}`, name, cli.command, { env, timeoutMs: probeTimeoutMs })));
   const endpointChecks = await Promise.all(endpointPromises);
 
   const checks = [
     ...cliChecks,
+    ...authChecks,
     ...endpointChecks,
     // sha256 so an operator who wants the pin (`run`/`set` --tampercheck-sha256)
     // sees the exact value to copy, fingerprinted from the binary that answered.

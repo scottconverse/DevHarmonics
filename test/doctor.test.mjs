@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { renderDoctorReport, runDoctor } from "../scripts/doctor.mjs";
 import { defaultConfig } from "../scripts/config.mjs";
+import { PROVIDER_AUTH } from "../scripts/probes.mjs";
 
 const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "cli.mjs");
 
@@ -74,7 +75,11 @@ test("cli doctor exits 0 when the assessment completes, even full of FAILs", () 
         skillHosts: { claude: path.join(dir, "none"), codex: path.join(dir, "nada") },
       },
     }));
-    const expectedChecks = Object.keys(deadEndpoints).length + 1 + Object.keys(deadClis).length + 1 + 3; // endpoints+deadend, clis+ghost, tampercheck+parity+governance
+    // endpoints+deadend, clis+ghost, one sign-in row per KNOWN provider CLI,
+    // tampercheck+parity+governance. Derived structurally so a new default
+    // cannot silently widen this test back into live probing (TEST-007).
+    const knownProviders = Object.keys(deadClis).filter((name) => PROVIDER_AUTH[name]).length;
+    const expectedChecks = Object.keys(deadEndpoints).length + 1 + Object.keys(deadClis).length + 1 + knownProviders + 3;
     const run = spawnSync(process.execPath, [CLI, "doctor", "--json", "--config", file], { encoding: "utf8", timeout: 60_000 });
     assert.equal(run.status, 0, run.stderr);
     const report = JSON.parse(run.stdout);

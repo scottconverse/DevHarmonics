@@ -469,3 +469,14 @@ test("maybeCompactLedger leaves a small ledger completely alone, and only fires 
   assert.equal(summarizeLedger(readFileSync(ledgerPath, "utf8"), true), total, "the recorded paid total is unchanged");
   assert.ok(existsSync(fired.archivePath), "the archived history is on disk, not deleted");
 });
+
+test("round 4: a worker record with an IMPOSSIBLE usage figure refuses instead of counting as zero", () => {
+  const base = '{"stage":"reserved","kind":"worker","invocationId":"w9","taskId":"w9","paid":false,"reservedTokens":0,"startedAt":"2026-08-06T00:00:00.000Z"}';
+  const negative = `${base}\n{"stage":"terminal","kind":"worker","invocationId":"w9","taskId":"w9","paid":false,"usage":{"total_tokens":-5000}}`;
+  assert.throws(() => summarizeFanout(negative, { since: 0 }), /impossible usage figure/);
+  const nonsenseCost = `${base}\n{"stage":"terminal","kind":"worker","invocationId":"w9","taskId":"w9","paid":false,"usage":{"total_tokens":10,"cost_usd":"free"}}`;
+  assert.throws(() => summarizeFanout(nonsenseCost, { since: 0 }), /impossible usage figure/);
+  // Honestly-unknown usage is still fine: absent means "we don't know", charged 0.
+  const unknown = `${base}\n{"stage":"terminal","kind":"worker","invocationId":"w9","taskId":"w9","paid":false,"usage":null}`;
+  assert.deepEqual(summarizeFanout(unknown, { since: 0 }), { workers: 1, tokens: 0, costUsd: 0 });
+});

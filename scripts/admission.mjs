@@ -442,6 +442,19 @@ export function summarizeFanout(ledgerText, { since = 0 } = {}) {
       // headless receipts carry total_cost_usd; local models report none and
       // honestly contribute $0 — the token ceilings remain their guard).
       const cost = entry.usage?.cost_usd;
+      // Round-4 finding: an amount that is PRESENT but nonsense (negative, NaN,
+      // a string) used to coerce to 0, so a single forged record could zero a
+      // worker's usage without ever tripping the conflict rule. Absent usage is
+      // still honest ("we don't know", charged 0); present-but-invalid is now an
+      // integrity failure, like every other untrustworthy record here.
+      const invalid = (value) => value !== undefined && value !== null
+        && !(Number.isFinite(value) && value >= 0);
+      if (invalid(total) || invalid(cost)) {
+        throw new Error(
+          "Fan-out ledger contains a record with an impossible usage figure — the ledger has been altered or corrupted. "
+          + "Repair it with: devharmonics ledger rotate",
+        );
+      }
       return {
         tokens: Number.isSafeInteger(total) && total > 0 ? total : 0,
         cost: Number.isFinite(cost) && cost > 0 ? cost : 0,

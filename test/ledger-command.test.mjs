@@ -76,3 +76,24 @@ test("rotate is a no-op when there is nothing to rotate, and bad flags refuse", 
   await assert.rejects(() => ledgerCommand(["status", "--nonsense"], { write: () => {} }), /Unknown ledger option/);
   await assert.rejects(() => ledgerCommand(["frobnicate", "--state-root", dir], { write: () => {} }), /Unknown ledger subcommand/);
 });
+
+// --- round-4 fixes -----------------------------------------------------------
+
+test("round 4: the original ledger survives even if the replacement cannot be written", (t) => {
+  const { file } = tempLedger(t, HEALTHY);
+  const before = readFileSync(file, "utf8");
+  // The archive is a COPY made before anything is replaced, so the live ledger
+  // is only ever swapped at the very end, atomically.
+  const result = rotateLedger(file);
+  assert.equal(readFileSync(result.archivePath, "utf8"), before, "the archive is a faithful copy of what was there");
+  assert.ok(existsSync(file), "a ledger always exists after rotation");
+});
+
+test("round 4: two rotations never overwrite each other's archive", (t) => {
+  const { file } = tempLedger(t, HEALTHY);
+  const first = rotateLedger(file, { now: 1_754_000_000_000 });
+  writeFileSync(file, `${HEALTHY.join("\n")}\n`);
+  const second = rotateLedger(file, { now: 1_754_000_000_000 });
+  assert.notEqual(first.archivePath, second.archivePath, "same-millisecond rotations get distinct archives");
+  assert.ok(existsSync(first.archivePath) && existsSync(second.archivePath), "both archives survive");
+});

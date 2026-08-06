@@ -130,9 +130,11 @@ async function httpTextRoundtrip({ candidate, deps, timeoutMs, prompt, maxTokens
     messages: [{ role: "user", content: prompt }],
     maxTokens,
     timeoutMs,
-    apiKeyEnvVar: candidate.apiKeyEnvVar ?? null,
-    apiKeyCredential: candidate.apiKeyCredential ?? null,
-    paidBudget: candidate.paidBudget,
+    // MONEY-003 (audit 2026-08-06): the credential/paidBudget plumbing here was
+    // unreachable — fleet.mjs never puts those fields on a candidate, so it read
+    // as support that did not exist. Qualification probes deliberately stay
+    // key-less (documented in the manual): a credentialed endpoint answers with
+    // an auth error rather than spending money, which is the safe direction.
   });
 }
 
@@ -288,9 +290,7 @@ async function runStructuredWriteHttp({ candidate, workRoot, env, timeoutMs, dep
     commitMessage: "qualify: fix add.py",
     timeoutMs,
     // Paid lane pass-through: only set for credentialed candidates.
-    apiKeyEnvVar: candidate.apiKeyEnvVar ?? null,
-    apiKeyCredential: candidate.apiKeyCredential ?? null,
-    paidBudget: candidate.paidBudget,
+    // MONEY-003 (audit 2026-08-06): see above — qualification probes stay key-less.
   };
   const result = await deps.runLocalPatch({ task, client: deps.sendMessages, runsRoot, env });
 

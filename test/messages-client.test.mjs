@@ -469,3 +469,48 @@ test("credential: a resolved stored credential is PAID — the full double opt-i
   assert.equal(ledger.length, 2, "reservation + terminal, same as the env-var paid path");
   assert.equal(ledger[0].paid, true);
 });
+
+// --- audit 2026-08-06 fixes ---------------------------------------------------
+
+test("SECRET-002: naming two credential sources at once is refused before any request", async (t) => {
+  let requests = 0;
+  const result = await withServer(
+    jsonHandler(() => { requests += 1; return { body: OK_MESSAGE }; }),
+    (baseUrl) => sendMessages({
+      baseUrl,
+      model: "claude-test",
+      messages: [{ role: "user", content: "hi" }],
+      apiKeyEnvVar: "DH_TEST_BOTH",
+      apiKeyCredential: "anthropic",
+      env: { DH_TEST_BOTH: "sk-env" },
+    }),
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.error, /^ambiguous-credential-source/);
+  assert.equal(requests, 0);
+});
+
+test("SECRET-004: a credential whose literal value is \"local\" is still treated as PAID", async (t) => {
+  let requests = 0;
+  const result = await withServer(
+    jsonHandler(() => { requests += 1; return { body: OK_MESSAGE }; }),
+    (baseUrl) => sendMessages({
+      baseUrl,
+      model: "claude-test",
+      messages: [{ role: "user", content: "hi" }],
+      apiKeyEnvVar: "DH_TEST_LOCALNAME",
+      env: { DH_TEST_LOCALNAME: "local" },
+    }),
+  );
+  assert.equal(result.ok, false, "a real credential must be metered regardless of its text");
+  assert.match(result.error, /^paid-api-disabled-by-policy/);
+  assert.equal(requests, 0);
+});
+
+test("key-less local calls are still unpaid after the paid-detection change", async (t) => {
+  const result = await withServer(
+    jsonHandler(() => ({ body: OK_MESSAGE })),
+    (baseUrl) => sendMessages({ baseUrl, model: "local-model", messages: [{ role: "user", content: "hi" }] }),
+  );
+  assert.equal(result.ok, true, result.error);
+});

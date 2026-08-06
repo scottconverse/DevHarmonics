@@ -8,9 +8,11 @@ import { acquireFileLock } from "./slots.mjs";
  * Apache-2.0, live-fire-tested 2026-08). Append-only `usage.jsonl` money
  * guards, unchanged in behavior. Every write goes through `acquireFileLock`
  * so two concurrent invocations can never both reserve against the same
- * remaining budget. Reads never trust a single record: the ledger is
- * replayed end-to-end and only the LATEST record per invocation counts,
- * so a duplicate/replayed terminal write can never double- or under-charge.
+ * remaining budget. Reads never trust a single record: the ledger is replayed
+ * end-to-end and the HIGHEST amount any of an invocation's terminal records
+ * reports is what counts (MONEY-001, audit 2026-08-06 — latest-wins let an
+ * appended line silently LOWER recorded spend), so neither a duplicate write
+ * nor a forged append can double- or under-charge.
  */
 
 export function createInvocationId() {
@@ -40,7 +42,7 @@ export function createInvocationId() {
  * situation charges zero for them instead of throwing.
  */
 export function summarizeLedger(ledgerText, paid) {
-  const latestByInvocation = new Map();
+  const recordsByInvocation = new Map();
   const legacyPending = new Map();
   let legacySequence = 0;
 
@@ -73,27 +75,44 @@ export function summarizeLedger(ledgerText, paid) {
         }
       }
     }
-    latestByInvocation.set(identity, entry);
+    const group = recordsByInvocation.get(identity) ?? { reservation: null, terminals: [] };
+    if (entry.stage === "reserved") group.reservation = entry;
+    else group.terminals.push(entry);
+    recordsByInvocation.set(identity, group);
   }
 
-  const charge = (entry) => {
-    if (entry.stage === "reserved") {
+  // MONEY-001 (audit 2026-08-06): the charge for an invocation is the HIGHEST
+  // amount any of its terminal records reports — not the latest one. Latest-wins
+  // stopped a duplicate terminal from double-charging, but it also let ANY later
+  // append silently LOWER recorded spend (proven: one line erased 900,000
+  // tokens). Highest-wins keeps the duplicate protection, makes an undercount
+  // impossible to append, and still lets `reconcilePaidUsage` correct a record
+  // upward. Lowering a recorded charge now requires deliberate ledger rotation —
+  // a visible act — exactly as the manual describes.
+  const charge = (group) => {
+    if (!group.terminals.length) {
+      const entry = group.reservation;
       // Reject a NEGATIVE reserved amount too (GAUNTLET, Agent B): a hand-forged
       // ledger line with a negative reservation would otherwise subtract from the
       // running total and mask real spend, defeating the budget cap. The write
       // path (reservePaidUsage) already refuses <= 0; the read/sum path must too.
-      if (!Number.isSafeInteger(entry.reservedTokens) || entry.reservedTokens < 0) {
+      if (!Number.isSafeInteger(entry?.reservedTokens) || entry.reservedTokens < 0) {
         throw new Error("Usage ledger contains an invalid reservation");
       }
       return entry.reservedTokens;
     }
-    if (!Number.isSafeInteger(entry.usage?.total_tokens)) {
-      if (paid) throw new Error("Paid usage ledger contains a run without trustworthy token usage");
-      return 0;
+    // A terminal supersedes the reservation's estimate. Among terminals: any
+    // untrustworthy one still poisons a PAID invocation (unknown spend must
+    // never be charged as zero), and otherwise the largest reported figure wins.
+    let highest = null;
+    for (const terminal of group.terminals) {
+      const total = terminal.usage?.total_tokens;
+      if (Number.isSafeInteger(total) && total >= 0) highest = Math.max(highest ?? 0, total);
+      else if (paid) throw new Error("Paid usage ledger contains a run without trustworthy token usage");
     }
-    return entry.usage.total_tokens;
+    return highest ?? 0;
   };
-  return [...latestByInvocation.values()].reduce((total, entry) => total + charge(entry), 0);
+  return [...recordsByInvocation.values()].reduce((total, group) => total + charge(group), 0);
 }
 
 /**
@@ -198,7 +217,7 @@ export async function reservePaidUsage({
  * ledger that cannot be trusted refuses, never guesses.
  */
 export function summarizeFanout(ledgerText, { since = 0 } = {}) {
-  const latestByInvocation = new Map();
+  const groups = new Map();
   const admittedAt = new Map();
   // TEST-004/ENG-006 (audit): a record the meter cannot DATE counts as always
   // in-window — it errs toward the cap, never out of it. The old `|| 0` mapped
@@ -220,22 +239,34 @@ export function summarizeFanout(ledgerText, { since = 0 } = {}) {
     if (entry.kind !== "worker") continue;
     if (!entry.invocationId) throw new Error(`fan-out ledger line ${index + 1} has no invocationId`);
     if (entry.stage === "reserved") admittedAt.set(entry.invocationId, dateOrInfinity(entry.startedAt));
-    latestByInvocation.set(entry.invocationId, entry);
+    const group = groups.get(entry.invocationId) ?? { records: [] };
+    group.records.push(entry);
+    groups.set(entry.invocationId, group);
   }
   let workers = 0;
   let tokens = 0;
   let costUsd = 0;
-  for (const [invocationId, entry] of latestByInvocation) {
-    const startedAt = admittedAt.get(invocationId) ?? dateOrInfinity(entry.startedAt ?? entry.finishedAt);
+  for (const [invocationId, group] of groups) {
+    const first = group.records[0];
+    const startedAt = admittedAt.get(invocationId) ?? dateOrInfinity(first.startedAt ?? first.finishedAt);
     if (startedAt < since) continue;
     workers += 1;
-    const total = entry.usage?.total_tokens;
-    if (Number.isSafeInteger(total) && total > 0) tokens += total;
-    // v1 port (b): real REPORTED dollars, where a run reported them (claude's
-    // headless receipts carry total_cost_usd; local models report none and
-    // honestly contribute $0 — the token ceilings remain their guard).
-    const cost = entry.usage?.cost_usd;
-    if (Number.isFinite(cost) && cost > 0) costUsd += cost;
+    // MONEY-001 (audit 2026-08-06): highest-reported wins, same rule as the
+    // money summary — a later appended record can no longer erase a worker's
+    // recorded tokens or dollars (proven: one line zeroed 5,000 tokens and $250).
+    let highestTokens = 0;
+    let highestCost = 0;
+    for (const entry of group.records) {
+      const total = entry.usage?.total_tokens;
+      if (Number.isSafeInteger(total) && total > 0) highestTokens = Math.max(highestTokens, total);
+      // v1 port (b): real REPORTED dollars, where a run reported them (claude's
+      // headless receipts carry total_cost_usd; local models report none and
+      // honestly contribute $0 — the token ceilings remain their guard).
+      const cost = entry.usage?.cost_usd;
+      if (Number.isFinite(cost) && cost > 0) highestCost = Math.max(highestCost, cost);
+    }
+    tokens += highestTokens;
+    costUsd += highestCost;
   }
   return { workers, tokens, costUsd };
 }

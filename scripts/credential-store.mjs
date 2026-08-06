@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -7,8 +7,11 @@ import process from "node:process";
 /**
  * Ported from devharmonics-v1's `credential-store.ts` (v1 port (d), owner's
  * go): API keys encrypted at rest with Windows DPAPI (CurrentUser scope), one
- * file per credential under `~/.devharmonics/credentials/<name>.json`, mode
- * 0600. The PM-shaped alternative to "set an environment variable": store the
+ * file per credential under `~/.devharmonics/credentials/<name>.json`.
+ * SECRET-001 (audit 2026-08-06): the 0o600 mode below is a best-effort POSIX
+ * hint only — Windows maps it to the read-only attribute and it grants no
+ * owner-only restriction. ALL of the at-rest protection here is DPAPI's.
+ * The PM-shaped alternative to "set an environment variable": store the
  * key once with `devharmonics credential set <name>`, then the config names
  * the CREDENTIAL (`endpoints.<name>.credential`), never the key itself.
  *
@@ -29,6 +32,25 @@ function credentialFile(name, directory) {
     throw new Error(`Invalid credential name ${JSON.stringify(name)} — letters, digits, "_" and "-" only`);
   }
   return path.join(directory, `${name}.json`);
+}
+
+/**
+ * SECRET-003 (audit 2026-08-06): every read, write, and delete follows whatever
+ * sits at the path. A pre-planted symlink (or junction) could redirect a write
+ * or a delete somewhere else entirely. Same-user threat, but a credential store
+ * is exactly where "same user" stops being a comfortable answer — so a store
+ * entry that is not a REGULAR FILE is refused rather than followed.
+ */
+function assertRegularFile(file) {
+  let stats;
+  try {
+    stats = lstatSync(file);
+  } catch {
+    return; // absent is fine — the caller handles missing entries
+  }
+  if (!stats.isFile()) {
+    throw new Error(`Refusing to use credential store entry ${file}: it is not a regular file (symlink, junction, or directory) — remove it and re-store the credential`);
+  }
 }
 
 /** DPAPI protect/unprotect via a bounded PowerShell child; the secret rides stdin, never argv. */
@@ -85,6 +107,7 @@ export function createCredentialStore({ directory = credentialsDir(), platform =
       if (typeof secret !== "string" || !secret.trim()) {
         throw new Error("Refusing to store an empty credential");
       }
+      assertRegularFile(file);
       const ciphertext = await dpapi(PROTECT, secret);
       mkdirSync(directory, { recursive: true });
       const value = { version: 1, protection: "windows-dpapi-current-user", ciphertext };
@@ -95,6 +118,7 @@ export function createCredentialStore({ directory = credentialsDir(), platform =
     async get(name) {
       const file = credentialFile(name, directory);
       if (!existsSync(file)) return null;
+      assertRegularFile(file);
       let value;
       try {
         value = JSON.parse(readFileSync(file, "utf8"));
@@ -113,6 +137,7 @@ export function createCredentialStore({ directory = credentialsDir(), platform =
     delete(name) {
       const file = credentialFile(name, directory);
       const existed = existsSync(file);
+      assertRegularFile(file);
       rmSync(file, { force: true });
       return existed;
     },

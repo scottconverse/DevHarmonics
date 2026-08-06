@@ -33,7 +33,7 @@ test("createInvocationId returns distinct real UUIDs", () => {
   assert.match(a, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 });
 
-test("duplicate terminal reconciliation charges only the latest record for an invocation", () => {
+test("duplicate terminal reconciliation charges the HIGHEST record for an invocation, never a lower duplicate", () => {
   const ledger = [
     '{"stage":"reserved","invocationId":"inv-one","taskId":"one","paid":true,"reservedTokens":60}',
     '{"stage":"terminal","invocationId":"inv-one","taskId":"one","paid":true,"usage":{"total_tokens":25}}',
@@ -50,7 +50,7 @@ test("a hand-forged ledger line with a NEGATIVE reservation fails closed, never 
   assert.throws(() => summarizeLedger(ledger, true), /invalid reservation/i);
 });
 
-test("latest duplicate terminal with unknown paid usage still fails closed", () => {
+test("a duplicate terminal with unknown paid usage still fails closed", () => {
   const ledger = [
     '{"stage":"reserved","invocationId":"inv-one","taskId":"one","paid":true,"reservedTokens":60}',
     '{"stage":"terminal","invocationId":"inv-one","taskId":"one","paid":true,"usage":{"total_tokens":25}}',
@@ -319,4 +319,38 @@ test("a garbage monthlyLimitUsd throws rather than silently unguarding the money
     () => admitWorker({ stateRoot: root, taskId: "w1", lane: "subprocess", budgets: { ...FANOUT_BUDGETS, monthlyLimitUsd: "5" } }),
     /monthlyLimitUsd must be a positive number/,
   );
+});
+
+// --- MONEY-001 (audit 2026-08-06): appended records can never LOWER recorded spend
+
+test("MONEY-001: a later terminal record cannot lower a paid charge — highest reported wins", () => {
+  const honest = [
+    '{"stage":"reserved","invocationId":"inv-1","taskId":"t1","paid":true,"reservedTokens":100}',
+    '{"stage":"terminal","invocationId":"inv-1","taskId":"t1","paid":true,"usage":{"total_tokens":900000}}',
+  ].join("\n");
+  assert.equal(summarizeLedger(honest, true), 900000);
+  // The exact forgery the audit proved: one appended line used to erase 900,000 tokens.
+  const forged = `${honest}\n{"stage":"terminal","invocationId":"inv-1","taskId":"t1","paid":true,"usage":{"total_tokens":1}}`;
+  assert.equal(summarizeLedger(forged, true), 900000, "an appended lower terminal must never reduce recorded spend");
+  // An honest UPWARD correction (reconcilePaidUsage) still works.
+  const corrected = `${honest}\n{"stage":"terminal","invocationId":"inv-1","taskId":"t1","paid":true,"usage":{"total_tokens":950000}}`;
+  assert.equal(summarizeLedger(corrected, true), 950000);
+});
+
+test("MONEY-001: the same rule protects the fan-out and monthly-dollar meters", () => {
+  const honest = [
+    '{"stage":"reserved","kind":"worker","invocationId":"w1","taskId":"w1","paid":false,"reservedTokens":0,"startedAt":"2026-08-06T00:00:00.000Z"}',
+    '{"stage":"terminal","kind":"worker","invocationId":"w1","taskId":"w1","paid":false,"usage":{"total_tokens":5000,"cost_usd":250}}',
+  ].join("\n");
+  assert.deepEqual(summarizeFanout(honest, { since: 0 }), { workers: 1, tokens: 5000, costUsd: 250 });
+  const forged = `${honest}\n{"stage":"terminal","kind":"worker","invocationId":"w1","taskId":"w1","paid":false,"usage":{"total_tokens":0,"cost_usd":0}}`;
+  assert.deepEqual(summarizeFanout(forged, { since: 0 }), { workers: 1, tokens: 5000, costUsd: 250 }, "an appended zero must never erase a worker's recorded tokens or dollars");
+});
+
+test("MONEY-001: a reconciled terminal still supersedes its own reservation estimate (no over-charging)", () => {
+  const ledger = [
+    '{"stage":"reserved","invocationId":"inv-2","taskId":"t2","paid":true,"reservedTokens":5000}',
+    '{"stage":"terminal","invocationId":"inv-2","taskId":"t2","paid":true,"usage":{"total_tokens":100}}',
+  ].join("\n");
+  assert.equal(summarizeLedger(ledger, true), 100, "the estimate is replaced by real usage, not maxed against it");
 });

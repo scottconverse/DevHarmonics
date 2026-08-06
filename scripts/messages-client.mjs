@@ -58,6 +58,20 @@ export async function sendMessages({
   deps = {},
   env = process.env,
 }) {
+  // SECRET-002 (audit 2026-08-06): config validation already refuses an endpoint
+  // naming two credential sources; refuse it here too, so a library caller that
+  // never went through config can't silently get the env var while believing the
+  // stored credential is in use. Money guards refuse ambiguity everywhere.
+  if (apiKeyEnvVar && apiKeyCredential) {
+    return {
+      ok: false,
+      status: null,
+      error: `ambiguous-credential-source: both apiKeyEnvVar ("${apiKeyEnvVar}") and apiKeyCredential ("${apiKeyCredential}") were supplied for ${baseUrl} — configure exactly one`,
+      contentText: null,
+      usage: null,
+      resolvedModel: null,
+    };
+  }
   if (apiKeyEnvVar && !env[apiKeyEnvVar]) {
     return {
       ok: false,
@@ -94,15 +108,19 @@ export async function sendMessages({
       };
     }
   }
+  // SECRET-004 (audit 2026-08-06): paid-ness is now decided by WHERE the
+  // credential came from, not by comparing its text to the sentinel "local" —
+  // a key whose literal value happened to be "local" used to skip metering.
   const resolvedApiKey = apiKey
     ?? (apiKeyEnvVar ? env[apiKeyEnvVar] : undefined)
     ?? storedKey
     ?? "local";
+  const carriesRealCredential = Boolean(apiKey) || Boolean(apiKeyEnvVar && env[apiKeyEnvVar]) || storedKey != null;
 
   // A call is PAID exactly when a real credential rides with it. Fail closed:
   // no configured budget means no paid call — a metered endpoint must never
   // be reachable un-metered.
-  const isPaid = resolvedApiKey !== "local";
+  const isPaid = carriesRealCredential;
   let paidReservation = null;
   if (isPaid) {
     // v1 port (b): the DOUBLE opt-in. Naming a credential opens nothing by
@@ -133,11 +151,15 @@ export async function sendMessages({
         raw: null,
       };
     }
-    // Reserve BEFORE the request: estimate = the response ceiling we asked for
-    // plus a conservative estimate of the prompt we are sending (~4 chars per
-    // token). Reconciliation replaces the estimate with the real usage.
+    // Reserve BEFORE the request: the response ceiling we asked for plus an
+    // estimate of the prompt. MONEY-002 (audit 2026-08-06): this divided by 4
+    // (the English rule of thumb), which UNDER-counts code (~3 chars/token),
+    // punctuation-dense JSON (~2.5) and CJK (~1) — so a single call could cross
+    // the ceiling before reconciliation caught it. Halved to 2 so the estimate
+    // errs toward the cap on realistic prompts; the reservation is temporary
+    // either way (reconciliation replaces it with the response's real usage).
     const promptChars = JSON.stringify(messages).length + (system ? JSON.stringify(system).length : 0);
-    const reservedTokens = maxTokens + Math.ceil(promptChars / 4);
+    const reservedTokens = maxTokens + Math.ceil(promptChars / 2);
     try {
       const reserveFn = deps.reservePaidUsage ?? (await import("./admission.mjs")).reservePaidUsage;
       paidReservation = await reserveFn({

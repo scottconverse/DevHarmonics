@@ -112,3 +112,18 @@ test("credential list prints names only; delete reports honestly either way; unk
   await assert.rejects(() => credentialCommand(["show", "one"], { store, write }), /Unknown credential subcommand/);
   await assert.rejects(() => credentialCommand(["set"], { store, write }), /requires a name/);
 });
+
+// --- SECRET-003 (audit 2026-08-06): store entries must be regular files ---------
+
+test("SECRET-003: a non-regular-file store entry is refused rather than followed", async (t) => {
+  const dir = tempStoreDir(t);
+  const store = createCredentialStore({ directory: dir, platform: "win32", dpapi: fakeDpapi });
+  // A directory stands in for a symlink/junction: both are "not a regular file",
+  // which is the property the guard actually checks (symlink creation needs
+  // elevation on Windows, so a directory is the portable way to prove it).
+  const { mkdirSync } = await import("node:fs");
+  mkdirSync(path.join(dir, "planted.json"));
+  await assert.rejects(() => store.set("planted", "sk-x"), /not a regular file/);
+  await assert.rejects(() => store.get("planted"), /not a regular file/);
+  assert.throws(() => store.delete("planted"), /not a regular file/);
+});

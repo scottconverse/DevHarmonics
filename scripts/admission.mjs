@@ -447,9 +447,14 @@ export function summarizeFanout(ledgerText, { since = 0 } = {}) {
       // worker's usage without ever tripping the conflict rule. Absent usage is
       // still honest ("we don't know", charged 0); present-but-invalid is now an
       // integrity failure, like every other untrustworthy record here.
-      const invalid = (value) => value !== undefined && value !== null
+      // Tokens are counts: a fractional one is as impossible as a negative one,
+      // and coercing it to 0 would under-count (round-5 finding). Cost is money,
+      // so fractions are expected there — it only has to be finite and positive.
+      const badCount = (value) => value !== undefined && value !== null
+        && !(Number.isSafeInteger(value) && value >= 0);
+      const badMoney = (value) => value !== undefined && value !== null
         && !(Number.isFinite(value) && value >= 0);
-      if (invalid(total) || invalid(cost)) {
+      if (badCount(total) || badMoney(cost)) {
         throw new Error(
           "Fan-out ledger contains a record with an impossible usage figure — the ledger has been altered or corrupted. "
           + "Repair it with: devharmonics ledger rotate",

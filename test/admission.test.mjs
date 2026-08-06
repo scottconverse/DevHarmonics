@@ -480,3 +480,12 @@ test("round 4: a worker record with an IMPOSSIBLE usage figure refuses instead o
   const unknown = `${base}\n{"stage":"terminal","kind":"worker","invocationId":"w9","taskId":"w9","paid":false,"usage":null}`;
   assert.deepEqual(summarizeFanout(unknown, { since: 0 }), { workers: 1, tokens: 0, costUsd: 0 });
 });
+
+test("round 5: a FRACTIONAL worker token count refuses too — counts cannot be fractional", () => {
+  const base = '{"stage":"reserved","kind":"worker","invocationId":"w10","taskId":"w10","paid":false,"reservedTokens":0,"startedAt":"2026-08-06T00:00:00.000Z"}';
+  const fractional = `${base}\n{"stage":"terminal","kind":"worker","invocationId":"w10","taskId":"w10","paid":false,"usage":{"total_tokens":5000.5}}`;
+  assert.throws(() => summarizeFanout(fractional, { since: 0 }), /impossible usage figure/);
+  // Fractional DOLLARS remain perfectly normal.
+  const cents = `${base}\n{"stage":"terminal","kind":"worker","invocationId":"w10","taskId":"w10","paid":false,"usage":{"total_tokens":10,"cost_usd":0.37}}`;
+  assert.deepEqual(summarizeFanout(cents, { since: 0 }), { workers: 1, tokens: 10, costUsd: 0.37 });
+});

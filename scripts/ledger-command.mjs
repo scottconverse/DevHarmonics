@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { constants, copyFileSync, existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { randomUUID } from "node:crypto";
@@ -70,7 +70,6 @@ export function rotateLedger(ledgerPath, { now = Date.now(), resetTotals = false
   // millisecond, or a stale file with the same name, must not overwrite
   // evidence. A short suffix is added until the name is free.
   let archivePath = `${ledgerPath}.${stamp}.rotated`;
-  while (existsSync(archivePath)) archivePath = `${ledgerPath}.${stamp}-${randomUUID().slice(0, 8)}.rotated`;
   const carried = status.healthy ? (status.paidTokens ?? 0) : 0;
   const fresh = carried > 0
     ? `${JSON.stringify({
@@ -87,7 +86,18 @@ export function rotateLedger(ledgerPath, { now = Date.now(), resetTotals = false
   // failure. Copy it to the archive first, stage the replacement beside it,
   // and only then swap atomically — so a full disk or a permission error can
   // never leave the operator with NO ledger and a ceiling reset to zero.
-  copyFileSync(ledgerPath, archivePath);
+  // Exclusive create, not "check then write": two rotations racing each other
+  // must never land on the same archive name and overwrite evidence (round-5
+  // finding — the previous existsSync probe left a window between the two).
+  for (;;) {
+    try {
+      copyFileSync(ledgerPath, archivePath, constants.COPYFILE_EXCL);
+      break;
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      archivePath = `${ledgerPath}.${stamp}-${randomUUID().slice(0, 8)}.rotated`;
+    }
+  }
   const staged = `${ledgerPath}.rotating`;
   writeFileSync(staged, fresh);
   renameSync(staged, ledgerPath);

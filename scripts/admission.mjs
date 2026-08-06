@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { acquireFileLock } from "./slots.mjs";
 
@@ -75,42 +75,58 @@ export function summarizeLedger(ledgerText, paid) {
         }
       }
     }
-    const group = recordsByInvocation.get(identity) ?? { reservation: null, terminals: [] };
-    if (entry.stage === "reserved") group.reservation = entry;
+    const group = recordsByInvocation.get(identity) ?? { reservations: [], terminals: [] };
+    if (entry.stage === "reserved") group.reservations.push(entry);
     else group.terminals.push(entry);
     recordsByInvocation.set(identity, group);
   }
 
-  // MONEY-001 (audit 2026-08-06): the charge for an invocation is the HIGHEST
-  // amount any of its terminal records reports — not the latest one. Latest-wins
-  // stopped a duplicate terminal from double-charging, but it also let ANY later
-  // append silently LOWER recorded spend (proven: one line erased 900,000
-  // tokens). Highest-wins keeps the duplicate protection, makes an undercount
-  // impossible to append, and still lets `reconcilePaidUsage` correct a record
-  // upward. Lowering a recorded charge now requires deliberate ledger rotation —
-  // a visible act — exactly as the manual describes.
+  // MONEY-001 (audit 2026-08-06, round 2): every legitimate flow writes exactly
+  // ONE reservation and at most ONE terminal per invocation — `reservePaidUsage`
+  // and `admitWorker` mint a fresh UUID per attempt, and a crashed attempt never
+  // reuses its identity. So DISAGREEING records for one invocation are not an
+  // ambiguity to resolve by arithmetic; they are evidence the ledger was altered.
+  // Round 1 took the highest figure, which quietly absorbed a forged line instead
+  // of surfacing it — and still let a duplicate RESERVATION lower a not-yet-
+  // reconciled charge (proven live: 900 then 100 charged 100). Any conflict now
+  // refuses outright, the same fail-closed rule the rest of this file follows.
+  // Identical duplicates stay harmless (charged once), preserving the replay
+  // safety this design started with.
+  const conflict = () => new Error(
+    "Usage ledger contains conflicting records for one invocation — the ledger has been altered or corrupted. "
+    + "Establish the true spend, then rotate usage.jsonl deliberately (see the manual); it is never repaired by appending.",
+  );
+  const reportedAmount = (entry) => {
+    const total = entry.usage?.total_tokens;
+    return Number.isSafeInteger(total) && total >= 0 ? total : null;
+  };
   const charge = (group) => {
-    if (!group.terminals.length) {
-      const entry = group.reservation;
-      // Reject a NEGATIVE reserved amount too (GAUNTLET, Agent B): a hand-forged
-      // ledger line with a negative reservation would otherwise subtract from the
-      // running total and mask real spend, defeating the budget cap. The write
-      // path (reservePaidUsage) already refuses <= 0; the read/sum path must too.
-      if (!Number.isSafeInteger(entry?.reservedTokens) || entry.reservedTokens < 0) {
-        throw new Error("Usage ledger contains an invalid reservation");
+    if (group.terminals.length) {
+      const amounts = group.terminals.map(reportedAmount);
+      if (amounts.some((amount) => amount !== amounts[0])) throw conflict();
+      // A terminal supersedes its own reservation's estimate: a 5,000-token
+      // reservation reconciled to 100 real tokens charges 100, not 5,000.
+      if (amounts[0] === null) {
+        // Unknown spend is never charged as zero on a PAID run — that closes the
+        // paid lane until the owner resolves it deliberately.
+        if (paid) throw new Error("Paid usage ledger contains a run without trustworthy token usage");
+        return 0;
       }
-      return entry.reservedTokens;
+      return amounts[0];
     }
-    // A terminal supersedes the reservation's estimate. Among terminals: any
-    // untrustworthy one still poisons a PAID invocation (unknown spend must
-    // never be charged as zero), and otherwise the largest reported figure wins.
-    let highest = null;
-    for (const terminal of group.terminals) {
-      const total = terminal.usage?.total_tokens;
-      if (Number.isSafeInteger(total) && total >= 0) highest = Math.max(highest ?? 0, total);
-      else if (paid) throw new Error("Paid usage ledger contains a run without trustworthy token usage");
+    if (group.reservations.length > 1
+      && group.reservations.some((entry) => entry.reservedTokens !== group.reservations[0].reservedTokens)) {
+      throw conflict();
     }
-    return highest ?? 0;
+    const entry = group.reservations[0];
+    // Reject a NEGATIVE reserved amount too (GAUNTLET, Agent B): a hand-forged
+    // ledger line with a negative reservation would otherwise subtract from the
+    // running total and mask real spend, defeating the budget cap. The write
+    // path (reservePaidUsage) already refuses <= 0; the read/sum path must too.
+    if (!Number.isSafeInteger(entry?.reservedTokens) || entry.reservedTokens < 0) {
+      throw new Error("Usage ledger contains an invalid reservation");
+    }
+    return entry.reservedTokens;
   };
   return [...recordsByInvocation.values()].reduce((total, group) => total + charge(group), 0);
 }
@@ -125,6 +141,7 @@ export async function reserveUnpaidTaskUsage({ stateRoot, taskId, metadata = {} 
   const ledgerPath = path.join(stateRoot, "usage.jsonl");
   const lock = await acquireFileLock(path.join(stateRoot, "usage.lock"), { taskId, stage: "reserved", paid: false });
   try {
+    maybeCompactLedger(ledgerPath);
     const ledgerText = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
     if (ledgerText.split(/\r?\n/).filter(Boolean).some((line) => { const e = JSON.parse(line); return e.kind !== "worker" && e.taskId === taskId; })) {
       throw new Error(`Task ${taskId} already has an attempt`);
@@ -150,6 +167,149 @@ export function usageSpent(ledgerPath, paid = true) {
   return existsSync(ledgerPath) ? summarizeLedger(readFileSync(ledgerPath, "utf8"), paid) : 0;
 }
 
+// ---------------------------------------------------------------------------
+// Automatic compaction (owner: "it was supposed to be a silent clean-up as it
+// grew beyond a certain size"). The ledger is append-only and replayed on every
+// admission, so unbounded growth eventually costs real time on every run.
+//
+// The naive version of this feature — truncate the file when it gets big — is a
+// FAIL-OPEN money bug: it would silently reset every ceiling. So compaction
+// never simply drops history. It:
+//   * keeps every record that can still affect a live decision,
+//   * preserves the lifetime PAID total exactly, via one carry-forward record,
+//   * preserves single-use task IDs, via one tiny tombstone per archived run,
+//   * writes everything it removed to a dated archive file beside the ledger,
+//   * and refuses to run at all if what it would archive is untrustworthy.
+// ---------------------------------------------------------------------------
+
+/** Compact when the ledger passes this size (bytes). */
+export const LEDGER_COMPACT_BYTES = 5 * 1024 * 1024;
+/** Money records older than this are archived (their totals are carried forward). */
+export const LEDGER_MONEY_RETENTION_MS = 31 * 24 * 3_600_000;
+
+/**
+ * Pure core: given ledger text, return what the compacted ledger and its archive
+ * should contain. Returns `{ compacted: false }` when there is nothing safe to
+ * do — the caller then leaves the file exactly as it is.
+ */
+export function compactLedgerText(ledgerText, { now = Date.now(), moneyRetentionMs = LEDGER_MONEY_RETENTION_MS, workerRetentionMs = LEDGER_MONEY_RETENTION_MS } = {}) {
+  const lines = ledgerText.split(/\r?\n/).filter(Boolean);
+  const groups = new Map();
+  const untouchable = []; // legacy records (no invocationId) and prior compaction markers
+  for (const line of lines) {
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      return { compacted: false, reason: "ledger contains a line that is not valid JSON — refusing to compact an unreadable ledger" };
+    }
+    // Legacy records pair by taskId/FIFO and prior markers are history: never move them.
+    if (!entry.invocationId || entry.stage === "compacted") { untouchable.push({ line, entry }); continue; }
+    const group = groups.get(entry.invocationId) ?? { lines: [], entries: [], newest: -Infinity, undateable: false };
+    const stamp = Date.parse(entry.startedAt ?? entry.finishedAt ?? "");
+    if (Number.isFinite(stamp)) group.newest = Math.max(group.newest, stamp);
+    else group.undateable = true;
+    group.lines.push(line);
+    group.entries.push(entry);
+    groups.set(entry.invocationId, group);
+  }
+
+  const keptLines = [];
+  const archivedLines = [];
+  const tombstones = [];
+  let carriedPaidTokens = 0;
+  let archivedRuns = 0;
+
+  for (const [invocationId, group] of groups) {
+    const isWorker = group.entries.some((entry) => entry.kind === "worker");
+    const retention = isWorker ? workerRetentionMs : moneyRetentionMs;
+    // Undateable records err toward KEEPING — the same fail-closed instinct the
+    // ceilings use. Anything inside its retention window stays verbatim.
+    if (group.undateable || group.newest >= now - retention || group.entries.some((e) => e.stage === "archived")) {
+      keptLines.push(...group.lines);
+      continue;
+    }
+    // Old enough to archive. A paid run whose spend is untrustworthy or
+    // self-contradictory must stay visible in the live ledger — compacting it
+    // away would quietly un-poison a closed lane.
+    const paidEntries = group.entries.filter((entry) => entry.paid === true);
+    if (paidEntries.length) {
+      let charge;
+      try {
+        charge = summarizeLedger(group.lines.join("\n"), true);
+      } catch (error) {
+        return { compacted: false, reason: `refusing to compact: an archivable paid run is untrustworthy (${error.message})` };
+      }
+      carriedPaidTokens += charge;
+    }
+    archivedLines.push(...group.lines);
+    archivedRuns += 1;
+    const sample = group.entries[0];
+    // Tombstone: just enough to keep a task ID single-use forever. `stage:
+    // "archived"` is ignored by every summary, so it can never be mistaken for
+    // spend or for a live worker.
+    tombstones.push(JSON.stringify({
+      stage: "archived",
+      invocationId,
+      taskId: sample.taskId ?? null,
+      ...(isWorker ? { kind: "worker" } : {}),
+      archivedAt: new Date(now).toISOString(),
+    }));
+  }
+
+  if (!archivedRuns) return { compacted: false, reason: "nothing is old enough to archive" };
+
+  const marker = JSON.stringify({
+    stage: "compacted",
+    at: new Date(now).toISOString(),
+    archivedRuns,
+    carriedPaidTokens,
+  });
+  const carry = carriedPaidTokens > 0
+    ? [JSON.stringify({
+        stage: "terminal",
+        invocationId: `carry-forward-${randomUUID()}`,
+        taskId: "devharmonics-carry-forward",
+        paid: true,
+        usage: { total_tokens: carriedPaidTokens },
+        finishedAt: new Date(now).toISOString(),
+        note: "lifetime paid total preserved from archived records — see the archive file beside this ledger",
+      })]
+    : [];
+
+  const text = `${[...untouchable.map((u) => u.line), ...keptLines, ...tombstones, ...carry, marker].join("\n")}\n`;
+  // A tombstone plus a carry-forward record can cost more than the handful of
+  // lines they replace. Rewriting the ledger to make it BIGGER would be pure
+  // churn on the money file, so a compaction that doesn't pay for itself simply
+  // doesn't happen.
+  if (text.length >= ledgerText.length) {
+    return { compacted: false, reason: "compaction would not reclaim any space yet" };
+  }
+  return { compacted: true, text, archiveText: `${archivedLines.join("\n")}\n`, archivedRuns, carriedPaidTokens };
+}
+
+/**
+ * Compact `usage.jsonl` in place when it has grown past the threshold. MUST be
+ * called with the ledger lock already held. Never throws: a compaction that
+ * cannot be done safely simply doesn't happen, and the run continues against
+ * the full ledger.
+ */
+export function maybeCompactLedger(ledgerPath, { now = Date.now(), thresholdBytes = LEDGER_COMPACT_BYTES, workerRetentionMs = LEDGER_MONEY_RETENTION_MS } = {}) {
+  try {
+    if (!existsSync(ledgerPath)) return { compacted: false };
+    if (statSync(ledgerPath).size < thresholdBytes) return { compacted: false };
+    const result = compactLedgerText(readFileSync(ledgerPath, "utf8"), { now, workerRetentionMs });
+    if (!result.compacted) return result;
+    const archivePath = `${ledgerPath}.${new Date(now).toISOString().slice(0, 10)}.archive`;
+    // Archive FIRST: if this write fails, the live ledger is untouched.
+    appendFileSync(archivePath, result.archiveText);
+    writeFileSync(ledgerPath, result.text);
+    return { compacted: true, archivePath, archivedRuns: result.archivedRuns, carriedPaidTokens: result.carriedPaidTokens };
+  } catch (error) {
+    return { compacted: false, reason: `compaction skipped: ${error.message}` };
+  }
+}
+
 /**
  * Reserve a paid attempt against `aggregateLimit` total tokens. Fails closed:
  * the reservation is refused whenever it would push spend past the
@@ -171,6 +331,7 @@ export async function reservePaidUsage({
   const ledgerPath = path.join(stateRoot, "usage.jsonl");
   const lock = await acquireFileLock(path.join(stateRoot, "usage.lock"), { taskId, stage: "reserved" });
   try {
+    maybeCompactLedger(ledgerPath);
     const ledgerText = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
     if (rejectTaskReuse && ledgerText.split(/\r?\n/).filter(Boolean)
       .some((line) => { const e = JSON.parse(line); return e.kind !== "worker" && e.taskId === taskId; })) {
@@ -237,6 +398,9 @@ export function summarizeFanout(ledgerText, { since = 0 } = {}) {
       throw new Error(`fan-out ledger line ${index + 1} is not valid JSON: ${error.message}`);
     }
     if (entry.kind !== "worker") continue;
+    // Compaction tombstones carry the original kind so task-ID reuse detection
+    // survives; they are history, never a live worker holding a slot.
+    if (entry.stage === "archived") continue;
     if (!entry.invocationId) throw new Error(`fan-out ledger line ${index + 1} has no invocationId`);
     if (entry.stage === "reserved") admittedAt.set(entry.invocationId, dateOrInfinity(entry.startedAt));
     const group = groups.get(entry.invocationId) ?? { records: [] };
@@ -254,19 +418,29 @@ export function summarizeFanout(ledgerText, { since = 0 } = {}) {
     // MONEY-001 (audit 2026-08-06): highest-reported wins, same rule as the
     // money summary — a later appended record can no longer erase a worker's
     // recorded tokens or dollars (proven: one line zeroed 5,000 tokens and $250).
-    let highestTokens = 0;
-    let highestCost = 0;
-    for (const entry of group.records) {
+    // Same rule as the money summary: disagreeing terminal records for one
+    // worker mean the ledger was altered, and a meter that cannot be trusted
+    // refuses rather than picking a number. Identical duplicates are harmless.
+    const terminals = group.records.filter((entry) => entry.stage !== "reserved");
+    const reported = terminals.map((entry) => {
       const total = entry.usage?.total_tokens;
-      if (Number.isSafeInteger(total) && total > 0) highestTokens = Math.max(highestTokens, total);
       // v1 port (b): real REPORTED dollars, where a run reported them (claude's
       // headless receipts carry total_cost_usd; local models report none and
       // honestly contribute $0 — the token ceilings remain their guard).
       const cost = entry.usage?.cost_usd;
-      if (Number.isFinite(cost) && cost > 0) highestCost = Math.max(highestCost, cost);
+      return {
+        tokens: Number.isSafeInteger(total) && total > 0 ? total : 0,
+        cost: Number.isFinite(cost) && cost > 0 ? cost : 0,
+      };
+    });
+    if (reported.some((r) => r.tokens !== reported[0].tokens || r.cost !== reported[0].cost)) {
+      throw new Error(
+        "Fan-out ledger contains conflicting records for one worker — the ledger has been altered or corrupted. "
+        + "Establish the true usage, then rotate usage.jsonl deliberately (see the manual); it is never repaired by appending.",
+      );
     }
-    tokens += highestTokens;
-    costUsd += highestCost;
+    tokens += reported[0]?.tokens ?? 0;
+    costUsd += reported[0]?.cost ?? 0;
   }
   return { workers, tokens, costUsd };
 }
@@ -290,6 +464,9 @@ export async function admitWorker({ stateRoot, taskId, lane, budgets, metadata =
   const ledgerPath = path.join(stateRoot, "usage.jsonl");
   const lock = await acquireFileLock(path.join(stateRoot, "usage.lock"), { taskId, stage: "reserved", kind: "worker" });
   try {
+    // Worker records must survive at least the operator's own rolling window,
+    // or compaction would quietly hand back fan-out headroom it never earned.
+    maybeCompactLedger(ledgerPath, { workerRetentionMs: Math.max(LEDGER_MONEY_RETENTION_MS, windowHours * 3_600_000 * 1.1) });
     const ledgerText = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
     const since = Date.now() - windowHours * 3_600_000;
     const { workers, tokens } = summarizeFanout(ledgerText, { since });

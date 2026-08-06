@@ -33,13 +33,22 @@ test("createInvocationId returns distinct real UUIDs", () => {
   assert.match(a, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 });
 
-test("duplicate terminal reconciliation charges the HIGHEST record for an invocation, never a lower duplicate", () => {
+test("terminal records that DISAGREE for one invocation refuse — the ledger was altered, and a money meter never guesses", () => {
   const ledger = [
     '{"stage":"reserved","invocationId":"inv-one","taskId":"one","paid":true,"reservedTokens":60}',
     '{"stage":"terminal","invocationId":"inv-one","taskId":"one","paid":true,"usage":{"total_tokens":25}}',
     '{"stage":"terminal","invocationId":"inv-one","taskId":"one","paid":true,"usage":{"total_tokens":30}}',
   ].join("\n");
-  assert.equal(summarizeLedger(ledger, true), 30);
+  assert.throws(() => summarizeLedger(ledger, true), /conflicting records/);
+});
+
+test("an IDENTICAL duplicate terminal is still harmless — charged once, never twice (replay safety)", () => {
+  const ledger = [
+    '{"stage":"reserved","invocationId":"inv-one","taskId":"one","paid":true,"reservedTokens":60}',
+    '{"stage":"terminal","invocationId":"inv-one","taskId":"one","paid":true,"usage":{"total_tokens":25}}',
+    '{"stage":"terminal","invocationId":"inv-one","taskId":"one","paid":true,"usage":{"total_tokens":25}}',
+  ].join("\n");
+  assert.equal(summarizeLedger(ledger, true), 25);
 });
 
 test("a hand-forged ledger line with a NEGATIVE reservation fails closed, never subtracts from the running total (GAUNTLET)", () => {
@@ -56,7 +65,7 @@ test("a duplicate terminal with unknown paid usage still fails closed", () => {
     '{"stage":"terminal","invocationId":"inv-one","taskId":"one","paid":true,"usage":{"total_tokens":25}}',
     '{"stage":"terminal","invocationId":"inv-one","taskId":"one","paid":true,"usage":null}',
   ].join("\n");
-  assert.throws(() => summarizeLedger(ledger, true), /Paid usage ledger contains a run without trustworthy token usage/);
+  assert.throws(() => summarizeLedger(ledger, true), /conflicting records|without trustworthy token usage/);
 });
 
 test("unpaid runs with unknown usage charge zero rather than throwing", () => {
@@ -323,18 +332,25 @@ test("a garbage monthlyLimitUsd throws rather than silently unguarding the money
 
 // --- MONEY-001 (audit 2026-08-06): appended records can never LOWER recorded spend
 
-test("MONEY-001: a later terminal record cannot lower a paid charge — highest reported wins", () => {
+test("MONEY-001: a later terminal record cannot lower a paid charge — the forgery is DETECTED", () => {
   const honest = [
     '{"stage":"reserved","invocationId":"inv-1","taskId":"t1","paid":true,"reservedTokens":100}',
     '{"stage":"terminal","invocationId":"inv-1","taskId":"t1","paid":true,"usage":{"total_tokens":900000}}',
   ].join("\n");
   assert.equal(summarizeLedger(honest, true), 900000);
-  // The exact forgery the audit proved: one appended line used to erase 900,000 tokens.
+  // The exact forgery the audit proved: one appended line used to erase 900,000
+  // tokens. It is now DETECTED and refused, not merely out-voted.
   const forged = `${honest}\n{"stage":"terminal","invocationId":"inv-1","taskId":"t1","paid":true,"usage":{"total_tokens":1}}`;
-  assert.equal(summarizeLedger(forged, true), 900000, "an appended lower terminal must never reduce recorded spend");
-  // An honest UPWARD correction (reconcilePaidUsage) still works.
-  const corrected = `${honest}\n{"stage":"terminal","invocationId":"inv-1","taskId":"t1","paid":true,"usage":{"total_tokens":950000}}`;
-  assert.equal(summarizeLedger(corrected, true), 950000);
+  assert.throws(() => summarizeLedger(forged, true), /conflicting records/, "an appended lower terminal must refuse, never reduce recorded spend");
+});
+
+test("MONEY-001 round 2: a duplicate RESERVATION cannot lower a not-yet-reconciled charge", () => {
+  // Proven live by the round-2 adversarial pass: 900 then 100 used to charge 100.
+  const ledger = [
+    '{"stage":"reserved","invocationId":"inv-r","taskId":"t","paid":true,"reservedTokens":900}',
+    '{"stage":"reserved","invocationId":"inv-r","taskId":"t","paid":true,"reservedTokens":100}',
+  ].join("\n");
+  assert.throws(() => summarizeLedger(ledger, true), /conflicting records/);
 });
 
 test("MONEY-001: the same rule protects the fan-out and monthly-dollar meters", () => {
@@ -344,7 +360,7 @@ test("MONEY-001: the same rule protects the fan-out and monthly-dollar meters", 
   ].join("\n");
   assert.deepEqual(summarizeFanout(honest, { since: 0 }), { workers: 1, tokens: 5000, costUsd: 250 });
   const forged = `${honest}\n{"stage":"terminal","kind":"worker","invocationId":"w1","taskId":"w1","paid":false,"usage":{"total_tokens":0,"cost_usd":0}}`;
-  assert.deepEqual(summarizeFanout(forged, { since: 0 }), { workers: 1, tokens: 5000, costUsd: 250 }, "an appended zero must never erase a worker's recorded tokens or dollars");
+  assert.throws(() => summarizeFanout(forged, { since: 0 }), /conflicting records/, "an appended zero must refuse, never erase a worker's recorded tokens or dollars");
 });
 
 test("MONEY-001: a reconciled terminal still supersedes its own reservation estimate (no over-charging)", () => {
@@ -353,4 +369,103 @@ test("MONEY-001: a reconciled terminal still supersedes its own reservation esti
     '{"stage":"terminal","invocationId":"inv-2","taskId":"t2","paid":true,"usage":{"total_tokens":100}}',
   ].join("\n");
   assert.equal(summarizeLedger(ledger, true), 100, "the estimate is replaced by real usage, not maxed against it");
+});
+
+// --- Automatic compaction (owner request 2026-08-06): the ledger stops growing
+// forever, WITHOUT ever silently resetting a ceiling -------------------------
+
+import { compactLedgerText, maybeCompactLedger, LEDGER_MONEY_RETENTION_MS } from "../scripts/admission.mjs";
+import { statSync, writeFileSync as write } from "node:fs";
+
+const daysAgo = (n) => new Date(Date.now() - n * 24 * 3_600_000).toISOString();
+
+test("compaction preserves the LIFETIME paid total exactly — a carry-forward record, never a reset", () => {
+  const old = daysAgo(90);
+  const lines = [];
+  for (let i = 0; i < 50; i += 1) {
+    lines.push(`{"stage":"reserved","invocationId":"old-${i}","taskId":"o${i}","paid":true,"reservedTokens":100,"startedAt":"${old}"}`);
+    lines.push(`{"stage":"terminal","invocationId":"old-${i}","taskId":"o${i}","paid":true,"usage":{"total_tokens":${20 + i}},"finishedAt":"${old}"}`);
+  }
+  lines.push(`{"stage":"reserved","invocationId":"new-1","taskId":"n1","paid":true,"reservedTokens":50,"startedAt":"${daysAgo(1)}"}`);
+  lines.push(`{"stage":"terminal","invocationId":"new-1","taskId":"n1","paid":true,"usage":{"total_tokens":25},"finishedAt":"${daysAgo(1)}"}`);
+  const ledger = lines.join("\n");
+
+  const before = summarizeLedger(ledger, true);
+  const result = compactLedgerText(ledger);
+  assert.equal(result.compacted, true, result.reason);
+  assert.equal(summarizeLedger(result.text, true), before, "the paid total must be identical after compaction");
+  assert.ok(result.text.length < ledger.length, "the live ledger actually got smaller");
+  assert.match(result.archiveText, /old-1/, "archived detail is preserved, not deleted");
+  assert.ok(!result.text.includes('"total_tokens":69'), "the archived detail left the live ledger");
+  assert.match(result.text, /"total_tokens":25/, "the recent run stays verbatim");
+});
+
+test("compaction that would not reclaim space doesn't happen at all — no churn on the money file", () => {
+  const old = daysAgo(90);
+  const ledger = [
+    `{"stage":"reserved","invocationId":"old-1","taskId":"o1","paid":true,"reservedTokens":100,"startedAt":"${old}"}`,
+    `{"stage":"terminal","invocationId":"old-1","taskId":"o1","paid":true,"usage":{"total_tokens":700},"finishedAt":"${old}"}`,
+  ].join("\n");
+  const result = compactLedgerText(ledger);
+  assert.equal(result.compacted, false);
+  assert.match(result.reason, /not reclaim any space/);
+});
+
+test("compaction keeps single-use task IDs single-use — a tombstone survives for every archived run", () => {
+  const ledger = [
+    `{"stage":"reserved","invocationId":"old-1","taskId":"important-task","paid":false,"reservedTokens":null,"startedAt":"${daysAgo(90)}"}`,
+    `{"stage":"terminal","invocationId":"old-1","taskId":"important-task","paid":false,"usage":null,"finishedAt":"${daysAgo(90)}"}`,
+  ].join("\n");
+  const result = compactLedgerText(ledger);
+  assert.equal(result.compacted, true, result.reason);
+  assert.match(result.text, /"taskId":"important-task"/, "the task ID must still be findable so it can never be reused");
+  assert.match(result.text, /"stage":"archived"/);
+});
+
+test("compaction NEVER archives a worker still inside the operator's rolling window", () => {
+  const ledger = [
+    `{"stage":"reserved","kind":"worker","invocationId":"w-old","taskId":"w1","paid":false,"reservedTokens":0,"startedAt":"${daysAgo(60)}"}`,
+    `{"stage":"terminal","kind":"worker","invocationId":"w-old","taskId":"w1","paid":false,"usage":{"total_tokens":10,"cost_usd":5},"finishedAt":"${daysAgo(60)}"}`,
+  ].join("\n");
+  // A 90-day fan-out window means this 60-day-old worker still counts.
+  const held = compactLedgerText(ledger, { workerRetentionMs: 90 * 24 * 3_600_000 });
+  assert.equal(held.compacted, false, "a worker inside the window must never be archived");
+  // With the default retention it is genuinely past every window, so it may go.
+  const done = compactLedgerText(ledger, { workerRetentionMs: LEDGER_MONEY_RETENTION_MS });
+  assert.equal(done.compacted, true, done.reason);
+  // And the tombstone must not read as a live worker holding fan-out headroom.
+  assert.deepEqual(summarizeFanout(done.text, { since: 0 }), { workers: 0, tokens: 0, costUsd: 0 });
+});
+
+test("compaction refuses outright when what it would archive is untrustworthy", () => {
+  const ledger = [
+    `{"stage":"reserved","invocationId":"bad-1","taskId":"b1","paid":true,"reservedTokens":100,"startedAt":"${daysAgo(90)}"}`,
+    `{"stage":"terminal","invocationId":"bad-1","taskId":"b1","paid":true,"usage":null,"finishedAt":"${daysAgo(90)}"}`,
+  ].join("\n");
+  const result = compactLedgerText(ledger);
+  assert.equal(result.compacted, false);
+  assert.match(result.reason, /untrustworthy/);
+});
+
+test("maybeCompactLedger leaves a small ledger completely alone, and only fires past the threshold", (t) => {
+  const root = tempRoot(t, "dh-compact-");
+  const ledgerPath = path.join(root, "usage.jsonl");
+  const old = daysAgo(90);
+  const lines = [];
+  for (let i = 0; i < 400; i += 1) {
+    lines.push(`{"stage":"reserved","invocationId":"old-${i}","taskId":"t${i}","paid":true,"reservedTokens":10,"startedAt":"${old}"}`);
+    lines.push(`{"stage":"terminal","invocationId":"old-${i}","taskId":"t${i}","paid":true,"usage":{"total_tokens":5},"finishedAt":"${old}"}`);
+  }
+  write(ledgerPath, `${lines.join("\n")}\n`);
+  const total = summarizeLedger(readFileSync(ledgerPath, "utf8"), true);
+  const sizeBefore = statSync(ledgerPath).size;
+
+  assert.equal(maybeCompactLedger(ledgerPath).compacted, false, "under the threshold: untouched");
+  assert.equal(statSync(ledgerPath).size, sizeBefore);
+
+  const fired = maybeCompactLedger(ledgerPath, { thresholdBytes: 1024 });
+  assert.equal(fired.compacted, true, fired.reason);
+  assert.ok(statSync(ledgerPath).size < sizeBefore, "the ledger shrank");
+  assert.equal(summarizeLedger(readFileSync(ledgerPath, "utf8"), true), total, "the recorded paid total is unchanged");
+  assert.ok(existsSync(fired.archivePath), "the archived history is on disk, not deleted");
 });

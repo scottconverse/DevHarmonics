@@ -11,6 +11,7 @@ const USAGE = `Usage:
   devharmonics config show [--config <file>] [--json]
   devharmonics config path
   devharmonics credential set <name> | list | delete <name>
+  devharmonics ledger status | rotate [--state-root <dir>] [--reset-totals] [--json]
   devharmonics run --repository <repo> --prompt <text> --provider <p>
                    [--model m (required: codex, claude)] [--check "cmd args"]
                    [--task-id t] [--lane subprocess|http|acp] [--files a,b,c]
@@ -55,6 +56,11 @@ Commands:
            auto-created on first use > built-in defaults). Never contains
            credential values — only environment-variable names or
            stored-credential names.
+  ledger   Show what the spend ledger records, and repair it when it
+           refuses. "status" prints recorded spend and whether the file
+           can be trusted (exit 1 when it cannot); "rotate" archives it
+           and starts fresh, carrying the lifetime paid total forward so
+           rotation is never a budget reset. Nothing is ever deleted.
   credential  Store API keys encrypted at rest (Windows DPAPI, this
            account only) under ~/.devharmonics/credentials. "set" reads
            the key from stdin — never a command argument. Point an
@@ -117,6 +123,10 @@ async function main() {
   if (command === "credential") {
     const { credentialCommand } = await import("./credential-command.mjs");
     return credentialCommand(rest);
+  }
+  if (command === "ledger") {
+    const { ledgerCommand } = await import("./ledger-command.mjs");
+    return ledgerCommand(rest);
   }
   throw new Error(`Unknown command: ${command}\n${USAGE}`);
 }

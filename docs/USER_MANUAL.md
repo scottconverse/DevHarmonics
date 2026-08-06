@@ -4,7 +4,7 @@
 
 DevHarmonics is a set of plain Node.js command-line scripts that let an AI coding agent make one bounded, gated change to a git repository on your own machine, using accounts you already have — there is no DevHarmonics server and no DevHarmonics account. Work is driven through one of three worker lanes: subprocess (a supervised call to a signed-in subscription CLI — Codex, Claude Code, or Antigravity's `agy`), HTTP (one Anthropic-Messages-API client pointed at a local model server or, only if you opt in, the real Claude API), and ACP (the Agent Client Protocol, driven by an installed ACP adapter over stdio). All three lanes are reachable today from the command line, standalone (`devharmonics worker`, `devharmonics acp`) or as the worker inside the full gated pipeline (`devharmonics run --lane subprocess|http|acp`). A change only reaches a local integration branch after clearing an empty-diff check and a `tampercheck` integrity scan, and it is never pushed anywhere or merged into your own branch — the tool always stops at a point where you, the owner, decide what happens next. Every attempt, whether it succeeds, is refused, or never even starts, leaves a written receipt.
 
-DevHarmonics has nine commands: `doctor`, `onboard`, `qualify`, `worker`, `acp`, `run`, `set`, `config`, and `credential`. `set` plans and integrates a change across more than one repository at once, judged all-or-nothing; `config` shows the configuration in effect and where it came from.
+DevHarmonics has ten commands: `doctor`, `onboard`, `qualify`, `worker`, `acp`, `run`, `set`, `config`, `credential`, and `ledger`. `set` plans and integrates a change across more than one repository at once, judged all-or-nothing; `config` shows the configuration in effect and where it came from.
 
 ## 2. Requirements
 
@@ -60,6 +60,7 @@ Usage:
   devharmonics config show [--config <file>] [--json]
   devharmonics config path
   devharmonics credential set <name> | list | delete <name>
+  devharmonics ledger status | rotate [--state-root <dir>] [--reset-totals] [--json]
   devharmonics run --repository <repo> --prompt <text> --provider <p>
                    [--model m (required: codex, claude)] [--check "cmd args"]
                    [--task-id t] [--lane subprocess|http|acp] [--files a,b,c]
@@ -185,6 +186,21 @@ devharmonics credential delete <name>
 ```
 
 `credential` is the alternative to `apiKeyEnvVar` — configure exactly one per endpoint (both at once is a validation error). Either way the endpoint becomes **paid** and every money guard below applies identically. There is deliberately no `credential show`: once stored, a key is never printed again. `set` is **Windows-only** (DPAPI is a Windows facility, exactly as in v1); on macOS/Linux use `apiKeyEnvVar`, and a store file copied to a non-Windows machine refuses to decrypt with a plain error. **Exit codes:** 0 = done; 2 = bad arguments, or `set` off-Windows.
+
+### `ledger`
+
+Shows what the spend ledger records, and repairs it when it refuses.
+
+```
+devharmonics ledger status [--state-root <dir>] [--json]
+devharmonics ledger rotate [--state-root <dir>] [--reset-totals]
+```
+
+`status` prints the recorded lifetime paid tokens, the worker and reported-dollar totals, and — the part that matters — whether the file can still be trusted. Records that disagree with each other mean the ledger was altered or corrupted, and every budget check refuses while that is true; `status` says so in plain language and **exits 1**, so a wedged money file can never read as a clean result.
+
+`rotate` is the sanctioned repair: the current ledger is **renamed** (never deleted) to a timestamped `.rotated` file beside it, and a fresh one starts. On a healthy ledger your lifetime paid total is carried forward automatically, so **rotation is never a budget reset**. On an untrustworthy ledger the true total is by definition unknown, so rotation refuses and tells you what it cannot know; passing `--reset-totals` says out loud that you accept starting paid totals at zero, with the full history still on disk to read.
+
+**Exit codes:** 0 = done (or a healthy status); 1 = the ledger is refusing and needs repair; 2 = a bad flag.
 
 ### `qualify`
 

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { acquireFileLock } from "./slots.mjs";
 
@@ -225,7 +225,14 @@ export function compactLedgerText(ledgerText, { now = Date.now(), moneyRetention
     const retention = isWorker ? workerRetentionMs : moneyRetentionMs;
     // Undateable records err toward KEEPING — the same fail-closed instinct the
     // ceilings use. Anything inside its retention window stays verbatim.
-    if (group.undateable || group.newest >= now - retention || group.entries.some((e) => e.stage === "archived")) {
+    // Round-3 finding (Major): an invocation with a reservation but NO terminal
+    // is unfinished. Archiving it would fold its reservation into the
+    // carry-forward total, and a terminal arriving later would then be charged
+    // a SECOND time under its original id. Unfinished runs therefore stay in the
+    // live ledger no matter how old they are — they keep counting toward the
+    // cap, which is the fail-closed direction, and orphans are tiny.
+    const finished = group.entries.some((entry) => entry.stage && entry.stage !== "reserved");
+    if (!finished || group.undateable || group.newest >= now - retention || group.entries.some((e) => e.stage === "archived")) {
       keptLines.push(...group.lines);
       continue;
     }
@@ -303,7 +310,14 @@ export function maybeCompactLedger(ledgerPath, { now = Date.now(), thresholdByte
     const archivePath = `${ledgerPath}.${new Date(now).toISOString().slice(0, 10)}.archive`;
     // Archive FIRST: if this write fails, the live ledger is untouched.
     appendFileSync(archivePath, result.archiveText);
-    writeFileSync(ledgerPath, result.text);
+    // Then swap the ledger ATOMICALLY (round-3 finding): a crash mid-rewrite must
+    // never leave a half-written money ledger. Worst case after a crash is a
+    // duplicated stretch of the human-readable archive sidecar, which costs
+    // nothing — the live ledger is either the old file or the new one, never a
+    // fragment of both.
+    const temporary = `${ledgerPath}.compacting`;
+    writeFileSync(temporary, result.text);
+    renameSync(temporary, ledgerPath);
     return { compacted: true, archivePath, archivedRuns: result.archivedRuns, carriedPaidTokens: result.carriedPaidTokens };
   } catch (error) {
     return { compacted: false, reason: `compaction skipped: ${error.message}` };

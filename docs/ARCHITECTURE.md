@@ -57,7 +57,8 @@ Every file in `scripts/` (29 as of this writing), one line each:
 | `qualify.mjs` | The qualification harnesses themselves (analysis, benchmark, tool_use, structured_write) plus the sweep planner/executor that records pass/fail to the ledger. |
 | `receipts.mjs` | Defines the one receipt schema (`devharmonics-receipt-v1`) shared by all three lanes; builds, validates, and writes `receipt.json`. |
 | `review.mjs` | Independent artifact-lens review: a model verdict plus a deterministic claims-vs-diff divergence check; always writes a review evidence bundle. |
-| `assurance.mjs` | The assurance ladder (`gates-only` → `validated`/`reviewed` → `validated+reviewed`), the `--require-evidence` floor parser, and the honest describe strings both `run` and `set` print. |
+| `claims.mjs` | Versioned worker-claims artifact parser/writer and deterministic claim-to-candidate divergence gate. |
+| `assurance.mjs` | The assurance ladder (`gates-only` → `validated`/`reviewed` → `validated+reviewed`), the `--require-evidence` floor parser including `claims`, and the honest describe strings both `run` and `set` print. |
 | `suite-qualification.mjs` | SPEC §2.4 labeling: detects whether a target repo carries the deterministic-detector CI workflow and labels validator evidence accordingly — detection only, never enforcement. |
 | `run-command.mjs` | The single-repository pipeline (`runPipeline`) and its CLI surface (`runCommandCli`): intake through every gate to the owner-approval stop, across all three worker lanes. |
 | `run-worker.mjs` | Subprocess-lane worker runner: resolves the CLI, builds its invocation, supervises it, parses its output, and always writes a receipt. |
@@ -168,24 +169,32 @@ flowchart TD
     FinalArtifact --> FinalOk{"clean?"}
     FinalOk -- "findings" --> R13["REFUSED: final-artifact-findings"]
     FinalOk -- "crash/timeout" --> R14["REFUSED: final-artifact-unavailable"]
-    FinalOk -- yes --> CheckGiven{"--check given?"}
+    FinalOk -- yes --> ClaimsGate["validate separate worker-claims artifact<br/>and compare claimed/material paths with candidate diff"]
+    ClaimsGate --> ClaimsRequired{"claims required or divergence open?"}
+    ClaimsRequired -- "required and unavailable / open divergence" --> R16["REFUSED: claims-unavailable / claims-divergence"]
+    ClaimsRequired -- "not required or pass" --> CheckGiven{"--check given?"}
     CheckGiven -- no --> Advance
     CheckGiven -- yes --> Resolve{"validator command on PATH?"}
     Resolve -- no --> R5["REFUSED: validator-unresolvable"]
     Resolve -- yes --> Validate["run --check in a checkout of the<br/>MERGED CANDIDATE (R-5), credential-stripped"]
     Validate --> ValidateOk{"exit 0, no timeout?"}
     ValidateOk -- no --> R6["REFUSED: validator-failed"]
-    ValidateOk -- yes --> Advance
-    Advance["advance devharmonics/integration/RUN_ID<br/>to the gated candidate (the LAST action)"] --> AdvanceOk{"ref moved?"}
+    ValidateOk -- yes --> ReviewerGiven{"reviewer or evidence floor requested?"}
+    ReviewerGiven -- no --> Advance
+    ReviewerGiven -- yes --> Park["park gated candidate; owner-facing ref stays unchanged"]
+    Park --> ReviewGiven{"--reviewer given?"}
+    ReviewGiven -- no --> Floor["check required evidence floor"]
+    ReviewGiven -- yes --> Review["independent reviewer sees the candidate diff + validator receipt,<br/>never the worker's own narration"]
+    Review --> Divergence["claims-vs-diff divergence check<br/>(when the separate worker-claims artifact is available)"]
+    Divergence --> Verdict{"valid READY and<br/>no open divergence finding?"}
+    Verdict -- no --> R11["REFUSED: review-not-ready / review-failed<br/>candidate discarded; ref unchanged; exit 1"]
+    Verdict -- yes --> Floor
+    Floor --> FloorOk{"all demanded evidence present?"}
+    FloorOk -- no --> R17["REFUSED: insufficient-evidence<br/>candidate discarded; ref unchanged; exit 1"]
+    FloorOk -- yes --> Advance
+    Advance["finalize candidate and advance<br/>devharmonics/integration/RUN_ID (LAST action)"] --> AdvanceOk{"ref moved?"}
     AdvanceOk -- no --> R15["REFUSED: integration-ref-locked<br/>(e.g. the branch is checked out somewhere)"]
-    AdvanceOk -- yes --> ReviewerGiven{"--reviewer given?"}
-    ReviewerGiven -- no --> Stop
-    ReviewerGiven -- yes --> Review["independent reviewer sees the diff + validator receipt,<br/>never the worker's own narration"]
-    Review --> Divergence["claims-vs-diff divergence check<br/>(the pipeline supplies no worker-claims manifest today,<br/>so this is reported 'not checked' — finding M-1)"]
-    Divergence --> Verdict{"model said READY AND<br/>no open divergence finding?"}
-    Verdict -- no --> R11["review-not-ready — still INTEGRATED (exit 0);<br/>the owner must read the review evidence"]
-    Verdict -- yes --> Stop
-    R11 --> Stop
+    AdvanceOk -- yes --> Stop
     Stop(["STOP at the owner approval boundary<br/>nothing pushed; nothing merged into the owner's own branch"])
 ```
 
@@ -218,16 +227,20 @@ update is now the last action, after the delivered commit itself passed
 every gate — including the operator's `--check`, which runs against the
 merged candidate (R-5), never just the worker's own tree.
 
-The `Divergence` node is likewise deliberately inert in the pipeline today
-(finding M-1). `claimsArtifactDivergence` in `review.mjs` is sound and tested,
-but it needs a manifest of what the *worker claimed* it changed, kept separate
-from the diff. The subprocess/acp worker emits only freeform narration, and a
-prior build fed the diff back in as the "claims" — a self-comparison that could
-never find anything, yet reported a reassuring "0 divergence". `run-command.mjs`
-now passes `claimedPaths: null`, so the gate is honestly reported as "not
-checked" rather than faking a pass; the model reviewer (which judges the real
-diff) remains the active review gate, and the divergence gate stays fully wired
-for any caller able to supply a real claims manifest.
+For a requested review or evidence floor, “last action” includes that owner
+boundary: the candidate is parked, the review and floor are evaluated, and
+only phase-2 finalization advances the owner-facing ref. A refusal therefore
+does not leave a base ref behind as a misleading placeholder.
+
+The `Divergence` node is now a real gate. Every worker attempt writes a separate,
+versioned `worker-claims.json` artifact (`devharmonics-worker-claims-v1`),
+parsed independently from narration and compared with the coordinator's real
+candidate diff. Unavailable claims remain explicitly unavailable (never an
+empty claim set); `--require-evidence claims` refuses them, and any claimed-but-
+absent, changed-but-unclaimed, or material-claim omission produces a refusal.
+The same artifact and divergence findings are carried into both integration and
+review evidence. Legacy direct callers may still omit claims, in which case the
+receipt records `not-checked` rather than inventing a zero.
 
 ## 5. Evidence model
 

@@ -269,6 +269,9 @@ test("integrateSet: two-repo set, both clean -> setReady true, both real merge c
     assert.equal(m.reason, null);
     assert.ok(m.integrationHead);
     assert.ok(existsSync(m.evidencePath));
+    const memberEvidence = readJson(m.evidencePath);
+    assert.equal(memberEvidence.integrated, true);
+    assert.equal(memberEvidence.integrationHead, m.integrationHead);
   }
 
   assert.ok(existsSync(result.evidencePath));
@@ -320,10 +323,10 @@ test("integrateSet: repo B trips tampercheck -> ATOMIC: setReady false, blockedB
   assert.equal(mB.reason, "tampercheck-findings");
   assert.equal(mB.integrationHead, null);
 
-  // repoA's integration branch exists (prepare creates it at the pinned base) but
-  // must still point AT THAT BASE — no merge was delivered anywhere.
-  const headA = git(repoA, ["rev-parse", "devharmonics/integration/" + plan.setId]).trim();
-  assert.equal(headA, plan.members[0].baseCommit, "repoA must NOT be advanced when the set is blocked");
+  // Candidate-first prepare never creates the owner-facing ref; a blocked set
+  // leaves repoA exactly as it started.
+  const headA = spawnSync("git", ["-C", repoA, "rev-parse", "--verify", "--quiet", `refs/heads/devharmonics/integration/${plan.setId}`]);
+  assert.notEqual(headA.status, 0, "repoA's ref must remain absent when the set is blocked");
   // The parked candidate was abandoned, not left lying around.
   const candidateA = spawnSync("git", ["-C", repoA, "rev-parse", "--verify", "--quiet", `refs/devharmonics/candidate/${plan.setId}-repoA`]);
   assert.notEqual(candidateA.status, 0, "an abandoned set must not leave candidate refs behind");
@@ -372,9 +375,9 @@ test("integrateSet: --check runs per member against the merged candidate; a fail
     assert.equal(m.reason, "validator-failed");
     assert.equal(m.gates.validator.status, "refused");
     assert.ok(m.gates.validator.candidateHead, "the validator ran against a real merged candidate");
-    // Nothing advanced: the integration branch is still at the pinned base.
-    const head = git(m.repositoryId === "repoA" ? repoA : repoB, ["rev-parse", m.integrationBranch]).trim();
-    assert.equal(head, m.baseCommit, "a failed validator must leave the integration ref at its base");
+    // Nothing advanced: candidate-first refusal leaves the integration ref absent.
+    const ref = spawnSync("git", ["-C", m.repositoryId === "repoA" ? repoA : repoB, "rev-parse", "--verify", "--quiet", `refs/heads/${m.integrationBranch}`]);
+    assert.notEqual(ref.status, 0, "a failed validator must leave the integration ref unchanged");
   }
 
   // And a passing validator still integrates the whole set.
@@ -446,8 +449,8 @@ test("integrateSet: --reviewer reviews each candidate; one NOT_READY blocks the 
   // Reviews ran against the parked CANDIDATE refs, not the branches.
   assert.ok(reviewedRefs.every((r) => String(r).startsWith("refs/devharmonics/candidate/")), `reviewed refs: ${reviewedRefs}`);
   // Nothing advanced anywhere.
-  assert.equal(git(repoA, ["rev-parse", bA.integrationBranch]).trim(), bA.baseCommit);
-  assert.equal(git(repoB, ["rev-parse", bB.integrationBranch]).trim(), bB.baseCommit);
+  assert.notEqual(spawnSync("git", ["-C", repoA, "rev-parse", "--verify", "--quiet", `refs/heads/${bA.integrationBranch}`]).status, 0);
+  assert.notEqual(spawnSync("git", ["-C", repoB, "rev-parse", "--verify", "--quiet", `refs/heads/${bB.integrationBranch}`]).status, 0);
 
   // A crashed reviewer is never a pass.
   const crashed = await integrateSet({
@@ -503,7 +506,7 @@ test("integrateSet: assurance is reported, and --require-evidence refuses a set 
     assert.deepEqual(m.missingEvidence, ["validator"]);
     assert.match(m.reason, /insufficient-evidence \(missing: validator\)/);
     const dir = m.repositoryId === "repoA" ? repoA : repoB;
-    assert.equal(git(dir, ["rev-parse", m.integrationBranch]).trim(), m.baseCommit, "an unmet evidence floor must advance nothing");
+    assert.notEqual(spawnSync("git", ["-C", dir, "rev-parse", "--verify", "--quiet", `refs/heads/${m.integrationBranch}`]).status, 0, "an unmet evidence floor must leave the integration ref unchanged");
   }
 
   // Supply the validator and the same floor is satisfied.

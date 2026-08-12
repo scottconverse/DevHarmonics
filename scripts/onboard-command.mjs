@@ -9,9 +9,8 @@ import { applyOnboarding, planOnboarding } from "./onboard.mjs";
  * doctorCommand/qualifyCommand/workerCommand: 0 means onboarding RAN
  * (dry-run or applied, including the everything-already-present case) — 2
  * means the runner itself could not operate (bad flags, missing/non-git
- * repository). Per-step write failures during --apply are NOT a runner
- * error: they land honestly in the result's `errors` list and the command
- * still exits 0, exactly as a doctor run full of FAILs still exits 0.
+ * repository). Per-step write failures during --apply are truthful command
+ * failures: they land in the result's `errors` list and return exit 1.
  */
 
 function renderStepsTable(steps) {
@@ -101,5 +100,5 @@ export async function onboardCommand(argv, {
 
   const result = applyOnboarding({ repository, plan, force: options.force });
   printApply(plan, result, options.asJson, write);
-  return 0;
+  return result.errors.length > 0 ? 1 : 0;
 }

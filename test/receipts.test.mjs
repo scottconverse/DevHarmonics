@@ -73,3 +73,10 @@ test("both usage shapes are representable: token counts and USD cost", () => {
   assert.equal(validateReceipt(tokens).ok, true);
   assert.equal(validateReceipt(usd).ok, true);
 });
+
+test("P0 receipt integrity: impossible usage containers and identity combinations are refused", () => {
+  assert.equal(validateReceipt(createReceipt(validInput({ usage: [] }))).ok, false);
+  assert.equal(validateReceipt(createReceipt(validInput({ usage: { unknown: 1 } }))).ok, false);
+  assert.equal(validateReceipt(createReceipt(validInput({ usage: { inputTokens: 1, outputTokens: 2, totalTokens: 99 } }))).ok, false);
+  assert.equal(validateReceipt(createReceipt(validInput({ resolvedModel: "forged", resolutionVerified: false }))).ok, false);
+});

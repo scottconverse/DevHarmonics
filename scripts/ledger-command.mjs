@@ -1,4 +1,4 @@
-import { constants, copyFileSync, existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { constants, copyFileSync, existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { randomUUID } from "node:crypto";
@@ -98,9 +98,14 @@ export function rotateLedger(ledgerPath, { now = Date.now(), resetTotals = false
       archivePath = `${ledgerPath}.${stamp}-${randomUUID().slice(0, 8)}.rotated`;
     }
   }
-  const staged = `${ledgerPath}.rotating`;
-  writeFileSync(staged, fresh);
-  renameSync(staged, ledgerPath);
+  const staged = `${ledgerPath}.${randomUUID()}.rotating`;
+  try {
+    writeFileSync(staged, fresh, { flag: "wx" });
+    renameSync(staged, ledgerPath);
+  } catch (error) {
+    rmSync(staged, { force: true });
+    throw error;
+  }
   return { rotated: true, archivePath, carriedPaidTokens: carried, totalsReset: !status.healthy };
 }
 

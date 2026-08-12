@@ -8,7 +8,7 @@ import { runWorker } from "./run-worker.mjs";
 import { runAcpWorker } from "./acp-worker.mjs";
 import { runLocalPatch } from "./local-patch.mjs";
 import { sendMessages } from "./messages-client.mjs";
-import { integrateWorkerBranch } from "./integrate.mjs";
+import { abandonIntegrationCandidate, annotateIntegrationEvidence, finalizeIntegrationCandidate, integrateWorkerBranch, rollbackIntegrationRef } from "./integrate.mjs";
 import { runReview } from "./review.mjs";
 import { SUBPROCESS_PROVIDERS } from "./providers.mjs";
 import { assuranceFor, missingEvidence, parseRequireEvidence, describeAssurance } from "./assurance.mjs";
@@ -92,7 +92,7 @@ export async function runPipeline({
   provider,
   model = null,
   check = null,          // "command arg arg..." — validator (subprocess/acp) or local-patch's check (http)
-  reviewer = null,       // { lane, provider, model } — independent review after integration
+  reviewer = null,       // { lane, provider, model } — independent review before ref finalization
   maxBudgetUsd = null,   // spend ceiling forwarded to a provider that supports one (claude)
   // Evidence floor: ["validator"], ["review"], or both. Readiness is REFUSED when
   // demanded evidence is absent (A4-6). Empty by default — the level is still always
@@ -146,6 +146,10 @@ export async function runPipeline({
     runLocalPatch,
     sendMessages,
     integrateWorkerBranch,
+    runReview,
+    finalizeIntegrationCandidate,
+    abandonIntegrationCandidate,
+    annotateIntegrationEvidence,
     ...deps,
   };
 
@@ -156,7 +160,7 @@ export async function runPipeline({
   // SPEC §2.4: worker prompts state that the diff will be tamperchecked —
   // stated to every write worker on every lane, so the gate is never a
   // surprise and legitimate work is shaped accordingly.
-  const gateNotice = "\n\n[DevHarmonics] Your diff will be integrity-scanned by tampercheck before integration. Weakening, skipping, or deleting tests to make checks pass will be detected and the change refused.";
+  const gateNotice = "\n\n[DevHarmonics] Your diff will be integrity-scanned by tampercheck before integration. Weakening, skipping, or deleting tests to make checks pass will be detected and the change refused.\n\n[DevHarmonics] Also include exactly one fenced JSON worker-claims manifest in your final response: ```json {\"schema\":\"devharmonics-worker-claims-v1\",\"status\":\"available\",\"claimedPaths\":[\"repo/relative/path\"],\"materialClaims\":[]} ``` . Claim every changed path and no unchanged path. This manifest is parsed independently from your prose and compared with the real candidate diff.";
   const gatedPrompt = `${prompt}${gateNotice}`;
 
   // The repository's .devharmonics is the canonical meter for this pipeline's
@@ -203,7 +207,8 @@ export async function runPipeline({
     );
   }
 
-  const stages = { worker: null, commit: null, validator: null, integration: null, review: null };
+  const stages = { worker: null, commit: null, validator: null, integration: null, review: null, claims: null };
+  let workerClaims = null;
 
   // Whatever worktree the lane created (the pipeline's own, for
   // subprocess/acp; local-patch's own, for http) is always removed here,
@@ -232,7 +237,7 @@ export async function runPipeline({
         apiKeyEnvVar,
         apiKeyCredential,
         paidBudget: (apiKeyEnvVar || apiKeyCredential)
-          ? { stateRoot: path.join(repo, ".devharmonics"), maxPaidTokens: admission?.budgets?.maxPaidTokens, allowPaidApi: admission?.budgets?.allowPaidApi, taskId: runId }
+          ? { stateRoot: path.join(repo, ".devharmonics"), maxPaidTokens: admission?.budgets?.maxPaidTokens, allowPaidApi: admission?.budgets?.allowPaidApi, taskId: `${runId.slice(0, 54)}-http` }
           : undefined,
       };
       const patchResult = await d.runLocalPatch({ task, client: d.sendMessages, runsRoot: evidenceRoot, env });
@@ -242,6 +247,8 @@ export async function runPipeline({
         usage: patchResult.receipt.usage,
         detail: patchResult.detail,
       };
+      workerClaims = patchResult.claimsArtifact ?? null;
+      stages.claims = workerClaims ? { status: workerClaims.status, path: patchResult.claimsArtifactPath ?? null, reason: workerClaims.reason ?? null } : { status: "unavailable", path: null };
       // A2-4c: local-patch runs the check ITSELF as its commit gate. On success,
       // stages.validator is populated below from the integration engine's own
       // validator run against the MERGED candidate (R-5) — the authoritative
@@ -270,7 +277,8 @@ export async function runPipeline({
       }
 
       if (patchResult.receipt.status !== "completed") {
-        return { integrated: false, reason: `worker-${patchResult.receipt.status}`, runId, baseRef, stages, evidenceRoot };
+        const emptyDiff = patchResult.detail?.message === "model returned unchanged content (empty diff)";
+        return { integrated: false, reason: emptyDiff ? "worker-empty-diff" : `worker-${patchResult.receipt.status}`, runId, baseRef, stages, evidenceRoot };
       }
 
       // local-patch commits on its OWN branch name; the pipeline's
@@ -310,6 +318,11 @@ export async function runPipeline({
       let attemptPrompt = gatedPrompt;
       for (;;) {
         attempts += 1;
+        const attemptAdmission = {
+          stateRoot: path.join(repo, ".devharmonics"),
+          ...(workerAdmission ?? {}),
+          taskId: `${runId.slice(0, 54)}-attempt-${attempts}`,
+        };
         workerResult = lane === "acp"
           ? await d.runAcpWorker({
               taskId: runId,
@@ -321,7 +334,7 @@ export async function runPipeline({
               runsRoot: evidenceRoot,
               permissionMode: "allow-edits",
               timeoutMs,
-              admission: workerAdmission,
+              admission: attemptAdmission,
               env,
             })
           : await d.runWorker({
@@ -336,10 +349,12 @@ export async function runPipeline({
               allowedTools: ["Read", "Edit", "Write"],
               timeoutMs,
               maxBudgetUsd: effectiveMaxBudgetUsd,
-              admission: workerAdmission,
+              admission: attemptAdmission,
               env,
             });
         stages.worker = { status: workerResult.receipt.status, receiptDir: workerResult.runDir, usage: workerResult.receipt.usage, attempts };
+        workerClaims = workerResult.claimsArtifact ?? null;
+        stages.claims = workerClaims ? { status: workerClaims.status, path: workerResult.claimsArtifactPath ?? null, reason: workerClaims.reason ?? null } : { status: "unavailable", path: null };
         if (workerResult.receipt.status !== "completed") {
           return { integrated: false, reason: `worker-${workerResult.receipt.status}`, runId, baseRef, stages, evidenceRoot };
         }
@@ -364,6 +379,7 @@ export async function runPipeline({
       // same credential-stripped env (C-2) it always had.
     }
 
+    const claimsRequired = requireEvidence.includes("claims");
     const integration = await d.integrateWorkerBranch({
       repository: repo,
       integrationBranch,
@@ -374,6 +390,9 @@ export async function runPipeline({
       check: check ? splitCheck(check) : null,
       tampercheckPath,
       expectedTampercheckSha256,
+      claimsArtifact: workerClaims,
+      claimsRequired,
+      deferRefUpdate: Boolean(reviewer || requireEvidence.length > 0),
       env,
     });
     stages.integration = integration;
@@ -392,49 +411,51 @@ export async function runPipeline({
         onMergedCandidate: true,
       };
     }
-    if (!integration.integrated) {
+    if (!integration.integrated && !integration.prepared) {
       return { integrated: false, reason: integration.reason, runId, baseRef, integrationBranch: null, integrationHead: null, stages, evidenceRoot };
     }
+
+    const candidateBranch = integration.prepared ? integration.candidateRef : integrationBranch;
 
     // Independent review AFTER the deterministic gates: the model reviewer is
     // the last layer, never the first. Its verdict cannot rescue a run the
     // gates refused, and the divergence check inside runReview outranks it.
     if (reviewer) {
-      // GAUNTLET-2026-08-05 M-1: claimedPaths is deliberately null here. The
-      // divergence gate is sound (see review.mjs / its tests) but it needs a
-      // manifest of what the WORKER claimed it changed, distinct from the diff.
-      // The subprocess lane's worker emits only freeform narration, no
-      // structured change-manifest, and parsing prose for "claimed" paths
-      // yields false positives that would block honest runs. Feeding the diff
-      // back in (the previous behavior) compared the diff to itself — a gate
-      // mathematically incapable of finding anything, reported as a reassuring
-      // "0 divergence". That false green is removed: divergence is reported as
-      // null ("not checked") until a structured worker-claims source exists.
-      // The artifact-lens reviewer still judges the real diff, so the actual
-      // protection is unchanged.
       // Paid http reviewer: same metering as the http worker call.
       const pipelineReviewer = reviewer?.lane === "http" && (reviewer.apiKeyEnvVar || reviewer.apiKeyCredential)
-        ? { ...reviewer, paidBudget: { stateRoot: path.join(repo, ".devharmonics"), maxPaidTokens: admission?.budgets?.maxPaidTokens, allowPaidApi: admission?.budgets?.allowPaidApi, taskId: runId } }
+        ? { ...reviewer, paidBudget: { stateRoot: path.join(repo, ".devharmonics"), maxPaidTokens: admission?.budgets?.maxPaidTokens, allowPaidApi: admission?.budgets?.allowPaidApi, taskId: `${runId.slice(0, 54)}-review` } }
         : reviewer;
-      const review = await runReview({
-        repository: repo,
-        integrationBranch,
-        baseRef,
-        goal: prompt,
-        reviewer: pipelineReviewer,
-        claimedPaths: null,
-        checkReceiptsSummary: stages.validator
-          ? `Validator: ${stages.validator.command}
+      let review;
+      try {
+        review = await d.runReview({
+          repository: repo,
+          integrationBranch: candidateBranch,
+          baseRef,
+          goal: prompt,
+          reviewer: pipelineReviewer,
+          claimsArtifact: workerClaims,
+          checkReceiptsSummary: stages.validator
+            ? `Validator: ${stages.validator.command}
 exit code: ${stages.validator.exitCode}${stages.validator.timedOut ? " (timed out)" : ""}
 ${(stages.validator.stdoutTail || "").slice(-800)}`
-          : "No validator was configured for this run.",
-        evidenceRoot,
-        env,
-        timeoutMs,
-        admission: workerAdmission,
-      });
+            : "No validator was configured for this run.",
+          evidenceRoot,
+          env,
+          timeoutMs,
+          admission: workerAdmission,
+        });
+      } catch (error) {
+        review = {
+          status: "failed",
+          verdict: "NOT_READY",
+          findings: [{ id: "reviewer-unavailable", severity: "critical", location: null, rationale: `Reviewer stage threw before producing a verdict: ${error?.message ?? String(error)}`, suggestedCorrection: "Investigate the reviewer failure and re-run the review.", disposition: "open" }],
+          divergence: null,
+          claimsStatus: workerClaims?.status === "available" ? "checked" : "unavailable",
+          reviewReceiptPath: null,
+        };
+      }
       const divergenceCount = review.divergence === null ? null : review.divergence.length;
-      stages.review = { verdict: review.verdict, findings: review.findings?.length ?? 0, divergence: divergenceCount, receipt: review.reviewReceiptPath };
+      stages.review = { status: review.status ?? (review.verdict === "READY" ? "passed" : "not-ready"), verdict: review.verdict, findings: review.findings?.length ?? 0, divergence: divergenceCount, claimsStatus: review.claimsStatus ?? null, receipt: review.reviewReceiptPath };
       // Deliberately NO early return on a NOT_READY verdict (audit DOC-004): the
       // old early return skipped the evidence floor below, so
       // `--require-evidence review` exited 0 on the exact case it exists for —
@@ -446,42 +467,93 @@ ${(stages.validator.stdoutTail || "").slice(-800)}`
     // ran, never as a bare "READY", and refuse it outright if the operator demanded
     // evidence that is absent. Derived from what passed, not from what was asked for.
     const validatorPassed = stages.validator?.exitCode === 0;
-    const reviewPassed = stages.review?.verdict === "READY";
+    if (!reviewer && !stages.review) {
+      stages.review = {
+        status: requireEvidence.includes("review") ? "missing" : "not-requested",
+        verdict: null,
+        findings: 0,
+        divergence: null,
+        receipt: null,
+      };
+    }
+    const reviewPassed = stages.review?.status === "passed" && stages.review?.verdict === "READY";
+    const claimsPassed = integration.gates?.claims?.status === "pass";
     const assurance = assuranceFor({ validatorPassed, reviewPassed });
     // SPEC §2.4: label validator-green by whether this repo's suite was ever proven
     // sensitive. Detection only — see suite-qualification.mjs for why enforcing
     // deterministic-detector here would violate that tool's own contract.
     const suiteQualification = detectSuiteQualification(repo);
     stages.suiteQualification = suiteQualification;
-    const missing = missingEvidence(requireEvidence, { validatorPassed, reviewPassed });
+    const missing = missingEvidence(requireEvidence, { validatorPassed, reviewPassed, claimsPassed });
+    const annotate = (extra = {}) => d.annotateIntegrationEvidence(integration.evidencePath, {
+      review: stages.review ?? { status: "not-requested" },
+      claims: stages.claims ?? { status: integration.gates?.claims?.status ?? "not-checked" },
+      ...extra,
+    });
+    const discardCandidate = () => {
+      if (integration.candidateRef) d.abandonIntegrationCandidate({ repository: repo, candidateRef: integration.candidateRef });
+    };
     if (missing.length > 0) {
+      const annotation = annotate({ refusal: { reason: "insufficient-evidence", missing } });
+      discardCandidate();
       return {
-        integrated: true,
+        integrated: false,
         reviewed: reviewPassed,
         assurance,
         suiteQualification,
         requiredEvidence: requireEvidence,
         missingEvidence: missing,
-        reason: `insufficient-evidence (missing: ${missing.join(", ")})`,
+        reason: annotation.ok ? `insufficient-evidence (missing: ${missing.join(", ")})` : "evidence-write-failed",
         runId, baseRef, integrationBranch,
         integrationHead: integration.integrationHead, stages, evidenceRoot,
       };
     }
 
     if (reviewer && !reviewPassed) {
+      const reviewReason = stages.review?.status === "failed" ? "review-failed" : "review-not-ready";
       const d = stages.review?.divergence;
       const divergenceNote = d === null || d === undefined ? "divergence not checked" : `${d} divergence`;
+      const annotation = annotate({ refusal: { reason: reviewReason } });
+      discardCandidate();
       return {
-        integrated: true,
+        integrated: false,
         reviewed: false,
         assurance,
         suiteQualification,
         requiredEvidence: requireEvidence,
         missingEvidence: [],
-        reason: `review-not-ready (${stages.review?.findings ?? 0} finding(s), ${divergenceNote})`,
+        reason: annotation.ok ? `${reviewReason} (${stages.review?.findings ?? 0} finding(s), ${divergenceNote})` : "evidence-write-failed",
         runId, baseRef, integrationBranch,
         integrationHead: integration.integrationHead, stages, evidenceRoot,
       };
+    }
+
+    if (integration.prepared) {
+      const preflightEvidence = annotate({ finalized: false });
+      if (!preflightEvidence.ok) {
+        discardCandidate();
+        return { integrated: false, reviewed: reviewPassed, assurance, suiteQualification, requiredEvidence: requireEvidence, missingEvidence: [], reason: "evidence-write-failed", runId, baseRef, integrationBranch, integrationHead: null, stages, evidenceRoot };
+      }
+      const finalized = d.finalizeIntegrationCandidate({
+        repository: repo,
+        integrationBranch,
+        candidateHead: integration.candidateHead,
+        expectedPreMergeHead: integration.preMergeHead,
+        expectedPreMergeExists: integration.preMergeExists,
+        candidateRef: integration.candidateRef,
+      });
+      if (!finalized.ok) {
+        annotate({ refusal: { reason: finalized.reason, detail: finalized.detail } });
+        discardCandidate();
+        return { integrated: false, reviewed: reviewPassed, assurance, suiteQualification, requiredEvidence: requireEvidence, missingEvidence: [], reason: finalized.reason, runId, baseRef, integrationBranch, integrationHead: null, stages, evidenceRoot };
+      }
+      integration.integrated = true;
+      integration.integrationHead = finalized.integrationHead;
+      const finalEvidence = annotate({ finalized: true, integrated: true, integrationHead: integration.integrationHead, reason: null });
+      if (!finalEvidence.ok) {
+        rollbackIntegrationRef({ repository: repo, integrationBranch, toCommit: integration.preMergeHead, wasPresent: integration.preMergeExists });
+        return { integrated: false, reviewed: reviewPassed, assurance, suiteQualification, requiredEvidence: requireEvidence, missingEvidence: [], reason: "evidence-write-failed", runId, baseRef, integrationBranch, integrationHead: null, stages, evidenceRoot };
+      }
     }
 
     return {
@@ -689,7 +761,7 @@ export async function runCommandCli(argv, { write = (t) => process.stdout.write(
     if (result.stages?.review) {
       const r = result.stages.review;
       const divergenceText = r.divergence === null || r.divergence === undefined ? "divergence not checked" : `${r.divergence} divergence`;
-      write(`review:      ${r.verdict} (${r.findings} finding(s), ${divergenceText})
+      write(`review:      ${r.status ?? "unknown"}${r.verdict ? ` / ${r.verdict}` : ""} (${r.findings} finding(s), ${divergenceText})
 `);
     }
     if (result.assurance) {

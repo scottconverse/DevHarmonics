@@ -237,6 +237,9 @@ test("happy path: fake codex fixes the bug, check passes, both gates pass, integ
     assert.ok(existsSync(result.evidenceRoot), "evidenceRoot must exist");
     assert.ok(existsSync(path.join(result.stages.worker.receiptDir, "receipt.json")), "worker receipt must exist");
     assert.ok(existsSync(result.stages.integration.evidencePath), "integration evidence bundle must exist");
+    const integrationEvidence = JSON.parse(readFileSync(result.stages.integration.evidencePath, "utf8"));
+    assert.equal(integrationEvidence.integrated, true, "finalized integration evidence must say the ref advanced");
+    assert.equal(integrationEvidence.integrationHead, result.integrationHead);
 
     // The user's own checkout: HEAD and porcelain status identical before/after.
     assert.equal(headOf(repo), beforeHead, "HEAD must be untouched");
@@ -376,13 +379,11 @@ test("validator failure: worker writes a file but --check fails -> validator-fai
     assert.equal(result.stages.validator.onMergedCandidate, true);
     assert.ok(result.stages.validator.candidateHead, "the refused validator run must name the candidate commit it tested");
 
-    // The integration branch is created at the pinned base before the candidate
-    // is built (candidate-first merge), but a validator refusal must never let
-    // it ADVANCE: it stays exactly at the base, with no merge commit on it.
+    // Candidate-first integration does not create the owner-facing ref until
+    // every requested gate has passed; a validator refusal leaves it absent.
     const integrationRef = `devharmonics/integration/${result.runId}`;
-    assert.equal(branchExists(repo, integrationRef), true);
-    assert.equal(git(repo, ["rev-parse", integrationRef]).trim(), result.baseRef,
-      "a validator refusal must leave the integration branch un-advanced at the pinned base");
+    assert.equal(branchExists(repo, integrationRef), false,
+      "a validator refusal must leave the integration ref unchanged (absent here)");
 
     assertWorktreeHygiene(repo, result.runId);
   } finally {
@@ -652,7 +653,7 @@ test("DOC-004: --require-evidence review refuses (insufficient-evidence) when th
       env: buildEnv(providerDir, tampercheckDir),
       timeoutMs: 20_000,
     });
-    assert.equal(result.integrated, true, JSON.stringify(result));
+    assert.equal(result.integrated, false, JSON.stringify(result));
     assert.match(result.reason, /^insufficient-evidence \(missing: review\)/);
     assert.deepEqual(result.missingEvidence, ["review"]);
     assert.ok(result.assurance, "the refused-floor path must still report its assurance level");
@@ -677,9 +678,38 @@ test("DOC-004 companion: with no evidence floor, a NOT_READY review still report
       env: buildEnv(providerDir, tampercheckDir),
       timeoutMs: 20_000,
     });
-    assert.equal(result.integrated, true, JSON.stringify(result));
-    assert.match(result.reason, /^review-not-ready/);
+    assert.equal(result.integrated, false, JSON.stringify(result));
+    assert.match(result.reason, /^review-(?:not-ready|failed)/);
     assert.ok(result.assurance, "review-not-ready must carry the assurance field (old early return dropped it)");
+  } finally {
+    for (const d of [repo, providerDir, tampercheckDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("P0 reviewer gate: an explicitly requested NOT_READY review leaves the integration ref unchanged", async () => {
+  const repo = initFixtureRepo();
+  const providerDir = fakeProviderDir("fix");
+  const tampercheckDir = fakeTampercheckDir("clean");
+  try {
+    const integrationBranch = "devharmonics/integration/reviewer-refusal";
+    const before = spawnSync("git", ["-C", repo, "rev-parse", "--verify", "--quiet", `refs/heads/${integrationBranch}`], { encoding: "utf8" });
+    assert.notEqual(before.status, 0, "fixture must start without an integration ref");
+
+    const result = await runPipeline({
+      repository: repo,
+      prompt: "fix it",
+      provider: "codex",
+      model: "fake-model-9b",
+      taskId: "review-refusal",
+      reviewer: { lane: "subprocess", provider: "codex", model: "fake-model-9b" },
+      env: buildEnv(providerDir, tampercheckDir),
+      timeoutMs: 20_000,
+    });
+
+    assert.equal(result.integrated, false, JSON.stringify(result));
+    assert.match(result.reason, /^review-(?:not-ready|failed)/);
+    const after = spawnSync("git", ["-C", repo, "rev-parse", "--verify", "--quiet", `refs/heads/${integrationBranch}`], { encoding: "utf8" });
+    assert.notEqual(after.status, 0, "a refused review must not create or advance the integration ref");
   } finally {
     for (const d of [repo, providerDir, tampercheckDir]) rmSync(d, { recursive: true, force: true });
   }

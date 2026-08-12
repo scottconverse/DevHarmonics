@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +8,7 @@ import { acquireFileLock } from "./slots.mjs";
 import { resolvePathCommand, runResolved } from "./path-resolve.mjs";
 import { superviseProcess } from "./supervise.mjs";
 import { workerEnv } from "./worker-env.mjs";
+import { claimsAvailable, claimsArtifactDivergence } from "./claims.mjs";
 
 /**
  * The single-repo integration engine: a completed worker branch enters the
@@ -64,6 +65,8 @@ const REASONS = Object.freeze([
   // A set member was fully gated but the set as a whole was blocked, so its ref
   // was deliberately NOT advanced (replaces the old advanced-but-set-blocked).
   "set-blocked-not-advanced",
+  "claims-unavailable",
+  "claims-divergence",
 ]);
 
 /** The one-per-repository serialization lock's path (ENG-005): derived from
@@ -227,6 +230,8 @@ export async function integrateWorkerBranch({
   expectedTampercheckSha256 = null,
   expectedTampercheckVersion = null,
   requireTampercheckIdentity = true,
+  claimsArtifact = null,
+  claimsRequired = false,
   env = process.env,
   timeoutMs = 120_000,
 }) {
@@ -254,6 +259,7 @@ export async function integrateWorkerBranch({
     // own tree — see the candidate-first merge below.
     finalArtifact: { status: "skipped", detail: "not reached" },
     validator: { status: "skipped", detail: "no validator configured" },
+    claims: { status: "not-checked", detail: "worker claims were not supplied" },
   };
   let workerHead = null;
   let mergeBase = null;
@@ -262,6 +268,9 @@ export async function integrateWorkerBranch({
   let integrated = false;
   let conflictPaths = null;
   let tampercheckOutput = null;
+  let claimsDivergence = null;
+  let candidateDiffPaths = null;
+  let preMergeExists = false;
 
   const evidenceId = `${taskId}-${randomUUID().split("-")[0]}`;
   const evidenceDir = path.join(evidenceRoot, evidenceId);
@@ -280,6 +289,9 @@ export async function integrateWorkerBranch({
       integrationBranch,
       integrationHead,
       gates,
+      claimsArtifact,
+      divergence: claimsDivergence,
+      integrated,
       reason,
       ...(conflictPaths ? { conflictingPaths: conflictPaths } : {}),
       integratedAt: new Date().toISOString(),
@@ -494,8 +506,12 @@ export async function integrateWorkerBranch({
         detail: tcRun.timedOut ? "tampercheck timed out" : `tampercheck failed to run: ${tcRun.error}`,
         exitCode: tcRun.exitCode,
         timedOut: tcRun.timedOut,
-        stdout: tcRun.stdout,
-        stderr: tcRun.stderr,
+        // Do not expose bytes emitted after the timeout boundary as if they
+        // were a completed verdict. The raw stream remains in
+        // tampercheck-output.txt for forensics, but the gate's structured
+        // stdout/stderr are empty on timeout.
+        stdout: tcRun.timedOut ? "" : tcRun.stdout,
+        stderr: tcRun.timedOut ? "" : tcRun.stderr,
       };
       reason = "tampercheck-unavailable";
       return { integrated: false, reason, integrationHead: null, gates, evidencePath: writeEvidence() };
@@ -541,12 +557,8 @@ export async function integrateWorkerBranch({
     // seen, and it was handed to the owner as gated. Building the merge in a
     // DETACHED worktree makes the ref update the last action, which is both the
     // fix here and the shape multi-repo two-phase readiness needs.
-    const branchExists = git(repository, ["rev-parse", "--verify", "--quiet", `refs/heads/${integrationBranch}`]).ok;
-    if (!branchExists) {
-      const createBranch = git(repository, ["branch", integrationBranch, baseRef]);
-      if (!createBranch.ok) fail(`could not create integration branch "${integrationBranch}": ${createBranch.stderr.trim()}`);
-    }
-    const preMergeRes = git(repository, ["rev-parse", integrationBranch]);
+    preMergeExists = git(repository, ["rev-parse", "--verify", "--quiet", `refs/heads/${integrationBranch}`]).ok;
+    const preMergeRes = preMergeExists ? git(repository, ["rev-parse", integrationBranch]) : { ok: true, stdout: baseHead };
     if (!preMergeRes.ok) fail(`could not resolve integration branch "${integrationBranch}": ${preMergeRes.stderr.trim()}`);
     const preMergeHead = preMergeRes.stdout.trim();
 
@@ -625,6 +637,42 @@ export async function integrateWorkerBranch({
         stdout: finalRun.stdout,
       };
 
+      // Claims are supplied by the worker as a separate versioned artifact and
+      // are compared with the candidate diff here, never synthesized from it.
+      // Unavailable claims are distinct from an empty divergence list.
+      const candidateNames = gitIn(mergeWorktree.worktreePath, ["diff", "--name-only", baseHead, candidateHead]);
+      if (!candidateNames.ok) fail(`could not compute candidate diff paths: ${candidateNames.stderr.trim()}`);
+      candidateDiffPaths = candidateNames.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      if (!claimsAvailable(claimsArtifact)) {
+        gates.claims = {
+          status: claimsRequired ? "refused" : "not-checked",
+          detail: claimsRequired
+            ? `worker claims are unavailable: ${claimsArtifact?.reason ?? "no claims artifact"}`
+            : `worker claims are unavailable — divergence not checked (${claimsArtifact?.reason ?? "no claims artifact"})`,
+        };
+        if (claimsRequired) {
+          reason = "claims-unavailable";
+          return { integrated: false, reason, integrationHead: null, gates, evidencePath: writeEvidence(), claimsArtifact, divergence: null, preMergeHead, preMergeExists };
+        }
+      } else {
+        claimsDivergence = claimsArtifactDivergence({
+          claimedPaths: claimsArtifact.claimedPaths,
+          materialClaims: claimsArtifact.materialClaims,
+          diffPaths: candidateDiffPaths,
+        });
+        gates.claims = {
+          status: claimsDivergence.length ? "refused" : "pass",
+          detail: claimsDivergence.length ? `${claimsDivergence.length} claims-vs-diff divergence finding(s)` : "worker claims match the candidate diff",
+          divergence: claimsDivergence,
+          claimedPaths: claimsArtifact.claimedPaths,
+          materialClaims: claimsArtifact.materialClaims,
+        };
+        if (claimsDivergence.length) {
+          reason = "claims-divergence";
+          return { integrated: false, reason, integrationHead: null, gates, evidencePath: writeEvidence(), claimsArtifact, divergence: claimsDivergence, preMergeHead, preMergeExists };
+        }
+      }
+
       // Optional validator, against the merged candidate. Runs after tampercheck
       // (cheap diff scan first, slow test suite second) and with a
       // credential-stripped environment, since it executes code from the tree the
@@ -680,9 +728,12 @@ export async function integrateWorkerBranch({
           candidateHead,
           candidateRef,
           preMergeHead,
+          preMergeExists,
           reason,
           integrationHead: null,
           gates,
+          claimsArtifact,
+          divergence: claimsDivergence,
           evidencePath: writeEvidence(),
         };
       }
@@ -704,7 +755,7 @@ export async function integrateWorkerBranch({
       integrationHead = candidateHead;
       integrated = true;
       reason = null;
-      return { integrated, reason, integrationHead, gates, evidencePath: writeEvidence() };
+      return { integrated, reason, integrationHead, gates, claimsArtifact, divergence: claimsDivergence, preMergeHead, preMergeExists, evidencePath: writeEvidence() };
     } finally {
       removeWorktree(repository, mergeWorktree.worktreePath, mergeWorktree.parent);
     }
@@ -721,12 +772,21 @@ export async function integrateWorkerBranch({
  * moved it in between, so the gated candidate is no longer the right successor.
  * Never merges, never re-gates; it only moves a ref that a gated candidate earned.
  */
-export function finalizeIntegrationCandidate({ repository, integrationBranch, candidateHead, expectedPreMergeHead, candidateRef = null }) {
-  const current = git(repository, ["rev-parse", integrationBranch]);
-  if (!current.ok) {
+export function finalizeIntegrationCandidate({ repository, integrationBranch, candidateHead, expectedPreMergeHead, expectedPreMergeExists = true, candidateRef = null }) {
+  const current = git(repository, ["rev-parse", "--verify", "--quiet", `refs/heads/${integrationBranch}`]);
+  if (!current.ok && expectedPreMergeExists) {
     return { ok: false, reason: "integration-ref-locked", detail: `could not resolve "${integrationBranch}": ${current.stderr.trim()}` };
   }
+  if (!current.ok && !expectedPreMergeExists) {
+    const update = git(repository, ["branch", "-f", integrationBranch, candidateHead]);
+    if (!update.ok) return { ok: false, reason: "integration-ref-locked", detail: update.stderr.trim() };
+    if (candidateRef) git(repository, ["update-ref", "-d", candidateRef]);
+    return { ok: true, integrationHead: candidateHead };
+  }
   const head = current.stdout.trim();
+  if (!expectedPreMergeExists) {
+    return { ok: false, reason: "integration-ref-moved", detail: `"${integrationBranch}" was created after the candidate was prepared` };
+  }
   if (head !== expectedPreMergeHead) {
     return {
       ok: false,
@@ -751,9 +811,33 @@ export function abandonIntegrationCandidate({ repository, candidateRef }) {
 
 /** Put an integration branch back where it was, used if a later member of the
  * same set fails to finalize after earlier ones already advanced. */
-export function rollbackIntegrationRef({ repository, integrationBranch, toCommit }) {
+export function rollbackIntegrationRef({ repository, integrationBranch, toCommit, wasPresent = true }) {
+  if (!wasPresent) {
+    const deleted = git(repository, ["update-ref", "-d", `refs/heads/${integrationBranch}`]);
+    return { ok: deleted.ok, detail: deleted.ok ? null : deleted.stderr.trim() };
+  }
   const res = git(repository, ["branch", "-f", integrationBranch, toCommit]);
   return { ok: res.ok, detail: res.ok ? null : res.stderr.trim() };
+}
+
+/** Add post-gate evidence (review status, claims status, and refusal detail)
+ * without moving the integration ref. This is intentionally an atomic replace
+ * so a crashed annotation cannot leave a half-written integration receipt. */
+export function annotateIntegrationEvidence(evidencePath, patch = {}) {
+  if (!evidencePath || !existsSync(evidencePath)) return { ok: false, detail: "integration evidence file is missing" };
+  let temporary = null;
+  try {
+    const current = JSON.parse(readFileSync(evidencePath, "utf8"));
+    const merged = { ...current, ...patch };
+    temporary = `${evidencePath}.${randomUUID()}.tmp`;
+    writeFileSync(temporary, `${JSON.stringify(merged, null, 2)}\n`, { flag: "wx" });
+    renameSync(temporary, evidencePath);
+    temporary = null;
+    return { ok: true };
+  } catch (error) {
+    if (temporary) rmSync(temporary, { force: true });
+    return { ok: false, detail: error.message };
+  }
 }
 
 export const INTEGRATION_REASONS = REASONS;

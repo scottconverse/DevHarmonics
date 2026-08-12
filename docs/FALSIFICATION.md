@@ -193,3 +193,25 @@ reader assessing the defense as it ships TODAY, the F-1 story has moved on:
   pin says it binds the launcher file, not the Python package it invokes.
 - See `docs/USER_MANUAL.md` "The tampercheck identity check" for the current
   contract, and `livefire/` for the retained real-tool proofs.
+## Repair pass — 2026-08-12
+
+The current `DevHarmonics` architecture was re-audited from starting commit
+`ee369b4eca02e22f5279fac5985fe124a79cde78`. The following matrix records the
+scope and the evidence used; no v1 tree was consulted or changed.
+
+| Area | Classification | Reproduction/evidence | Current disposition |
+|---|---|---|---|
+| Explicit reviewer NOT_READY/failure/malformed/timeout | **Confirmed P0** | Pipeline regression test leaves `devharmonics/integration/<runId>` absent before/after; review parser marks malformed fenced output `failed`. | Fixed: candidate parked, review gates finalization, exit 1. |
+| Multi-repository review ordering | **Confirmed** | Integration-set tests inject a blocking reviewer and assert every prepared candidate is reviewed before any phase-2 ref advance. | Fixed: prepare/review/finalize remains all-or-nothing. |
+| Worker claims treated as narration/diff | **Confirmed** | New claims tests cover missing/malformed manifests, claimed-but-absent paths, changed-but-unclaimed paths, and material omissions. | Fixed: `worker-claims-v1` artifact, independent parse, fail-closed required policy, evidence carry-forward. |
+| Untruthful receipt usage/identity fields | **Confirmed** | Receipt regressions reject arrays, unknown usage keys, inconsistent token sums, and unverified non-null resolved models. | Fixed at `validateReceipt`. |
+| Admission terminal without reservation / forged correlation | **Confirmed P0** | Admission regressions append terminal-only and mismatched invocation/task records. | Fixed: replay and reconciliation both require matching reservation and reject conflicts/impossible numerics. |
+| Unchanged HTTP response reason | **Confirmed** | Structured-write lane returns a failed receipt with `model returned unchanged content (empty diff)`. | Fixed: pipeline normalizes to `worker-empty-diff` while retaining detail. |
+| `onboard --apply` write failure status | **Confirmed P0** | Regression blocks a requested directory creation with a file and checks returned code. | Fixed: per-step write errors return 1. |
+| Rotation/compaction carry-forward and atomicity | **Confirmed residual risk, hardened** | Existing tests cover lifetime totals, archive preservation, duplicate archive names, tombstones, and in-flight retention. | Fixed/hardened: unique staging paths and atomic replacement; an interrupted process still requires operator re-audit. |
+| External tampercheck identity | **External dependency / deliberate boundary** | `tampercheck` is resolved and scanned but its package implementation is outside this repository. | Documented: path/hash pin and repo-side CI are the independent controls. |
+| ACP live timing failures | **Pre-existing baseline / external adapter** | Baseline `npm run check` and later full `npm test` both timed out in existing ACP happy/deny/timeout fixtures; no ACP protocol behavior was changed by this repair. | Not silently reclassified as fixed; investigate adapter/fixture separately. |
+
+The repair deliberately does not push, merge, tag, publish, or modify the
+historical `devharmonics-v1` architecture. The working tree remains an
+uncommitted local repair for owner review.

@@ -184,3 +184,16 @@ rigor-suite install as the intake ceremony for unonboarded repos; doctor asserts
 - **Fan-out ceilings AND money guards, not either/or** — a prior session inferred "fan-out replaced dollars" from the 255-agent incident; the owner never decided that. Both halves are live and binding (§2.6).
 - **No `tampercheck: allow`** — a worker-writable escape from the integrity gate inverts the gate; descoped 2026-08-06, the notice half stands.
 - **Dollars only where dollars are reported** — enforcing estimated cost from a price table would be a guess wearing a guard's uniform; tokens are the universal floor, USD binds where providers report real cost.
+## Current repair clarification — 2026-08-12
+
+In the current second architecture, the integration ref is not advanced until
+every explicitly requested reviewer and evidence floor has passed. A reviewer
+refusal, malformed/failed/timeout result, unavailable required claims, claims
+divergence, evidence-write failure, or finalize failure is nonzero and leaves
+the owner-facing ref unchanged. Workers emit a separate versioned
+`devharmonics-worker-claims-v1` artifact; claims are parsed independently from
+prose and compared with the actual candidate diff. Admission and receipts
+reject terminal-without-reservation, correlation mismatches, conflicting
+duplicates, malformed usage, and impossible numeric values. This supersedes
+older prose that described review as post-integration or claims divergence as
+permanently inert.

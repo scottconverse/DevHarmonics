@@ -222,6 +222,32 @@ test("happy path: real change + clean gate -> integrated, merge commit, evidence
   assert.equal(worktrees.length, 1);
 }));
 
+test("worker claims are a fail-closed integration gate when required", () => withTemps(async ({ repo, evidenceRoot, fixtureDir }) => {
+  fakeClean(fixtureDir);
+  branchFromNewFile(repo, "worker-claims-missing", "main", "claimed.txt", "changed\n");
+  const result = await integrateWorkerBranch({
+    repository: repo,
+    integrationBranch: "devharmonics/integration/claims-required",
+    workerBranch: "worker-claims-missing",
+    baseRef: "main",
+    taskId: "task-claims-required",
+    evidenceRoot,
+    claimsArtifact: {
+      schema: "devharmonics-worker-claims-v1",
+      status: "unavailable",
+      reason: "manifest omitted",
+    },
+    claimsRequired: true,
+    env: pathOnlyEnv(fixtureDir),
+    timeoutMs: 20_000,
+  });
+  assert.equal(result.integrated, false);
+  assert.equal(result.reason, "claims-unavailable");
+  assert.equal(result.gates.claims.status, "refused");
+  assert.throws(() => git(repo, ["show-ref", "--verify", "--quiet", "refs/heads/devharmonics/integration/claims-required"]));
+  assert.equal(readEvidence(result.evidencePath).claimsArtifact.status, "unavailable");
+}));
+
 test("seeded gate-weakening: tampercheck exit 1 -> refused, findings preserved, no merge", () => withTemps(async ({ repo, evidenceRoot, fixtureDir }) => {
   fakeFindings(fixtureDir);
   branchFrom(repo, "worker-b", "main", "line1\nCHANGED\nline3\n");

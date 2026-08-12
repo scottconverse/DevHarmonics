@@ -355,6 +355,26 @@ test("onboardCommand dry run writes nothing; --apply writes; --repository also w
   await assert.rejects(() => onboardCommand([]), /repository is required/);
 }));
 
+test("P0 onboard apply: a requested write failure returns a nonzero command result and keeps per-step evidence", async () => {
+  const repo = initRepo();
+  try {
+    // Block the workflow directory so ci-tampercheck is requested but cannot
+    // write. The other independent steps should still be attempted.
+    writeFileSync(path.join(repo, ".github"), "not-a-directory\n");
+    const output = { text: "" };
+    const code = await onboardCommand([repo, "--apply", "--json"], {
+      write: (text) => { output.text += text; },
+      detectorTemplateDir: NO_DETECTOR_TEMPLATES,
+    });
+    assert.equal(code, 1, output.text);
+    const result = JSON.parse(output.text);
+    assert.ok(result.errors.some((entry) => entry.id === "ci-tampercheck"));
+    assert.ok(result.applied.includes("gitignore-devharmonics"));
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 // --- deterministic-detector provisioning + the two-installers collision -----
 // deterministic-detector is not a runtime gate (no CLI, and its own templates
 // forbid an agent from promoting its checks), so provisioning its CI workflow is

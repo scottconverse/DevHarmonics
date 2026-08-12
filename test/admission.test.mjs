@@ -154,6 +154,27 @@ test("reconcilePaidUsage records real usage and usageSpent reflects it on replay
   assert.equal(usageSpent(reservation.ledgerPath, true), 45);
 });
 
+test("P0 admission: a terminal without its reservation is an integrity failure", () => {
+  const paid = '{"stage":"terminal","invocationId":"missing-reservation","taskId":"one","paid":true,"usage":{"total_tokens":10}}';
+  assert.throws(() => summarizeLedger(paid, true), /matching reservation|reservation/i);
+
+  const worker = '{"stage":"terminal","kind":"worker","invocationId":"missing-worker-reservation","taskId":"one","paid":false,"usage":{"total_tokens":10}}';
+  assert.throws(() => summarizeFanout(worker, { since: 0 }), /matching reservation|reservation/i);
+});
+
+test("P0 admission: reconciliation rejects missing or mismatched correlation", async (t) => {
+  const root = tempRoot(t, "dh-admission-correlation-");
+  const reservation = await reservePaidUsage({ stateRoot: root, aggregateLimit: 100, reservedTokens: 10, taskId: "one" });
+  await assert.rejects(
+    reconcilePaidUsage({ stateRoot: root, invocationId: "forged", taskId: "one", usage: { total_tokens: 5 } }),
+    /reservation|invocation/i,
+  );
+  await assert.rejects(
+    reconcilePaidUsage({ stateRoot: root, invocationId: reservation.invocationId, taskId: "other", usage: { total_tokens: 5 } }),
+    /task|correlation|reservation/i,
+  );
+});
+
 test("usageSpent on a ledger that does not exist yet is zero, not an error", () => {
   assert.equal(usageSpent(path.join(tmpdir(), "dh-admission-never-created", "usage.jsonl"), true), 0);
 });

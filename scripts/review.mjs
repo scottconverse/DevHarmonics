@@ -7,11 +7,16 @@ import process from "node:process";
 import { runWorker as defaultRunWorker } from "./run-worker.mjs";
 import { sendMessages as defaultSendMessages } from "./messages-client.mjs";
 import { promptSha256 } from "./receipts.mjs";
+import { claimsAvailable, claimsArtifactDivergence } from "./claims.mjs";
+
+export { claimsArtifactDivergence } from "./claims.mjs";
 
 /**
  * The review stage: an independent artifact-lens reviewer (sees only the
  * diff and executed check receipts, NEVER worker/implementor narration) plus
- * a deterministic claims-vs-diff divergence gate. Ported from
+ * a deterministic claims-vs-diff divergence gate. The claims artifact is
+ * supplied separately by the coordinator and is never inferred from prose.
+ * Ported from
  * devharmonics-v1's src/review.ts and src/prompts.ts (reviewerPrompt,
  * parseReviewerResponse, claimsArtifactDivergence), simplified to a single
  * artifact lens and a plain claimed-paths list rather than v1's full
@@ -25,7 +30,8 @@ import { promptSha256 } from "./receipts.mjs";
  * to `Read` runs inside a temporary DETACHED worktree under os.tmpdir(),
  * always removed in a `finally`. The small git/worktree helpers below are
  * deliberately duplicated from integrate.mjs rather than imported — this
- * task is scoped to touch only scripts/review.mjs and test/review.test.mjs
+ * this module remains read-only with respect to the repository; it writes only
+ * its own review evidence bundle.
  * (same disclosed tradeoff local-patch.mjs makes for its TASK_ID_PATTERN).
  *
  * Fail-closed rule carried forward from every other stage in this codebase:
@@ -139,20 +145,23 @@ READY must use an empty findings array. NOT READY must include every blocking fi
 
 function firstVerdict(text) {
   const firstLine = text.trimStart().split(/\r?\n/, 1)[0]?.trim().toUpperCase();
-  return firstLine === "READY" ? "READY" : "NOT_READY";
+  if (firstLine === "READY") return "READY";
+  if (firstLine === "NOT READY") return "NOT_READY";
+  return null;
 }
 
-/** Extract the findings array from the reviewer's fenced (or bare) JSON
- * object. Never throws: any parse failure or shape mismatch yields []. */
+/** Extract the findings array and retain whether the structured block was
+ * actually valid. A malformed fenced block is a failed review format, not an
+ * empty findings list. */
 function parseFindingsJson(text) {
   const fenced = text.match(/```json\s*([\s\S]*?)```/i)?.[1];
   const candidate = fenced ?? text.match(/\{[\s\S]*\}/)?.[0];
-  if (!candidate) return [];
+  if (!candidate) return { findings: [], present: false, valid: false };
   try {
     const value = JSON.parse(candidate);
-    return Array.isArray(value?.findings) ? value.findings : [];
+    return { findings: Array.isArray(value?.findings) ? value.findings : [], present: true, valid: Array.isArray(value?.findings) };
   } catch {
-    return [];
+    return { findings: [], present: true, valid: false };
   }
 }
 
@@ -186,8 +195,10 @@ function normalizeFinding(value, index) {
  */
 export function parseReviewerResponse(text, identity = {}) {
   const source = typeof text === "string" ? text : "";
-  const verdict = firstVerdict(source);
-  const rawFindings = parseFindingsJson(source);
+  const parsedVerdict = firstVerdict(source);
+  const verdict = parsedVerdict ?? "NOT_READY";
+  const parsedFindings = parseFindingsJson(source);
+  const rawFindings = parsedFindings.findings;
   const normalized = rawFindings.map(normalizeFinding).filter((finding) => finding !== null);
   const body = source.trim().split(/\r?\n/).slice(1).join("\n").replace(/```json[\s\S]*?```/gi, "").trim();
   const findings = verdict === "NOT_READY" && normalized.length === 0
@@ -207,51 +218,12 @@ export function parseReviewerResponse(text, identity = {}) {
     summary: body || (verdict === "READY" ? "No material findings." : findings[0].rationale),
     findings,
     rawText: source,
+    // A response that cannot state an exact verdict and structured findings is
+    // retained as evidence but is never a passing review.
+    formatValid: parsedVerdict !== null && /```json\s*[\s\S]*?```/i.test(source)
+      && parsedFindings.valid && normalized.length === rawFindings.length
+      && (verdict !== "READY" || normalized.length === 0),
   };
-}
-
-/** One path grammar for claims and diffs, so the two sides cannot drift
- * apart on a cosmetic difference (ported from v1's normalizeChangePath). */
-function normalizeChangePath(value) {
-  return String(value ?? "").replace(/\\/g, "/").replace(/^\.\//, "").trim();
-}
-
-/**
- * The deterministic half of the review (ported and simplified from v1's
- * claimsArtifactDivergence): compare what was claimed changed against what
- * the diff actually contains. A claimed-but-absent path is the "narration
- * without artifacts" defect class — high severity. A changed-but-unclaimed
- * path is an unexplained/unattributed change — medium severity. Pure
- * function; no I/O.
- */
-export function claimsArtifactDivergence({ claimedPaths = [], diffPaths = [] }) {
-  const normalizedClaimed = [...new Set((claimedPaths ?? []).map(normalizeChangePath).filter(Boolean))];
-  const diffSet = new Set((diffPaths ?? []).map(normalizeChangePath).filter(Boolean));
-  const claimedSet = new Set(normalizedClaimed);
-  const findings = [];
-  for (const claimedPath of normalizedClaimed) {
-    if (diffSet.has(claimedPath)) continue;
-    findings.push({
-      id: `divergence-claimed-${findings.length + 1}`,
-      severity: "high",
-      location: claimedPath,
-      rationale: `A change to "${claimedPath}" was claimed but the integrated diff does not contain it.`,
-      suggestedCorrection: "Establish whether the work was actually done; a report narrating changes that do not exist must fail, not pass.",
-      disposition: "open",
-    });
-  }
-  for (const diffPath of diffSet) {
-    if (claimedSet.has(diffPath)) continue;
-    findings.push({
-      id: `divergence-unexplained-${findings.length + 1}`,
-      severity: "medium",
-      location: diffPath,
-      rationale: `"${diffPath}" changed in the integration but no claim reported it.`,
-      suggestedCorrection: "Attribute the change to a task or remove it before re-review.",
-      disposition: "open",
-    });
-  }
-  return findings;
 }
 
 function reviewerUnavailableFinding(detail) {
@@ -279,9 +251,14 @@ function interpretWorkerResult(runResult, identity) {
       summary: `Reviewer worker did not complete (${detail}); a crashed reviewer is never a pass.`,
       findings: [reviewerUnavailableFinding(detail)],
       rawText: typeof finalText === "string" ? finalText : "",
+      reviewStatus: "failed",
     };
   }
-  return parseReviewerResponse(finalText, { provider: identity.provider, modelId: runResult.receipt.resolvedModel ?? identity.modelId });
+  const parsed = parseReviewerResponse(finalText, { provider: identity.provider, modelId: runResult.receipt.resolvedModel ?? identity.modelId });
+  return {
+    ...parsed,
+    reviewStatus: parsed.formatValid ? (parsed.verdict === "READY" ? "passed" : "not-ready") : "failed",
+  };
 }
 
 /** Interpret an http-lane sendMessages() result the same way. */
@@ -295,9 +272,14 @@ function interpretHttpResult(response, identity) {
       summary: `Reviewer HTTP call did not complete (${detail}); a crashed reviewer is never a pass.`,
       findings: [reviewerUnavailableFinding(detail)],
       rawText: typeof response?.contentText === "string" ? response.contentText : "",
+      reviewStatus: "failed",
     };
   }
-  return parseReviewerResponse(response.contentText, { provider: identity.provider, modelId: response.resolvedModel ?? identity.modelId });
+  const parsed = parseReviewerResponse(response.contentText, { provider: identity.provider, modelId: response.resolvedModel ?? identity.modelId });
+  return {
+    ...parsed,
+    reviewStatus: parsed.formatValid ? (parsed.verdict === "READY" ? "passed" : "not-ready") : "failed",
+  };
 }
 
 /**
@@ -314,6 +296,7 @@ export async function runReview({
   goal,
   reviewer,
   claimedPaths = null,
+  claimsArtifact = null,
   checkReceiptsSummary = null,
   evidenceRoot,
   env = process.env,
@@ -363,9 +346,14 @@ export async function runReview({
   // returned [] here, so run-command.mjs's `divergence === null` check was dead
   // and the pipeline still printed "0 divergence" — the exact false green this
   // project exists to catch, shipped by us. Now genuinely null when unchecked.
-  const divergence = claimedPaths !== null
-    ? claimsArtifactDivergence({ claimedPaths, diffPaths })
-    : null;
+  const claimsStatus = claimsArtifact !== null
+    ? (claimsAvailable(claimsArtifact) ? "checked" : "unavailable")
+    : (claimedPaths !== null ? "checked-legacy" : "not-checked");
+  const divergence = claimsArtifact !== null
+    ? (claimsAvailable(claimsArtifact)
+      ? claimsArtifactDivergence({ claimedPaths: claimsArtifact.claimedPaths, materialClaims: claimsArtifact.materialClaims, diffPaths })
+      : null)
+    : (claimedPaths !== null ? claimsArtifactDivergence({ claimedPaths, diffPaths }) : null);
 
   const reviewId = `review-${randomUUID().split("-")[0]}`;
   const evidenceDir = path.join(evidenceRoot, reviewId);
@@ -436,6 +424,7 @@ export async function runReview({
 
   const divergenceOpen = (divergence ?? []).some((finding) => finding.disposition === "open");
   const verdict = modelReview.verdict === "READY" && !divergenceOpen ? "READY" : "NOT_READY";
+  const reviewStatus = verdict === "READY" ? "passed" : (modelReview.reviewStatus === "failed" ? "failed" : "not-ready");
   const finishedAt = new Date().toISOString();
 
   // Always written from here on — an attempt that leaves no evidence is
@@ -456,8 +445,11 @@ export async function runReview({
     },
     modelVerdict: modelReview.verdict,
     verdict,
+    reviewStatus,
     findings: modelReview.findings,
     divergence,
+    claimsStatus,
+    claimsArtifact,
     diffStat,
     diffTruncated,
     promptSha256: promptSha256(basePrompt),
@@ -467,5 +459,5 @@ export async function runReview({
   const reviewReceiptPath = path.join(evidenceDir, "review.json");
   writeFileSync(reviewReceiptPath, `${JSON.stringify(bundle, null, 2)}\n`);
 
-  return { verdict, findings: modelReview.findings, divergence, reviewReceiptPath };
+  return { verdict, status: reviewStatus, findings: modelReview.findings, divergence, claimsStatus, claimsArtifact, reviewReceiptPath };
 }

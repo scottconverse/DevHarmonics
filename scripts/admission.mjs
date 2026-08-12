@@ -19,6 +19,22 @@ export function createInvocationId() {
   return randomUUID();
 }
 
+function assertTaskId(value, label = "taskId") {
+  if (typeof value !== "string" || value.trim().length === 0) throw new Error(`${label} must be a non-empty string`);
+}
+
+function validateUsage(usage, { paid = false, label = "usage" } = {}) {
+  if (usage === null || usage === undefined) return null;
+  if (typeof usage !== "object" || Array.isArray(usage)) throw new Error(`${label} must be an object or null`);
+  const allowed = new Set(["total_tokens", "cost_usd"]);
+  for (const key of Object.keys(usage)) if (!allowed.has(key)) throw new Error(`${label} contains an unknown field: ${key}`);
+  if (Object.keys(usage).length === 0) throw new Error(`${label} must contain a usage value when present`);
+  if (usage.total_tokens !== undefined && !(Number.isSafeInteger(usage.total_tokens) && usage.total_tokens >= 0)) throw new Error(`${label}.total_tokens must be a non-negative safe integer`);
+  if (usage.cost_usd !== undefined && !(Number.isFinite(usage.cost_usd) && usage.cost_usd >= 0)) throw new Error(`${label}.cost_usd must be a finite non-negative number`);
+  if (paid && usage.total_tokens === undefined) throw new Error("Paid usage ledger contains a run without trustworthy token usage");
+  return usage;
+}
+
 /**
  * Replay a `usage.jsonl` ledger and return the total tokens charged for
  * `paid` runs (or unpaid runs, when `paid` is false).
@@ -42,6 +58,7 @@ export function createInvocationId() {
  * situation charges zero for them instead of throwing.
  */
 export function summarizeLedger(ledgerText, paid) {
+  if (typeof paid !== "boolean") throw new Error("summarizeLedger requires a boolean paid selector");
   const recordsByInvocation = new Map();
   const legacyPending = new Map();
   let legacySequence = 0;
@@ -49,12 +66,27 @@ export function summarizeLedger(ledgerText, paid) {
   const standaloneLegacy = new Set();
   for (const [index, line] of ledgerText.split(/\r?\n/).entries()) {
     if (!line) continue;
-    const entry = JSON.parse(line);
+    let entry;
+    try { entry = JSON.parse(line); } catch (error) { throw new Error(`usage ledger line ${index + 1} is not valid JSON: ${error.message}`); }
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error(`usage ledger line ${index + 1} is not an object`);
     // ENG-010 (audit): fan-out worker records cohabit this ledger; the money
     // summaries must never count them (their unpaid reservations carry
     // reservedTokens 0 and would skew any future unpaid-path caller).
     if (entry.kind === "worker") continue;
+    if (entry.stage === "archived" || entry.stage === "compacted") continue;
+    if (typeof entry.paid !== "boolean") throw new Error(`Usage ledger line ${index + 1} has no valid paid identity`);
     if (entry.paid !== paid) continue;
+    assertTaskId(entry.taskId, `usage ledger line ${index + 1} taskId`);
+    if (entry.stage === "reserved") {
+      const validReservation = paid
+        ? Number.isSafeInteger(entry.reservedTokens) && entry.reservedTokens > 0
+        : entry.reservedTokens === null || (Number.isSafeInteger(entry.reservedTokens) && entry.reservedTokens >= 0);
+      if (!validReservation) throw new Error("Usage ledger contains an invalid reservation");
+    } else if (entry.stage !== "terminal" && entry.stage !== undefined) {
+      throw new Error(`Usage ledger line ${index + 1} has an unknown stage`);
+    } else if (entry.usage !== undefined) {
+      validateUsage(entry.usage, { paid, label: `usage ledger line ${index + 1} usage` });
+    }
     let identity = entry.invocationId;
     if (!identity) {
       const key = String(entry.taskId ?? "");
@@ -75,7 +107,8 @@ export function summarizeLedger(ledgerText, paid) {
         }
       }
     }
-    const group = recordsByInvocation.get(identity) ?? { reservations: [], terminals: [] };
+    const group = recordsByInvocation.get(identity) ?? { reservations: [], terminals: [], taskId: entry.taskId, paid: entry.paid, modern: Boolean(entry.invocationId) };
+    if (group.taskId !== entry.taskId || group.paid !== entry.paid) throw new Error("Usage ledger contains conflicting task identity records");
     if (entry.stage === "reserved") group.reservations.push(entry);
     else group.terminals.push(entry);
     recordsByInvocation.set(identity, group);
@@ -101,6 +134,9 @@ export function summarizeLedger(ledgerText, paid) {
     return Number.isSafeInteger(total) && total >= 0 ? total : null;
   };
   const charge = (group) => {
+    if (group.modern && group.terminals.length && group.reservations.length === 0 && group.taskId !== "devharmonics-carry-forward") {
+      throw new Error(`Usage ledger terminal for task ${group.taskId} has no matching reservation`);
+    }
     if (group.terminals.length) {
       const amounts = group.terminals.map(reportedAmount);
       if (amounts.some((amount) => amount !== amounts[0])) throw conflict();
@@ -138,6 +174,7 @@ export function summarizeLedger(ledgerText, paid) {
  * the same task concurrently.
  */
 export async function reserveUnpaidTaskUsage({ stateRoot, taskId, metadata = {} }) {
+  assertTaskId(taskId);
   const ledgerPath = path.join(stateRoot, "usage.jsonl");
   const lock = await acquireFileLock(path.join(stateRoot, "usage.lock"), { taskId, stage: "reserved", paid: false });
   try {
@@ -315,7 +352,7 @@ export function maybeCompactLedger(ledgerPath, { now = Date.now(), thresholdByte
     // duplicated stretch of the human-readable archive sidecar, which costs
     // nothing — the live ledger is either the old file or the new one, never a
     // fragment of both.
-    const temporary = `${ledgerPath}.compacting`;
+    const temporary = `${ledgerPath}.${randomUUID()}.compacting`;
     writeFileSync(temporary, result.text);
     renameSync(temporary, ledgerPath);
     return { compacted: true, archivePath, archivedRuns: result.archivedRuns, carriedPaidTokens: result.carriedPaidTokens };
@@ -337,8 +374,10 @@ export async function reservePaidUsage({
   reservedTokens,
   taskId,
   metadata = {},
-  rejectTaskReuse = false,
+  rejectTaskReuse = true,
 }) {
+  assertTaskId(taskId);
+  if (!Number.isSafeInteger(aggregateLimit) || aggregateLimit <= 0) throw new Error("Paid aggregateLimit must be a positive safe integer");
   if (!Number.isSafeInteger(reservedTokens) || reservedTokens <= 0) {
     throw new Error("Paid invocation requires a positive token reservation");
   }
@@ -415,9 +454,22 @@ export function summarizeFanout(ledgerText, { since = 0 } = {}) {
     // Compaction tombstones carry the original kind so task-ID reuse detection
     // survives; they are history, never a live worker holding a slot.
     if (entry.stage === "archived") continue;
-    if (!entry.invocationId) throw new Error(`fan-out ledger line ${index + 1} has no invocationId`);
+    if (!entry.invocationId) throw new Error(`fan-out ledger line ${index + 1} has no invocationId or matching reservation`);
+    assertTaskId(entry.taskId, `fan-out ledger line ${index + 1} taskId`);
+    if (entry.stage === "reserved") {
+      if (entry.paid !== false || entry.reservedTokens !== 0) throw new Error(`fan-out ledger line ${index + 1} has an invalid reservation`);
+    } else if (entry.stage === "terminal") {
+      try {
+        validateUsage(entry.usage, { paid: false, label: `fan-out ledger line ${index + 1} usage` });
+      } catch (error) {
+        throw new Error(`Fan-out ledger contains a record with an impossible usage figure: ${error.message}`);
+      }
+    } else {
+      throw new Error(`fan-out ledger line ${index + 1} has an unknown stage`);
+    }
     if (entry.stage === "reserved") admittedAt.set(entry.invocationId, dateOrInfinity(entry.startedAt));
-    const group = groups.get(entry.invocationId) ?? { records: [] };
+    const group = groups.get(entry.invocationId) ?? { records: [], taskId: entry.taskId, paid: entry.paid };
+    if (group.taskId !== entry.taskId || group.paid !== entry.paid) throw new Error(`fan-out invocation ${entry.invocationId} has conflicting task identity`);
     group.records.push(entry);
     groups.set(entry.invocationId, group);
   }
@@ -426,6 +478,9 @@ export function summarizeFanout(ledgerText, { since = 0 } = {}) {
   let costUsd = 0;
   for (const [invocationId, group] of groups) {
     const first = group.records[0];
+    const reservations = group.records.filter((entry) => entry.stage === "reserved");
+    if (reservations.length === 0) throw new Error(`fan-out invocation ${invocationId} has a terminal record without a matching reservation`);
+    if (reservations.some((entry) => entry.reservedTokens !== reservations[0].reservedTokens)) throw new Error("Fan-out ledger contains conflicting records for one worker");
     const startedAt = admittedAt.get(invocationId) ?? dateOrInfinity(first.startedAt ?? first.finishedAt);
     if (startedAt < since) continue;
     workers += 1;
@@ -485,6 +540,7 @@ export function summarizeFanout(ledgerText, { since = 0 } = {}) {
  * reportable outcome the caller turns into an honest failed receipt.
  */
 export async function admitWorker({ stateRoot, taskId, lane, budgets, metadata = {} }) {
+  assertTaskId(taskId);
   const { maxWorkers, maxTotalTokens, windowHours, monthlyLimitUsd } = budgets ?? {};
   if (!Number.isSafeInteger(maxWorkers) || maxWorkers <= 0) throw new Error("admitWorker: budgets.maxWorkers must be a positive integer");
   if (!Number.isSafeInteger(maxTotalTokens) || maxTotalTokens <= 0) throw new Error("admitWorker: budgets.maxTotalTokens must be a positive integer");
@@ -500,6 +556,11 @@ export async function admitWorker({ stateRoot, taskId, lane, budgets, metadata =
     // or compaction would quietly hand back fan-out headroom it never earned.
     maybeCompactLedger(ledgerPath, { workerRetentionMs: Math.max(LEDGER_MONEY_RETENTION_MS, windowHours * 3_600_000 * 1.1) });
     const ledgerText = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
+    if (ledgerText.split(/\r?\n/).filter(Boolean).some((line, index) => {
+      let entry;
+      try { entry = JSON.parse(line); } catch (error) { throw new Error(`fan-out ledger line ${index + 1} is not valid JSON: ${error.message}`); }
+      return entry.kind === "worker" && entry.taskId === taskId;
+    })) throw new Error(`Task ${taskId} already has an attempt`);
     const since = Date.now() - windowHours * 3_600_000;
     const { workers, tokens } = summarizeFanout(ledgerText, { since });
     if (workers + 1 > maxWorkers) {
@@ -559,12 +620,29 @@ export async function admitWorker({ stateRoot, taskId, lane, budgets, metadata =
 
 /** Close out an admitted worker with its real reported usage (null = honestly unknown, charged 0). */
 export async function reconcileWorker({ stateRoot, invocationId, taskId, status, totalTokens = null, costUsd = null, metadata = {} }) {
+  assertTaskId(taskId);
+  if (typeof invocationId !== "string" || invocationId.length === 0) throw new Error("reconcileWorker requires an invocationId");
+  if (totalTokens !== null && !(Number.isSafeInteger(totalTokens) && totalTokens >= 0)) throw new Error("reconcileWorker totalTokens must be a non-negative safe integer or null");
+  if (costUsd !== null && !(Number.isFinite(costUsd) && costUsd >= 0)) throw new Error("reconcileWorker costUsd must be a finite non-negative number or null");
   const ledgerPath = path.join(stateRoot, "usage.jsonl");
   const lock = await acquireFileLock(path.join(stateRoot, "usage.lock"), { taskId, invocationId, stage: "terminal", kind: "worker" });
   try {
+    const existing = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8").split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line)) : [];
+    const reservation = existing.find((entry) => entry.kind === "worker" && entry.stage === "reserved" && entry.invocationId === invocationId);
+    if (!reservation) throw new Error(`worker reservation ${invocationId} is missing`);
+    if (reservation.taskId !== taskId) throw new Error(`worker reservation ${invocationId} task correlation mismatch`);
+    const desiredUsage = {};
+    if (totalTokens !== null) desiredUsage.total_tokens = totalTokens;
+    if (costUsd !== null) desiredUsage.cost_usd = costUsd;
+    const terminals = existing.filter((entry) => entry.kind === "worker" && entry.stage === "terminal" && entry.invocationId === invocationId);
+    if (terminals.length) {
+      const same = terminals.every((entry) => entry.taskId === taskId && JSON.stringify(entry.usage ?? null) === JSON.stringify(Object.keys(desiredUsage).length ? desiredUsage : null) && (entry.status ?? null) === (status ?? null));
+      if (!same) throw new Error(`worker invocation ${invocationId} has conflicting terminal reconciliation`);
+      return terminals[0];
+    }
     const usage = {};
-    if (Number.isSafeInteger(totalTokens) && totalTokens > 0) usage.total_tokens = totalTokens;
-    if (Number.isFinite(costUsd) && costUsd > 0) usage.cost_usd = costUsd;
+    if (totalTokens !== null) usage.total_tokens = totalTokens;
+    if (costUsd !== null) usage.cost_usd = costUsd;
     const record = {
       stage: "terminal",
       kind: "worker",
@@ -606,9 +684,22 @@ export function deriveStateRoot(runsRoot) {
 
 /** Close out a paid reservation with the run's real (reported) usage. */
 export async function reconcilePaidUsage({ stateRoot, invocationId, taskId, usage, metadata = {} }) {
+  assertTaskId(taskId);
+  if (typeof invocationId !== "string" || invocationId.length === 0) throw new Error("reconcilePaidUsage requires an invocationId");
+  validateUsage(usage, { paid: true, label: "reconcilePaidUsage usage" });
   const ledgerPath = path.join(stateRoot, "usage.jsonl");
   const lock = await acquireFileLock(path.join(stateRoot, "usage.lock"), { taskId, invocationId, stage: "terminal" });
   try {
+    const existing = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8").split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line)) : [];
+    const reservation = existing.find((entry) => entry.kind !== "worker" && entry.stage === "reserved" && entry.invocationId === invocationId && entry.paid === true);
+    if (!reservation) throw new Error(`paid reservation ${invocationId} is missing`);
+    if (reservation.taskId !== taskId) throw new Error(`paid reservation ${invocationId} task correlation mismatch`);
+    const terminals = existing.filter((entry) => entry.kind !== "worker" && entry.stage === "terminal" && entry.invocationId === invocationId);
+    if (terminals.length) {
+      const same = terminals.every((entry) => entry.taskId === taskId && JSON.stringify(entry.usage ?? null) === JSON.stringify(usage));
+      if (!same) throw new Error(`paid invocation ${invocationId} has conflicting terminal reconciliation`);
+      return terminals[0];
+    }
     const record = {
       stage: "terminal",
       invocationId,

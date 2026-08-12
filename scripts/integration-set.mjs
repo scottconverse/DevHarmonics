@@ -7,6 +7,7 @@ import {
   integrateWorkerBranch,
   finalizeIntegrationCandidate,
   abandonIntegrationCandidate,
+  annotateIntegrationEvidence,
   rollbackIntegrationRef,
 } from "./integrate.mjs";
 import { runReview } from "./review.mjs";
@@ -148,7 +149,7 @@ export function planIntegrationSet({ members }) {
       ? member.integrationBranch.trim()
       : `devharmonics/integration/${setId}`;
 
-    return { repositoryId, repository, baseRef, baseCommit, workerBranch, integrationBranch };
+    return { repositoryId, repository, baseRef, baseCommit, workerBranch, integrationBranch, claimsArtifact: member.claimsArtifact ?? null };
   });
 
   return { setId, members: resolvedMembers };
@@ -222,6 +223,8 @@ export async function integrateSet({
         ...(checkTimeoutMs === undefined ? {} : { checkTimeoutMs }),
         tampercheckPath,
         expectedTampercheckSha256,
+        claimsArtifact: member.claimsArtifact ?? null,
+        claimsRequired: requireEvidence.includes("claims"),
         env,
         timeoutMs,
       });
@@ -297,6 +300,7 @@ export async function integrateSet({
           goal: scopedGoal,
           checkReceiptsSummary,
           reviewer,
+          claimsArtifact: outcome.claimsArtifact ?? member.claimsArtifact ?? null,
           evidenceRoot: path.join(evidenceRoot, "members", member.repositoryId),
           env,
           timeoutMs,
@@ -304,6 +308,7 @@ export async function integrateSet({
           deps,
         });
         reviewByRepositoryId.set(member.repositoryId, {
+          status: review?.status ?? (review?.verdict === "READY" ? "passed" : "not-ready"),
           verdict: review?.verdict ?? "NOT_READY",
           findings: review?.findings?.length ?? 0,
           divergence: review?.divergence === null || review?.divergence === undefined ? null : review.divergence.length,
@@ -312,6 +317,7 @@ export async function integrateSet({
       } catch (error) {
         // A crashed reviewer is never a pass — same rule as a crashed gate.
         reviewByRepositoryId.set(member.repositoryId, {
+          status: "failed",
           verdict: "NOT_READY",
           findings: 0,
           divergence: null,
@@ -321,16 +327,17 @@ export async function integrateSet({
       }
     }
   }
-  const reviewsPassed = !reviewer || [...reviewByRepositoryId.values()].every((r) => r.verdict === "READY");
+  const reviewsPassed = !reviewer || [...reviewByRepositoryId.values()].every((r) => r.status === "passed" && r.verdict === "READY");
 
   // Evidence floor, per member: absent evidence is missing evidence (fail closed).
   const missingByRepositoryId = new Map();
   for (const { member, outcome } of attempts) {
     const validatorPassed = outcome?.gates?.validator?.status === "pass";
-    const reviewPassed = reviewByRepositoryId.get(member.repositoryId)?.verdict === "READY";
+    const reviewPassed = reviewByRepositoryId.get(member.repositoryId)?.status === "passed" && reviewByRepositoryId.get(member.repositoryId)?.verdict === "READY";
+    const claimsPassed = outcome?.gates?.claims?.status === "pass";
     missingByRepositoryId.set(member.repositoryId, {
       assurance: assuranceFor({ validatorPassed, reviewPassed }),
-      missing: missingEvidence(requireEvidence, { validatorPassed, reviewPassed }),
+      missing: missingEvidence(requireEvidence, { validatorPassed, reviewPassed, claimsPassed }),
       // SPEC §2.4: per-repository, label validator-green by whether that repo's
       // suite was ever proven sensitive. Detection only, never enforcement.
       suiteQualification: detectSuiteQualification(member.repository),
@@ -352,6 +359,24 @@ export async function integrateSet({
   let finalizeFailure = null;
   const advanced = [];
   if (allPrepared) {
+    // The phase-1 integration bundle was written while the candidate was only
+    // parked. Record the review/evidence decision before any ref can move; a
+    // write failure therefore blocks the set without leaving a ref to roll
+    // back. The successful phase-2 annotation below makes the final receipt
+    // truthful about the ref that was actually advanced.
+    for (const { member, outcome } of attempts) {
+      const review = reviewByRepositoryId.get(member.repositoryId) ?? { status: "not-requested" };
+      const annotated = annotateIntegrationEvidence(outcome.evidencePath, {
+        review,
+        finalized: false,
+      });
+      if (!annotated.ok) {
+        finalizeFailure = { member, reason: "evidence-write-failed", detail: annotated.detail };
+        break;
+      }
+    }
+  }
+  if (allPrepared && !finalizeFailure) {
     // Sequential: a failure mid-way is then trivially rewindable.
     for (const { member, outcome } of attempts) {
       const res = finalizeIntegrationCandidate({
@@ -359,15 +384,32 @@ export async function integrateSet({
         integrationBranch: member.integrationBranch,
         candidateHead: outcome.candidateHead,
         expectedPreMergeHead: outcome.preMergeHead,
+        expectedPreMergeExists: outcome.preMergeExists,
         candidateRef: outcome.candidateRef,
       });
       if (!res.ok) { finalizeFailure = { member, ...res }; break; }
       advanced.push({ member, outcome });
     }
+    if (!finalizeFailure) {
+      for (const { member, outcome } of advanced) {
+        const review = reviewByRepositoryId.get(member.repositoryId) ?? { status: "not-requested" };
+        const annotated = annotateIntegrationEvidence(outcome.evidencePath, {
+          review,
+          finalized: true,
+          integrated: true,
+          integrationHead: outcome.candidateHead,
+          reason: null,
+        });
+        if (!annotated.ok) {
+          finalizeFailure = { member, reason: "evidence-write-failed", detail: annotated.detail };
+          break;
+        }
+      }
+    }
     if (finalizeFailure) {
       // Rewind whatever already advanced, so the set is still all-or-nothing.
       for (const { member, outcome } of advanced) {
-        rollbackIntegrationRef({ repository: member.repository, integrationBranch: member.integrationBranch, toCommit: outcome.preMergeHead });
+        rollbackIntegrationRef({ repository: member.repository, integrationBranch: member.integrationBranch, toCommit: outcome.preMergeHead, wasPresent: outcome.preMergeExists });
       }
       advanced.length = 0;
       abandonAll();
@@ -382,8 +424,15 @@ export async function integrateSet({
     // A member that passed every gate but whose set was blocked is reported as
     // gated-but-deliberately-not-advanced — not as a success, and not as a
     // half-applied change the operator has to remember to avoid.
-    const review = reviewByRepositoryId.get(member.repositoryId) ?? null;
-    const reviewBlocked = review !== null && review.verdict !== "READY";
+    const review = reviewByRepositoryId.get(member.repositoryId) ?? {
+      status: reviewer ? "missing" : "not-requested",
+      verdict: null,
+      findings: 0,
+      divergence: null,
+      receipt: null,
+    };
+    const memberFinalizeFailure = finalizeFailure?.member.repositoryId === member.repositoryId ? finalizeFailure : null;
+    const reviewBlocked = reviewer && review.status !== "missing" && !(review.status === "passed" && review.verdict === "READY");
     const evidence = missingByRepositoryId.get(member.repositoryId) ?? { assurance: "gates-only", missing: [] };
     const evidenceBlocked = evidence.missing.length > 0;
     const gatedButBlocked = outcome?.prepared === true && !reviewBlocked && !evidenceBlocked && !setReady;
@@ -394,11 +443,13 @@ export async function integrateSet({
       assurance: evidence.assurance,
       suiteQualification: evidence.suiteQualification,
       ...(requireEvidence.length > 0 ? { requiredEvidence: requireEvidence, missingEvidence: evidence.missing } : {}),
-      ...(review ? { review } : {}),
+      review,
       reason: setReady
         ? null
+        : memberFinalizeFailure
+          ? memberFinalizeFailure.reason
         : reviewBlocked
-          ? "review-not-ready"
+          ? (review.status === "failed" ? "review-failed" : "review-not-ready")
           : evidenceBlocked
             ? `insufficient-evidence (missing: ${evidence.missing.join(", ")})`
             : gatedButBlocked
@@ -410,9 +461,11 @@ export async function integrateSet({
       workerBranch: member.workerBranch,
       integrationBranch: member.integrationBranch,
       gates: outcome?.gates ?? null,
+      claimsArtifact: outcome?.claimsArtifact ?? member.claimsArtifact ?? null,
+      divergence: outcome?.divergence ?? null,
       ...(threw ? { threw } : {}),
-      ...(finalizeFailure && finalizeFailure.member.repositoryId === member.repositoryId
-        ? { finalizeRefused: { reason: finalizeFailure.reason, detail: finalizeFailure.detail } }
+      ...(memberFinalizeFailure
+        ? { finalizeRefused: { reason: memberFinalizeFailure.reason, detail: memberFinalizeFailure.detail } }
         : {}),
     };
   });
@@ -422,6 +475,7 @@ export async function integrateSet({
   const blockedBy = members
     .filter((m) => m.prepared !== true
       || m.reason === "review-not-ready"
+      || m.reason === "review-failed"
       || (m.missingEvidence?.length ?? 0) > 0)
     .map((m) => m.repositoryId);
   if (finalizeFailure && !blockedBy.includes(finalizeFailure.member.repositoryId)) {

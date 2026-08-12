@@ -40,6 +40,7 @@ export function createReceipt(input) {
     status: input.status,
     exit: input.exit ?? null,
     usage: input.usage ?? null,
+    claimsArtifactPath: input.claimsArtifactPath ?? null,
     artifactPath: input.artifactPath ?? null,
     eventsPath: input.eventsPath ?? null,
     // What the worker-env boundary removed from this child's environment.
@@ -68,22 +69,33 @@ export function validateReceipt(receipt) {
   if (receipt.resolutionVerified) {
     need(typeof receipt.resolvedModel === "string" && receipt.resolvedModel.length > 0,
       "resolutionVerified=true requires a resolvedModel");
+  } else {
+    need(receipt.resolvedModel === null, "resolutionVerified=false requires resolvedModel=null");
   }
   need(ISO_PATTERN.test(receipt.startedAt ?? ""), "startedAt must be ISO-8601");
   need(ISO_PATTERN.test(receipt.finishedAt ?? ""), "finishedAt must be ISO-8601");
   need(Number.isFinite(receipt.durationMs) && receipt.durationMs >= 0, "durationMs must be >= 0");
   need(STATUSES.includes(receipt.status), `status must be one of ${STATUSES.join(", ")}`);
   need(receipt.promptSha256 === null || /^[0-9a-f]{64}$/.test(receipt.promptSha256 ?? ""), "promptSha256 must be a sha256 hex or null");
+  need(receipt.claimsArtifactPath === null || (typeof receipt.claimsArtifactPath === "string" && receipt.claimsArtifactPath.length > 0), "claimsArtifactPath must be string or null");
   if (receipt.usage !== null) {
     const usage = receipt.usage;
-    need(typeof usage === "object", "usage must be object or null");
+    need(typeof usage === "object" && !Array.isArray(usage), "usage must be a non-array object or null");
+    const usageKeys = ["inputTokens", "outputTokens", "totalTokens", "costUsd"];
+    for (const key of Object.keys(usage ?? {})) {
+      need(usageKeys.includes(key), `usage.${key} is not a recognized usage field`);
+    }
+    need(Object.keys(usage ?? {}).length > 0, "usage must contain at least one usage field");
     for (const key of ["inputTokens", "outputTokens", "totalTokens"]) {
+      if (Object.prototype.hasOwnProperty.call(usage ?? {}, key)) {
+        need(usage[key] === null || (Number.isSafeInteger(usage[key]) && usage[key] >= 0), `usage.${key} must be a nonnegative integer or null`);
+      }
       if (usage?.[key] !== undefined && usage[key] !== null) {
         need(Number.isSafeInteger(usage[key]) && usage[key] >= 0, `usage.${key} must be a nonnegative integer`);
       }
     }
-    if (usage?.costUsd !== undefined && usage.costUsd !== null) {
-      need(Number.isFinite(usage.costUsd) && usage.costUsd >= 0, "usage.costUsd must be a nonnegative number");
+    if (Object.prototype.hasOwnProperty.call(usage ?? {}, "costUsd")) {
+      need(usage.costUsd === null || (typeof usage.costUsd === "number" && Number.isFinite(usage.costUsd) && usage.costUsd >= 0), "usage.costUsd must be a finite nonnegative number or null");
     }
     // A2-5 (independent audit): every field was type-checked in isolation, so
     // {inputTokens:10, outputTokens:5, totalTokens:100} validated cleanly. Each
@@ -94,6 +106,9 @@ export function validateReceipt(receipt) {
     const { inputTokens: i, outputTokens: o, totalTokens: t } = usage ?? {};
     if (Number.isSafeInteger(i) && Number.isSafeInteger(o) && Number.isSafeInteger(t)) {
       need(i + o === t, `usage.totalTokens (${t}) must equal inputTokens + outputTokens (${i} + ${o} = ${i + o})`);
+    }
+    if (i !== undefined && i !== null && o !== undefined && o !== null) {
+      need(t !== undefined && t !== null, "usage.totalTokens is required when both inputTokens and outputTokens are present");
     }
   }
   return { ok: errors.length === 0, errors };

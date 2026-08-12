@@ -70,9 +70,9 @@ how to read the combined result.
 | Stage | Reason | Meaning |
 |---|---|---|
 | `planIntegrationSet` | throws (fail closed) | Empty/non-array `members`; duplicate `repositoryId`; two `repositoryId`s resolving to the same repository root; `repository` missing, not a directory, or not a git root; `workerBranch` or an explicit `baseRef` that doesn't resolve to a commit. A malformed plan is refused before anything runs. |
-| per member (`integrateWorkerBranch`, reused) | `stale-worker-base` / `empty-diff` / `tampercheck-findings` / `tampercheck-unavailable` / `merge-conflict` / `final-artifact-findings` / `final-artifact-unavailable` / `validator-failed` / `validator-unresolvable` / `integration-ref-locked` | Unchanged from `scripts/integrate.mjs` — see that module. |
-| per member, review phase | `review-not-ready` | This member's own independent review returned NOT_READY (a crashed reviewer is never a pass); blocks the whole set. |
-| per member, evidence floor | `insufficient-evidence (missing: ...)` | A `--require-evidence` demand (validator and/or review) was not met for this member; the set does not reach `setReady`. |
+| per member (`integrateWorkerBranch`, reused) | `stale-worker-base` / `empty-diff` / `tampercheck-findings` / `tampercheck-unavailable` / `merge-conflict` / `final-artifact-findings` / `final-artifact-unavailable` / `validator-failed` / `validator-unresolvable` / `claims-unavailable` / `claims-divergence` / `integration-ref-locked` | Unchanged gate behavior plus the separate worker-claims gate; see `scripts/integrate.mjs`. |
+| per member, review phase | `review-not-ready` / `review-failed` | This member's own independent review returned NOT_READY, malformed output, timed out, or failed. A reviewer is never treated as a pass; blocks the whole set. |
+| per member, evidence floor | `insufficient-evidence (missing: ...)` | A `--require-evidence` demand (validator, review, or claims) was not met for this member; the set does not reach `setReady`. |
 | per member, set-level annotation | `set-blocked-not-advanced` | This member passed every gate, but a sibling did not — its integration ref was deliberately **not** advanced and its parked candidate was abandoned. Nothing is half-applied. |
 | per member, finalize | `integration-ref-moved` | The member's integration branch moved between the gated prepare and the finalize, so its candidate is no longer the right successor. Not advanced. |
 | per member, defensive | `integration-error` | `integrateWorkerBranch` threw for this member (e.g. the repository changed underneath a planned set between plan and integrate). Never allowed to crash the other members' results; recorded as refused, never as a pass. |
@@ -83,10 +83,20 @@ how to read the combined result.
 `integrateSet` always writes `set.json` at `evidenceRoot` — for every outcome,
 including a fully refused set — recording `setId`, `setReady`, `blockedBy`,
 and per member: `repositoryId`, `baseCommit`, `workerBranch`,
-`integrationBranch`, `integrationHead` (or `null`), gate results, reason,
+`integrationBranch`, `integrationHead` (or `null`), gate results, claims artifact,
+claims-vs-diff divergence, review status, and reason,
 `assurance` (`gates-only` / `validated` / `reviewed` / `validated+reviewed`),
 the repo's `suiteQualification` label, and — when an evidence floor was
 demanded — `requiredEvidence` and `missingEvidence`.
 Each member's own `integrateWorkerBranch` evidence bundle (`integration.json`
 + `tampercheck-output.txt`) lives nested under
 `evidenceRoot/members/<repositoryId>/`.
+
+When review is requested, phase 1 prepares every member first and then reviews
+every prepared candidate before phase 2 begins; one NOT_READY, malformed,
+failed, or missing review blocks the set. Member evidence distinguishes
+`not-requested`, `passed`, `not-ready`, `failed`, and `missing`. The worker's
+`worker-claims.json` artifact and the coordinator's divergence findings are
+also retained in each member's integration and review evidence. A required
+claims artifact is fail-closed: unavailable or malformed claims do not count
+as an empty claim set.

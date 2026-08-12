@@ -10,6 +10,7 @@ import { workerEnv } from "./worker-env.mjs";
 import { admitWorker, reconcileWorker, deriveStateRoot } from "./admission.mjs";
 import { acquireWorkerSlot } from "./slots.mjs";
 import { defaultConfig } from "./config.mjs";
+import { parseWorkerClaims, unavailableWorkerClaims, writeWorkerClaimsArtifact } from "./claims.mjs";
 
 // Duplicated from receipts.mjs (which does not export it), same as
 // local-patch.mjs. Keep in sync if receipts.mjs ever changes its pattern.
@@ -75,6 +76,7 @@ export async function runWorker({
   // reservation dangling un-reconciled.
   const fanoutStateRoot = admission?.stateRoot ?? deriveStateRoot(runsRoot);
   const fanoutBudgets = admission?.budgets ?? defaultConfig().budgets;
+  const admissionTaskId = admission?.taskId ?? taskId;
   let fanoutInvocationId = null;
   let slot = null;
 
@@ -84,6 +86,12 @@ export async function runWorker({
       slot = null;
     }
     const finishedAt = new Date().toISOString();
+    const claimsArtifact = parsed?.claimsArtifact?.status === "available"
+      ? { ...parsed.claimsArtifact, taskId, lane: "subprocess" }
+      : (typeof parsed?.finalText === "string"
+        ? parseWorkerClaims(parsed.finalText, { taskId, lane: "subprocess" })
+        : unavailableWorkerClaims({ taskId, lane: "subprocess", reason: "worker produced no final text from which to parse claims" }));
+    const claimsArtifactPath = writeWorkerClaimsArtifact(path.join(runDir, "worker-claims.json"), claimsArtifact);
     const receipt = createReceipt({
       receiptId,
       taskId,
@@ -101,6 +109,7 @@ export async function runWorker({
       exit: { code: exit.code ?? null, timedOut: exit.timedOut ?? false, error: exit.error ?? null },
       usage: parsed?.usage ?? null,
       artifactPath: parsed?.finalText != null ? path.join(runDir, "final-text.txt") : null,
+      claimsArtifactPath,
       eventsPath: supervised ? path.join(runDir, "stdout.log") : null,
       strippedEnv: stripped,
     });
@@ -114,7 +123,7 @@ export async function runWorker({
         await reconcileWorker({
           stateRoot: fanoutStateRoot,
           invocationId: fanoutInvocationId,
-          taskId,
+          taskId: admissionTaskId,
           status,
           totalTokens: receipt.usage?.totalTokens ?? null,
           costUsd: receipt.usage?.costUsd ?? null,
@@ -122,7 +131,7 @@ export async function runWorker({
       } catch { /* fail toward the cap */ }
       fanoutInvocationId = null;
     }
-    return { receipt, runDir, parsed, supervised };
+    return { receipt, runDir, parsed, supervised, claimsArtifact, claimsArtifactPath };
   };
 
   let invocation;
@@ -158,7 +167,7 @@ export async function runWorker({
   // the worker through. The reference incident this guards against: 255
   // agents / >300M tokens in ~45 minutes.
   try {
-    const verdict = await admitWorker({ stateRoot: fanoutStateRoot, taskId, lane: "subprocess", budgets: fanoutBudgets });
+    const verdict = await admitWorker({ stateRoot: fanoutStateRoot, taskId: admissionTaskId, lane: "subprocess", budgets: fanoutBudgets });
     if (!verdict.admitted) {
       return finish({ status: "failed", exit: { error: verdict.reason, args: invocation.args } });
     }

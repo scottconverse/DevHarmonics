@@ -25,7 +25,7 @@
  */
 
 /** The evidence kinds an operator can demand. */
-export const EVIDENCE_KINDS = Object.freeze(["validator", "review"]);
+export const EVIDENCE_KINDS = Object.freeze(["validator", "review", "claims"]);
 
 export const ASSURANCE_LEVELS = Object.freeze([
   "gates-only",           // deterministic gates only: ancestry, empty-diff, tampercheck, final-artifact
@@ -63,11 +63,12 @@ export function parseRequireEvidence(spec) {
  * Which demanded evidence is missing. Empty array => the floor is satisfied.
  * Fail-closed by construction: absent evidence is missing evidence.
  */
-export function missingEvidence(required, { validatorPassed = false, reviewPassed = false } = {}) {
+export function missingEvidence(required, { validatorPassed = false, reviewPassed = false, claimsPassed = false } = {}) {
   const missing = [];
   for (const kind of required ?? []) {
     if (kind === "validator" && !validatorPassed) missing.push("validator");
     if (kind === "review" && !reviewPassed) missing.push("review");
+    if (kind === "claims" && !claimsPassed) missing.push("claims");
   }
   return missing;
 }

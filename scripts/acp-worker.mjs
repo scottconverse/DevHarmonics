@@ -11,6 +11,7 @@ import { createReceipt, writeReceipt } from "./receipts.mjs";
 import { admitWorker, reconcileWorker, deriveStateRoot } from "./admission.mjs";
 import { acquireWorkerSlot } from "./slots.mjs";
 import { defaultConfig } from "./config.mjs";
+import { parseWorkerClaims, unavailableWorkerClaims, writeWorkerClaimsArtifact } from "./claims.mjs";
 
 /**
  * Lane A: drive a coding agent over the Agent Client Protocol (stdio
@@ -217,6 +218,7 @@ export async function runAcpWorker({
   // reservation and releases the slot on every exit path.
   const fanoutStateRoot = admission?.stateRoot ?? deriveStateRoot(runsRoot);
   const fanoutBudgets = admission?.budgets ?? defaultConfig().budgets;
+  const admissionTaskId = admission?.taskId ?? taskId;
   let fanoutInvocationId = null;
   let slot = null;
 
@@ -231,11 +233,17 @@ export async function runAcpWorker({
     error = null,
     exitCode = null,
     timedOut = false,
+    claimsArtifact = null,
   }) => {
     const finishedAt = new Date().toISOString();
     if (finalText != null) {
       writeFileSync(path.join(runDir, "final-text.txt"), finalText);
     }
+    const resolvedClaims = claimsArtifact
+      ?? (typeof finalText === "string"
+        ? parseWorkerClaims(finalText, { taskId, lane: "acp" })
+        : unavailableWorkerClaims({ taskId, lane: "acp", reason: "worker produced no final text from which to parse claims" }));
+    const claimsArtifactPath = writeWorkerClaimsArtifact(path.join(runDir, "worker-claims.json"), resolvedClaims);
     const receipt = createReceipt({
       receiptId,
       taskId,
@@ -255,6 +263,7 @@ export async function runAcpWorker({
       usage,
       artifactPath: finalText != null ? path.join(runDir, "final-text.txt") : null,
       eventsPath,
+      claimsArtifactPath,
       // Null only when the failure happened before the child env was even built;
       // otherwise the real list, so the boundary is checkable and not just claimed.
       strippedEnv: strippedEnvNames,
@@ -269,7 +278,7 @@ export async function runAcpWorker({
         await reconcileWorker({
           stateRoot: fanoutStateRoot,
           invocationId: fanoutInvocationId,
-          taskId,
+          taskId: admissionTaskId,
           status,
           totalTokens: receipt.usage?.totalTokens ?? null,
           costUsd: receipt.usage?.costUsd ?? null,
@@ -277,7 +286,7 @@ export async function runAcpWorker({
       } catch { /* fail toward the cap */ }
       fanoutInvocationId = null;
     }
-    return { receipt, runDir, events, permissionRequests };
+    return { receipt, runDir, events, permissionRequests, claimsArtifact: resolvedClaims, claimsArtifactPath };
   };
 
   const resolvedCommand = isBareCommand(adapterCommand)
@@ -290,7 +299,7 @@ export async function runAcpWorker({
   // D1 fan-out ceilings: reservation before the adapter is spawned, then one
   // live-worker slot (bounded wait), exactly as the subprocess lane does.
   try {
-    const verdict = await admitWorker({ stateRoot: fanoutStateRoot, taskId, lane: "acp", budgets: fanoutBudgets });
+    const verdict = await admitWorker({ stateRoot: fanoutStateRoot, taskId: admissionTaskId, lane: "acp", budgets: fanoutBudgets });
     if (!verdict.admitted) {
       return finish({ status: "failed", error: verdict.reason });
     }

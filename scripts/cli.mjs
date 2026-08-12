@@ -16,7 +16,7 @@ const USAGE = `Usage:
                    [--model m (required: codex, claude)] [--check "cmd args"]
                    [--task-id t] [--lane subprocess|http|acp] [--files a,b,c]
                    [--adapter <cmd>] [--base-url <url>]
-                   [--reviewer <spec>] [--require-evidence validator,review]
+                   [--reviewer <spec>] [--require-evidence validator,review,claims]
                    [--timeout-minutes <n>] [--max-budget-usd <n>]
                    [--tampercheck-path <abs>] [--tampercheck-sha256 <hex64>]
                    [--config <file>] [--json]
@@ -32,7 +32,7 @@ const USAGE = `Usage:
   devharmonics set --member "<repositoryId>=<repoPath>:<workerBranch>" (2+)
                    [--base "<repositoryId>=<ref>"] [--evidence-root <dir>]
                    [--check "cmd args"] [--reviewer <spec>] [--goal <text>]
-                   [--require-evidence validator,review]
+                   [--require-evidence validator,review,claims]
                    [--tampercheck-path <abs>] [--tampercheck-sha256 <hex64>]
                    [--config <file>] [--json]
 

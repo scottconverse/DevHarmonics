@@ -8,6 +8,7 @@ import { resolvePathCommand } from "./path-resolve.mjs";
 import { superviseProcess } from "./supervise.mjs";
 import { workerEnv } from "./worker-env.mjs";
 import { createReceipt, writeReceipt } from "./receipts.mjs";
+import { parseWorkerClaimsObject, unavailableWorkerClaims, writeWorkerClaimsArtifact } from "./claims.mjs";
 
 /**
  * The HTTP lane's WRITE mode (spec §2.2, lane "http") for local models that
@@ -208,9 +209,12 @@ export async function runLocalPatch({ task, client, runsRoot, env = process.env 
   let worktreePath = null;
   let worktreeParent = null;
   let promptFull = null;
+  let claimsArtifact = unavailableWorkerClaims({ taskId: task.taskId, lane: "http", reason: "HTTP worker did not provide a claims manifest" });
 
-  const finish = ({ status, accepted, headCommit = null, detail, usage = null, resolvedModel = null }) => {
+  const finish = ({ status, accepted, headCommit = null, detail, usage = null, resolvedModel = null, claims = null }) => {
     const finishedAt = new Date().toISOString();
+    const resolvedClaims = claims ?? claimsArtifact;
+    const claimsArtifactPath = writeWorkerClaimsArtifact(path.join(runDir, "worker-claims.json"), resolvedClaims);
     const receipt = createReceipt({
       receiptId,
       taskId: task.taskId,
@@ -230,9 +234,10 @@ export async function runLocalPatch({ task, client, runsRoot, env = process.env 
       status,
       usage,
       artifactPath: status === "completed" ? path.join(runDir, "diff.patch") : null,
+      claimsArtifactPath,
     });
     writeReceipt(runsRoot, receipt);
-    return { receipt, runDir, accepted, headCommit, worktreePath, detail };
+    return { receipt, runDir, accepted, headCommit, worktreePath, detail, claimsArtifact: resolvedClaims, claimsArtifactPath };
   };
 
   // Step 2: isolated worktree. Never the caller's own checkout.
@@ -276,7 +281,7 @@ export async function runLocalPatch({ task, client, runsRoot, env = process.env 
   // Step 3: build the prompt from the WORKTREE's current file contents,
   // never the caller's live checkout — the model must only ever see what
   // it is actually patching.
-  const system = 'Return ONLY a JSON object {"files":[{"path":"<one of the write paths>","content":"complete new file text"}]} — no markdown fences, no commentary.';
+  const system = 'Return ONLY a JSON object {"files":[{"path":"<one of the write paths>","content":"complete new file text"}],"claims":{"schema":"devharmonics-worker-claims-v1","status":"available","claimedPaths":["<changed repo-relative path>"],"materialClaims":[{"id":"short-id","summary":"what materially changed","paths":["<changed repo-relative path>"]}]}} — no markdown fences, no commentary. The claims object is a separate worker report; do not derive it from a computed diff.';
   const readSections = [];
   for (const readPath of task.readPaths) {
     const abs = path.join(worktreePath, readPath);
@@ -368,6 +373,9 @@ export async function runLocalPatch({ task, client, runsRoot, env = process.env 
       resolvedModel: response.resolvedModel ?? null,
     });
   }
+  claimsArtifact = parsedBody.claims
+    ? parseWorkerClaimsObject(parsedBody.claims, { taskId: task.taskId, lane: "http" })
+    : unavailableWorkerClaims({ taskId: task.taskId, lane: "http", reason: "HTTP worker response omitted the claims manifest" });
 
   const writtenFiles = [];
   for (const [index, entry] of parsedBody.files.entries()) {

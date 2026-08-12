@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { parseWorkerClaims } from "./claims.mjs";
 
 /**
  * Per-provider invocation builders and output parsers for the subprocess
@@ -227,6 +228,7 @@ function parseCodexOutput({ stdout, outputDir }) {
     // requested model string passed as an argument is never proof of what
     // actually ran (the receipts.mjs v1 rule, carried forward here).
     resolutionVerified: resolvedModel !== null,
+    claimsArtifact: parseWorkerClaims(finalText, { lane: "subprocess" }),
     parseNotes,
   };
 }
@@ -261,7 +263,7 @@ function parseClaudeOutput({ stdout }) {
     parseNotes.push(`cost_breakdown named ${modelKeys.length} models, expected exactly 1`);
   }
 
-  return { finalText, usage, resolvedModel, resolutionVerified, parseNotes };
+  return { finalText, usage, resolvedModel, resolutionVerified, claimsArtifact: parseWorkerClaims(finalText, { lane: "subprocess" }), parseNotes };
 }
 
 function parseAgyOutput({ stdout }) {
@@ -271,6 +273,7 @@ function parseAgyOutput({ stdout }) {
     usage: null,
     resolvedModel: null,
     resolutionVerified: false,
+    claimsArtifact: parseWorkerClaims(text, { lane: "subprocess" }),
     parseNotes: [],
   };
 }

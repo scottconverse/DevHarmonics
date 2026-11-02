@@ -2,8 +2,12 @@ name: ci
 
 on:
   push:
+    # Docs-only changes start no CI run (docs get push, merge and publish only).
+    paths-ignore: ['**.md', '**.mdx', '**.rst', '**.docx', '**.pdf', '**/LICENSE', '**/LICENSE.*', '**/NOTICE', '**/NOTICE.*', 'docs/**.png', 'docs/**.jpg', 'docs/**.svg', 'docs/**.gif', 'docs/**.webp', 'docs/**.html', 'docs/**.css']
     branches: [main]
   pull_request:
+    # Docs-only changes start no CI run (docs get push, merge and publish only).
+    paths-ignore: ['**.md', '**.mdx', '**.rst', '**.docx', '**.pdf', '**/LICENSE', '**/LICENSE.*', '**/NOTICE', '**/NOTICE.*', 'docs/**.png', 'docs/**.jpg', 'docs/**.svg', 'docs/**.gif', 'docs/**.webp', 'docs/**.html', 'docs/**.css']
 
 jobs:
   verify:

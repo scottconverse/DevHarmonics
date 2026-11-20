@@ -3,227 +3,29 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DevHarmonics — a gated pipeline for AI code changes, on your machine</title>
-<meta name="description" content="DevHarmonics runs any qualified model, over three interchangeable lanes, to make one bounded, gated change to a git repository — with an append-only receipt for every attempt and a hard stop before anything leaves your machine.">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0e12'/%3E%3Cpath d='M8 16h4l2.5-6 3 12 2.5-6H24' fill='none' stroke='%2343d18a' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-<style>
-  :root{
-    --bg:#0a0e12; --surface:#10151b; --surface-2:#131a21; --elevated:#18212a;
-    --border:#222d37; --border-bright:#33424f;
-    --text:#e8eef4; --muted:#98a5b3; --faint:#7d8b99;
-    --accent:#45d290; --accent-dim:#2f9d68; --accent-ink:#06170e; --glow:rgba(69,210,144,.13);
-    --refuse:#f26a60; --warn:#e6b567; --info:#82a6f2;
-    --mono:ui-monospace,"Cascadia Code","SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
-    --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-    --maxw:1120px; --prose:64ch; --radius:12px; --radius-sm:8px;
-  }
-  *{box-sizing:border-box}
-  html{scroll-behavior:smooth}
-  @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
-  body{
-    margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);
-    font-size:16px;line-height:1.65;-webkit-font-smoothing:antialiased;
-    text-rendering:optimizeLegibility;overflow-x:hidden;
-  }
-  body::before{
-    content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
-    background:
-      radial-gradient(900px 500px at 78% -8%, rgba(69,210,144,.10), transparent 60%),
-      radial-gradient(700px 480px at 8% 4%, rgba(130,166,242,.06), transparent 55%);
-  }
-  main,header,footer{position:relative;z-index:1}
-  a{color:var(--accent);text-decoration:none}
-  a:hover{text-decoration:underline;text-underline-offset:3px}
-  h1,h2,h3{line-height:1.12;letter-spacing:-.02em;font-weight:650;margin:0}
-  p{margin:0 0 1rem}
-  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 24px}
-  .eyebrow{font-family:var(--mono);font-size:.72rem;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin:0 0 .9rem;font-weight:600}
-  .muted{color:var(--muted)}
-  .lede{font-size:1.18rem;color:var(--muted);max-width:var(--prose)}
-  section{padding:clamp(64px,9vw,120px) 0;border-top:1px solid var(--border)}
-  .skip{position:absolute;left:-999px;top:0;background:var(--accent);color:var(--accent-ink);padding:10px 16px;border-radius:0 0 8px 0;z-index:100}
-  .skip:focus{left:0}
-  :focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:4px}
-
-  /* nav */
-  header{position:sticky;top:0;z-index:50;background:rgba(10,14,18,.78);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
-  nav{display:flex;align-items:center;gap:24px;height:62px;max-width:var(--maxw);margin:0 auto;padding:0 24px}
-  .brand{display:flex;align-items:center;gap:10px;font-weight:650;letter-spacing:-.02em;font-size:1.04rem;color:var(--text)}
-  .brand:hover{text-decoration:none}
-  .brand svg{display:block}
-  .navlinks{display:flex;gap:22px;margin-left:auto;align-items:center}
-  .navlinks a{color:var(--muted);font-size:.92rem}
-  .navlinks a.btn-primary,.navlinks a.btn-primary:hover{color:var(--accent-ink)}
-  .navlinks a:hover{color:var(--text);text-decoration:none}
-  .btn{display:inline-flex;align-items:center;gap:8px;font-family:var(--sans);font-size:.92rem;font-weight:560;padding:9px 16px;border-radius:var(--radius-sm);border:1px solid var(--border-bright);color:var(--text);background:var(--elevated);cursor:pointer;transition:border-color .15s,background .15s,transform .05s}
-  .btn:hover{border-color:var(--accent-dim);background:#1b2530;text-decoration:none}
-  .btn:active{transform:translateY(1px)}
-  .btn-primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
-  .btn-primary:hover{background:#54e09e;border-color:#54e09e;color:var(--accent-ink)}
-  .navtoggle{display:none;margin-left:auto;background:none;border:1px solid var(--border-bright);border-radius:8px;color:var(--text);width:44px;height:44px;font-size:1.1rem;cursor:pointer}
-
-  /* hero */
-  .hero{padding-top:clamp(48px,7vw,88px);border-top:none}
-  .hero-grid{display:grid;grid-template-columns:1.02fr .98fr;gap:clamp(32px,4vw,56px);align-items:center}
-  /* grid/flex children holding scrollable <pre> must be allowed to shrink
-     below their content's intrinsic width, or they force page overflow. */
-  .hero-grid>*,.split>*,.grid>*,.callout>*,.lanes>*{min-width:0}
-  .term,.code{min-width:0;max-width:100%}
-  h1.headline{font-size:clamp(2.3rem,5.4vw,3.9rem);letter-spacing:-.035em;font-weight:680}
-  h1.headline .g{color:var(--accent)}
-  .hero .lede{font-size:1.24rem;margin:1.3rem 0 1.9rem}
-  .cta-row{display:flex;flex-wrap:wrap;gap:12px}
-  .btn-lg{padding:13px 22px;font-size:1rem}
-  .trust{display:flex;flex-wrap:wrap;gap:8px 20px;margin-top:2rem;font-family:var(--mono);font-size:.78rem;color:var(--faint)}
-  .trust span{display:inline-flex;align-items:center;gap:7px}
-  .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px var(--glow)}
-
-  /* terminal */
-  .term{background:linear-gradient(180deg,#0e141a,#0b1116);border:1px solid var(--border-bright);border-radius:var(--radius);box-shadow:0 24px 60px -28px rgba(0,0,0,.8),0 0 0 1px rgba(69,210,144,.05);overflow:hidden}
-  .term-bar{display:flex;align-items:center;gap:8px;padding:11px 14px;background:#0c1217;border-bottom:1px solid var(--border)}
-  .term-bar i{width:11px;height:11px;border-radius:50%;background:#28323b;display:block}
-  .term-title{margin-left:8px;font-family:var(--mono);font-size:.74rem;color:var(--faint)}
-  .term-body{padding:16px 18px;font-family:var(--mono);font-size:.82rem;line-height:1.75;overflow-x:auto}
-  .term-body pre{margin:0;white-space:pre;font:inherit;color:#c6d2de}
-  .prompt{color:var(--accent)} .cmd{color:#e8eef4} .cmt{color:var(--faint)}
-  .ok{color:var(--accent)} .no{color:var(--refuse)} .dim{color:var(--faint)} .key{color:var(--info)} .num{color:var(--warn)}
-  .tnum{font-variant-numeric:tabular-nums}
-
-  /* proof strip */
-  .strip{border-top:1px solid var(--border);border-bottom:1px solid var(--border);background:var(--surface)}
-  .strip .wrap{display:flex;flex-wrap:wrap;gap:10px 30px;padding-top:20px;padding-bottom:20px;font-family:var(--mono);font-size:.82rem;color:var(--muted)}
-  .strip b{color:var(--text);font-weight:600}
-  .strip span{display:inline-flex;align-items:center;gap:9px}
-
-  /* section heads */
-  .shead{max-width:var(--prose)}
-  .shead h2{font-size:clamp(1.7rem,3.4vw,2.45rem)}
-  .shead p{margin-top:1rem;color:var(--muted)}
-
-  /* generic grid */
-  .grid{display:grid;gap:18px;margin-top:44px}
-  .cols-3{grid-template-columns:repeat(3,1fr)}
-  .cols-2{grid-template-columns:repeat(2,1fr)}
-  .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px}
-  .card h3{font-size:1.12rem;margin-bottom:.5rem;display:flex;align-items:center;gap:10px}
-  .card p{color:var(--muted);font-size:.95rem;margin:0}
-  .card .tag{font-family:var(--mono);font-size:.7rem;color:var(--accent);letter-spacing:.05em;text-transform:uppercase;display:block;margin-bottom:.7rem}
-  .ico{width:22px;height:22px;flex:0 0 auto;color:var(--accent)}
-
-  /* split */
-  .split{display:grid;grid-template-columns:1fr 1fr;gap:clamp(28px,4vw,56px);align-items:center}
-  .split.rev>div:first-child{order:2}
-
-  /* lanes */
-  .lanes{display:grid;gap:14px}
-  .lane{display:grid;grid-template-columns:auto 1fr auto;gap:16px;align-items:center;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:16px 18px}
-  .lane .lk{font-family:var(--mono);font-size:.72rem;color:var(--accent-ink);background:var(--accent);border-radius:5px;padding:3px 8px;font-weight:700}
-  .lane .lk.b{background:var(--info);color:#06122b}
-  .lane .lk.c{background:var(--warn);color:#1e1603}
-  .lane b{font-weight:600}
-  .lane .lm{color:var(--muted);font-size:.9rem}
-  .lane .status{font-family:var(--mono);font-size:.72rem;color:var(--faint);text-align:right;white-space:nowrap}
-  @media (max-width:560px){.lane .status{white-space:normal}}
-
-  /* gate chain */
-  .chain{margin-top:48px;display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px}
-  .gate{position:relative;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:18px 16px}
-  .gate .gn{font-family:var(--mono);font-size:.7rem;color:var(--faint);letter-spacing:.1em}
-  .gate h3{margin:.5rem 0 .35rem;font-size:.98rem;font-weight:620}
-  .gate p{font-size:.82rem;color:var(--muted);margin:0}
-  .gate.pass{border-color:var(--accent-dim);box-shadow:inset 0 0 0 1px rgba(69,210,144,.12)}
-  .gate .refuse{margin-top:10px;font-family:var(--mono);font-size:.7rem;color:var(--refuse);display:flex;align-items:center;gap:6px}
-  .gate .refuse::before{content:"⊘"}
-  .stop{grid-column:1/-1;display:flex;align-items:center;gap:14px;background:linear-gradient(90deg,rgba(69,210,144,.1),transparent);border:1px solid var(--accent-dim);border-radius:var(--radius-sm);padding:16px 20px;margin-top:4px}
-  .stop b{color:var(--accent)}
-  .stop .lm{color:var(--muted);font-size:.9rem}
-
-  /* callout */
-  .callout{background:linear-gradient(180deg,var(--surface-2),var(--surface));border:1px solid var(--border-bright);border-radius:var(--radius);padding:clamp(28px,4vw,44px);display:grid;grid-template-columns:1fr 1fr;gap:36px;align-items:center}
-  .callout h2{font-size:clamp(1.5rem,3vw,2.1rem)}
-  .callout .lede{font-size:1.05rem;margin-top:.9rem}
-
-  /* code block */
-  .code{background:#0b1116;border:1px solid var(--border-bright);border-radius:var(--radius);overflow:hidden;font-family:var(--mono)}
-  .code .cbar{padding:9px 14px;border-bottom:1px solid var(--border);font-size:.72rem;color:var(--faint);display:flex;justify-content:space-between}
-  .code pre{margin:0;padding:16px 18px;font-size:.82rem;line-height:1.8;overflow-x:auto;color:#c6d2de;white-space:pre}
-  .copyhint{color:var(--faint)}
-
-  /* steps */
-  .steps{counter-reset:s;display:grid;gap:2px;margin-top:40px}
-  .step{display:grid;grid-template-columns:auto 1fr;gap:20px;padding:22px 0;border-top:1px solid var(--border)}
-  .step:first-child{border-top:none}
-  .step .sn{counter-increment:s;font-family:var(--mono);color:var(--accent);font-size:1.1rem;font-weight:700}
-  .step .sn::before{content:counter(s,decimal-leading-zero)}
-  .step h3{font-size:1.1rem;margin-bottom:.4rem}
-  .step p{color:var(--muted);margin:0;max-width:60ch}
-
-  /* comparison */
-  .cmp{margin-top:40px;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
-  .cmp-row{display:grid;grid-template-columns:1.3fr 1fr 1fr;border-top:1px solid var(--border)}
-  .cmp-row:first-child{border-top:none}
-  .cmp-row>div{padding:14px 18px;font-size:.9rem}
-  .cmp-row.head>div{background:var(--surface);font-family:var(--mono);font-size:.74rem;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
-  .cmp-row .lab{color:var(--muted)}
-  .cmp-row .y{color:var(--text)} .cmp-row .y b{color:var(--accent)}
-  .cmp-row .n{color:var(--faint)}
-
-  /* status list */
-  .status-list{margin-top:36px;display:grid;gap:12px}
-  .sitem{display:grid;grid-template-columns:auto 1fr;gap:14px;align-items:start;font-size:.95rem}
-  .sitem .m{font-family:var(--mono);font-size:.68rem;padding:3px 8px;border-radius:5px;letter-spacing:.05em;text-transform:uppercase;white-space:nowrap;margin-top:2px}
-  .m.built{background:rgba(69,210,144,.14);color:var(--accent)}
-  .m.partial{background:rgba(230,181,103,.14);color:var(--warn)}
-  .m.early{background:rgba(130,166,242,.14);color:var(--info)}
-  .sitem p{margin:0;color:var(--muted)}
-  .sitem b{color:var(--text);font-weight:600}
-
-  /* final cta */
-  .final{text-align:center;border-top:1px solid var(--border)}
-  .final h2{font-size:clamp(1.9rem,4vw,2.8rem);max-width:16ch;margin:0 auto}
-  .final .lede{margin:1.2rem auto 2rem;text-align:center}
-  .final .cta-row{justify-content:center}
-
-  /* footer */
-  footer{border-top:1px solid var(--border);background:var(--surface);padding:44px 0}
-  .foot{display:flex;flex-wrap:wrap;gap:24px;justify-content:space-between;align-items:flex-start}
-  .foot .fl{display:flex;gap:28px;flex-wrap:wrap}
-  .foot a{color:var(--muted);font-size:.9rem}
-  .foot a:hover{color:var(--text)}
-  .foot .fnote{color:var(--faint);font-size:.82rem;max-width:42ch}
-  .foot .brand{margin-bottom:12px}
-
-  @media (max-width:900px){
-    .hero-grid,.split,.cols-3,.cols-2,.callout{grid-template-columns:1fr}
-    .split.rev>div:first-child{order:0}
-    .navlinks{display:none}
-    .navtoggle{display:block}
-    .navlinks.open{display:flex;position:absolute;top:62px;left:0;right:0;flex-direction:column;background:var(--bg);border-bottom:1px solid var(--border);padding:16px 24px;gap:4px;margin:0}
-    .navlinks.open a{padding:10px 0}
-    .navlinks.open .btn{width:100%;justify-content:center;padding:13px 16px}
-    .cmp-row{grid-template-columns:1fr}
-    .cmp-row>div{border-top:1px solid var(--border)}
-  }
-  @media (max-width:560px){
-    .hero .lede{font-size:1.08rem}
-    .trust{font-size:.72rem}
-  }
-</style>
+<title>DevHarmonics: gated AI code changes on your own machine</title>
+<meta name="description" content="DevHarmonics lets an AI coding agent make one bounded change to a git repository on your machine. Fail-closed gates, an append-only receipt for every attempt, and a hard stop before anything leaves your machine.">
+<meta name="theme-color" content="#0a0e12">
+<link rel="canonical" href="https://scottconverse.github.io/DevHarmonics/">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+<meta property="og:type" content="website">
+<meta property="og:title" content="DevHarmonics: gated AI code changes on your own machine">
+<meta property="og:description" content="One bounded change, fail-closed gates, a receipt for every attempt, and a stop before anything leaves your machine.">
+<meta property="og:url" content="https://scottconverse.github.io/DevHarmonics/">
+<link rel="stylesheet" href="assets/site.css">
 </head>
 <body>
 <a href="#main" class="skip">Skip to content</a>
 <header>
   <nav aria-label="Primary">
-    <a class="brand" href="#top" aria-label="DevHarmonics home">
-      <svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#10151b" stroke="#33424f"/><path d="M7 16h4l2.6-7 3.2 14 2.6-7H25" fill="none" stroke="#45d290" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      DevHarmonics
-    </a>
-    <button class="navtoggle" aria-expanded="false" aria-controls="navlinks" aria-label="Menu">≡</button>
+    <a class="brand" href="#top" aria-label="DevHarmonics home"><img src="assets/favicon.svg" width="26" height="26" alt="">DevHarmonics</a>
+    <button class="navtoggle" type="button" aria-expanded="false" aria-controls="navlinks" aria-label="Menu">&#8801;</button>
     <div class="navlinks" id="navlinks">
-      <a href="#why">Why</a>
       <a href="#lanes">Lanes</a>
       <a href="#gates">Gates</a>
-      <a href="#how">How it works</a>
+      <a href="#evidence">Evidence</a>
+      <a href="#limits">Limits</a>
+      <a href="#proof">Proof</a>
       <a href="#start">Quick start</a>
       <a href="https://github.com/scottconverse/DevHarmonics">GitHub</a>
       <a class="btn btn-primary" href="#start">Get started</a>
@@ -234,274 +36,275 @@
 <main id="main">
 <a id="top"></a>
 
-<!-- HERO -->
 <section class="hero">
   <div class="wrap hero-grid">
     <div>
-      <p class="eyebrow">Local-first · host-agnostic · Apache-2.0</p>
-      <h1 class="headline">An AI agent makes the change. <span class="g">The gates decide if it ships.</span></h1>
-      <p class="lede">DevHarmonics runs any qualified model — over three interchangeable lanes — to make one bounded change to a git repository on your own machine. Every attempt leaves an append-only receipt, and nothing merges or leaves your machine without you.</p>
+      <p class="eyebrow">Local-first, host-agnostic, Apache-2.0</p>
+      <h1 class="headline">An agent makes the change. <span class="g">The gates decide if it lands.</span></h1>
+      <p class="lede">DevHarmonics is a set of Node.js command-line scripts that let an AI coding agent make one bounded change to a git repository on your own machine. Every attempt writes a receipt, a failed gate refuses the change, and the run always stops before anything is pushed or merged into your branch.</p>
       <div class="cta-row">
         <a class="btn btn-primary btn-lg" href="#start">Quick start</a>
-        <a class="btn btn-lg" href="https://github.com/scottconverse/DevHarmonics">View source ↗</a>
+        <a class="btn btn-lg" href="https://github.com/scottconverse/DevHarmonics">View source &#8599;</a>
       </div>
-      <div class="trust">
-        <span><i class="dot"></i>No server, no account</span>
-        <span><i class="dot"></i>No API keys required</span>
-        <span><i class="dot"></i>Node 24 · one dependency</span>
-        <span><i class="dot"></i>Windows + Linux CI</span>
-      </div>
+      <ul class="trust">
+        <li><i class="dot"></i>No server, no account</li>
+        <li><i class="dot"></i>Never asks for an API key</li>
+        <li><i class="dot"></i>Node 24, one runtime dependency</li>
+        <li><i class="dot"></i>CI on Windows and Linux</li>
+      </ul>
     </div>
-    <div class="term" role="img" aria-label="Terminal showing the devharmonics doctor command probing local CLIs and model endpoints, with a mix of PASS and FAIL results verified by real attempts.">
-      <div class="term-bar"><i></i><i></i><i></i><span class="term-title">devharmonics doctor — capability probe (representative output)</span></div>
-      <div class="term-body"><pre><span class="prompt">$</span> <span class="cmd">devharmonics doctor</span>
+    <div class="term" role="img" aria-label="Terminal output of the devharmonics doctor command: six checks pass, one fails because LM Studio has no model loaded, and one is skipped.">
+      <div class="bar"><span class="t"><i></i><i></i><i></i>devharmonics doctor</span><span>real capture, shortened</span></div>
+<pre><span class="prompt">$</span> devharmonics doctor
 
-<span class="ok">PASS</span>  cli:codex          <span class="dim">codex-cli 0.145.0</span>
-<span class="ok">PASS</span>  cli:claude         <span class="dim">2.1.220 (Claude Code)</span>
-<span class="no">FAIL</span>  cli:agy            <span class="dim">"agy" not found on PATH</span>
-<span class="ok">PASS</span>  http:ollama        <span class="dim">Messages OK via qwen2.5vl:3b · 339ms</span>
-<span class="ok">PASS</span>  http:lmstudio      <span class="dim">Messages OK via gemma-4-12b · 410ms</span>
-<span class="ok">PASS</span>  rigor:tampercheck  <span class="dim">0.1.1</span>
-<span class="ok">PASS</span>  rigor:skill-parity <span class="dim">v0.7.0 on claude, codex</span>
+<span class="ok">PASS</span>    cli:codex           <span class="dim">codex-cli 0.145.0</span>
+<span class="ok">PASS</span>    cli:claude          <span class="dim">2.1.220 (Claude Code)</span>
+<span class="ok">PASS</span>    cli:agy             <span class="dim">1.1.10</span>
+<span class="ok">PASS</span>    http:ollama         <span class="dim">Messages OK via qwen2.5vl:3b</span>
+<span class="no">FAIL</span>    http:lmstudio       <span class="dim">no model listed (server down?)</span>
+<span class="ok">PASS</span>    rigor:tampercheck   <span class="dim">0.1.1, sha256 recorded</span>
+<span class="ok">PASS</span>    rigor:skill-parity  <span class="dim">v0.7.0 on claude, codex</span>
+SKIPPED repo:governance     <span class="dim">no repository in scope</span>
 
-<span class="tnum">6 PASS, 1 FAIL, 0 SKIPPED</span>
-<span class="cmt"># every line is a real attempt — never inferred from config</span></pre></div>
+6 PASS, 1 FAIL, 1 SKIPPED
+<span class="cmt"># every row is a real attempt, never inferred from config</span></pre>
     </div>
   </div>
 </section>
 
-<!-- PROOF STRIP -->
 <div class="strip">
-  <div class="wrap">
-    <span><i class="dot"></i><b>3</b>&nbsp;worker lanes</span>
-    <span><i class="dot"></i>ACP · HTTP · subprocess</span>
-    <span><i class="dot"></i>Append-only <b>receipts</b></span>
-    <span><i class="dot"></i>Fail-closed <b>gates</b></span>
-    <span><i class="dot"></i>Runs entirely <b>local</b></span>
-    <span><i class="dot"></i><b>Apache-2.0</b></span>
-  </div>
+  <ul aria-label="At a glance">
+    <li><i class="dot"></i><b>3</b>&nbsp;worker lanes</li>
+    <li><i class="dot"></i><b>10</b>&nbsp;commands</li>
+    <li><i class="dot"></i>One receipt schema</li>
+    <li><i class="dot"></i>Fail-closed gates</li>
+    <li><i class="dot"></i>Stops before your branch</li>
+  </ul>
 </div>
 
-<!-- WHY -->
 <section id="why">
   <div class="wrap">
     <div class="shead">
       <p class="eyebrow">The problem</p>
-      <h2>An AI agent can rewrite your repository faster than you can check it.</h2>
-      <p>Hand a coding agent a task and it edits files, runs commands, and reports success. What it doesn't give you is a boundary — a place where the change is <em>verified</em> before it counts, evidence of what actually happened, and independence from the one vendor's app you happened to be using. When "the model said it's done" is the only signal, a confident wrong answer looks exactly like a correct one.</p>
+      <h2>When the only signal is "the model said it's done", a wrong answer looks like a right one.</h2>
+      <p>A coding agent edits files, runs commands and reports success. DevHarmonics adds what that loop lacks: a boundary where the change is checked before it counts, evidence of what actually happened, and independence from any one vendor's app.</p>
     </div>
     <div class="grid cols-3">
-      <div class="card">
-        <span class="tag">Instead of trust</span>
-        <h3>Evidence</h3>
-        <p>Every attempt — success, refusal, or a run that never started — writes an append-only receipt first. A run that leaves no evidence is treated as one that never happened.</p>
-      </div>
-      <div class="card">
-        <span class="tag">Instead of lock-in</span>
-        <h3>Three lanes</h3>
-        <p>Subscription CLIs, local model servers, and ACP adapters are interchangeable transports. The design test: the factory must survive any single vendor, app, or model disappearing.</p>
-      </div>
-      <div class="card">
-        <span class="tag">Instead of auto-merge</span>
-        <h3>A hard stop</h3>
-        <p>The pipeline always halts at a local integration branch. Nothing is pushed, and nothing is merged into the branch you had checked out. You decide what happens next.</p>
-      </div>
+      <div class="card"><span class="tag">Instead of trust</span><h3>Evidence</h3><p>Every attempt writes a receipt, whether it succeeds, is refused, or never starts. An attempt that leaves no evidence is meant to be indistinguishable from one that never happened.</p></div>
+      <div class="card"><span class="tag">Instead of lock-in</span><h3>Three lanes</h3><p>Subscription CLIs, local model servers and ACP adapters are interchangeable transports. The stated design test: the factory must survive any single vendor, app or model disappearing.</p></div>
+      <div class="card"><span class="tag">Instead of auto-merge</span><h3>A hard stop</h3><p>The pipeline halts at a local integration branch. Nothing is pushed and nothing is merged into the branch you had checked out. What happens next is your decision.</p></div>
     </div>
   </div>
 </section>
 
-<!-- LANES -->
 <section id="lanes">
-  <div class="wrap">
-    <div class="split">
-      <div>
-        <p class="eyebrow">Survive any vendor</p>
-        <h2 style="font-size:clamp(1.7rem,3.4vw,2.45rem)">One factory, three interchangeable ways to do the work.</h2>
-        <p class="muted" style="margin-top:1rem">A worker lane is just a transport for one bounded turn. Any two lanes can stand in for the third, so no single provider's CLI or API is load-bearing. Every lane emits the same receipt schema, so the evidence trail is identical no matter who did the work.</p>
-        <p class="muted">Authentication stays where it already lives — a signed-in subscription CLI, a local endpoint that needs no key at all, or an adapter's own session. DevHarmonics never asks you for an API key.</p>
-      </div>
-      <div class="lanes">
-        <div class="lane"><span class="lk c">Lane&nbsp;C</span><div><b>Subprocess</b><div class="lm">A supervised headless turn against a signed-in CLI — <code>codex&nbsp;exec</code>, <code>claude&nbsp;-p</code>, <code>agy&nbsp;-p</code>.</div></div><span class="status">the default lane<br>subscription auth</span></div>
-        <div class="lane"><span class="lk b">Lane&nbsp;B</span><div><b>HTTP (local models)</b><div class="lm">One Anthropic-Messages client, base-URL-switched: Ollama, LM Studio, a LiteLLM proxy — or the real Claude API, opt-in only.</div></div><span class="status">no keys locally<br>runs offline</span></div>
-        <div class="lane"><span class="lk">Lane&nbsp;A</span><div><b>ACP</b><div class="lm">A live, multi-turn Agent Client Protocol session over stdio, driven by any adapter you install.</div></div><span class="status">provider-owned<br>auth</span></div>
-      </div>
+  <div class="wrap split top">
+    <div>
+      <p class="eyebrow">Survive any vendor</p>
+      <h2 class="h2">One pipeline, three interchangeable ways to do the work.</h2>
+      <p class="muted mt">A worker lane is a transport for one bounded turn. <code>devharmonics run --lane subprocess|http|acp</code> can drive any of them as the worker, and all three write the same receipt schema, so the evidence trail looks the same no matter who did the work.</p>
+      <p class="muted">Authentication stays where it already lives: a signed-in subscription CLI, a local endpoint that needs no key, or an ACP adapter's own session.</p>
+    </div>
+    <div class="lanes">
+      <div class="lane"><span class="lk c">Subprocess</span><div><b>Supervised headless CLI</b><div class="lm">One bounded turn against a signed-in <code>codex exec</code>, <code>claude -p</code> or <code>agy -p</code>. The default lane.</div></div><span class="auth">auth: the CLI's own subscription sign-in</span></div>
+      <div class="lane"><span class="lk b">HTTP</span><div><b>Local model servers</b><div class="lm">One Anthropic Messages client, switched by base URL: Ollama and LM Studio by default, a LiteLLM proxy if you add one. The real Claude API is an explicit opt-in only.</div></div><span class="auth">auth: none for local endpoints</span></div>
+      <div class="lane"><span class="lk">ACP</span><div><b>Agent Client Protocol</b><div class="lm">A live, multi-turn session over stdio with any ACP adapter on your <code>PATH</code> (default <code>claude-code-acp</code>). Permission requests are denied, or only file edits are granted.</div></div><span class="auth">auth: the adapter's own session</span></div>
     </div>
   </div>
 </section>
 
-<!-- GATES -->
 <section id="gates">
   <div class="wrap">
     <div class="shead">
       <p class="eyebrow">The gate chain</p>
-      <h2>Every consequential step can refuse — and a crashed gate is never a pass.</h2>
-      <p>A change only reaches a local integration branch after clearing each gate in turn. Every refusal below is a real, distinct outcome the code returns, recorded in the receipt. Missing evidence always fails closed.</p>
+      <h2>Every consequential step can refuse, and a crashed gate is never a pass.</h2>
+      <p>This is the order <code>devharmonics run</code> applies them. Each refusal is a distinct reason the code returns and records in the evidence bundle. Missing evidence fails closed.</p>
     </div>
-    <div class="chain">
-      <div class="gate">
-        <div class="gn">STEP 01</div><h3>Isolated worktree</h3>
-        <p>The worker edits a fresh git worktree in your temp dir — never your own checkout.</p>
-      </div>
-      <div class="gate pass">
-        <div class="gn">GATE 02</div><h3>Empty-diff</h3>
-        <p>A branch that changed nothing does not pass. No false green from a no-op.</p>
-        <div class="refuse">empty-diff</div>
-      </div>
-      <div class="gate pass">
-        <div class="gn">GATE 03</div><h3>tampercheck</h3>
-        <p>An integrity scan of the diff, with an identity check on the binary itself before its verdict is trusted.</p>
-        <div class="refuse">findings / unavailable</div>
-      </div>
-      <div class="gate pass">
-        <div class="gn">GATE 04</div><h3>Serial merge</h3>
-        <p>A <code>--no-ff</code> merge into an integration branch, per-repository lock, auto-abort on conflict.</p>
-        <div class="refuse">merge-conflict</div>
-      </div>
-      <div class="gate">
-        <div class="gn">STEP 05</div><h3>Independent review</h3>
-        <p>Optional. An artifact-lens reviewer sees the diff and receipts — never the worker's own narration.</p>
-        <div class="refuse">review-not-ready</div>
-      </div>
-      <div class="stop">
-        <svg class="ico" width="26" height="26" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3l7 4v5c0 4.4-3 7.8-7 9-4-1.2-7-4.6-7-9V7l7-4z" stroke="#45d290" stroke-width="1.6"/><path d="M9 12l2 2 4-4" stroke="#45d290" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        <div><b>STOP — the owner-approval boundary.</b> <span class="lm">The run prints the integration branch and evidence path, then stops. Nothing is pushed; nothing touches your working branch.</span></div>
-      </div>
-    </div>
+    <ol class="chain">
+      <li class="gate"><div class="gn">STEP 01</div><h3>Isolated worktree</h3><p>The worker edits a fresh git worktree in your OS temp directory, never your checkout. A dirty tracked tree is refused at intake.</p></li>
+      <li class="gate"><div class="gn">STEP 02</div><h3>Worker output</h3><p>The pipeline commits what changed. Nothing staged earns one retry, then the run refuses.</p><div class="refuse">worker-empty-diff</div></li>
+      <li class="gate pass"><div class="gn">GATE 03</div><h3>Base ancestry</h3><p>The pinned base must be an ancestor of the worker branch, so a stale branch cannot sneak in ungated changes.</p><div class="refuse">stale-worker-base</div></li>
+      <li class="gate pass"><div class="gn">GATE 04</div><h3>Empty diff</h3><p>A branch that changed nothing does not pass, so a no-op never reads as green.</p><div class="refuse">empty-diff</div></li>
+      <li class="gate pass"><div class="gn">GATE 05</div><h3>tampercheck</h3><p>An integrity scan of the diff. The binary must first answer <code>--version</code> like a real tool, and its path and sha256 are recorded.</p><div class="refuse">tampercheck-findings, tampercheck-unavailable</div></li>
+      <li class="gate pass"><div class="gn">GATE 06</div><h3>Merged candidate</h3><p>A <code>--no-ff</code> merge is built detached, then scanned again, because the delivered tree is not the worker's tree.</p><div class="refuse">merge-conflict, final-artifact-findings</div></li>
+      <li class="gate"><div class="gn">STEP 07</div><h3>Your check</h3><p>Optional <code>--check</code> runs against that exact merged commit with a credential-stripped environment.</p><div class="refuse">validator-failed</div></li>
+      <li class="gate"><div class="gn">STEP 08</div><h3>Independent review</h3><p>Optional. The reviewer sees the diff and your check's result, never the worker's own account of what it did.</p><div class="refuse">review-not-ready, review-failed</div></li>
+      <li class="stop">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3l7 4v5c0 4.4-3 7.8-7 9-4-1.2-7-4.6-7-9V7l7-4z" stroke="#45d290" stroke-width="1.6"/><path d="M9 12l2 2 4-4" stroke="#45d290" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <div><b>STOP: the owner-approval boundary.</b> <span class="lm">Only then does <code>devharmonics/integration/&lt;runId&gt;</code> advance. The run prints the branch and the evidence path and stops. Nothing is pushed.</span></div>
+      </li>
+    </ol>
   </div>
 </section>
 
-<!-- RECEIPT / evidence -->
-<section id="receipts">
-  <div class="wrap split rev">
-    <div class="code" role="img" aria-label="A receipt.json file in the devharmonics-receipt-v1 schema, recording the lane, the requested versus resolved model, resolution verification, status, cost, and the list of credential-shaped environment variables that were stripped before the worker ran.">
-      <div class="cbar"><span>.devharmonics/runs/run-3a2b1c4d/receipt.json</span><span class="copyhint">schema v1</span></div>
-      <pre><span class="key">"schema"</span>: <span class="ok">"devharmonics-receipt-v1"</span>,
-<span class="key">"lane"</span>: <span class="ok">"subprocess"</span>,
-<span class="key">"provider"</span>: <span class="ok">"claude"</span>,
-<span class="key">"requestedModel"</span>: <span class="ok">"sonnet"</span>,
-<span class="key">"resolvedModel"</span>: <span class="ok">"claude-sonnet-4-5"</span>,
-<span class="key">"resolutionVerified"</span>: <span class="num">true</span>,
-<span class="key">"status"</span>: <span class="ok">"completed"</span>,
-<span class="key">"usage"</span>: { <span class="key">"costUsd"</span>: <span class="num">0.021</span> },
-<span class="key">"strippedEnv"</span>: [
-  <span class="ok">"ANTHROPIC_API_KEY"</span>, <span class="ok">"OPENAI_API_KEY"</span>,
-  <span class="ok">"AWS_SECRET_ACCESS_KEY"</span>, <span class="ok">"GITHUB_TOKEN"</span>
-],
-<span class="key">"promptSha256"</span>: <span class="dim">"a3f1…"</span></pre>
+<section id="evidence">
+  <div class="wrap split rev top">
+    <div class="code" role="img" aria-label="The shape of a receipt.json file in the devharmonics-receipt-v1 schema: lane, provider, requested and resolved model, whether resolution was verified, prompt hash, status, usage, and the list of environment variable names that were stripped.">
+      <div class="bar"><span>.devharmonics/runs/&lt;runId&gt;/receipt.json</span><span>shape, not a real run</span></div>
+<pre><span class="key">"schema"</span>: <span class="ok">"devharmonics-receipt-v1"</span>,
+<span class="key">"lane"</span>: <span class="ok">"acp"</span> | <span class="ok">"http"</span> | <span class="ok">"subprocess"</span>,
+<span class="key">"provider"</span>: <span class="dim">&lt;string&gt;</span>,
+<span class="key">"requestedModel"</span>: <span class="dim">&lt;string&gt;</span>,
+<span class="key">"resolvedModel"</span>: <span class="num">null</span>,        <span class="cmt">// null unless the runtime said</span>
+<span class="key">"resolutionVerified"</span>: <span class="num">false</span>,   <span class="cmt">// true needs a resolvedModel</span>
+<span class="key">"promptSha256"</span>: <span class="dim">&lt;64 hex&gt;</span>,
+<span class="key">"status"</span>: <span class="ok">"completed"</span> | <span class="ok">"failed"</span> | <span class="ok">"timeout"</span> | <span class="ok">"interrupted"</span>,
+<span class="key">"usage"</span>: <span class="num">null</span>,                <span class="cmt">// tokens and/or costUsd,</span>
+                              <span class="cmt">// never invented as zero</span>
+<span class="key">"strippedEnv"</span>: [<span class="dim">&lt;names removed&gt;</span>]</pre>
     </div>
     <div>
       <p class="eyebrow">Evidence over confidence</p>
-      <h2 style="font-size:clamp(1.7rem,3.4vw,2.45rem)">A receipt for every attempt — including the ones that never start.</h2>
-      <p class="muted" style="margin-top:1rem">One schema across all three lanes records what was <em>requested</em> versus the model that actually <em>resolved</em> (never trusting a requested name as proof of what ran), the status, usage, a prompt hash, and the environment variables stripped before the worker touched anything.</p>
-      <p class="muted"><code>resolutionVerified</code> stays <code>false</code> unless the runtime itself reported its identity. Token counts are never invented as zero when a provider doesn't report them. The evidence is meant to be checkable, not taken on faith.</p>
+      <h2 class="h2">A receipt for every attempt, including the ones that never start.</h2>
+      <p class="muted mt">One schema across all three lanes records the model you <em>requested</em> next to the model that actually <em>resolved</em>. A requested name is never treated as proof of what ran, so <code>resolutionVerified</code> stays <code>false</code> unless the runtime reported its own identity. Usage fields are null when a provider does not report them.</p>
+      <p class="muted">Integration adds its own bundle (<code>integration.json</code>) with every gate result and the tampercheck binary's path and checksum. A reviewer adds <code>review.json</code>. Each worker also writes a separate claims artifact that is compared against the real diff.</p>
+      <p class="eyebrow" style="margin-top:1.6rem">Assurance, derived from what passed</p>
+      <ul class="ladder">
+        <li><code>gates-only</code><span>deterministic gates passed</span></li>
+        <li><code>validated</code><span>and your <code>--check</code> exited 0 on the merged candidate</span></li>
+        <li><code>reviewed</code><span>an independent reviewer said READY</span></li>
+        <li><code>validated+reviewed</code><span>both</span></li>
+      </ul>
+      <p class="muted" style="margin-top:14px;font-size:.9rem"><code>--require-evidence validator,review,claims</code> refuses readiness when the evidence you demand is missing.</p>
     </div>
   </div>
 </section>
 
-<!-- CREDENTIAL BOUNDARY callout -->
 <section id="boundary" style="border-top:none;padding-top:0">
   <div class="wrap">
     <div class="callout">
       <div>
         <p class="eyebrow">The credential boundary</p>
-        <h2>Workers don't inherit your secrets.</h2>
-        <p class="lede">Before a worker — or the check command that validates its work inside the same worktree — is spawned, DevHarmonics strips credential-shaped variables from its environment: named provider keys, cloud credentials, secret-bearing connection strings, and anything whose name carries a credential word.</p>
+        <h2>Workers do not inherit your secrets.</h2>
+        <p class="lede">Before a subprocess or ACP worker is spawned, DevHarmonics strips credential-shaped variables from its environment: named provider keys, cloud credentials, connection-string URLs, and any name containing a credential word. The same stripping applies to your <code>--check</code> command and to tampercheck, because both run inside the worktree the worker just wrote to.</p>
       </div>
       <div>
         <div class="code">
-          <div class="cbar"><span>worker environment</span><span class="copyhint">stripped</span></div>
-          <pre><span class="no">– ANTHROPIC_API_KEY</span>   <span class="dim">removed</span>
-<span class="no">– OPENAI_API_KEY</span>      <span class="dim">removed</span>
-<span class="no">– DATABASE_URL</span>        <span class="dim">removed</span>
-<span class="no">– DBPASSWORD</span>          <span class="dim">removed</span>
-<span class="ok">+ PATH</span>                 <span class="dim">kept — resolution still works</span>
-<span class="ok">+ SSH_AUTH_SOCK</span>       <span class="dim">kept — a socket, not a secret</span></pre>
+          <div class="bar"><span>worker environment</span><span>examples from the manual</span></div>
+<pre><span class="no">- ANTHROPIC_API_KEY</span>   <span class="dim">removed</span>
+<span class="no">- OPENAI_API_KEY</span>      <span class="dim">removed</span>
+<span class="no">- DATABASE_URL</span>        <span class="dim">removed</span>
+<span class="no">- DBPASSWORD</span>          <span class="dim">removed (name contains PASSWORD)</span>
+<span class="ok">+ PATH</span>                 <span class="dim">kept, so commands still resolve</span>
+<span class="ok">+ SSH_AUTH_SOCK</span>       <span class="dim">kept, a socket path, not a secret</span></pre>
         </div>
-        <p class="muted" style="font-size:.88rem;margin-top:14px">A boundary, not a sandbox — it closes the ambient-inheritance path that would hand a worker every secret in your shell for free. The manual says so plainly rather than implying containment it doesn't provide.</p>
+        <p class="muted" style="font-size:.88rem;margin-top:14px">A boundary, not a sandbox. It closes the ambient-inheritance path; it does not stop a worker with real file access from reading credentials off disk. The manual says so plainly.</p>
       </div>
     </div>
   </div>
 </section>
 
-<!-- HOW IT WORKS -->
 <section id="how">
   <div class="wrap">
     <div class="shead">
       <p class="eyebrow">How a run flows</p>
-      <h2>From a natural-language task to a reviewed integration branch.</h2>
+      <h2>From a prompt to a reviewed integration branch.</h2>
     </div>
-    <div class="steps">
-      <div class="step"><div class="sn"></div><div><h3>Intake</h3><p>Point <code>devharmonics run</code> at a repository with a clean tracked working tree. It pins the current <code>HEAD</code> as the base and refuses to proceed on uncommitted tracked changes — nothing is stashed or silently skipped.</p></div></div>
-      <div class="step"><div class="sn"></div><div><h3>Isolated work</h3><p>A worker on the lane you chose makes the change inside a throwaway worktree. The pipeline stages and commits it on a task branch; a no-op refuses immediately as <code>worker-empty-diff</code>.</p></div></div>
-      <div class="step"><div class="sn"></div><div><h3>Validate &amp; gate</h3><p>The empty-diff, base-ancestry, and tampercheck gates run at the integration boundary, the merge is built detached, and the merged candidate itself is scanned again — then your optional <code>--check</code> command runs against that exact merged candidate, with a credential-stripped environment. A crashed gate is never read as a pass.</p></div></div>
-      <div class="step"><div class="sn"></div><div><h3>Merge &amp; review</h3><p>A <code>--no-ff</code> merge into an integration branch, then an optional independent reviewer that judges the diff and receipts — never the worker's own story of what it did.</p></div></div>
-      <div class="step"><div class="sn"></div><div><h3>Stop for you</h3><p>The run prints the integration branch and the evidence bundle, and stops. Bringing the change into your own history is a decision only you make.</p></div></div>
-    </div>
+    <ol class="steps">
+      <li class="step"><div><h3>Intake</h3><p>Point <code>devharmonics run</code> at a repository. It refuses tracked uncommitted changes (nothing is stashed), pins the current <code>HEAD</code> as the base, and keeps <code>.devharmonics/</code> out of git through the private <code>.git/info/exclude</code>.</p></div></li>
+      <li class="step"><div><h3>Isolated work</h3><p>A worker on the lane you chose makes the change in a throwaway worktree on a <code>devharmonics/task/&lt;runId&gt;</code> branch. The HTTP lane is stricter: it may only touch the files you list with <code>--files</code>, and it commits only if your check passes.</p></div></li>
+      <li class="step"><div><h3>Gate</h3><p>Ancestry, empty-diff and tampercheck run on the worker's commits. A merge candidate is built without moving any branch, scanned again, and your check runs against it.</p></div></li>
+      <li class="step"><div><h3>Review and finalize</h3><p>With <code>--reviewer</code> or an evidence floor, the candidate is parked on a temporary ref and the owner-facing branch stays unchanged until a valid READY and every demanded item are in.</p></div></li>
+      <li class="step"><div><h3>Stop for you</h3><p>The run prints the integration branch and the evidence path, and stops. Bringing the change into your history is a decision only you make.</p></div></li>
+    </ol>
   </div>
 </section>
 
-<!-- MULTI-REPO + qualification (two themes, split cards) -->
-<section id="more">
-  <div class="wrap grid cols-2">
-    <div class="card" style="padding:32px">
-      <span class="tag">The novel piece</span>
-      <h3 style="font-size:1.3rem">Multi-repository integration sets</h3>
-      <p style="margin-top:.6rem">Plan a change that spans several repositories and judge it all-or-nothing. Each member is pinned to its own exact base commit at plan time, gets its own integration branch, and merges under the same per-repository lock — and one task never touches two repositories, enforced structurally, not by convention.</p><p style="margin-top:.6rem">Advancement is genuinely two-phase. First, every member is gated and its merged candidate built, with no branch moving. Only after every member passes do the integration refs advance. If any member is refused, nothing advances anywhere (<code>set-blocked-not-advanced</code>) — never a half-applied set.</p>
-    </div>
-    <div class="card" style="padding:32px">
-      <span class="tag">Admission, not routing</span>
-      <h3 style="font-size:1.3rem">Qualification is a yes/no gate</h3>
-      <p style="margin-top:.6rem">Before a model is trusted with a role, it has to pass that role's harness — and a write role additionally requires a passing reasoning benchmark. It's an admission gate, deliberately: <em>may this model do this job at all</em>, appended to a ledger. There is no ranking engine, no cost-based routing, no "best model" heuristic to be gamed.</p>
-    </div>
-  </div>
-</section>
-
-<!-- DIFFERENTIATION -->
-<section id="compare">
+<section id="limits">
   <div class="wrap">
     <div class="shead">
-      <p class="eyebrow">Where it fits</p>
-      <h2>A pipeline and an evidence layer — not a cockpit, and not a raw agent.</h2>
-      <p>DevHarmonics is scripts, gates, and receipts. It's meant to sit <em>underneath</em> a UI you already like and <em>around</em> the agents you already run, not to replace either.</p>
+      <p class="eyebrow">Guardrails with numbers</p>
+      <h2>Spend and spawn limits that refuse before anything runs.</h2>
+      <p>The documented design incident behind these was 255 agents and over 300 million tokens in about 45 minutes. Subprocess and ACP workers, reviewers and qualification harnesses all pass an admission gate before they spawn.</p>
     </div>
-    <div class="cmp">
-      <div class="cmp-row head"><div>Approach</div><div>A raw coding agent</div><div>DevHarmonics</div></div>
-      <div class="cmp-row"><div class="lab">Verification</div><div class="n">"the model said it's done"</div><div class="y"><b>fail-closed gates</b> + optional independent review</div></div>
-      <div class="cmp-row"><div class="lab">Evidence</div><div class="n">chat scrollback</div><div class="y"><b>append-only receipts</b>, one schema, every attempt</div></div>
-      <div class="cmp-row"><div class="lab">Vendor risk</div><div class="n">one app / one API</div><div class="y"><b>three interchangeable lanes</b></div></div>
-      <div class="cmp-row"><div class="lab">Secrets</div><div class="n">full environment inherited</div><div class="y"><b>credential-stripped</b> worker + validator</div></div>
-      <div class="cmp-row"><div class="lab">Blast radius</div><div class="n">edits your checkout directly</div><div class="y"><b>isolated worktree</b>, stops before your branch</div></div>
+    <div class="grid cols-3">
+      <div class="card"><span class="tag">Fan-out ceilings</span><h3>Workers and tokens</h3><p>Defaults per state root over a rolling 24 hours: <code>maxWorkers</code> 100, <code>maxConcurrentWorkers</code> 3, <code>maxTotalTokens</code> 50,000,000. There is no off switch, only deliberately raised limits.</p></div>
+      <div class="card"><span class="tag">Paid lane</span><h3>Double opt-in</h3><p>A credentialed endpoint is refused unless <code>budgets.allowPaidApi</code> is true and <code>maxPaidTokens</code> is set. Dollar ceilings use real reported cost only, never a price table.</p></div>
+      <div class="card"><span class="tag">Per-run cap</span><h3><code>--max-budget-usd</code></h3><p>Forwarded to <code>claude</code>'s own flag. Live-fire testing showed it is an overage stop, not a pre-flight guarantee, and the manual says so.</p></div>
     </div>
-    <p class="muted" style="margin-top:20px;font-size:.9rem;max-width:var(--prose)">Emdash is the intended human cockpit — its diff, branch, and PR review already work on the worktrees and integration branches DevHarmonics produces. The deterministic gates above are DevHarmonics' own code; the integrity scan is not — it is <code>tampercheck</code>, a separate tool resolved from your <code>PATH</code> (optionally bound to an absolute path and checksum), so the thing being judged never owns the judge (<a href="https://github.com/scottconverse/DevHarmonics/blob/main/docs/ARCHITECTURE.md">architecture</a>).</p>
   </div>
 </section>
 
-<!-- QUICK START -->
+<section id="more">
+  <div class="wrap">
+    <div class="grid cols-2" style="margin-top:0">
+      <div class="card big"><span class="tag">The novel piece</span><h3>Multi-repository integration sets</h3>
+        <p>Plan one change across several repositories and judge it all-or-nothing. Each member is pinned to its own base commit at plan time and gets its own integration branch. One task never touches two repositories, enforced structurally.</p>
+        <p>Advancement is two-phase: every member is gated and its candidate built with no branch moving, and only after all pass do the refs advance. If one is refused, nothing advances anywhere (<code>set-blocked-not-advanced</code>). <code>devharmonics set</code> integrates existing worker branches; it does not run workers itself.</p></div>
+      <div class="card big"><span class="tag">Admission, not routing</span><h3>Qualification is a yes or no</h3>
+        <p><code>devharmonics qualify</code> runs a real harness per role and appends the result, pass or fail, to a ledger. A write role additionally requires a passing reasoning benchmark, so a model that has never shown it reasons correctly does not get to edit unsupervised.</p>
+        <p>It answers whether a model may do a job at all. There is no ranking engine and no cost-based routing. <code>devharmonics onboard</code> goes the other way: it installs a pinned tampercheck CI workflow in a target repository, so the gate still holds if DevHarmonics is bypassed.</p></div>
+    </div>
+    <ul class="cmds" aria-label="The ten commands">
+      <li><code>doctor</code><span>Probe CLIs, endpoints, sign-in state and tampercheck.</span></li>
+      <li><code>run</code><span>The full gated single-repository pipeline.</span></li>
+      <li><code>set</code><span>Integrate existing branches across repositories, all-or-nothing.</span></li>
+      <li><code>onboard</code><span>Install repo-side enforcement (dry run by default).</span></li>
+      <li><code>qualify</code><span>Admission sweep for models and CLIs (dry run by default).</span></li>
+      <li><code>worker</code> / <code>acp</code><span>One bounded attempt on the subprocess or ACP lane.</span></li>
+      <li><code>config</code><span>Show the effective configuration and its source.</span></li>
+      <li><code>credential</code><span>Store API keys encrypted with Windows DPAPI (Windows only).</span></li>
+      <li><code>ledger</code><span>Inspect and repair the spend ledger without ever resetting totals silently.</span></li>
+    </ul>
+  </div>
+</section>
+
+<section id="proof">
+  <div class="wrap">
+    <div class="shead">
+      <p class="eyebrow">Tried against real tools</p>
+      <h2>Tests prove the engine. Live-fire runs prove the boundaries.</h2>
+      <p>The suite in <code>test/</code> uses fixtures. A separate opt-in lane drives the real tampercheck binary, a real test suite as the validator and a real model reviewer, and the gates were also attacked on purpose. Both records are public, flattering or not.</p>
+    </div>
+    <div class="split top" style="margin-top:44px">
+      <div class="code">
+        <div class="bar"><span>livefire/set-advance-path.mjs</span><span>retained result, 2026-08-05</span></div>
+<pre><span class="dim">claude-haiku-4-5-20251001, about 47s, two repositories</span>
+umbrella: validator=<span class="ok">pass</span> tampercheck=<span class="ok">pass</span> finalArtifact=<span class="ok">pass</span>
+          review=<span class="ok">READY</span>(0 findings)
+          assurance=validated+reviewed  ref advanced
+module:   validator=<span class="ok">pass</span> tampercheck=<span class="ok">pass</span> finalArtifact=<span class="ok">pass</span>
+          review=<span class="ok">READY</span>(0 findings)
+          assurance=validated+reviewed  ref advanced
+setReady=true blockedBy=[]</pre>
+      </div>
+      <div>
+        <p class="muted">The companion refusal run uses a deliberately incomplete change. Both members pass every deterministic gate, the reviewer returns NOT_READY, and both integration refs stay at their pinned base commits. A third script exercises <code>--max-budget-usd</code> against the real <code>claude</code> CLI.</p>
+        <p class="muted">The falsification record lists attacks that worked as well as ones that did not. A fake always-pass <code>tampercheck</code> earlier on <code>PATH</code> did deceive the original gate; that finding led to the default-on identity check and the optional sha256 pin. A later adversarial pass reproduced and closed a command injection, a symlink escape and a credential-leak path, each with a regression test.</p>
+        <div class="cta-row" style="margin-top:1.2rem">
+          <a class="btn" href="https://github.com/scottconverse/DevHarmonics/blob/main/docs/FALSIFICATION.md">Falsification record &#8599;</a>
+          <a class="btn" href="https://github.com/scottconverse/DevHarmonics/blob/main/livefire/README.md">Live-fire results &#8599;</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
 <section id="start">
-  <div class="wrap split">
+  <div class="wrap split top">
     <div>
       <p class="eyebrow">Quick start</p>
-      <h2 style="font-size:clamp(1.7rem,3.4vw,2.45rem)">Install from source and probe your machine.</h2>
-      <p class="muted" style="margin-top:1rem">Requires <b>Node.js 24+</b>, <b>Git</b>, and <b><code>tampercheck</code></b> on your PATH — the integrity gate is a separate Python tool, deliberately not bundled, and without it a run refuses rather than integrating. There's no published package yet — install from source. <code>npm ci</code> pulls the single runtime dependency; <code>npm link</code> puts a global <code>devharmonics</code> on your PATH.</p>
-      <p class="muted">To make a change, add a lane and a repository — a signed-in <code>claude</code>/<code>codex</code>/<code>agy</code>, or a local Ollama / LM Studio server. <code>doctor</code> tells you, from real attempts, exactly what's reachable.</p>
-      <div class="cta-row" style="margin-top:1.5rem">
-        <a class="btn" href="https://github.com/scottconverse/DevHarmonics/blob/main/docs/USER_MANUAL.md">Read the manual ↗</a>
-        <a class="btn" href="https://github.com/scottconverse/DevHarmonics/blob/main/docs/ARCHITECTURE.md">Architecture ↗</a>
+      <h2 class="h2">Install from source and probe your machine.</h2>
+      <p class="muted mt">You need <b>Node.js 24+</b>, <b>Git</b> and <b><code>tampercheck</code></b> on your <code>PATH</code>. The integrity gate is a separate Python tool and is deliberately not bundled. Without it, <code>run</code> and <code>set</code> refuse with <code>tampercheck-unavailable</code> instead of integrating.</p>
+      <p class="muted">There is no published package yet. <code>doctor</code> reports, from real attempts, which lanes are reachable. To make a change you also need a signed-in <code>codex</code>, <code>claude</code> or <code>agy</code>, a local Ollama or LM Studio server, or an ACP adapter. Without <code>npm link</code>, run <code>node scripts/cli.mjs &lt;command&gt;</code> from the repository root.</p>
+      <div class="cta-row" style="margin-top:1.4rem">
+        <a class="btn" href="https://github.com/scottconverse/DevHarmonics/blob/main/docs/USER_MANUAL.md">User manual &#8599;</a>
+        <a class="btn" href="https://github.com/scottconverse/DevHarmonics/blob/main/docs/ARCHITECTURE.md">Architecture &#8599;</a>
       </div>
     </div>
     <div class="code">
-      <div class="cbar"><span>bash</span><span class="copyhint">verified commands</span></div>
-      <pre><span class="cmt"># 1 — install from source</span>
+      <div class="bar"><span>bash</span><span>from README and manual</span></div>
+<pre><span class="cmt"># 1. install from source</span>
 <span class="prompt">$</span> git clone https://github.com/scottconverse/DevHarmonics.git
-<span class="prompt">$</span> cd DevHarmonics && npm ci && npm link
+<span class="prompt">$</span> cd DevHarmonics &amp;&amp; npm ci &amp;&amp; npm link
 
-<span class="cmt"># 2 — the integrity gate is a separate tool, not bundled</span>
+<span class="cmt"># 2. the integrity gate is a separate tool</span>
 <span class="prompt">$</span> pip install tampercheck==0.1.1
 
-<span class="cmt"># 3 — see what your machine can actually do</span>
+<span class="cmt"># 3. see what your machine can actually do</span>
 <span class="prompt">$</span> devharmonics doctor
 
-<span class="cmt"># 4 — make one gated change (--model is required for codex/claude)</span>
+<span class="cmt"># 4. one gated change (--model is required for codex and claude)</span>
 <span class="prompt">$</span> devharmonics run \
     --repository ../my-project \
     --provider codex --model <span class="ok">gpt-5.6-luna</span> \
@@ -513,37 +316,35 @@
   </div>
 </section>
 
-<!-- STATUS / limitations + verification-of-itself -->
 <section id="status">
-  <div class="wrap">
-    <div class="split">
-      <div>
-        <p class="eyebrow">Honest status</p>
-        <h2 style="font-size:clamp(1.7rem,3.4vw,2.45rem)">Early-stage, and specific about it.</h2>
-        <p class="muted" style="margin-top:1rem">DevHarmonics is functional and its full pipeline runs live against real tools, with CI on Windows and Linux. It is also new, installs from source, and carries limitations worth knowing before you rely on it. The project keeps that list in the open rather than smoothing it over.</p>
-        <p class="muted">In the spirit of the tool itself, its own gates were put through an adversarial falsification pass — a real command-injection, a symlink escape, and a credential-leak path were found against the code and closed, each with a regression test and a re-verification against a frozen build. That record is public, findings and fixes alike.</p>
-        <div class="cta-row" style="margin-top:1.4rem">
-          <a class="btn" href="https://github.com/scottconverse/DevHarmonics/blob/main/docs/FALSIFICATION.md">Read the falsification record ↗</a>
-        </div>
+  <div class="wrap split top">
+    <div>
+      <p class="eyebrow">Honest status</p>
+      <h2 class="h2">Version 0.1.0, installed from source, specific about its limits.</h2>
+      <p class="muted mt">The README records all eight spec slices as implemented and live-fire accepted on 2026-08-05, with CI on Windows and Ubuntu. It is also new, has no published package, and keeps a Known Limitations section that is meant to be read before you trust it with something that matters.</p>
+      <p class="muted">A repair pass on 2026-08-12 closed reviewer, claims and admission defects. That record also notes that some existing ACP timing tests had timed out at baseline, and it does not claim those as fixed.</p>
+      <div class="cta-row" style="margin-top:1.4rem">
+        <a class="btn" href="https://github.com/scottconverse/DevHarmonics/blob/main/docs/USER_MANUAL.md#8-known-limitations">Known limitations &#8599;</a>
       </div>
-      <div class="status-list">
-        <div class="sitem"><span class="m built">Built</span><p><b>All eight pipeline slices</b> — the three lanes, qualification, single-repo pipeline, review, and multi-repo sets are implemented and live-fire accepted.</p></div>
-        <div class="sitem"><span class="m early">From source</span><p><b>No published package.</b> Install via <code>git clone</code> + <code>npm link</code>; there is no npm or registry release.</p></div>
-        <div class="sitem"><span class="m partial">Partial</span><p><b>Usage metering is only as good as provider reporting:</b> <code>agy</code> reports no token usage at all, and the http lane's single bounded model call isn't metered by the fan-out ceilings. There is also <b>no resume</b> — an interrupted run starts over, by design. All documented.</p></div>
-        <div class="sitem"><span class="m partial">By design</span><p><b>No resume, no auto-merge repair, no dashboard.</b> An interrupted run starts over; conflicts and the UI are a human's job.</p></div>
-      </div>
+    </div>
+    <div class="status-list">
+      <div class="sitem"><span class="m built">Built</span><p><b>Three lanes, qualification, the single-repository pipeline, review, and multi-repository sets</b> are implemented.</p></div>
+      <div class="sitem"><span class="m early">From source</span><p><b>No npm or registry release.</b> Install with <code>git clone</code>, <code>npm ci</code> and optionally <code>npm link</code>.</p></div>
+      <div class="sitem"><span class="m partial">Partial</span><p><b>Metering depends on what providers report.</b> <code>agy</code> reports no token usage, a resolved model from ACP is usually null, and HTTP-lane calls are not counted against the worker ceilings.</p></div>
+      <div class="sitem"><span class="m partial">Partial</span><p><b>tampercheck covers Python and JavaScript/TypeScript patterns only.</b> Rust patterns are a named, unbuilt gap.</p></div>
+      <div class="sitem"><span class="m not">By design</span><p><b>No resume, no automatic conflict repair, no dashboard, no ranking engine.</b> An interrupted run starts over. Emdash is named as the intended human cockpit, as a companion and not a dependency.</p></div>
     </div>
   </div>
 </section>
 
-<!-- FINAL CTA -->
 <section class="final">
   <div class="wrap">
     <h2>Let the agent work. Keep the receipts.</h2>
     <p class="lede">Clone it, run <code>doctor</code>, and make one gated change against a repository you trust yourself to review.</p>
     <div class="cta-row">
       <a class="btn btn-primary btn-lg" href="#start">Quick start</a>
-      <a class="btn btn-lg" href="https://github.com/scottconverse/DevHarmonics">GitHub ↗</a>
+      <a class="btn btn-lg" href="https://github.com/scottconverse/DevHarmonics">GitHub &#8599;</a>
+      <a class="btn btn-lg" href="https://github.com/scottconverse/DevHarmonics/issues">Issues &#8599;</a>
     </div>
   </div>
 </section>
@@ -552,41 +353,21 @@
 <footer>
   <div class="wrap foot">
     <div>
-      <a class="brand" href="#top" aria-label="DevHarmonics home">
-        <svg width="24" height="24" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#10151b" stroke="#33424f"/><path d="M7 16h4l2.6-7 3.2 14 2.6-7H25" fill="none" stroke="#45d290" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        DevHarmonics
-      </a>
-      <p class="fnote">A local-first, host-agnostic pipeline for gated AI code changes. Built to survive any single vendor, app, or model disappearing.</p>
+      <a class="brand" href="#top" aria-label="DevHarmonics home"><img src="assets/favicon.svg" width="24" height="24" alt="">DevHarmonics</a>
+      <p class="fnote">A local-first, host-agnostic pipeline for gated AI code changes. Built to survive any single vendor, app or model disappearing. Apache-2.0.</p>
     </div>
-    <div class="fl">
+    <nav class="fl" aria-label="Footer">
       <a href="https://github.com/scottconverse/DevHarmonics">Source</a>
       <a href="https://github.com/scottconverse/DevHarmonics/blob/main/docs/USER_MANUAL.md">Manual</a>
       <a href="https://github.com/scottconverse/DevHarmonics/blob/main/docs/ARCHITECTURE.md">Architecture</a>
+      <a href="https://github.com/scottconverse/DevHarmonics/blob/main/docs/INTEGRATION-SETS.md">Integration sets</a>
       <a href="https://github.com/scottconverse/DevHarmonics/blob/main/docs/SPEC.md">Spec</a>
       <a href="https://github.com/scottconverse/DevHarmonics/blob/main/docs/FALSIFICATION.md">Falsification</a>
-      <a href="https://github.com/scottconverse/DevHarmonics/blob/main/LICENSE">Apache-2.0</a>
-    </div>
+      <a href="https://github.com/scottconverse/DevHarmonics/blob/main/docs/GAUNTLET-2026-08-05.md">Audit</a>
+      <a href="https://github.com/scottconverse/DevHarmonics/blob/main/LICENSE">License</a>
+    </nav>
   </div>
 </footer>
-
-<script>
-  // Mobile nav — progressive enhancement, keyboard-accessible.
-  (function(){
-    var t=document.querySelector('.navtoggle'), l=document.getElementById('navlinks');
-    if(!t||!l)return;
-    function close(){ l.classList.remove('open'); t.setAttribute('aria-expanded','false'); }
-    t.addEventListener('click',function(){
-      var open=l.classList.toggle('open');
-      t.setAttribute('aria-expanded',open?'true':'false');
-    });
-    l.addEventListener('click',function(e){ if(e.target.tagName==='A'){close();} });
-    document.addEventListener('keydown',function(e){
-      if(e.key==='Escape'&&l.classList.contains('open')){ close(); t.focus(); }
-    });
-    document.addEventListener('click',function(e){
-      if(l.classList.contains('open')&&!l.contains(e.target)&&e.target!==t&&!t.contains(e.target)){ close(); }
-    });
-  })();
-</script>
+<script src="assets/site.js" defer></script>
 </body>
 </html>
